@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import express from "express";
 import type { Express, Request, Response } from "express";
+import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { RateLimiter } from "./rate-limit.js";
 import { SESSION_SECRET, sellerFromSession } from "./auth.js";
@@ -186,6 +187,7 @@ export function mountOauthRoutes(app: Express): void {
   });
 
   mountAuthorize(app);
+  mountToken(app);
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +581,302 @@ function mountAuthorize(app: Express): void {
       }
       db.release();
       redirectWithParams(res, req, validated.redirectUri, { code, state: q.state });
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Token endpoint (spec THI-11 §2.6) — exchange, refresh rotation, replay
+// revocation — and revocation endpoint (§2.7).
+
+const TOKEN_HOURLY_LIMIT = 60; // per IP + client_id (spec §5)
+const ACCESS_TTL_S = Number(process.env.OAUTH_ACCESS_TTL_S ?? 30 * 60);
+const REFRESH_TTL_S = Number(process.env.OAUTH_REFRESH_TTL_S ?? 30 * 24 * 3600);
+const CODE_VERIFIER_RE = /^[A-Za-z0-9-._~]{43,128}$/; // RFC 7636 §4.1
+
+interface TokenRow {
+  id: string;
+  grant_id: string;
+  kind: "access" | "refresh";
+  expires_at: Date;
+  revoked_at: Date | null;
+}
+
+function tokenError(res: Response, error: string, description?: string): void {
+  const body: Record<string, string> = { error };
+  if (description) body.error_description = description;
+  res.status(400).set("Cache-Control", "no-store").json(body);
+}
+
+/** Revokes every token in the grant plus the grant row — uniform "any
+ * revocation ends the connection" semantics (§2.7, §2.9). Idempotent. */
+async function revokeGrantFamily(db: PoolClient, grantId: string): Promise<void> {
+  await db.query(`UPDATE oauth_tokens SET revoked_at = now() WHERE grant_id = $1 AND revoked_at IS NULL`, [grantId]);
+  await db.query(`UPDATE oauth_grants SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`, [grantId]);
+}
+
+/** Mints one access + one refresh token pair bound to a grant. */
+async function issueTokenPair(
+  db: PoolClient,
+  grantId: string,
+): Promise<{ access_token: string; token_type: string; expires_in: number; refresh_token: string; scope: string }> {
+  const access = `thgo_${crypto.randomBytes(32).toString("base64url")}`;
+  const refresh = `thgr_${crypto.randomBytes(32).toString("base64url")}`;
+  await db.query(
+    `INSERT INTO oauth_tokens (grant_id, kind, token_hash, expires_at) VALUES ($1, 'access', $2, now() + make_interval(secs => $3))`,
+    [grantId, sha256Hex(access), ACCESS_TTL_S],
+  );
+  await db.query(
+    `INSERT INTO oauth_tokens (grant_id, kind, token_hash, expires_at) VALUES ($1, 'refresh', $2, now() + make_interval(secs => $3))`,
+    [grantId, sha256Hex(refresh), REFRESH_TTL_S],
+  );
+  return { access_token: access, token_type: "Bearer", expires_in: ACCESS_TTL_S, refresh_token: refresh, scope: "mcp" };
+}
+
+function mountToken(app: Express): void {
+  const tokenLimiter = new RateLimiter(TOKEN_HOURLY_LIMIT, 60 * 60 * 1000);
+
+  app.post(
+    "/oauth/token",
+    express.urlencoded({ extended: false, limit: "64kb" }),
+    async (req: Request, res: Response) => {
+      const body = req.body as Record<string, string>;
+      const clientId = body.client_id ?? "";
+      if (!tokenLimiter.allow(`token:${req.ip ?? "unknown"}:${clientId}`)) {
+        res.status(429).set("Cache-Control", "no-store").json({ error: "invalid_request", error_description: "rate limit exceeded" });
+        return;
+      }
+      if (!clientId || !body.grant_type) {
+        tokenError(res, "invalid_request", "client_id and grant_type are required");
+        return;
+      }
+      const client = await clientById(clientId);
+      if (!client) {
+        tokenError(res, "invalid_client", "unknown client"); // swept/unknown client (§2.9)
+        return;
+      }
+      if (body.grant_type === "authorization_code") {
+        await handleCodeExchange(body, clientId, res);
+      } else if (body.grant_type === "refresh_token") {
+        await handleRefresh(body, clientId, res);
+      } else {
+        tokenError(res, "unsupported_grant_type", "only authorization_code and refresh_token are supported");
+      }
+    },
+  );
+
+  async function handleCodeExchange(body: Record<string, string>, clientId: string, res: Response): Promise<void> {
+    const { code, redirect_uri: redirectUri, resource, code_verifier: verifier } = body;
+    if (!code || !redirectUri || !verifier) {
+      tokenError(res, "invalid_request", "code, redirect_uri and code_verifier are required");
+      return;
+    }
+    // Pre-check the verifier shape before any hash computation (§2.6).
+    if (!CODE_VERIFIER_RE.test(verifier)) {
+      tokenError(res, "invalid_grant", "malformed code_verifier");
+      return;
+    }
+    const { rows } = await pool.query<{
+      grant_id: string;
+      seller_id: string;
+      client_id: string;
+      redirect_uri: string;
+      code_challenge: string;
+      resource: string | null;
+      scope: string;
+      expires_at: Date;
+      consumed_at: Date | null;
+    }>(`SELECT grant_id, seller_id, client_id, redirect_uri, code_challenge, resource, scope, expires_at, consumed_at
+        FROM oauth_codes WHERE code_hash = $1`, [sha256Hex(code)]);
+    const row = rows[0];
+    if (!row) {
+      tokenError(res, "invalid_grant", "unknown authorization code");
+      return;
+    }
+    if (row.consumed_at) {
+      // Replay of a consumed code — theft signal (RFC 6749 §4.1.2): the whole
+      // grant dies, not just the presentation.
+      const db = await pool.connect();
+      try {
+        await db.query("BEGIN");
+        await revokeGrantFamily(db, row.grant_id);
+        await db.query("COMMIT");
+      } finally {
+        db.release();
+      }
+      securityEvent("code_replay", { client_id: clientId, grant_id: row.grant_id, ip: res.req?.ip });
+      tokenError(res, "invalid_grant", "authorization code already used");
+      return;
+    }
+    const expired = new Date(row.expires_at).getTime() <= Date.now();
+    if (expired) {
+      tokenError(res, "invalid_grant", "authorization code expired"); // no grant effect (§2.9)
+      return;
+    }
+    if (row.client_id !== clientId || row.redirect_uri !== redirectUri) {
+      tokenError(res, "invalid_grant", "code is not bound to this client or redirect URI");
+      return;
+    }
+    if (row.resource !== null && row.resource !== resource) {
+      tokenError(res, "invalid_grant", "resource does not match the authorized audience"); // RFC 8707
+      return;
+    }
+    const verifierDigest = crypto.createHash("sha256").update(verifier).digest();
+    const challengeDigest = Buffer.from(row.code_challenge, "base64url");
+    if (
+      verifierDigest.length !== challengeDigest.length ||
+      !crypto.timingSafeEqual(verifierDigest, challengeDigest)
+    ) {
+      tokenError(res, "invalid_grant", "PKCE verification failed");
+      return;
+    }
+
+    const db = await pool.connect();
+    try {
+      await db.query("BEGIN");
+      // Single use, concurrency-safe: exactly one concurrent exchange wins.
+      const consume = await db.query(`UPDATE oauth_codes SET consumed_at = now() WHERE code_hash = $1 AND consumed_at IS NULL`, [
+        sha256Hex(code),
+      ]);
+      if (consume.rowCount !== 1) {
+        await db.query("COMMIT"); // release the loser quickly; nothing changed
+        tokenError(res, "invalid_grant", "authorization code already used");
+        return;
+      }
+      const pair = await issueTokenPair(db, row.grant_id);
+      await db.query("COMMIT");
+      res.set("Cache-Control", "no-store").json(pair);
+    } catch (e) {
+      await db.query("ROLLBACK").catch(() => {});
+      console.error("oauth: code exchange failed:", (e as Error).message);
+      tokenError(res, "invalid_grant", "exchange failed");
+    } finally {
+      db.release();
+    }
+  }
+
+  async function handleRefresh(body: Record<string, string>, clientId: string, res: Response): Promise<void> {
+    const presented = body.refresh_token;
+    if (!presented) {
+      tokenError(res, "invalid_request", "refresh_token is required");
+      return;
+    }
+    const { rows } = await pool.query<TokenRow & { grant_client_id: string; grant_revoked_at: Date | null }>(
+      `SELECT t.id, t.grant_id, t.kind, t.expires_at, t.revoked_at, g.client_id AS grant_client_id, g.revoked_at AS grant_revoked_at
+       FROM oauth_tokens t JOIN oauth_grants g ON g.id = t.grant_id
+       WHERE t.token_hash = $1`,
+      [sha256Hex(presented)],
+    );
+    const row = rows[0];
+    if (!row || row.kind !== "refresh") {
+      tokenError(res, "invalid_grant", "unknown refresh token");
+      return;
+    }
+    if (new Date(row.expires_at).getTime() <= Date.now()) {
+      tokenError(res, "invalid_grant", "refresh token expired"); // host re-authorizes
+      return;
+    }
+    if (row.grant_revoked_at) {
+      tokenError(res, "invalid_grant", "grant revoked"); // terminal (§2.9)
+      return;
+    }
+    if (row.grant_client_id !== clientId) {
+      // F9: valid token, wrong client — lifted-from-a-config theft signature.
+      const db = await pool.connect();
+      try {
+        await db.query("BEGIN");
+        await revokeGrantFamily(db, row.grant_id);
+        await db.query("COMMIT");
+      } finally {
+        db.release();
+      }
+      securityEvent("refresh_wrong_client", { client_id: clientId, grant_id: row.grant_id, ip: res.req?.ip });
+      tokenError(res, "invalid_client", "refresh token is not bound to this client");
+      return;
+    }
+    if (row.revoked_at) {
+      // Rotated-then-reused refresh token — the pair was duplicated; family revocation.
+      const db = await pool.connect();
+      try {
+        await db.query("BEGIN");
+        await revokeGrantFamily(db, row.grant_id);
+        await db.query("COMMIT");
+      } finally {
+        db.release();
+      }
+      securityEvent("refresh_replay", { client_id: clientId, grant_id: row.grant_id, ip: res.req?.ip });
+      tokenError(res, "invalid_grant", "refresh token already used");
+      return;
+    }
+
+    const db = await pool.connect();
+    try {
+      await db.query("BEGIN");
+      // Rotation: conditional single-row update — a concurrent rotation makes
+      // this presentation a replay and it falls into the family-revocation path.
+      const rotate = await db.query(
+        `UPDATE oauth_tokens SET revoked_at = now() WHERE token_hash = $1 AND kind = 'refresh' AND revoked_at IS NULL`,
+        [sha256Hex(presented)],
+      );
+      if (rotate.rowCount !== 1) {
+        await revokeGrantFamily(db, row.grant_id);
+        await db.query("COMMIT");
+        securityEvent("refresh_replay", { client_id: clientId, grant_id: row.grant_id, ip: res.req?.ip });
+        tokenError(res, "invalid_grant", "refresh token already used");
+        return;
+      }
+      const pair = await issueTokenPair(db, row.grant_id);
+      await db.query("COMMIT");
+      res.set("Cache-Control", "no-store").json(pair);
+    } catch (e) {
+      await db.query("ROLLBACK").catch(() => {});
+      console.error("oauth: refresh failed:", (e as Error).message);
+      tokenError(res, "invalid_grant", "refresh failed");
+    } finally {
+      db.release();
+    }
+  }
+
+  // --- Revocation endpoint (§2.7, RFC 7009) -------------------------------
+  app.post(
+    "/oauth/revoke",
+    express.urlencoded({ extended: false, limit: "64kb" }),
+    async (req: Request, res: Response) => {
+      const body = req.body as Record<string, string>;
+      if (!body.token || !body.client_id) {
+        tokenError(res, "invalid_request", "token and client_id are required");
+        return;
+      }
+      if (!tokenLimiter.allow(`token:${req.ip ?? "unknown"}:${body.client_id}`)) {
+        res.status(429).set("Cache-Control", "no-store").json({ error: "invalid_request", error_description: "rate limit exceeded" });
+        return;
+      }
+      // Always 200 for well-formed requests — no token-enumeration oracle.
+      // Any revocation ends the connection: revoke the whole grant family,
+      // but only when the token belongs to this client.
+      try {
+        const { rows } = await pool.query<{ grant_id: string; grant_client_id: string }>(
+          `SELECT t.grant_id, g.client_id AS grant_client_id
+           FROM oauth_tokens t JOIN oauth_grants g ON g.id = t.grant_id
+           WHERE t.token_hash = $1`,
+          [sha256Hex(body.token)],
+        );
+        const row = rows[0];
+        if (row && row.grant_client_id === body.client_id) {
+          const db = await pool.connect();
+          try {
+            await db.query("BEGIN");
+            await revokeGrantFamily(db, row.grant_id);
+            await db.query("COMMIT");
+          } finally {
+            db.release();
+          }
+        }
+        res.set("Cache-Control", "no-store").json({});
+      } catch (e) {
+        console.error("oauth: revoke failed:", (e as Error).message);
+        res.set("Cache-Control", "no-store").json({}); // still 200 — never leak state
+      }
     },
   );
 }

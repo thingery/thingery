@@ -51,7 +51,7 @@ export function verifyPassword(password: string, stored: string | null): boolean
 }
 
 /** Ephemeral fallback: sessions reset on restart when SESSION_SECRET is unset. */
-const SESSION_SECRET =
+export const SESSION_SECRET =
   process.env.SESSION_SECRET ?? crypto.randomBytes(32).toString("hex");
 if (!process.env.SESSION_SECRET) {
   console.error("Warning: SESSION_SECRET not set — sessions will not survive restarts.");
@@ -61,7 +61,12 @@ export const SESSION_COOKIE = "thingery_session";
 const SESSION_MAX_AGE_S = 30 * 24 * 3600;
 
 export function signSession(sellerId: string): string {
-  const mac = crypto.createHmac("sha256", SESSION_SECRET).update(sellerId).digest("base64url");
+  // "session:" prefix = HMAC domain separation (spec THI-11 §2.5(5), F8): the
+  // shared SESSION_SECRET signs both session cookies and OAuth consent CSRF
+  // tokens ("csrf:" prefix in oauth.ts); the prefixes keep purposes distinct.
+  // One-time effect on deploy: cookies signed without the prefix stop validating
+  // (existing users log in again once).
+  const mac = crypto.createHmac("sha256", SESSION_SECRET).update(`session:${sellerId}`).digest("base64url");
   return `${sellerId}.${mac}`;
 }
 
@@ -71,7 +76,7 @@ export function parseSession(cookieValue: string | undefined): string | null {
   if (dot <= 0) return null;
   const sellerId = cookieValue.slice(0, dot);
   const mac = cookieValue.slice(dot + 1);
-  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(sellerId).digest("base64url");
+  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(`session:${sellerId}`).digest("base64url");
   const a = Buffer.from(mac);
   const b = Buffer.from(expected);
   return a.length === b.length && crypto.timingSafeEqual(a, b) ? sellerId : null;

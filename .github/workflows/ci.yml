@@ -32,4 +32,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      # Apply schema before tests: DB-backed test files run in parallel workers
+      # and must not race each other for table creation (42P01).
+      - run: npx tsx scripts/migrate.ts
       - run: npm test

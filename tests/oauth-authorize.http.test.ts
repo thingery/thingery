@@ -66,6 +66,8 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
   let db: pg.Client;
   let cookie: string;
   let sellerId: string;
+  const runTag = crypto.randomBytes(4).toString("hex"); // unique per run: a crashed prior run can't poison the next
+  const email = `authorize-test-${runTag}@example.com`;
 
   beforeAll(async () => {
     const app = express();
@@ -81,17 +83,19 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     const seller = await db.query<{ id: string }>(
       `INSERT INTO sellers (api_key, display_name, email, password_hash)
        VALUES ($1, $2, $3, $4) RETURNING id`,
-      [`thg_test_${crypto.randomBytes(8).toString("hex")}`, "Authorize Tester", "authorize-test@example.com", "x"],
+      [`thg_test_${runTag}`, "Authorize Tester", email, "x"],
     );
     sellerId = seller.rows[0].id;
     cookie = `${SESSION_COOKIE}=${encodeURIComponent(signSession(sellerId))}`;
 
     await db.query(
-      `INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ($1, $2, $3)`,
+      `INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ($1, $2, $3)
+       ON CONFLICT (client_id) DO UPDATE SET client_name = EXCLUDED.client_name, redirect_uris = EXCLUDED.redirect_uris`,
       ["thgc_authtest", "Test Inspector", [REDIRECT_URI]],
     );
     await db.query(
-      `INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ($1, $2, $3)`,
+      `INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ($1, $2, $3)
+       ON CONFLICT (client_id) DO UPDATE SET client_name = EXCLUDED.client_name, redirect_uris = EXCLUDED.redirect_uris`,
       ["thgc_xss", `<script>alert("x")</script>`, [REDIRECT_URI]],
     );
   });
@@ -100,7 +104,7 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     await db.query(`DELETE FROM oauth_codes WHERE client_id IN ('thgc_authtest', 'thgc_xss')`);
     await db.query(`DELETE FROM oauth_grants WHERE client_id IN ('thgc_authtest', 'thgc_xss')`);
     await db.query(`DELETE FROM oauth_clients WHERE client_id IN ('thgc_authtest', 'thgc_xss')`);
-    await db.query(`DELETE FROM sellers WHERE id = $1`, [sellerId]);
+    await db.query(`DELETE FROM sellers WHERE id = $1 OR email = $2`, [sellerId, email]);
     await db.end();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
@@ -122,7 +126,7 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     const html = await res.text();
     expect(html).toContain("Authorize Test Inspector");
-    expect(html).toContain("authorize-test@example.com");
+    expect(html).toContain(email);
     expect(html).toContain("read and manage your listings and orders");
     expect(html).toContain('action="/oauth/authorize"');
     const form = parseConsentForm(html);

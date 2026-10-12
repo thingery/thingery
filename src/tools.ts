@@ -9,6 +9,23 @@ export interface ToolContext {
   seller: SellerRow | null;
 }
 
+// ---------------------------------------------------------------------------
+// Seller-required tools (spec THI-11 §2.10c, F7): the /mcp method-aware 401
+// gate challenges anonymous calls to PROTECTED_TOOLS, so OAuth-capable hosts
+// discover they must authenticate and start the browser onboarding flow.
+// The annotation lives next to tool registration; CI
+// (tests/protected-tools.test.ts) enforces that the set matches exactly the
+// tools whose handlers reject anonymous callers, so a future write tool
+// cannot silently lose its 401-challenge onboarding path. Tool-level
+// requireSeller() guards remain as defense in depth (§2.10c, unchanged).
+export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
+  "create_listing",
+  "add_item_image",
+  "my_listings",
+  "update_listing",
+  // Order-flow tools (spec THI-10) must be added here when they land.
+]);
+
 function publicBaseUrl(): string {
   return (process.env.PUBLIC_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
 }
@@ -101,7 +118,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
     },
     async (args: Record<string, unknown>) => {
       const seller = requireSeller();
-      if (!seller) return err("Missing or invalid Authorization: Bearer thg_... API key", "unauthorized");
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
       try {
         const category = ((args.category as string) ?? "other").toLowerCase();
         const categoryRow = await getCategory(category);
@@ -214,7 +231,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
     },
     async (args: Record<string, unknown>) => {
       const seller = requireSeller();
-      if (!seller) return err("Missing or invalid Authorization: Bearer thg_... API key", "unauthorized");
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
       const items = await myItems(seller.id, args.status as string | undefined, (args.limit as number) ?? 50);
       return ok({ seller: seller.display_name, count: items.length, items: items.map(itemToPublic) });
     },
@@ -238,7 +255,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
     },
     async (args: Record<string, unknown>) => {
       const seller = requireSeller();
-      if (!seller) return err("Missing or invalid Authorization: Bearer thg_... API key", "unauthorized");
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
       const item = await updateItem(args.id as string, seller.id, {
         status: args.status as string | undefined,
         price_cents: args.price_cents as number | undefined,
@@ -266,7 +283,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
     },
     async (args: Record<string, unknown>) => {
       const seller = requireSeller();
-      if (!seller) return err("Missing or invalid Authorization: Bearer thg_... API key", "unauthorized");
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
       const result = await addItemImageBase64(
         seller.id,
         args.item_id as string,

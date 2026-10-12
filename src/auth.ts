@@ -24,11 +24,56 @@ export async function sellerFromApiKey(key: string): Promise<SellerRow | null> {
   return rows[0] ?? null;
 }
 
-/** Resolves the caller's seller from an Authorization: Bearer thg_... header. */
-export async function sellerFromRequest(req: Request): Promise<SellerRow | null> {
+/**
+ * Resolves a seller from an OAuth access token (spec THI-11 §2.10a).
+ * Opaque DB-backed token: one indexed lookup on token_hash joining the grant
+ * (revoked grants kill their tokens) — no fallback chain, no second query.
+ */
+export async function sellerFromAccessToken(token: string): Promise<SellerRow | null> {
+  if (!token.startsWith("thgo_")) return null;
+  const hash = crypto.createHash("sha256").update(token, "utf8").digest("hex");
+  const { rows } = await pool.query<SellerRow>(
+    `SELECT s.id, s.api_key, s.display_name
+       FROM oauth_tokens t
+       JOIN oauth_grants g ON g.id = t.grant_id
+       JOIN sellers s ON s.id = g.seller_id
+      WHERE t.token_hash = $1
+        AND t.kind = 'access'
+        AND t.expires_at > now()
+        AND t.revoked_at IS NULL
+        AND g.revoked_at IS NULL`,
+    [hash],
+  );
+  return rows[0] ?? null;
+}
+
+/** /mcp auth outcome (spec THI-11 §2.10a–b). */
+export type AuthResult = {
+  seller: SellerRow | null;
+  /** "none": no credential presented (anonymous). "invalid_token": a
+   * credential WAS presented (unknown key, expired/revoked token, or an
+   * unrecognized format) — the server must 401, never silently downgrade. */
+  failure: "none" | "invalid_token";
+};
+
+/**
+ * Dual-token dispatch on the Authorization: Bearer header (spec THI-11
+ * §2.10): `thg_` → API key, `thgo_` → OAuth access token. Anything else that
+ * arrives as a Bearer credential is present-but-invalid.
+ */
+export async function authenticateRequest(req: Request): Promise<AuthResult> {
   const header = req.headers.authorization;
-  if (!header?.startsWith("Bearer ")) return null;
-  return sellerFromApiKey(header.slice("Bearer ".length).trim());
+  if (!header?.startsWith("Bearer ")) return { seller: null, failure: "none" };
+  const token = header.slice("Bearer ".length).trim();
+  if (token.startsWith("thg_")) {
+    const seller = await sellerFromApiKey(token);
+    return { seller, failure: seller ? "none" : "invalid_token" };
+  }
+  if (token.startsWith("thgo_")) {
+    const seller = await sellerFromAccessToken(token);
+    return { seller, failure: seller ? "none" : "invalid_token" };
+  }
+  return { seller: null, failure: "invalid_token" };
 }
 
 // ---------------------------------------------------------------------------

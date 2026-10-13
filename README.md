@@ -17,7 +17,7 @@ Chinese-market name: 物坊 (Wùfāng).
 
 | Tool | Auth | Purpose |
 |---|---|---|
-| `describe_category` | public | List categories and their declared attribute fields — the self-describing schema for agents. Declared fields get validated on create; undeclared keys are allowed and searchable |
+| `describe_category` | public | List categories and their declared attribute fields — the self-describing schema for agents. Declared fields get validated on create; undeclared keys are allowed, searchable, and their real use is surfaced via `undeclared_in_use` |
 | `search_items` | public | Hybrid semantic + keyword search with price/category/condition/attribute filters (any attribute key, declared or not) |
 | `get_item` | public | Fetch one listing by id |
 | `create_listing` | seller | Publish an item — core fields plus a flexible `attributes` object (declared keys validated, extras pass through and stay searchable) |
@@ -205,6 +205,12 @@ No fixed column set can cover sneakers, cameras and sofas at once, so the Item G
 Growth path: when an attribute becomes a hot filter, promote it to a Postgres generated column + index — no API change needed.
 
 Which undeclared keys are *actually* in use is discoverable too: `describe_category` returns `undeclared_in_use` — undeclared attribute keys observed on active listings from multiple sellers, with item and distinct-seller counts. These keys are never validated (they pass through as-is), so treat them as search hints, not contracts — a signal of what buyers can filter on today.
+
+Reading `undeclared_in_use` as an agent:
+
+- It lists at most 20 keys, and only keys carried by ≥2 active listings from ≥2 distinct sellers. The field is omitted entirely when no key qualifies.
+- Values are free-form: the same undeclared key can hold different values (even different types) on each listing. Use the key in `search_items` attribute filters — they match any key, declared or not — but never treat one listing's value as the category's contract.
+- Writes are shape-capped on `create_listing` and `update_listing`: at most 64 attribute entries, keys up to 128 chars, string values up to 500 chars. Over the cap, the call fails with `invalid_attributes`.
 
 ## Roadmap
 

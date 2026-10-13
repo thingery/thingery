@@ -102,7 +102,7 @@
       "unknown"
     ],
     "item_ids": "UUID v4",
-    "attributes": "flexible JSONB object of category-specific fields; declared definitions validate types and required keys, unknown keys pass through and remain searchable (attribute filters match any key); discover per category via describe_category",
+    "attributes": "flexible JSONB object of category-specific fields; declared definitions validate types and required keys, unknown keys pass through and remain searchable (attribute filters match any key); discover per category via describe_category, whose undeclared_in_use section lists undeclared keys observed on active listings (item/seller counts, top 20 — search hints, not validated fields); writes capped at 64 entries, 128-char keys, 500-char string values (invalid_attributes beyond)",
     "order_states": [
       "pending",
       "sold",

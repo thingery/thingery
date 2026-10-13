@@ -20,7 +20,9 @@ The Thingery MCP server must be connected. Listing requires the seller's API key
    size, colorway. If ambiguous, ask ONE compact question covering all unknowns at once.
    Call `describe_category` for the matching category and fill its expected `attributes`
    (e.g. sneakers want `size_eu`). Undeclared extra fields are allowed — include anything
-   a buyer would filter on.
+   a buyer would filter on. The response's `undeclared_in_use` section lists undeclared
+   keys already in real use in that category; reusing those exact keys makes the listing
+   findable by existing filters.
 2. **Grade honestly** — Inspect photos for wear and choose `condition`:
    `new | like_new | good | fair | poor`. Never inflate. Flaws go in the description verbatim.
 3. **Estimate logistics** — Guess `weight_grams` and `dimensions_mm` (LxWxH) from the item
@@ -45,4 +47,6 @@ The Thingery MCP server must be connected. Listing requires the seller's API key
 
 - Never invent condition details you cannot see; say what's unverifiable.
 - Currency defaults to EUR; confirm before using anything else.
+- Keep `attributes` compact: max 64 entries, keys up to 128 chars, string values up to
+  500 chars — anything larger fails with `invalid_attributes` on create and update alike.
 - If `create_listing` returns `unauthorized`, tell the user to set their API key — don't retry.

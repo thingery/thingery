@@ -4,6 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chat — Thingery</title>
+  <link rel="icon" href="/assets/favicon.ico" sizes="48x48">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+  <meta property="og:title" content="Chat — Thingery">
+  <meta property="og:description" content="Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.">
+  <meta property="og:site_name" content="Thingery">
+  <meta property="og:url" content="https://thingery.dev/chat.html">
+  <meta property="og:image" content="https://thingery.dev/assets/og-image.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://thingery.dev/assets/og-image.png">
   <style>
     :root { color-scheme: light dark; }
     * { box-sizing: border-box; }
@@ -16,6 +25,7 @@
       display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
     }
     header h1 { font-size: 1.1rem; margin: 0; }
+    header h1 img { height: 28px; width: auto; vertical-align: middle; }
     header .links { font-size: .9rem; }
     a { color: inherit; }
     #log { flex: 1; overflow-y: auto; padding: 1rem 1.2rem; }
@@ -33,7 +43,7 @@
 </head>
 <body>
   <header>
-    <h1><a href="/">Thingery</a> assistant</h1>
+    <h1><a href="/"><img src="/assets/logo-header.png" alt="Thingery" width="151" height="28"></a> assistant</h1>
     <span class="links" id="account-link"><a href="/login.html">Log in / sign up</a></span>
   </header>
 

@@ -28,12 +28,19 @@ export async function sellerFromApiKey(key: string): Promise<SellerRow | null> {
  * Resolves a seller from an OAuth access token (spec THI-11 §2.10a).
  * Opaque DB-backed token: one indexed lookup on token_hash joining the grant
  * (revoked grants kill their tokens) — no fallback chain, no second query.
+ *
+ * On success, fires the spec THI-11 rev 2 throttled `last_used_at` update
+ * (the /apps "last used" trust signal): only when the row is older than
+ * 10 minutes (`NULL` counts as stale — first use stamps the row), so the
+ * hottest path pays at most one tiny UPDATE per token per 10 min instead of
+ * a write per request. Fire-and-forget: the UPDATE never blocks or fails
+ * the request (errors are logged and swallowed).
  */
 export async function sellerFromAccessToken(token: string): Promise<SellerRow | null> {
   if (!token.startsWith("thgo_")) return null;
   const hash = crypto.createHash("sha256").update(token, "utf8").digest("hex");
-  const { rows } = await pool.query<SellerRow>(
-    `SELECT s.id, s.api_key, s.display_name
+  const { rows } = await pool.query<SellerRow & { token_id: string }>(
+    `SELECT s.id, s.api_key, s.display_name, t.id AS token_id
        FROM oauth_tokens t
        JOIN oauth_grants g ON g.id = t.grant_id
        JOIN sellers s ON s.id = g.seller_id
@@ -44,7 +51,19 @@ export async function sellerFromAccessToken(token: string): Promise<SellerRow | 
         AND g.revoked_at IS NULL`,
     [hash],
   );
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) return null;
+  void pool
+    .query(
+      `UPDATE oauth_tokens SET last_used_at = now()
+        WHERE id = $1
+          AND (last_used_at IS NULL OR last_used_at < now() - interval '10 minutes')`,
+      [row.token_id],
+    )
+    .catch((err: unknown) => {
+      console.error("oauth: last_used_at touch failed (ignored):", err);
+    });
+  return { id: row.id, api_key: row.api_key, display_name: row.display_name };
 }
 
 /** /mcp auth outcome (spec THI-11 §2.10a–b). */

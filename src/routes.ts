@@ -16,10 +16,16 @@ import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { addItemImage, MAX_IMAGE_BYTES } from "./images.js";
 import { asyncHandler } from "./oauth.js";
 import { RateLimiter } from "./rate-limit.js";
+import crypto from "node:crypto";
+import { pool } from "./db.js";
+import { orderFlowConfig, envValue } from "./config.js";
+import { applyTransition, IllegalTransitionError, type OrderRow } from "./orders.js";
+import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer } from "./stripe.js";
 
 const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/logins per IP per hour
 const chatAnonLimiter = new RateLimiter(10, 60 * 60_000); // 10 anonymous chats per IP per hour
 const chatAuthedLimiter = new RateLimiter(60, 60 * 60_000); // 60 logged-in chats per hour
+export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin calls per IP per hour (F7)
 
 function clientIp(req: Request): string {
   return req.ip ?? "unknown";
@@ -155,6 +161,145 @@ api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
   }
   const reply = await chatTurn(parsed.data.history as ChatMessage[], parsed.data.message, seller);
   res.json({ reply });
+}));
+
+// --- admin: dispute resolution (spec THI-3 §4.3, PR-9) ----------------------
+
+/** F7: timing-safe Bearer compare — length-check first, then constant-time
+ * equal (auth.ts verifyPassword pattern; kept local so auth.ts is untouched). */
+function adminKeyMatches(presented: string | undefined, expected: string | undefined): boolean {
+  if (!presented || !expected) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+const resolveDisputeSchema = z.object({
+  outcome: z.enum(["refund", "release"]),
+  note: z.string().min(1).max(500),
+});
+
+const ADMIN = { type: "admin" as const };
+
+/** §6.6 refund-after-transfer: reverse the transfer (full, idempotent per
+ * order), then refund the charge from the platform balance; alert the
+ * operator to any shortfall — never silently drop funds. */
+async function refundAfterTransfer(order: OrderRow): Promise<{ refundId: string | null }> {
+  const stripe = getStripe();
+  if (!stripe) throw new Error("payments_not_configured");
+  if (order.transfer_id && !order.refund_id) {
+    await stripe.transfers
+      .createReversal(order.transfer_id, {}, { idempotencyKey: `reversal:${order.id}` })
+      .catch((err: unknown) => console.error(`[admin] reversal of ${order.transfer_id} failed (${(err as Error).message}) — refund continues from platform balance`));
+    console.error(
+      `[admin] operator alert: order ${order.id} refunded after transfer ${order.transfer_id} — ` +
+        `platform-balance shortfall possible (transfer ${order.transfer_id} reversed; reserve policy §6.4)`,
+    );
+  }
+  if (order.refund_id) return { refundId: null }; // refund already in flight — reconcile, never duplicate (F3)
+  const refund = await createRefundForOrder(order, order.payment_intent_id!, stripe);
+  // THI-70 A1(a): persist refund_id BEFORE the transition. If admin_refund
+  // loses a cross-outcome race (admin_release won the status CAS meanwhile),
+  // the refund stays visible on the row instead of orphaning at Stripe —
+  // sweep rules 7/9 key on non-terminal statuses, so the row is the only
+  // record a terminal paid_out would carry.
+  await pool.query("UPDATE orders SET refund_id = $2 WHERE id = $1 AND refund_id IS NULL", [order.id, refund.id]);
+  return { refundId: refund.id };
+}
+
+/** #19 release: reconcile-don't-recreate (F3) — an existing transfer is
+ * retrieved, not re-created; paid → #20 lands immediately, in flight → the
+ * order waits for its own transfer event. */
+async function releaseWithReconcile(order: OrderRow): Promise<void> {
+  if (order.payment_mode !== "stripe") return;
+  if (order.transfer_id) {
+    const transfer = await retrieveTransfer(order.transfer_id);
+    if (transfer && !transfer.amount_reversed) {
+      // Already landed: complete the payout now instead of waiting for a
+      // possibly-lost transfer event (rule 6 recovers it otherwise).
+      const landed = await pool.query("SELECT status FROM orders WHERE id = $1", [order.id]);
+      if (landed.rows[0]?.status === "payout_pending") {
+        await applyTransition({ orderId: order.id, trigger: "transfer_paid", actor: { type: "stripe", id: order.transfer_id } });
+      }
+    }
+    return;
+  }
+  const stripe = getStripe();
+  if (!stripe) throw new Error("payments_not_configured");
+  const dest = await pool.query<{ stripe_account_id: string | null }>(
+    "SELECT stripe_account_id FROM sellers WHERE id = $1",
+    [order.seller_id],
+  );
+  const destination = dest.rows[0]?.stripe_account_id;
+  if (!destination) throw new Error("inconsistent_state: seller payout account missing");
+  const transfer = await createTransferForOrder(order, destination, stripe);
+  await pool.query("UPDATE orders SET transfer_id = $2 WHERE id = $1", [order.id, transfer.id]);
+}
+
+api.post("/admin/orders/:id/resolve-dispute", asyncHandler(async (req: Request, res: Response) => {
+  // F1/F7: boot validation disables the route entirely when the key is unset
+  // or short — a disabled admin surface is indistinguishable from absent.
+  const cfg = orderFlowConfig();
+  if (!cfg.adminRouteEnabled) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const header = req.get("Authorization");
+  const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : undefined;
+  // A2 (THI-70): read through envValue — trimmed, empty=unset — so the auth
+  // compare sees exactly what the adminRouteEnabled gate validated at boot.
+  // Raw process.env here made a whitespace-padded key enable the route while
+  // every request 401s (fail-closed, availability-only).
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
+    res.status(401).json({ error: "Not authorized." });
+    return;
+  }
+  const parsed = resolveDisputeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "outcome (refund|release) and note (1-500 chars) required." });
+    return;
+  }
+  // Malformed ids must 404 (no uuid parse error, no oracle).
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    res.status(404).json({ error: "Order not found." });
+    return;
+  }
+  const { outcome, note } = parsed.data;
+  const { rows } = await pool.query<OrderRow>("SELECT * FROM orders WHERE id = $1", [req.params.id]);
+  const order = rows[0];
+  if (!order) {
+    res.status(404).json({ error: "Order not found." });
+    return;
+  }
+  if (order.status !== "disputed") {
+    res.status(409).json({ error: `Order is ${order.status}; only disputed orders can be resolved.` });
+    return;
+  }
+  try {
+    if (outcome === "refund") {
+      const refundId =
+        order.payment_mode === "stripe" && order.payment_intent_id
+          ? (await refundAfterTransfer(order)).refundId
+          : null; // null → refund already in flight (reconcile) or off_platform
+      await applyTransition({ orderId: order.id, trigger: "admin_refund", actor: ADMIN, reason: note, ...(refundId ? { sets: { refund_id: refundId } } : {}) });
+    } else {
+      await applyTransition({ orderId: order.id, trigger: "admin_release", actor: ADMIN, reason: note });
+      await releaseWithReconcile(order);
+    }
+  } catch (err) {
+    if (err instanceof IllegalTransitionError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+  const after = (await pool.query<OrderRow>("SELECT * FROM orders WHERE id = $1", [order.id])).rows[0];
+  res.set("Cache-Control", "no-store");
+  res.json({ order_id: order.id, status: after.status, refund_id: after.refund_id, transfer_id: after.transfer_id });
 }));
 
 /**

@@ -32,4 +32,9 @@ export class RateLimiter {
     this.buckets.set(key, bucket);
     return true;
   }
+
+  /** Clears all buckets (test isolation). */
+  reset(): void {
+    this.buckets.clear();
+  }
 }

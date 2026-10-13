@@ -249,7 +249,9 @@ export async function updateItem(
 
 // Undeclared-key surfacing thresholds and cap (spec THI-83 §3.3) — module
 // constants, deliberately not env-configurable (same posture as CONDITIONS
-// in db.ts).
+// in db.ts). Passed as query parameters ($4/$5/$6), not interpolated, so
+// making anything here configurable later can't become an injection vector
+// (Security review THI-90 rider: the safe path is the easy path).
 const UNDECLARED_KEY_MIN_ITEMS = 2;
 const UNDECLARED_KEY_MIN_SELLERS = 2;
 const UNDECLARED_KEY_LIMIT = 20;
@@ -277,11 +279,18 @@ export async function undeclaredKeyUsage(
        AND NOT (k = ANY($2::text[]))
        AND k ~ $3
      GROUP BY k
-     HAVING COUNT(*) >= ${UNDECLARED_KEY_MIN_ITEMS}
-       AND COUNT(DISTINCT i.seller_id) >= ${UNDECLARED_KEY_MIN_SELLERS}
+     HAVING COUNT(*) >= $4
+       AND COUNT(DISTINCT i.seller_id) >= $5
      ORDER BY items DESC, key ASC
-     LIMIT ${UNDECLARED_KEY_LIMIT}`,
-    [category.toLowerCase(), declaredKeys, UNDECLARED_KEY_PATTERN],
+     LIMIT $6`,
+    [
+      category.toLowerCase(),
+      declaredKeys,
+      UNDECLARED_KEY_PATTERN,
+      UNDECLARED_KEY_MIN_ITEMS,
+      UNDECLARED_KEY_MIN_SELLERS,
+      UNDECLARED_KEY_LIMIT,
+    ],
   );
   return rows;
 }

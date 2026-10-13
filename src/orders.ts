@@ -260,6 +260,16 @@ export async function applyTransition(input: ApplyTransitionInput): Promise<Orde
       throw new IllegalTransitionError(input.orderId, order.status, input.trigger, allowed);
     }
 
+    // THI-70 A1(b) cross-outcome guard: admin_release must fail closed once
+    // the order carries a refund_id — a Stripe refund issued by a concurrent
+    // refund outcome (persisted before its transition per A1(a)) must never
+    // coexist with a seller payout. Explicit state-machine rule: contradictory
+    // admin outcomes are an illegal transition, not undefined behavior.
+    if (input.trigger === "admin_release" && order.refund_id) {
+      const allowed = [...new Set(transitionsFrom(order.status, order.payment_mode).map((t) => t.trigger))];
+      throw new IllegalTransitionError(input.orderId, order.status, input.trigger, allowed);
+    }
+
     let target: OrderStatus;
     if (spec.to === "pre_dispute") {
       if (!input.restoreTo || !RESTORE_TARGETS.includes(input.restoreTo)) {

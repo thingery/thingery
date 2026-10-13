@@ -282,4 +282,86 @@ describe.skipIf(!available)("admin resolve-dispute route (DB + HTTP)", () => {
     }
     expect(last).toBe(429);
   });
+
+  // --- THI-70 hardening: cross-outcome race (A1) + env read consistency (A2) ---
+
+  it("A2: whitespace-padded ADMIN_API_KEY authenticates like the enable-gate (envValue read)", async () => {
+    const prev = process.env.ADMIN_API_KEY;
+    // Trimmed value is still >=32 chars, so the boot gate enables the route;
+    // the route's compare must see the trimmed key too, or every request 401s.
+    process.env.ADMIN_API_KEY = `${KEY}  \n`;
+    try {
+      const seed1 = await seedDisputed("off_platform", false);
+      const r = await resolve(seed1.orderId, { outcome: "release", note: "padded key" });
+      expect(r.status).toBe(200); // was 401 against raw process.env (length mismatch)
+      expect(((await r.json()) as { status: string }).status).toBe("completed");
+    } finally {
+      process.env.ADMIN_API_KEY = prev;
+    }
+  });
+
+  it("A1(b): admin_release on a disputed order with refund_id set → 409, no transfer", async () => {
+    const { client, calls } = fakeStripe();
+    setStripeForTests(client);
+    const seed1 = await seedDisputed("stripe", true);
+    // Simulates a concurrent refund outcome that already created its Stripe
+    // refund and persisted refund_id (A1(a)) while its transition is pending.
+    await db.query("UPDATE orders SET refund_id = 're_race' WHERE id = $1", [seed1.orderId]);
+    const r = await resolve(seed1.orderId, { outcome: "release", note: "concurrent refund" });
+    expect(r.status).toBe(409);
+    const after = await status(seed1.orderId);
+    expect(after.status).toBe("disputed"); // nothing moved
+    expect(calls.some((c) => c.startsWith("transfers.create:"))).toBe(false); // no money moved
+  });
+
+  it("A1(a): refund that loses the cross-outcome race still persists refund_id — no orphaned Stripe refund", async () => {
+    // Deterministic interleave of the THI-69 A1 race: the refund request parks
+    // inside the Stripe refund call; release wins the status CAS and pays out;
+    // when the refund call resolves, its admin_refund transition loses (409)
+    // but refund_id must already be on the row — visible to ops instead of
+    // orphaned at Stripe.
+    let openGate!: () => void;
+    const gate = new Promise<void>((r) => {
+      openGate = r;
+    });
+    const m = Math.random().toString(36).slice(2, 8);
+    const calls: string[] = [];
+    const client = {
+      refunds: {
+        create: async (_a: unknown, o: unknown) => {
+          calls.push(`refunds.create:${(o as { idempotencyKey: string }).idempotencyKey}`);
+          await gate; // hold the refund request inside the Stripe-call window
+          return { id: `re_${m}` };
+        },
+      },
+      transfers: {
+        create: async (_a: unknown, o: unknown) => {
+          calls.push(`transfers.create:${(o as { idempotencyKey: string }).idempotencyKey}`);
+          return { id: `tr_${m}` };
+        },
+        createReversal: async (id: string, _a: unknown, o: unknown) => {
+          calls.push(`reversal:${(o as { idempotencyKey: string }).idempotencyKey}:${id}`);
+          return { id: `trr_${m}` };
+        },
+        retrieve: async (id: string) => {
+          calls.push(`transfers.retrieve:${id}`);
+          return { id, amount_reversed: 0 };
+        },
+      },
+    } as unknown as Stripe;
+    setStripeForTests(client);
+    const seed1 = await seedDisputed("stripe", true);
+    const refundP = resolve(seed1.orderId, { outcome: "refund", note: "race refund" });
+    await new Promise((r) => setTimeout(r, 50)); // refund request is parked at the gate
+    const release = await resolve(seed1.orderId, { outcome: "release", note: "race release" });
+    expect(release.status).toBe(200); // release wins the disputed → payout_pending CAS
+    openGate(); // let the parked refund call finish
+    const refund = await refundP;
+    expect(refund.status).toBe(409); // its transition loses the race …
+    const after = await status(seed1.orderId);
+    expect(after.status).toBe("payout_pending");
+    expect(after.refund_id).toBe(`re_${m}`); // … but the refund is persisted, not orphaned
+    expect(calls.some((c) => c.startsWith("refunds.create:"))).toBe(true);
+    expect(calls.some((c) => c.startsWith("transfers.create:"))).toBe(true);
+  });
 });

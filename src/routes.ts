@@ -18,7 +18,7 @@ import { asyncHandler } from "./oauth.js";
 import { RateLimiter } from "./rate-limit.js";
 import crypto from "node:crypto";
 import { pool } from "./db.js";
-import { orderFlowConfig } from "./config.js";
+import { orderFlowConfig, envValue } from "./config.js";
 import { applyTransition, IllegalTransitionError, type OrderRow } from "./orders.js";
 import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer } from "./stripe.js";
 
@@ -198,6 +198,12 @@ async function refundAfterTransfer(order: OrderRow): Promise<{ refundId: string 
   }
   if (order.refund_id) return { refundId: null }; // refund already in flight — reconcile, never duplicate (F3)
   const refund = await createRefundForOrder(order, order.payment_intent_id!, stripe);
+  // THI-70 A1(a): persist refund_id BEFORE the transition. If admin_refund
+  // loses a cross-outcome race (admin_release won the status CAS meanwhile),
+  // the refund stays visible on the row instead of orphaning at Stripe —
+  // sweep rules 7/9 key on non-terminal statuses, so the row is the only
+  // record a terminal paid_out would carry.
+  await pool.query("UPDATE orders SET refund_id = $2 WHERE id = $1 AND refund_id IS NULL", [order.id, refund.id]);
   return { refundId: refund.id };
 }
 
@@ -244,7 +250,11 @@ api.post("/admin/orders/:id/resolve-dispute", asyncHandler(async (req: Request, 
   }
   const header = req.get("Authorization");
   const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : undefined;
-  if (!adminKeyMatches(presented, process.env.ADMIN_API_KEY)) {
+  // A2 (THI-70): read through envValue — trimmed, empty=unset — so the auth
+  // compare sees exactly what the adminRouteEnabled gate validated at boot.
+  // Raw process.env here made a whitespace-padded key enable the route while
+  // every request 401s (fail-closed, availability-only).
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
     res.status(401).json({ error: "Not authorized." });
     return;
   }

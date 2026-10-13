@@ -26,6 +26,10 @@ human founder as architect and final reviewer. Every agent working here follows 
 - Match the existing style: ESM, `node:` builtins, double quotes, named exports.
 - SQL always goes through parameterized queries in `src/items.ts` / `src/db.ts`.
   Never string-concatenate user input into SQL.
+- Async Express route handlers must be wrapped in `asyncHandler` (or fully internally
+  try/caught) — Express 4 does not route rejected promises to error middleware, and an
+  unhandled rejection terminates the process (THI-52 review). Canonical pattern:
+  `asyncHandler` in `src/oauth.ts`; tests in `tests/oauth-error-handling.test.ts`.
 
 ## Repo map
 

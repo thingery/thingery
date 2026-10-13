@@ -871,7 +871,13 @@ function mountToken(app: Express): void {
         sha256Hex(code),
       ]);
       if (consume.rowCount !== 1) {
-        await db.query("COMMIT"); // release the loser quickly; nothing changed
+        // Racing replay: this presentation passed the pre-check but lost the
+        // conditional consume — the same theft signal as a sequential replay
+        // (§2.6). Mirror the refresh rotate-loser path: revoke the family and
+        // emit code_replay so a two-presentation race is never silent (THI-41).
+        await revokeGrantFamily(db, row.grant_id);
+        await db.query("COMMIT");
+        securityEvent("code_replay", { client_id: clientId, grant_id: row.grant_id, ip: res.req?.ip });
         tokenError(res, "invalid_grant", "authorization code already used");
         return;
       }

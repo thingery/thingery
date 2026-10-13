@@ -5,6 +5,8 @@ import { getCategory, getItem, createItem, listCategories, myItems, searchItems,
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { addItemImageBase64 } from "./images.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
+import { orderFlowConfig } from "./config.js";
+import { cancelOrder, createOrder, getOrderView, OrderFlowError } from "./order-flow.js";
 
 export interface ToolContext {
   seller: SellerRow | null;
@@ -26,6 +28,9 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   "update_listing",
   // Order-flow tools (spec THI-10) must be added here when they land.
   "get_payout_setup",
+  "create_order",
+  "get_order",
+  "cancel_order",
 ]);
 
 function publicBaseUrl(): string {
@@ -33,7 +38,7 @@ function publicBaseUrl(): string {
 }
 
 export function itemToPublic(item: ItemRow & { score?: number }) {
-  const { id, title, price_cents, currency, ...rest } = item;
+  const { id, title, price_cents, currency, seller_payout_ready, ...rest } = item;
   return {
     ...rest,
     id,
@@ -43,6 +48,12 @@ export function itemToPublic(item: ItemRow & { score?: number }) {
       currency,
       cents: price_cents,
     },
+    // §11.2: buyers see payment availability before ordering; `orderable`
+    // stays true either way (off_platform orders track the deal regardless).
+    ...(seller_payout_ready !== undefined
+      ? { payment_available: orderFlowConfig().stripePaymentsEnabled && seller_payout_ready === true }
+      : {}),
+    orderable: item.status === "active",
     url: `${publicBaseUrl()}/item/${id}`,
   };
 }
@@ -50,6 +61,24 @@ export function itemToPublic(item: ItemRow & { score?: number }) {
 const ok = (data: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
 });
+
+/** Order payload for tool responses — parties only; address is PII (F16). */
+function orderToPublic(order: Parameters<typeof getOrderView>[0] extends never ? never : {
+  id: string; status: string; payment_mode: string; item_id: string; item_title?: string;
+  price_cents: number; shipping_price_cents: number; currency: string; fulfillment: string;
+  carrier: string | null; tracking_code: string | null; label_url: string | null;
+  payment_deadline: Date | null; dispute_deadline: Date | null;
+  status_changed_at: Date; created_at: Date; payment_url?: string | null;
+  shipping_address?: Record<string, unknown>;
+  checkout_session_id?: string | null; payment_intent_id?: string | null;
+  transfer_id?: string | null; refund_id?: string | null; seller_id?: string; buyer_id?: string;
+}) {
+  const { shipping_address, seller_id, buyer_id, ...rest } = order;
+  return {
+    ...rest,
+    total_price_cents: order.price_cents + order.shipping_price_cents,
+  };
+}
 
 const err = (message: string, code = "error") => ({
   content: [{ type: "text" as const, text: JSON.stringify({ error: message, code }, null, 2) }],
@@ -334,6 +363,104 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         });
       } catch (e) {
         return err(`get_payout_setup failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  // ---- Order flow (spec THI-3 rev 2 §4.1 + rev 3 §11.2; PR-4) ----
+
+  server.registerTool(
+    "create_order",
+    {
+      description:
+        "Order an item. Default payment_mode is 'stripe' (Checkout URL returned) when the " +
+        "deployment has payments AND the seller finished payout onboarding; otherwise " +
+        "'off_platform' — you and the seller settle payment yourselves (check get_item's " +
+        "payment_available first). Shippable items need a shipping_address; local-pickup " +
+        "items ignore it. Requires authentication (buyer account).",
+      inputSchema: {
+        item_id: z.string().uuid().describe("Item to order"),
+        shipping_address: z.object({
+          name: z.string().min(1).max(120),
+          line1: z.string().min(1).max(200),
+          line2: z.string().max(200).optional(),
+          city: z.string().min(1).max(80),
+          postal_code: z.string().min(1).max(20),
+          country: z.string().length(2).describe("ISO 3166-1 alpha-2, e.g. 'IT'"),
+        }).strict().optional().describe("Required for shippable items"),
+        payment_mode: z.enum(["stripe", "off_platform"]).optional()
+          .describe("Leave unset for the best available path"),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const { order, paymentUrl } = await createOrder({
+          buyerId: seller.id,
+          itemId: args.item_id as string,
+          shippingAddress: args.shipping_address as Parameters<typeof createOrder>[0]["shippingAddress"],
+          paymentMode: args.payment_mode as "stripe" | "off_platform" | undefined,
+        });
+        return ok({
+          order: orderToPublic(order),
+          payment_url: paymentUrl,
+          next_steps: paymentUrl
+            ? ["Open payment_url to pay with card (the order expires unpaid in 24h)", "Track with get_order"]
+            : ["Agree payment directly with the seller (off-platform)", "The seller confirms receipt with confirm_payment", "Track with get_order"],
+        });
+      } catch (e) {
+        if (e instanceof OrderFlowError) return err(e.message, e.code);
+        return err(`create_order failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_order",
+    {
+      description: "Fetch one of your orders (as buyer or seller): status, price breakdown, " +
+        "tracking, deadlines. Requires authentication; only order parties can see it.",
+      inputSchema: { order_id: z.string().uuid() },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      const order = await getOrderView(args.order_id as string, seller.id);
+      if (!order) return err("Order not found.", "not_found");
+      return ok({ order: orderToPublic(order) });
+    },
+  );
+
+  server.registerTool(
+    "cancel_order",
+    {
+      description:
+        "Cancel one of your orders (buyer or seller) while it is still cancellable " +
+        "(pending, sold, label_issued). Stripe-mode orders that already paid cannot be " +
+        "cancelled — the payment is refunded instead where applicable; off-platform " +
+        "parties reverse their own payment. Requires authentication.",
+      inputSchema: {
+        order_id: z.string().uuid(),
+        reason: z.string().max(500).optional(),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const order = await cancelOrder(args.order_id as string, seller.id, args.reason as string | undefined);
+        return ok({
+          order: orderToPublic(order),
+          note: order.status === "refunding"
+            ? "Refund initiated; status moves to refunded when Stripe confirms (get_order)."
+            : order.status === "cancelled"
+              ? "Order cancelled and the item is available again."
+              : undefined,
+        });
+      } catch (e) {
+        if (e instanceof OrderFlowError) return err(e.message, e.code);
+        return err(`cancel_order failed: ${describeError(e)}`);
       }
     },
   );

@@ -155,6 +155,17 @@ describe.skipIf(!available)("/mcp method-aware 401 gate (HTTP)", () => {
     return JSON.parse(dataLine ? dataLine.slice("data: ".length) : text);
   }
 
+  /** Polls a probe until it returns non-null or the timeout elapses. */
+  async function waitFor<T>(probe: () => Promise<T | null>, timeoutMs = 5000): Promise<T | null> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const value = await probe();
+      if (value !== null) return value;
+      if (Date.now() > deadline) return null;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
   it("initialize works anonymously (public reads stay free)", async () => {
     const res = await post(rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1" } }));
     expect(res.status).toBe(200);
@@ -214,6 +225,45 @@ describe.skipIf(!available)("/mcp method-aware 401 gate (HTTP)", () => {
     const body = rpcBody(await res.text());
     const payload = JSON.parse(body.result?.content?.[0]?.text ?? "{}");
     expect(payload.seller).toBe("Gate Tester");
+  });
+
+  it("thgo_ use advances last_used_at; a second use within 10 min does not (THI-11 rev 2 throttle)", async () => {
+    const hash = crypto.createHash("sha256").update(accessToken, "utf8").digest("hex");
+    const readLastUsed = async (): Promise<Date | null> => {
+      const { rows } = await db.query<{ last_used_at: Date | null }>(
+        `SELECT last_used_at FROM oauth_tokens WHERE token_hash = $1`,
+        [hash],
+      );
+      return rows[0]?.last_used_at ?? null;
+    };
+
+    // Backdate the row well outside the 10-minute throttle window, then use
+    // the token over /mcp: the fire-and-forget touch must advance the stamp.
+    await db.query(`UPDATE oauth_tokens SET last_used_at = now() - interval '2 hours' WHERE token_hash = $1`, [hash]);
+    const before = await readLastUsed();
+    expect(before).not.toBeNull();
+
+    const res = await post(rpc("tools/call", { name: "my_listings", arguments: {} }), {
+      authorization: `Bearer ${accessToken}`,
+    });
+    expect(res.status).toBe(200);
+
+    const first = await waitFor(async () => {
+      const value = await readLastUsed();
+      return value !== null && value.getTime() > (before as Date).getTime() ? value : null;
+    });
+    if (first === null) throw new Error("last_used_at did not advance after /mcp call with thgo_ token");
+
+    // Second use inside the window: the throttled WHERE matches nothing, so
+    // the stamp must be bit-for-bit unchanged.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const res2 = await post(rpc("tools/call", { name: "my_listings", arguments: {} }), {
+      authorization: `Bearer ${accessToken}`,
+    });
+    expect(res2.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const second = await readLastUsed();
+    expect(second?.getTime()).toBe(first.getTime());
   });
 
   it("expired thgo_ token → 401 invalid_token", async () => {

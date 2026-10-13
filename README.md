@@ -204,6 +204,8 @@ No fixed column set can cover sneakers, cameras and sofas at once, so the Item G
 
 Growth path: when an attribute becomes a hot filter, promote it to a Postgres generated column + index — no API change needed.
 
+Which undeclared keys are *actually* in use is discoverable too: `describe_category` returns `undeclared_in_use` — undeclared attribute keys observed on active listings from multiple sellers, with item and distinct-seller counts. These keys are never validated (they pass through as-is), so treat them as search hints, not contracts — a signal of what buyers can filter on today.
+
 ## Roadmap
 
 1. ~~**Order state machine**~~ — **shipped**: orders with Stripe Connect payouts, carrier webhooks, disputes, and deadline sweeps ([ADR 0003](docs/adr/0003-order-state-machine.md)). Next: live-mode Stripe after legal/ToS sign-off.

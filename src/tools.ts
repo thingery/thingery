@@ -1,8 +1,8 @@
 import { z } from "zod";
 import type { ItemRow, SellerRow } from "./db.js";
 import { CONDITIONS, SHIPPING_TIERS, STATUSES } from "./db.js";
-import { getCategory, getItem, createItem, listCategories, myItems, searchItems, updateItem } from "./items.js";
-import { validateAttributes, type Attributes } from "./attributes.js";
+import { getCategory, getItem, createItem, listCategories, myItems, searchItems, undeclaredKeyUsage, updateItem } from "./items.js";
+import { validateAttributes, AttributeValidationError, type Attributes } from "./attributes.js";
 import { addItemImageBase64 } from "./images.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
@@ -106,7 +106,9 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
       description:
         "Discover a category's declared attribute fields (e.g. sneakers want size_eu, " +
         "colorway...). Declared fields are validated by create_listing; listings may also carry " +
-        "undeclared attribute keys, and search attribute filters match any key. " +
+        "undeclared attribute keys, and search attribute filters match any key. When undeclared " +
+        "keys are actually in use in a category, they're listed in undeclared_in_use with " +
+        "item/seller counts — search hints, not validated fields. " +
         "Call with no arguments to list all categories. Use before create_listing " +
         "to fill attributes correctly. Public.",
       inputSchema: {
@@ -129,11 +131,24 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         const categories = await listCategories();
         return err(`Unknown category '${name}'`, "unknown_category");
       }
+      // Spec THI-83 §3.1/§3.4: helper output verbatim — no re-filtering,
+      // sorting or capping here; field AND its note sentence are omitted when
+      // empty so clean categories keep a payload byte-identical to today's.
+      const undeclared = await undeclaredKeyUsage(
+        name,
+        category.attribute_definitions.map((d) => d.key),
+      );
+      const hasUndeclared = undeclared.length > 0;
       return ok({
         category,
+        ...(hasUndeclared ? { undeclared_in_use: undeclared } : {}),
         note: "attribute_definitions are the declared keys — create_listing validates them " +
           "(types, required, enums). Listings may also carry undeclared keys: they pass through " +
-          "unvalidated, and search_items attribute filters match any key, declared or not.",
+          "unvalidated, and search_items attribute filters match any key, declared or not." +
+          (hasUndeclared
+            ? " undeclared_in_use lists undeclared keys observed on active listings (item and " +
+              "distinct-seller counts); they are NOT validated — treat them as search hints, not contracts."
+            : ""),
       });
     },
   );
@@ -303,15 +318,25 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
     async (args: Record<string, unknown>) => {
       const seller = requireSeller();
       if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
-      const item = await updateItem(args.id as string, seller.id, {
-        status: args.status as string | undefined,
-        price_cents: args.price_cents as number | undefined,
-        title: args.title as string | undefined,
-        description: args.description as string | undefined,
-        attributes: args.attributes as Attributes | undefined,
-      });
-      if (!item) return err("Item not found or not owned by this seller", "not_found");
-      return ok({ updated: true, item: itemToPublic(item) });
+      try {
+        const item = await updateItem(args.id as string, seller.id, {
+          status: args.status as string | undefined,
+          price_cents: args.price_cents as number | undefined,
+          title: args.title as string | undefined,
+          description: args.description as string | undefined,
+          attributes: args.attributes as Attributes | undefined,
+        });
+        if (!item) return err("Item not found or not owned by this seller", "not_found");
+        return ok({ updated: true, item: itemToPublic(item) });
+      } catch (e) {
+        // updateItem throws AttributeValidationError for attribute shape-cap
+        // violations (spec THI-83 §3.5); surface it with the structured
+        // invalid_attributes code, same as create_listing (THI-90 note 1).
+        if (e instanceof AttributeValidationError) {
+          return err(`Invalid attributes: ${describeError(e)}`, e.code);
+        }
+        return err(`update_listing failed: ${describeError(e)}`);
+      }
     },
   );
 

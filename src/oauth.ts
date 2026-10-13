@@ -4,7 +4,7 @@ import type { Express, Request, Response } from "express";
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { RateLimiter } from "./rate-limit.js";
-import { SESSION_SECRET, sellerFromSession } from "./auth.js";
+import { SESSION_SECRET, sellerFromSession, oauthDisabled } from "./auth.js";
 
 // MCP OAuth one-click onboarding — spec THI-11 rev 2.
 // This module is new auth surface: every change follows the protected-path
@@ -129,6 +129,10 @@ export function validateClientRegistration(body: unknown): ClientRegistration {
 
 /** Mounts the OAuth authorization-server surface (spec §4.1). No CORS headers are ever set on /oauth/*. */
 export function mountOauthRoutes(app: Express): void {
+  // OAUTH_DISABLED kill switch (spec §4.4): no OAuth route is mounted at all —
+  // every path 404s. Toggle requires a process restart (deploy-level action).
+  if (oauthDisabled()) return;
+
   const dcrLimiter = new RateLimiter(DCR_HOURLY_LIMIT, 60 * 60 * 1000);
 
   const wellKnown =
@@ -188,6 +192,134 @@ export function mountOauthRoutes(app: Express): void {
 
   mountAuthorize(app);
   mountToken(app);
+  mountApps(app);
+}
+
+// ---------------------------------------------------------------------------
+// Connected applications page (spec §4.6, OQ3): minimal server-rendered list
+// of the seller's active grants with a Revoke button per grant. Revoking is
+// family revocation (§2.7): every token of the grant dies with it.
+
+/** Same CSRF discipline as consent (F8/F10): request-bound HMAC over
+ * seller|grant, domain-separated with "csrf:", compared timing-safe. */
+export function revokeCsrfToken(sellerId: string, grantId: string): string {
+  return crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(["csrf:", sellerId, "revoke", grantId].join("|"))
+    .digest("base64url");
+}
+
+interface AppsGrantRow {
+  id: string;
+  client_name: string;
+  created_at: Date;
+  last_used_at: Date | null;
+  csrf: string;
+}
+
+function appsPageHtml(grants: AppsGrantRow[], revoked: boolean): string {
+  const rows = grants
+    .map(
+      (g) => `
+        <tr>
+          <td>${htmlEscape(g.client_name)}</td>
+          <td>${htmlEscape(g.created_at.toISOString().slice(0, 10))}</td>
+          <td>${g.last_used_at ? htmlEscape(g.last_used_at.toISOString().slice(0, 10)) : "never"}</td>
+          <td>mcp</td>
+          <td>
+            <form method="post" action="/apps/revoke">
+              <input type="hidden" name="grant_id" value="${htmlEscape(g.id)}">
+              <input type="hidden" name="csrf" value="${htmlEscape(g.csrf)}">
+              <button type="submit">Revoke</button>
+            </form>
+          </td>
+        </tr>`,
+    )
+    .join("");
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connected applications — Thingery</title>
+<style>body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:44rem;margin:2rem auto;padding:0 1rem;line-height:1.6}
+table{border-collapse:collapse;width:100%}td,th{padding:.4rem .6rem;border-bottom:1px solid #ddd;text-align:left}
+button{cursor:pointer}</style></head>
+<body><h1>Connected applications</h1>
+${revoked ? `<p><strong>Application disconnected.</strong> Its access has been revoked.</p>` : ""}
+${grants.length === 0 ? `<p>No applications are connected to your account. Applications you authorize through an MCP host will appear here.</p>` : `
+<table>
+  <thead><tr><th>Application</th><th>Authorized</th><th>Last used</th><th>Scope</th><th></th></tr></thead>
+  <tbody>${rows}</tbody>
+</table>`}
+<p><a href="/login.html">Back to your account</a></p>
+</body></html>`;
+}
+
+function mountApps(app: Express): void {
+  app.get("/apps", async (req: Request, res: Response) => {
+    const seller = await sellerFromSession(req);
+    if (!seller) {
+      pageHeaders(res);
+      res.redirect(302, `/login.html?next=${encodeURIComponent("/apps")}`);
+      return;
+    }
+    const { rows } = await pool.query<AppsGrantRow>(
+      `SELECT g.id, c.client_name, g.created_at,
+              (SELECT max(t.last_used_at) FROM oauth_tokens t WHERE t.grant_id = g.id) AS last_used_at
+         FROM oauth_grants g
+         JOIN oauth_clients c ON c.client_id = g.client_id
+        WHERE g.seller_id = $1 AND g.revoked_at IS NULL
+        ORDER BY g.created_at DESC`,
+      [seller.id],
+    );
+    // Bind each row's CSRF to the CURRENT session's seller id.
+    const bound = rows.map((g) => ({
+      ...g,
+      csrf: revokeCsrfToken(seller.id, g.id),
+    }));
+    pageHeaders(res);
+    res.status(200).type("html").send(appsPageHtml(bound, req.query.revoked === "1"));
+  });
+
+  app.post(
+    "/apps/revoke",
+    express.urlencoded({ extended: false, limit: "16kb" }),
+    async (req: Request, res: Response) => {
+    const seller = await sellerFromSession(req);
+    if (!seller) {
+      pageHeaders(res);
+      res.redirect(302, `/login.html?next=${encodeURIComponent("/apps")}`);
+      return;
+    }
+    const grantId = typeof req.body?.grant_id === "string" ? req.body.grant_id : "";
+    const expected = revokeCsrfToken(seller.id, grantId);
+    const submitted = Buffer.from(typeof req.body?.csrf === "string" ? req.body.csrf : "");
+    const expectedBuf = Buffer.from(expected);
+    const csrfOk = submitted.length === expectedBuf.length && crypto.timingSafeEqual(submitted, expectedBuf);
+    if (!csrfOk) {
+      securityEvent("csrf_rejected", { surface: "apps_revoke", seller_id: seller.id, ip: req.ip });
+      errorPage(res, "Invalid request", "The revocation request could not be verified. Please reload the page and try again.");
+      return;
+    }
+    const db = await pool.connect();
+    try {
+      await db.query("BEGIN");
+      const owned = await db.query<{ id: string }>(
+        `UPDATE oauth_grants SET revoked_at = now() WHERE id = $1 AND seller_id = $2 AND revoked_at IS NULL RETURNING id`,
+        [grantId, seller.id],
+      );
+      if (owned.rowCount === 1) {
+        await revokeGrantFamily(db, grantId);
+        securityEvent("grant_revoked_manual", { seller_id: seller.id, grant_id: grantId, ip: req.ip });
+      }
+      await db.query("COMMIT");
+    } catch (e) {
+      await db.query("ROLLBACK").catch(() => {});
+      throw e;
+    } finally {
+      db.release();
+    }
+    pageHeaders(res);
+    res.redirect(302, "/apps?revoked=1");
+  });
 }
 
 // ---------------------------------------------------------------------------

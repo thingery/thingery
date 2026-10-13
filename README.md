@@ -25,7 +25,8 @@ Chinese-market name: 物坊 (Wùfāng).
 | `my_listings` | seller | Your listings by status |
 | `update_listing` | seller | Mark reserved/sold, adjust price, edit text or attributes |
 
-Sellers authenticate with `Authorization: Bearer thg_...`; search is anonymous.
+Sellers authenticate with **OAuth** (one-click sign-in from any MCP host — see below) or a
+`thg_...` API key (`Authorization: Bearer`); search is anonymous.
 
 ## Two ways to use it
 
@@ -34,8 +35,12 @@ Sellers authenticate with `Authorization: Bearer thg_...`; search is anonymous.
   free one (`/login.html`, email + password; your MCP API key is shown after signup).
   The chat uses an LLM configured on the server (`LLM_*` env vars) — you bring the key, any
   OpenAI-compatible endpoint works; without it, chat is disabled while MCP and signup still work.
-- **Bring your own agent (power users):** connect any MCP client to `/mcp` with your `thg_...` API
-  key, or self-host everything (below, or `npx thingery` over stdio).
+- **Bring your own agent (power users):** point any MCP client at `/mcp` and **sign in with
+  OAuth** — Claude Desktop, ChatGPT connectors, VS Code and Inspector discover the sign-in
+  flow automatically (RFC 9728 resource metadata + RFC 7591 dynamic client registration);
+  you approve once on a consent screen and the host gets a rotating `thgo_` token, with
+  revoke-anytime at [`/apps`](https://thingery.dev/apps). Prefer a key? The manual `thg_...`
+  API key still works, and self-hosting is below (`npx thingery` over stdio).
 
 ## Quickstart
 
@@ -70,6 +75,14 @@ Postgres, run the same two SQL statements as the superuser and point `DATABASE_U
 
 ### Connect an MCP client
 
+Most hosts (Claude Desktop, ChatGPT connectors, VS Code, Inspector) can sign in with **OAuth**:
+just add `https://thingery.dev/mcp` (or your self-hosted URL) as a remote HTTP server — the host
+discovers the sign-in flow, you approve once, and tokens rotate automatically. On thingery.dev
+you can review and revoke connected applications at `/apps`.
+
+Hosts without OAuth support use a `thg_...` API key (from `/login.html`) as a static bearer
+token instead:
+
 ```json
 {
   "mcpServers": {
@@ -82,7 +95,10 @@ Postgres, run the same two SQL statements as the superuser and point `DATABASE_U
 }
 ```
 
-Omit the `Authorization` header for buyer-only (public search) usage.
+Omit the `Authorization` header for buyer-only (public search) usage — anonymous access to the
+public read tools is always available. Design note: the decision record for the OAuth flow is
+[docs/adr/0002-mcp-oauth-onboarding.md](docs/adr/0002-mcp-oauth-onboarding.md); set
+`OAUTH_DISABLED=1` to turn OAuth routes off entirely (hosts then fall back to keys).
 
 ### Run locally over stdio (`npx`)
 

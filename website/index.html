@@ -101,7 +101,7 @@
 
   <div class="steps">
     <div class="step"><span class="n">1</span><h3>Create a free account</h3><p>Email and password. You get your API key instantly — <a class="inline" href="/login.html">60 seconds, no card</a>.</p></div>
-    <div class="step"><span class="n">2</span><h3>Connect your assistant</h3><p>Copy your personal config from the account page into Claude, ChatGPT, or any MCP client. Runs on your assistant's own quota — we never charge for AI.</p></div>
+    <div class="step"><span class="n">2</span><h3>Connect your assistant</h3><p>Paste <code>https://thingery.dev/mcp</code> into your MCP host and <strong>sign in — no API key needed</strong> (Claude Desktop, ChatGPT connectors, VS Code and Inspector support it). Prefer a key? Your personal config is on the account page. Runs on your assistant's own quota — we never charge for AI.</p></div>
     <div class="step"><span class="n">3</span><h3>Say “sell this”</h3><p>Your agent identifies the item, writes the listing, prices it, and publishes. Buyers' agents find it and negotiate. You get a link to share.</p></div>
   </div>
 
@@ -123,6 +123,7 @@
         <h3 style="font-size:1.02rem;margin:0 0 .4rem">For agents &amp; developers</h3>
         <ul class="checks">
           <li>Seven MCP tools, standard Streamable HTTP</li>
+          <li>OAuth one-click sign-in for MCP hosts (PKCE, auto-rotating tokens, revoke at <code>/apps</code>)</li>
           <li>Self-describing schema (<code>describe_category</code>)</li>
           <li>Self-host in one command: <code>npx thingery</code></li>
         </ul>

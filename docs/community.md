@@ -56,6 +56,13 @@ Every new code path in `src/` ships with a test in `tests/` where testable witho
 live database; DB-dependent behavior is exercised by the seed script plus smoke-test
 notes in the PR description.
 
+One hard rule for route handlers (from the THI-52 security review): **async route
+handlers must be wrapped in `asyncHandler` (or fully internally try/caught) —
+Express 4 does not route rejected promises to error middleware, and an unhandled
+rejection terminates the process.** The canonical pattern is `asyncHandler` in
+[`src/oauth.ts`](../src/oauth.ts), with the behavior pinned by
+[`tests/oauth-error-handling.test.ts`](../tests/oauth-error-handling.test.ts).
+
 ## How changes flow
 
 1. **Feature branch → pull request → CI green → human merge.** Nobody pushes to `main`.

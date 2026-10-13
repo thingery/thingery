@@ -11,6 +11,8 @@ import { startOauthSweepTimer } from "./oauth-sweep.js";
 import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
 import { mountApiRoutes } from "./routes.js";
+import { stripeWebhookRouter } from "./webhooks-stripe.js";
+import { logConfigBootReport } from "./config.js";
 import { browsePage, itemPage } from "./web-pages.js";
 import { uploadsDir } from "./images.js";
 import { securityHeaders } from "./security-headers.js";
@@ -65,6 +67,12 @@ function runHttp(): void {
   // cap, parsed body handed to the transport. Mounts before any
   // body-parsing middleware — the gate consumes the raw stream itself.
   app.use(mcpRoutes({ authedLimiter, anonLimiter }));
+
+  // Stripe webhook (spec THI-3 §4.3): raw-body mount BEFORE the global JSON
+  // parser — signatures are computed over raw bytes. Fail-closed 503 stub
+  // until STRIPE_WEBHOOK_SECRET is set (F1); see config boot report.
+  const cfg = logConfigBootReport();
+  app.use(stripeWebhookRouter(cfg));
 
   // Browser API (accounts + chat). /mcp above consumes the raw body stream,
   // so the JSON parser starts here and never touches MCP traffic.

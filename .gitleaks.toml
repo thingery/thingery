@@ -1,0 +1,19 @@
+# Gitleaks configuration for Thingery.
+# Used by the secret-scan job in .github/workflows/ci.yml.
+# Docs: https://github.com/gitleaks/gitleaks#configuration
+
+# Keep the full default gitleaks ruleset (AWS keys, GitHub tokens, etc.) and
+# add Thingery-specific rules on top.
+[extend]
+useDefault = true
+
+# Thingery seller API keys: "thg_" followed by 24 random bytes in base64url
+# (32 chars; see newSellerKey in src/auth.ts). Length floor of 20 keeps the
+# rule matching even if the key format is tweaked, while ignoring the
+# "Bearer thg_... API key" placeholder strings used in error messages.
+[[rules]]
+id = "thingery-seller-api-key"
+description = "Thingery seller API key"
+regex = '''\bthg_[A-Za-z0-9_-]{20,}\b'''
+keywords = ["thg_"]
+tags = ["secret", "thingery"]

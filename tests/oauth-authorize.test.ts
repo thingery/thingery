@@ -44,6 +44,18 @@ describe("redirectUriMatches (F3: normative matcher)", () => {
     expect(redirectUriMatches("https://app.example.com:444/cb", prod)).toBe(false);
   });
 
+  it("rejects userinfo and fragment on the presented URI (RFC 6749 §3.1.2)", () => {
+    // Mirrors normalizeRedirectUri (registration side): userinfo (even alone),
+    // userinfo+password, and fragment variants must never match a registered
+    // loopback URI — these failed against main before the class-level fix.
+    expect(redirectUriMatches("http://attacker@localhost:51717/callback", registered)).toBe(false);
+    expect(redirectUriMatches("http://attacker:secret@localhost:51717/callback", registered)).toBe(false);
+    expect(redirectUriMatches("http://localhost:51717/callback#frag", registered)).toBe(false);
+    // Same rejection under a loopback port variation (defense is not port-dependent).
+    expect(redirectUriMatches("http://attacker@localhost:49152/callback", registered)).toBe(false);
+    expect(redirectUriMatches("https://user@example.com/cb", "https://example.com/cb")).toBe(false);
+  });
+
   it("rejects unparseable inputs", () => {
     expect(redirectUriMatches("not a url", registered)).toBe(false);
     expect(redirectUriMatches(registered, "::::")).toBe(false);

@@ -360,6 +360,10 @@ export function redirectUriMatches(presented: string, registered: string): boole
   } catch {
     return false;
   }
+  // RFC 6749 §3.1.2: the presented redirect URI must not carry userinfo or a
+  // fragment — mirrors the registration-side rule in normalizeRedirectUri
+  // (e.g. http://attacker@localhost:51717/callback must NOT match). Fail closed.
+  if (p.username || p.password || p.hash) return false;
   if (p.protocol !== r.protocol) return false;
   if (p.pathname !== r.pathname) return false;
   if (p.hostname !== r.hostname) return false;
@@ -383,13 +387,16 @@ export function sha256Hex(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-/** Page/redirect hardening headers (F10): no-store, no-referrer, anti-framing. */
+/** Page/redirect hardening headers (F10): no-store, no-referrer, anti-framing.
+ * CSP note: default-src 'none' also blocks the pages' inline <style> blocks
+ * (pages render unstyled by design trade-off — no remote subresource, form,
+ * or framing vector is allowed); revisit with nonces if styling must return. */
 function pageHeaders(res: Response): void {
   res.set({
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": "frame-ancestors 'none'",
+    "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
   });
 }
 
@@ -528,10 +535,19 @@ function mountAuthorize(app: Express): void {
   const validateClientAndRedirect = async (q: AuthorizeQuery): Promise<
     { client: ClientRow; redirectUri: string } | { errorPage: { title: string; detail: string } }
   > => {
-    if (!q.client_id) return { errorPage: { title: "Missing client_id", detail: "The authorization request is incomplete." } };
+    if (typeof q.client_id !== "string" || !q.client_id) {
+      return { errorPage: { title: "Missing client_id", detail: "The authorization request is incomplete." } };
+    }
     const client = await clientById(q.client_id);
     if (!client) return { errorPage: { title: "Unknown application", detail: "This client is not registered with Thingery." } };
-    if (!q.redirect_uri || !client.redirect_uris.some((registered) => redirectUriMatches(q.redirect_uri as string, registered))) {
+    // Repeated query/form params arrive as arrays (Express qs / urlencoded):
+    // reject them as malformed here so clientById and the matcher below only
+    // ever see strings (400 error page, never a 500 from the DB layer).
+    if (
+      typeof q.redirect_uri !== "string" ||
+      !q.redirect_uri ||
+      !client.redirect_uris.some((registered) => redirectUriMatches(q.redirect_uri as string, registered))
+    ) {
       return {
         errorPage: {
           title: "Invalid redirect URI",

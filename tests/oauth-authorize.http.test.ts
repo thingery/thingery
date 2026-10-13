@@ -124,6 +124,9 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     expect(res.headers.get("content-type")).toContain("text/html");
     expect(res.headers.get("x-frame-options")).toBe("DENY");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(res.headers.get("content-security-policy")).toBe(
+      "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
+    );
     const html = await res.text();
     expect(html).toContain("Authorize Test Inspector");
     expect(html).toContain(email);
@@ -232,6 +235,30 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     expect(wrongRedirect.status).toBe(400);
     expect(wrongRedirect.headers.get("location")).toBeNull();
     await wrongRedirect.text();
+  });
+
+  it("returns 400 (not 500) for repeated query/form params (arrays, not strings)", async () => {
+    // ?client_id=a&client_id=b parses to an array — must hit the 400 error
+    // page, never reach the DB layer and 500. Same for a repeated redirect_uri.
+    const repeatedId = `/oauth/authorize?client_id=thgc_authtest&client_id=thgc_authtest&redirect_uri=${encodeURIComponent(
+      REDIRECT_URI,
+    )}&response_type=code&code_challenge=${CHALLENGE}&code_challenge_method=S256&state=st-123456`;
+    const res = await fetch(`${baseUrl}${repeatedId}`);
+    expect(res.status).toBe(400);
+    expect(res.headers.get("location")).toBeNull();
+    // error page carries the hardened page CSP (default-src 'none' rider)
+    expect(res.headers.get("content-security-policy")).toBe(
+      "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
+    );
+    await res.text();
+
+    const repeatedRedirect = `/oauth/authorize?client_id=thgc_authtest&redirect_uri=${encodeURIComponent(
+      REDIRECT_URI,
+    )}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code&code_challenge=${CHALLENGE}&code_challenge_method=S256`;
+    const res2 = await fetch(`${baseUrl}${repeatedRedirect}`);
+    expect(res2.status).toBe(400);
+    expect(res2.headers.get("location")).toBeNull();
+    await res2.text();
   });
 
   const errorRedirectCases: Array<[string, Record<string, string | undefined>, string]> = [

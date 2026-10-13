@@ -138,6 +138,30 @@ describe.skipIf(!available)("oauth token + revoke endpoints (HTTP)", () => {
     return rows[0].grant_id;
   }
 
+  /** Captures `code_replay` security events for one grant while `fn` runs
+   * (securityEvent writes JSON lines to console.error — spec §4.5). */
+  async function captureCodeReplays(grantId: string, fn: () => Promise<void>): Promise<number> {
+    const seen: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      for (const arg of args) {
+        if (typeof arg !== "string") continue;
+        try {
+          const parsed = JSON.parse(arg) as { security_event?: string; grant_id?: string };
+          if (parsed.security_event === "code_replay" && parsed.grant_id === grantId) seen.push(arg);
+        } catch {
+          /* not a security-event line */
+        }
+      }
+    };
+    try {
+      await fn();
+    } finally {
+      console.error = original;
+    }
+    return seen.length;
+  }
+
   it("exchanges a code for an access+refresh pair and consumes the code exactly once", async () => {
     const code = await mintCode("thgc_tok1");
     const res = await tokenRequest({
@@ -291,6 +315,84 @@ describe.skipIf(!available)("oauth token + revoke endpoints (HTTP)", () => {
     expect(right.status).toBe(200);
     const dead = await tokenRequest({ grant_type: "refresh_token", client_id: "thgc_tok1", refresh_token: pair.refresh_token });
     expect(((await dead.json()) as { error: string }).error).toBe("invalid_grant");
+  });
+
+  it("THI-41: the racing-replay loser of the code consume fires code_replay and revokes the family", async () => {
+    const code = await mintCode("thgc_tok1");
+    const grantId = await grantIdOfCode(code);
+
+    // Winner-in-flight: consume the code and mint a token, but hold the
+    // transaction open so the HTTP request below blocks on its conditional
+    // UPDATE — forcing the exact loser path (pre-check passed, consume lost).
+    const winner = new pg.Client({ connectionString });
+    await winner.connect();
+    await winner.query("BEGIN");
+    await winner.query(`UPDATE oauth_codes SET consumed_at = now() WHERE code_hash = $1`, [
+      crypto.createHash("sha256").update(code).digest("hex"),
+    ]);
+    await winner.query(
+      `INSERT INTO oauth_tokens (grant_id, kind, token_hash, expires_at)
+       VALUES ($1, 'access', $2, now() + interval '30 minutes')`,
+      [grantId, crypto.createHash("sha256").update(`thgo_${crypto.randomBytes(24).toString("hex")}`).digest("hex")],
+    );
+
+    let res!: Response;
+    const replays = await captureCodeReplays(grantId, async () => {
+      const pending = tokenRequest({
+        grant_type: "authorization_code",
+        client_id: "thgc_tok1",
+        code,
+        redirect_uri: REDIRECT_URI,
+        code_verifier: verifier,
+      });
+      // Wait until the request is blocked on the winner's row lock, then let
+      // the winner commit: the blocked UPDATE re-checks and loses the race.
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const { rows } = await db.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+           WHERE wait_event_type = 'Lock' AND state = 'active'
+             AND query LIKE '%oauth_codes SET consumed_at = now() WHERE code_hash = $1 AND consumed_at IS NULL%'`,
+        );
+        if (rows[0].n >= 1) break;
+        if (Date.now() > deadline) throw new Error("code-consume UPDATE never blocked on the winner's lock");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      await winner.query("COMMIT");
+      res = await pending;
+    });
+    await winner.end();
+
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("invalid_grant");
+    // The loser is not silent: exactly one code_replay event for this grant.
+    expect(replays).toBe(1);
+    // And the whole family died — including the winner's just-minted token.
+    expect(await grantAlive(grantId)).toBe(false);
+    const alive = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM oauth_tokens WHERE grant_id = $1 AND revoked_at IS NULL`, [grantId]);
+    expect(alive.rows[0].n).toBe(0);
+  });
+
+  it("THI-41: N-way race on one code — every 400 loser emits code_replay; family revoked", async () => {
+    const code = await mintCode("thgc_tok1");
+    const grantId = await grantIdOfCode(code);
+    const responses: Response[] = [];
+    const replays = await captureCodeReplays(grantId, async () => {
+      responses.push(
+        ...(await Promise.all(
+          Array.from({ length: 12 }, () =>
+            tokenRequest({ grant_type: "authorization_code", client_id: "thgc_tok1", code, redirect_uri: REDIRECT_URI, code_verifier: verifier }),
+          ),
+        )),
+      );
+    });
+    await Promise.all(responses.map((r) => r.json())); // drain bodies
+    const statuses = responses.map((r) => r.status);
+    expect(statuses.filter((s) => s === 200)).toHaveLength(1); // exactly one winner
+    const losers = statuses.filter((s) => s === 400).length;
+    expect(losers).toBe(11);
+    expect(replays).toBe(losers); // no silent losers (main fails here)
+    expect(await grantAlive(grantId)).toBe(false);
   });
 
   it("expired codes and expired refresh tokens are invalid_grant without grant damage", async () => {

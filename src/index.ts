@@ -13,7 +13,8 @@ import { pool } from "./db.js";
 import { mountApiRoutes } from "./routes.js";
 import { stripeWebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
-import { logConfigBootReport } from "./config.js";
+import { logConfigBootReport, orderFlowConfig } from "./config.js";
+import { startSweepScheduler } from "./orders-sweep.js";
 import { browsePage, itemPage } from "./web-pages.js";
 import { uploadsDir } from "./images.js";
 import { securityHeaders } from "./security-headers.js";
@@ -109,6 +110,9 @@ function runHttp(): void {
   app.listen(PORT, () => {
     // OAuth retention sweeps (spec THI-11 §4.5): boot run + hourly, unref'd.
     startOauthSweepTimer();
+    // Order deadline sweeps + webhook reprocessing (spec THI-3 §4.5):
+    // boot run + every SWEEP_INTERVAL_MINUTES (10 default), unref'd.
+    startSweepScheduler(orderFlowConfig());
     console.log(`Thingery MCP server listening on http://localhost:${PORT}`);
     console.log(`  MCP endpoint:     http://localhost:${PORT}/mcp`);
     console.log(`  Health check:     http://localhost:${PORT}/healthz`);

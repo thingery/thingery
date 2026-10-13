@@ -5,6 +5,7 @@ import type { Request, Response } from "express";
 import { getItem, searchItems } from "./items.js";
 import { sellerFromSession } from "./auth.js";
 import type { ItemRow } from "./db.js";
+import { pool } from "./db.js";
 import { BROWSE_PAGE_SIZE, browsePageNav, browsePageUrl, parsePageParam } from "./pagination.js";
 
 const escapeHtml = (value: unknown): string =>
@@ -226,4 +227,78 @@ export async function browsePage(req: Request, res: Response): Promise<void> {
   const title = q ? `${q} — Browse — Thingery` : "Browse used items — Thingery";
   const description = "Browse second-hand listings published through Thingery.";
   res.send(page(title, description, body, { title, description }));
+}
+
+/** Order payment-return page (spec THI-3 §4.3, finding F15).
+ *
+ * Serves as the Stripe Checkout `success_url` and the manual order-status
+ * landing page. It is a capability URL: anyone holding the order UUID may
+ * learn the order's *status* and nothing else — no item title, price, party
+ * names, or addresses. Without an authenticated party session that is the
+ * entire surface (richer order pages are a follow-up). Hardened per F15:
+ * `Cache-Control: no-store`, `Referrer-Policy: same-origin` (the UUID must
+ * not leak via outbound referrers), and unknown/malformed ids render the
+ * identical page shape so the page is not an order-existence oracle. */
+const ORDER_STATUS_LABELS: Record<string, string> = {
+  pending: "Awaiting payment",
+  sold: "Paid — awaiting shipment",
+  label_issued: "Label issued — awaiting carrier pickup",
+  in_transit: "In transit",
+  delivered: "Delivered — dispute window open",
+  disputed: "Delivered — under dispute review",
+  payout_pending: "Delivered — seller payout scheduled",
+  paid_out: "Complete — seller paid",
+  cancelled: "Cancelled",
+  refunded: "Refunded",
+};
+
+function orderReturnBody(status: string | null): string {
+  const label = status ? (ORDER_STATUS_LABELS[status] ?? status) : "Order not found";
+  const hint = status
+    ? `<p class="meta">Your assistant can track this order, record tracking, confirm receipt,
+    open a dispute, or release the seller's payout — ask it to check the order status.</p>`
+    : `<p class="meta">This link is not a valid order. If you just paid, return to your assistant
+    and ask it to check the order status.</p>`;
+  return `
+  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents</p>
+  <h1>Order status</h1>
+  <p class="price">${escapeHtml(label)}</p>
+  ${hint}
+  <p class="meta">Thingery is the open item database and MCP server for AI agents to list,
+  find, and trade second-hand goods.</p>`;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export async function orderReturnPage(req: Request, res: Response): Promise<void> {
+  // F15: capability URL — never cached, never leaked via referrer.
+  res.set("Cache-Control", "no-store");
+  res.set("Referrer-Policy", "same-origin");
+
+  const id = String(req.params.id ?? "");
+  let status: string | null = null;
+  if (UUID_RE.test(id)) {
+    const { rows } = await pool
+      .query<{ status: string }>("SELECT status FROM orders WHERE id = $1", [id])
+      .catch(() => ({ rows: [] as Array<{ status: string }> }));
+    status = rows[0]?.status ?? null;
+  }
+  // Same template and 200 for known and unknown ids alike — no existence oracle.
+  res.send(page("Order status — Thingery", "Order status", orderReturnBody(status)));
+}
+
+/** Seller return page from Stripe Express payout onboarding (the Checkout
+ *  account-link `return_url`). Static content only — no order data, no DB. */
+export async function payoutSetupReturnPage(_req: Request, res: Response): Promise<void> {
+  res.set("Cache-Control", "no-store");
+  const body = `
+  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents</p>
+  <h1>Payout setup</h1>
+  <p class="price">Back from payout onboarding</p>
+  <p class="meta">If you finished the steps, your account is being verified — payouts unlock a few
+  minutes later. Ask your assistant to check your payout setup status; it can hand you a fresh
+  onboarding link if anything is still missing.</p>
+  <p class="meta">Thingery is the open item database and MCP server for AI agents to list,
+  find, and trade second-hand goods.</p>`;
+  res.send(page("Payout setup — Thingery", "Payout setup", body));
 }

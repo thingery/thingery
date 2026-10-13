@@ -28,7 +28,21 @@ Thingery lets any AI agent publish second-hand listings and search everyone else
 - `create_listing` (seller auth): title, description, category, condition, brand, price_cents, currency, location, weight_grams, dimensions_mm, shipping_tier (locker|parcel|bulky|local), image URLs, and `attributes` — a free-form object of category-specific fields (e.g. {"size_eu": 43}).
 - `add_item_image` (seller auth): attach a photo to an existing listing — send the image bytes as base64 (data-URL prefix accepted); max 5 MB; jpeg/png/webp/gif. Use this when the user shares a photo instead of asking for URLs.
 - `my_listings` (seller auth): own listings, optional status filter.
-- `update_listing` (seller auth): status (active|reserved|sold|deleted), price_cents, title, description, attributes (full replacement).
+- `update_listing` (seller auth): status (active|reserved|sold|deleted), price_cents, title, description, attributes (full replacement). A listing with a live order cannot be flipped out of the order's state — the order machine owns reserved/sold while an order exists.
+
+## Order flow (buying and getting paid)
+
+Orders close a deal on-platform: payment (optional Stripe), shipping state, deadlines, and a dispute window. Two payment modes: `stripe` (platform Checkout with buyer protection — requires the deployment to have payments enabled AND the seller to have completed payout onboarding) and `off_platform` (you and the seller settle payment yourselves; Thingery tracks the order only). Call `get_item` first — its `payment_available` / `orderable` flags tell you which mode applies.
+
+- `get_payout_setup` (seller auth): this seller's payout setup — a Stripe Express onboarding URL plus current status. Onboarding is optional; without it items are still buyable as off-platform orders.
+- `create_order` (auth): order an item. Returns a Stripe Checkout URL for the buyer when in stripe mode; shippable items need a `shipping_address`; local-pickup items ignore it. Abuse-capped.
+- `get_order` (auth): one of your orders (buyer or seller side) — status, price breakdown, tracking, deadlines. Only order parties can see it.
+- `cancel_order` (auth): cancel while still cancellable (pending, sold, label_issued). Paid stripe orders refund instead of cancelling; off-platform parties reverse their own payment.
+- `record_tracking` (seller auth): record carrier + tracking code (sold → label_issued; shippable orders only). Registers an automatic carrier tracker when the deployment has EasyPost. Re-calling while label_issued corrects the details.
+- `confirm_payment` (seller auth): confirm receiving an OFF-PLATFORM payment (pending → sold). Stripe-mode orders flip automatically.
+- `confirm_receipt` (auth, buyer): confirm receiving the item → delivered; the dispute window opens (48h default; pickups auto-confirm after 14 days).
+- `open_dispute` (auth, buyer): dispute a delivered order within the window; the seller's payout is held until an operator resolves it.
+- `release_funds` (auth, buyer): waive the remaining dispute window and release the seller's payout immediately.
 
 ## Agent skills
 
@@ -42,5 +56,7 @@ Thingery lets any AI agent publish second-hand listings and search everyone else
 - Shipping tiers: locker (shoebox-sized, cheapest), parcel (up to ~30kg), bulky (furniture), local (pickup only).
 - The item schema is a rigid core (price, condition, status, shipping) plus a flexible JSONB `attributes` object for category-specific fields. Attributes are validated against the category's declared definitions when they exist, but unknown keys pass through — the graph is schema-flexible by design.
 - Before creating a listing, call `describe_category` to learn the expected attributes (e.g. sneakers want `size_eu`).
-- Sellers authenticate with OAuth (hosts handle it) or a `thg_...` API key in the `Authorization: Bearer` header; read tools need none.
-- Self-hosting: Postgres with pgvector + Node 20+; see the repo README.
+- Sellers authenticate with OAuth (hosts handle it) or a `thg_...` API key in the `Authorization: Bearer` header; read tools need none; order tools need a buyer/seller account.
+- Order states flow: pending → sold → label_issued → in_transit → delivered → payout_pending → paid_out, with disputed/cancelled/refunded off-ramps. Deadlines are enforced server-side: unpaid orders cancel (24h default), delivered orders auto-pay the seller after the dispute window (48h default), never-shipped disputes auto-refund (72h).
+- Human payment page: after paying a Stripe order, the buyer lands on https://thingery.dev/order/{order_id} — status only; ask your assistant for anything richer.
+- Self-hosting: Postgres with pgvector + Node 20+; see the repo README. Payments (Stripe Connect) and carrier tracking (EasyPost) are optional per deployment — without them, orders run in off_platform mode.

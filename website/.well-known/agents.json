@@ -18,28 +18,104 @@
             "token_endpoint": "https://thingery.dev/oauth/token",
             "revocation_endpoint": "https://thingery.dev/oauth/revoke",
             "registration_endpoint": "https://thingery.dev/oauth/register",
-            "grant_types": ["authorization_code", "refresh_token"],
-            "code_challenge_methods": ["S256"],
-            "scopes": ["mcp"]
+            "grant_types": [
+              "authorization_code",
+              "refresh_token"
+            ],
+            "code_challenge_methods": [
+              "S256"
+            ],
+            "scopes": [
+              "mcp"
+            ]
           }
         },
         "discovery": "https://thingery.dev/.well-known/oauth-authorization-server",
         "resource_metadata": "https://thingery.dev/.well-known/oauth-protected-resource",
         "token_format": "thgo_... (30 min) / thgr_... refresh (30 d, rotating)",
         "legacy_bearer_key_format": "thg_...",
-        "required_for": ["create_listing", "add_item_image", "my_listings", "update_listing"],
+        "required_for": [
+          "create_listing",
+          "add_item_image",
+          "my_listings",
+          "update_listing"
+        ],
         "notes": "OAuth one-click sign-in recommended for MCP hosts; thg_ API key is the manual/legacy path. Connected applications can be reviewed and revoked at https://thingery.dev/apps. Anonymous public reads always work; invalid credentials get HTTP 401."
       },
-      "public_tools": ["describe_category", "search_items", "get_item"],
-      "seller_tools": ["create_listing", "add_item_image", "my_listings", "update_listing"]
+      "public_tools": [
+        "describe_category",
+        "search_items",
+        "get_item"
+      ],
+      "seller_tools": [
+        "create_listing",
+        "add_item_image",
+        "my_listings",
+        "update_listing"
+      ],
+      "required_for": [
+        "create_listing",
+        "add_item_image",
+        "my_listings",
+        "update_listing",
+        "get_payout_setup",
+        "create_order",
+        "get_order",
+        "cancel_order",
+        "record_tracking",
+        "confirm_payment",
+        "confirm_receipt",
+        "open_dispute",
+        "release_funds"
+      ],
+      "order_tools": {
+        "get_payout_setup": "seller payout setup: Stripe Express onboarding URL + status; optional, enables platform payment",
+        "create_order": "order an item; stripe mode returns a Checkout URL, off_platform tracks the order only; check get_item's payment_available/orderable first",
+        "get_order": "one of your orders (buyer or seller side); parties only",
+        "cancel_order": "cancel while cancellable (pending/sold/label_issued); paid stripe orders refund instead",
+        "record_tracking": "seller records carrier + tracking code (sold -> label_issued); auto carrier tracker when EasyPost is configured",
+        "confirm_payment": "seller confirms an off-platform payment (pending -> sold)",
+        "confirm_receipt": "buyer confirms delivery -> delivered; dispute window opens",
+        "open_dispute": "buyer disputes a delivered order within the window; payout held",
+        "release_funds": "buyer waives the dispute window; seller payout released immediately"
+      },
+      "payment_modes": {
+        "stripe": "platform Stripe Checkout with buyer protection; requires deployment payments + seller payout onboarding",
+        "off_platform": "parties settle payment themselves; Thingery tracks order state only"
+      }
     }
   ],
   "data_conventions": {
     "price": "integer cents (12500 = EUR 125.00)",
-    "condition_scale": ["new", "like_new", "good", "fair", "poor"],
-    "shipping_tiers": ["locker", "parcel", "bulky", "local", "unknown"],
+    "condition_scale": [
+      "new",
+      "like_new",
+      "good",
+      "fair",
+      "poor"
+    ],
+    "shipping_tiers": [
+      "locker",
+      "parcel",
+      "bulky",
+      "local",
+      "unknown"
+    ],
     "item_ids": "UUID v4",
-    "attributes": "flexible JSONB object of category-specific fields; declared definitions validate types and required keys, unknown keys pass through; discover per category via describe_category"
+    "attributes": "flexible JSONB object of category-specific fields; declared definitions validate types and required keys, unknown keys pass through; discover per category via describe_category",
+    "order_states": [
+      "pending",
+      "sold",
+      "label_issued",
+      "in_transit",
+      "delivered",
+      "disputed",
+      "payout_pending",
+      "paid_out",
+      "cancelled",
+      "refunded"
+    ],
+    "order_deadlines": "server-enforced: unpaid cancels (24h default), dispute window after delivery (48h default, pickups auto-confirm 14d), never-shipped disputes auto-refund (72h)"
   },
   "rate_limits": {
     "authenticated_per_minute": 120,

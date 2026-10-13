@@ -218,11 +218,18 @@ export function mountOauthRoutes(app: Express): void {
   // OAuth paths keep their 4xx status (413/400/415), everything else is 500.
   // In-flight (headers-sent) responses are destroyed — nothing safe to append.
   app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+    // Express 4 matches routes case-insensitively (THI-52 finding 1): fold
+    // the path so case-varied requests (/Apps, /OAUTH/TOKEN) stay in scope —
+    // otherwise their faults fall through to the default handler, skipping
+    // the security_event log and, outside production, disclosing the raw
+    // error text. All mounted OAuth route literals are lowercase, so this
+    // cannot over-match. The security_event below logs the original req.path.
+    const foldedPath = req.path.toLowerCase();
     const onOauthSurface =
-      req.path === "/apps" ||
-      req.path.startsWith("/apps/") ||
-      req.path.startsWith("/oauth/") ||
-      req.path.startsWith("/.well-known/oauth-");
+      foldedPath === "/apps" ||
+      foldedPath.startsWith("/apps/") ||
+      foldedPath.startsWith("/oauth/") ||
+      foldedPath.startsWith("/.well-known/oauth-");
     if (!onOauthSurface) {
       next(err);
       return;

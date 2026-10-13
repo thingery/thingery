@@ -168,3 +168,88 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
   consumed_at     TIMESTAMPTZ,                -- single-use flag; replay detection
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ---------------------------------------------------------------------------
+-- Order flow (spec THI-3 rev 2, §3). One item, one seller, one buyer, an
+-- explicit 11-state machine (§2), an append-only audit log, and a raw webhook
+-- event store backing idempotency + replay (§5.4). All additive and idempotent
+-- (expand-only migration); items gain no new columns or status values.
+CREATE TABLE IF NOT EXISTS orders (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  item_id             UUID NOT NULL REFERENCES items(id),
+  seller_id           UUID NOT NULL REFERENCES sellers(id),  -- snapshot of item owner at creation
+  buyer_id            UUID NOT NULL REFERENCES sellers(id),  -- buyer account; sellers IS the accounts table
+  status              TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending','sold','label_issued','in_transit','delivered',
+                                        'disputed','refunding','refunded','payout_pending',
+                                        'paid_out','cancelled')),
+  price_cents         INTEGER NOT NULL CHECK (price_cents >= 0),  -- snapshot of item price at creation
+  currency            CHAR(3) NOT NULL,
+  fulfillment         TEXT NOT NULL CHECK (fulfillment IN ('shipping','pickup')),
+  shipping_address    JSONB NOT NULL DEFAULT '{}'::jsonb,   -- PII; zod-validated at ingest (max
+                                                            -- lengths, unknown keys rejected — F16);
+                                                            -- visible only to order parties (§4.1)
+  carrier             TEXT,
+  tracking_code       TEXT,
+  tracker_id          TEXT UNIQUE,     -- carrier-aggregator tracker id (EasyPost result.id) —
+                                       -- PRIMARY webhook event-resolution key (F4, §5.2)
+  label_url           TEXT,            -- https-only; stored and returned as data, never a link (F16)
+  checkout_session_id TEXT UNIQUE,
+  payment_intent_id   TEXT UNIQUE,
+  transfer_id         TEXT,
+  refund_id           TEXT,
+  payment_deadline    TIMESTAMPTZ,        -- pending expiry
+  dispute_deadline    TIMESTAMPTZ,        -- set on delivered
+  status_changed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),  -- drives stale-sold / stuck-transit sweeps
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS orders_item_idx   ON orders (item_id);
+CREATE INDEX IF NOT EXISTS orders_buyer_idx  ON orders (buyer_id);
+CREATE INDEX IF NOT EXISTS orders_seller_idx ON orders (seller_id);
+CREATE INDEX IF NOT EXISTS orders_status_idx ON orders (status);
+-- Webhook event→order resolution fallback + handler performance (F4):
+CREATE INDEX IF NOT EXISTS orders_carrier_tracking_idx ON orders (carrier, tracking_code);
+-- One live order per item at a time (spec §2.3 transition #1 guard, DB-backed):
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_order_per_item
+  ON orders (item_id)
+  WHERE status IN ('pending','sold','label_issued','in_transit','delivered',
+                   'disputed','refunding','payout_pending');
+
+-- Append-only audit log: every transition, correction, webhook application,
+-- sweep firing, and operator alert lands here (spec §2.3, §3.2).
+CREATE TABLE IF NOT EXISTS order_events (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id    UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  event_type  TEXT NOT NULL,        -- 'transition', 'tracking_corrected', 'carrier_update',
+                                    -- 'stripe_event', 'unexpected_payment', 'operator_alert', ...
+  from_status TEXT,
+  to_status   TEXT,
+  actor_type  TEXT NOT NULL CHECK (actor_type IN ('buyer','seller','system','carrier','stripe','admin')),
+  actor_id    TEXT,                 -- account id, webhook source, or sweep rule name
+  reason      TEXT,
+  payload     JSONB NOT NULL DEFAULT '{}'::jsonb,  -- PII-free by construction (F6): status codes,
+                                                    -- timestamps, object ids — never raw provider payloads
+  dedupe_key  TEXT UNIQUE,          -- stripe:{event_id}, carrier:{event_id}, sweep:{rule}:{order_id}
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS order_events_order_idx ON order_events (order_id, created_at);
+
+-- Raw webhook event store: UNIQUE (source, external_id) is the idempotency
+-- barrier; process_error + processed_at drive reprocessing (spec §5.4, §4.5
+-- sweep rule 6). Payloads are REDACTED at ingest (F6) — see spec §3.3.
+CREATE TABLE IF NOT EXISTS webhook_events (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source        TEXT NOT NULL CHECK (source IN ('stripe','carrier')),
+  external_id   TEXT NOT NULL,      -- Stripe event id / carrier event id
+  payload       JSONB NOT NULL,     -- REDACTED at ingest (F6): event id, normalized status, object ids
+  received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  processed_at  TIMESTAMPTZ,
+  process_error TEXT,
+  UNIQUE (source, external_id)
+);
+
+-- Seller payout readiness (spec §3.4, §6.3). Set by the Stripe account.updated
+-- webhook when capabilities.transfers = 'active' (known connected accounts only, F5).
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;           -- Express connected account
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS stripe_onboarded_at TIMESTAMPTZ;  -- transfers capability active

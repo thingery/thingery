@@ -7,6 +7,7 @@ import { buildServer } from "./server.js";
 import { sellerFromApiKey } from "./auth.js";
 import { mcpRoutes } from "./mcp-gate.js";
 import { mountOauthRoutes } from "./oauth.js";
+import { startOauthSweepTimer } from "./oauth-sweep.js";
 import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
 import { api } from "./routes.js";
@@ -86,6 +87,8 @@ function runHttp(): void {
   app.use(express.static(websiteDir, { extensions: ["html"] }));
 
   app.listen(PORT, () => {
+    // OAuth retention sweeps (spec THI-11 §4.5): boot run + hourly, unref'd.
+    startOauthSweepTimer();
     console.log(`Thingery MCP server listening on http://localhost:${PORT}`);
     console.log(`  MCP endpoint:     http://localhost:${PORT}/mcp`);
     console.log(`  Health check:     http://localhost:${PORT}/healthz`);

@@ -56,6 +56,15 @@ export type AuthResult = {
   failure: "none" | "invalid_token";
 };
 
+/** OAUTH_DISABLED kill switch (spec THI-11 §4.4): read per call so it can be
+ * toggled without restart tooling in tests; production toggles restart via
+ * deploy. When set, OAuth routes 404 and `thgo_` becomes an unrecognized
+ * credential format → 401 → hosts fall back to API keys. */
+export function oauthDisabled(): boolean {
+  const flag = process.env.OAUTH_DISABLED;
+  return flag === "1" || flag === "true";
+}
+
 /**
  * Dual-token dispatch on the Authorization: Bearer header (spec THI-11
  * §2.10): `thg_` → API key, `thgo_` → OAuth access token. Anything else that
@@ -70,6 +79,7 @@ export async function authenticateRequest(req: Request): Promise<AuthResult> {
     return { seller, failure: seller ? "none" : "invalid_token" };
   }
   if (token.startsWith("thgo_")) {
+    if (oauthDisabled()) return { seller: null, failure: "invalid_token" }; // kill switch (§4.4)
     const seller = await sellerFromAccessToken(token);
     return { seller, failure: seller ? "none" : "invalid_token" };
   }

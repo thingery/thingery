@@ -48,6 +48,35 @@ export function stripeWebhookRouter(cfg: OrderFlowConfig = orderFlowConfig()): R
 }
 
 async function handleStripeWebhook(req: Request, res: Response, cfg: OrderFlowConfig): Promise<void> {
+  // THI-64 V1 fix: this handler is void-mounted, so a rejection escaping the
+  // body would be an unhandled rejection — Node >= 15 crashes the whole
+  // process (THI-58 class) on any DB fault during a Stripe delivery. One
+  // barrier around the entire body: log, best-effort mark, 500 (Stripe
+  // redelivers). `ingest failed:` marks the row for sweep rule 6 (PR-8) so a
+  // stored-but-unprocessed row is never swallowed by the dedupe path.
+  let eventId: string | null = null;
+  try {
+    await ingestStripeWebhook(req, res, cfg, (id) => (eventId = id));
+  } catch (err) {
+    console.error("[webhooks:stripe] ingest failed:", (err as Error).message);
+    if (eventId) {
+      await pool
+        .query(
+          "UPDATE webhook_events SET process_error = $2 WHERE source = 'stripe' AND external_id = $1 AND processed_at IS NULL",
+          [eventId, `ingest failed: ${(err as Error).message}`.slice(0, 500)],
+        )
+        .catch(() => undefined);
+    }
+    if (!res.headersSent) res.status(500).json({ error: "processing failed" });
+  }
+}
+
+async function ingestStripeWebhook(
+  req: Request,
+  res: Response,
+  cfg: OrderFlowConfig,
+  onEventId: (id: string) => void,
+): Promise<void> {
   if (!cfg.stripeWebhookReady) {
     // Fail-closed 503 stub (F1): key set but webhook secret unset.
     res.status(503).json({ error: "stripe webhook not configured" });
@@ -89,6 +118,7 @@ async function handleStripeWebhook(req: Request, res: Response, cfg: OrderFlowCo
 
   // F6: REDACT at ingest — event id, type, mode, and the object ids handlers
   // need. customer_details, addresses, names never touch the store.
+  onEventId(event.id);
   const payload = {
     id: event.id,
     type: event.type,

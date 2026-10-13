@@ -10,7 +10,7 @@ import { mountOauthRoutes } from "./oauth.js";
 import { startOauthSweepTimer } from "./oauth-sweep.js";
 import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
-import { api } from "./routes.js";
+import { mountApiRoutes } from "./routes.js";
 import { browsePage, itemPage } from "./web-pages.js";
 import { uploadsDir } from "./images.js";
 import { securityHeaders } from "./security-headers.js";
@@ -70,7 +70,9 @@ function runHttp(): void {
   // so the JSON parser starts here and never touches MCP traffic.
   app.use(express.json({ limit: "256kb" }));
   mountOauthRoutes(app); // OAuth discovery + DCR (spec THI-11 §4.1) — after the JSON parser, like /api
-  app.use("/api", api);
+  // /api router + its app-level terminal JSON error middleware (spec THI-58
+  // PR-1): mount position unchanged, right where the router sat before.
+  mountApiRoutes(app);
 
   app.get("/healthz", async (_req, res) => {
     try {

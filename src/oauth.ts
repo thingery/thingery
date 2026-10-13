@@ -136,7 +136,7 @@ export function validateClientRegistration(body: unknown): ClientRegistration {
  * rejections reach the terminal error middleware in mountOauthRoutes:
  * fail-securely by degrading, never by crashing.
  */
-function asyncHandler(fn: (req: Request, res: Response) => Promise<void>): RequestHandler {
+export function asyncHandler(fn: (req: Request, res: Response) => Promise<void>): RequestHandler {
   return (req, res, next) => {
     fn(req, res).catch(next);
   };

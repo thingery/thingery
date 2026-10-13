@@ -20,10 +20,13 @@ export interface ItemRow {
   weight_grams: number | null;
   dimensions_mm: string | null;
   shipping_tier: string;
+  shipping_price_cents: number;
   images: string[];
   attributes: Record<string, unknown>;
   status: string;
   created_at: Date;
+  /** Joined from sellers (getItem/searchItems); absent when not queried. */
+  seller_payout_ready?: boolean;
 }
 
 export interface SellerRow {

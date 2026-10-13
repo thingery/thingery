@@ -51,6 +51,8 @@ cd /opt/thingery
 cp .env.example .env
 nano .env   # set POSTGRES_PASSWORD (required!), EMBED_API_KEY (optional), PUBLIC_BASE_URL=https://thingery.dev
 
+export GIT_COMMIT=$(git rev-parse HEAD)
+export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 docker compose -f docker-compose.prod.yml up -d --build
 
 # apply the schema (idempotent — safe to re-run)
@@ -165,11 +167,22 @@ then `rm -rf /tmp/img-verify`.
 
 Deploys are automated via the `deploy.yml` workflow (on push to `main`) once you set the
 repo variables/secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, and `DEPLOY_ENABLED=true`.
-Manual equivalent:
+The workflow exports `GIT_COMMIT`/`BUILD_TIME` before building, so `/healthz` reports the
+deployed commit. Manual equivalent:
 
 ```bash
-cd /opt/thingery && git pull && docker compose -f docker-compose.prod.yml up -d --build
+cd /opt/thingery && git pull && \
+  GIT_COMMIT=$(git rev-parse HEAD) BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  docker compose -f docker-compose.prod.yml up -d --build
 ```
+
+Verify the deployed build info (must match `git rev-parse HEAD` in `/opt/thingery`):
+
+```bash
+curl -s https://thingery.dev/healthz   # {"ok":true,...,"version":"…","commit":"…","buildTime":"…"}
+```
+If `commit` reports `"unknown"`, the deploy skipped the build args — rebuild with the
+exports above. The site footer shows the same version + short commit.
 
 ## 6. Scaling later
 

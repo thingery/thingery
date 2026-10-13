@@ -21,5 +21,7 @@ jobs:
           script: |
             cd /opt/thingery
             git pull --ff-only
+            export GIT_COMMIT=$(git rev-parse HEAD)
+            export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             docker compose -f docker-compose.prod.yml up -d --build
             docker image prune -f

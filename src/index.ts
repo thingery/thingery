@@ -13,6 +13,7 @@ import { pool } from "./db.js";
 import { api } from "./routes.js";
 import { browsePage, itemPage } from "./web-pages.js";
 import { uploadsDir } from "./images.js";
+import { securityHeaders } from "./security-headers.js";
 import { VERSION } from "./version.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -44,6 +45,10 @@ function runHttp(): void {
   const anonLimiter = new RateLimiter(30, 60_000);
 
   const app = express();
+
+  // Baseline security headers on every response, before any route (upstream #9).
+  app.disable("x-powered-by");
+  app.use(securityHeaders);
 
   // F1 (spec THI-11 §4.1, hard prerequisite for every per-IP limit): Caddy is
   // the single trusted proxy hop. Without this, req.ip is always the Caddy

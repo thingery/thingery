@@ -46,10 +46,21 @@ describe.skipIf(!available)("db schema", () => {
   it("applies the schema to a fresh database without error", async () => {
     // Hermetic: drop the OAuth tables so every run exercises a true fresh apply
     // (the file uses CREATE TABLE IF NOT EXISTS, which would otherwise no-op).
-    await client.query(
-      `DROP TABLE IF EXISTS oauth_codes, oauth_tokens, oauth_grants, oauth_clients CASCADE`,
-    );
-    await client.query(readFileSync(schemaPath, "utf8"));
+    // Wrapped in a transaction: vitest runs test files in parallel workers, so
+    // the drop/recreate must be atomic to concurrent DB users (THI-31) — without
+    // the txn, oauth-register.test.ts can observe a window with no oauth
+    // tables and fail with 42P01-driven 500s.
+    await client.query("BEGIN");
+    try {
+      await client.query(
+        `DROP TABLE IF EXISTS oauth_codes, oauth_tokens, oauth_grants, oauth_clients CASCADE`,
+      );
+      await client.query(readFileSync(schemaPath, "utf8"));
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    }
   });
 
   it("is idempotent: re-applying the schema is a no-op", async () => {

@@ -30,9 +30,37 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
+      # Fail the build on high/critical findings in *production* dependencies.
+      # Dev-toolchain findings follow the 30-day SLA in docs/security.md §7.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
       - run: npm run typecheck
       - run: npm run build
       # Apply schema before tests: DB-backed test files run in parallel workers
       # and must not race each other for table creation (42P01).
       - run: npx tsx scripts/migrate.ts
       - run: npm test
+
+  # Secret scanning: gitleaks (official release binary, pinned by SHA-256) over
+  # the full git history, with the default ruleset plus a custom rule for the
+  # `thg_` seller-key prefix (.gitleaks.toml). We run the pinned binary instead
+  # of gitleaks/gitleaks-action because that Action hard-fails on organization
+  # repos unless a GITLEAKS_LICENSE secret is set (free key from gitleaks.io,
+  # requires a human request). Swap to the Action (pinned by full commit SHA)
+  # once the license secret exists.
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: keys must never hide in old commits
+      - name: Download and verify gitleaks v8.30.1
+        run: |
+          set -euo pipefail
+          curl -fsSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum --check
+          tar -xzf gitleaks.tar.gz gitleaks
+      - name: Scan git history for secrets
+        run: ./gitleaks git . --config .gitleaks.toml --redact --verbose --no-banner

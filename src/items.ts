@@ -88,6 +88,8 @@ export interface SearchFilters {
   shipping_tier?: string;
   attributes?: Attributes;
   limit: number;
+  /** Rows to skip, for offset pagination (1-based pages in callers). Defaults to 0. */
+  offset?: number;
 }
 
 /**
@@ -115,6 +117,7 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
 
   const q = filters.q?.trim();
   const limit = Math.min(Math.max(filters.limit, 1), 50);
+  const offset = Math.max(Math.trunc(filters.offset ?? 0), 0);
 
   if (q) {
     const embedding = await embedText(q);
@@ -129,7 +132,7 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
            AND (i.title ILIKE ${keywordParam} OR i.description ILIKE ${keywordParam}
                 OR 1 - (i.embedding <=> ${vecParam}::vector) > 0.15)
          ORDER BY i.embedding <=> ${vecParam}::vector
-         LIMIT ${add(limit)}`,
+         LIMIT ${add(limit)} OFFSET ${add(offset)}`,
         params,
       );
       return rows;
@@ -142,7 +145,7 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
        WHERE ${where.join(" AND ")}
          AND (i.title ILIKE ${keywordParam} OR i.description ILIKE ${keywordParam})
        ORDER BY i.created_at DESC
-       LIMIT ${add(limit)}`,
+       LIMIT ${add(limit)} OFFSET ${add(offset)}`,
       params,
     );
     return rows;
@@ -153,7 +156,7 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
      FROM items i
      WHERE ${where.join(" AND ")}
      ORDER BY i.created_at DESC
-     LIMIT ${add(limit)}`,
+     LIMIT ${add(limit)} OFFSET ${add(offset)}`,
     params,
   );
   return rows;

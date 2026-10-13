@@ -131,7 +131,7 @@ Failures (A02:2021), secrets management.*
 | **S**poofing | `/mcp` Bearer key; session cookie | Keys are 192-bit random (`thg_` + 24 bytes) — unguessable. But: no email verification (anyone can be "anyone"), keys never expire, sessions can't be revoked.Spoofing a *seller identity* is cheap; spoofing a *specific* seller requires the key. |
 | **T**ampering | `create_listing`/`update_listing` payloads; `attributes` JSONB | TLS protects transit. Owner checks are correct (`updateItem` scopes `WHERE seller_id = $`); no cross-seller tampering found. Free-form attributes pass through by design — tampering with *semantic* integrity (fake ISBNs, wrong sizes) is unmitigated and accepted for now. Media type of uploads is client-asserted (tamperable). |
 | **R**epudiation | Listing creation/edit, logins, rate-limit hits | **No audit trail.** Logs are `console.log/error` only; who created/edited what is reconstructible from the DB but nothing logs auth failures or abuse. Repudiation currently fails. Fix in H4. |
-| **I**nformation disclosure | `get_item`, `/api/me`, error paths, headers, external image URLs | `get_item` returns `seller_id` (a UUID — acceptable, unguessable, no display name). Signup returns 409 "email exists" — account enumeration. Errors echo exception messages (`describeError`, signup 500). `x-powered-by: Express` leaks stack info. External image URLs leak viewer IPs to third parties. Plaintext keys in DB/backups (H2). No secrets found in repo/logs today. |
+| **I**nformation disclosure | `get_item`, `/api/me`, error paths, headers, external image URLs | `get_item` returns `seller_id` (a UUID — acceptable, unguessable, no display name). Signup returns 409 "email exists" — account enumeration. Errors echo exception messages (`describeError`, signup 500). `x-powered-by` disabled since the baseline-headers PR. External image URLs leak viewer IPs to third parties. Plaintext keys in DB/backups (H2). No secrets found in repo/logs today. |
 | **D**enial of service | `/mcp`, `/api/*`, uploads, embeddings API, chat LLM | Body sizes bounded (4 MiB SDK cap on `/mcp`, 256 KB JSON on `/api`, 5 MB uploads). Query limits capped (≤ 50 search, ≤ 100 my_listings). Real DoS vectors: the shared-bucket bug (H1) lets one client lock out *all* anonymous users; disk fill via uploads (H3); cost DoS on `EMBED_API_KEY`/`LLM_API_KEY` via spam or chat. ILIKE wildcards are escaped (`src/items.ts`), preventing pattern-DoS. |
 | **E**levation of privilege | Tool surface, chat agent | **None found.** Every write tool re-checks `ctx.seller`; there is no admin surface at all (also means no privileged code to exploit — and no moderation capability; see H4). Chat agent tools execute with the *session* seller only (`src/chat.ts` `executeTool`). |
 
@@ -146,7 +146,7 @@ Failures (A02:2021), secrets management.*
 | API5 | Function Level Authorization | ✅ | Every write tool requires seller; public tools are read-only by construction. |
 | API6 | Sensitive Business Flows | ❌ | Signup and listing-creation flows have no abuse controls beyond (broken) IP limits. → H4 |
 | API7 | Server Side Request Forgery | ✅ today | The server never fetches URLs from user input (images are stored, not fetched; embed/LLM URLs come from env). **Future risk:** if we ever proxy/fetch external image URLs or add webhooks, SSRF controls (allowlist, no internal ranges) are mandatory. |
-| API8 | Security Misconfiguration | ❌ | No CSP/HSTS/`X-Content-Type-Options`, `x-powered-by` exposed, `trust proxy` unset, `SESSION_SECRET` not wired into prod compose. → H1, quick wins |
+| API8 | Security Misconfiguration | ⚠️ | Baseline headers shipped (CSP without inline script, HSTS, nosniff, Referrer-Policy; `x-powered-by` off). Still open: `trust proxy` unset, `SESSION_SECRET` not wired into prod compose. → H1 |
 | API9 | Inventory | ✅ small | One repo, one VPS, one npm package, one MCP registry entry. Stdio mode (`npx thingery`) is a second deployment shape — keep it in mind when adding env-dependent features. |
 | API10 | Unsafe Consumption of APIs | ⚠️ | LLM/embedding responses are trusted: `embedText` casts responses to `number[]` without validation; LLM `tool_calls` are executed directly (bounded by the seller session and a 6-round loop). Acceptable now; revisit with H5. |
 
@@ -204,6 +204,12 @@ phishing concerns — threat-model them before building, not after.
 - CI (typecheck, build, test) runs on every PR/push to `main`; deploys are SSH-gated
   behind `DEPLOY_ENABLED` + GitHub Secrets.
 - `npm audit --omit=dev` on the current lockfile: **0 production vulnerabilities**.
+- Baseline security headers on every response (`src/security-headers.ts`): CSP with
+  `script-src 'self'` only (no inline script — all executable scripts are static files),
+  HSTS `max-age=15552000`, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: strict-origin-when-cross-origin`, `x-powered-by` disabled.
+  `style-src 'unsafe-inline'` remains (documented tradeoff). Item-page JSON-LD is
+  `<`-escaped so seller content cannot break out of the data block (stored XSS fix).
 - Fail-securely examples: unset `SESSION_SECRET` → sessions invalid (not forged);
   missing DB → 503 on `/healthz`; invalid key → read-only toolset.
 
@@ -217,7 +223,8 @@ phishing concerns — threat-model them before building, not after.
 - Email verification, listing velocity limits, moderation/takedown tooling, security
   event logging and alerting (H4).
 - Prompt-injection hardening for the chat agent and downstream agent consumers (H5).
-- Security headers (CSP, HSTS, `X-Content-Type-Options`), `x-powered-by` off (quick wins).
+- CSP `style-src 'unsafe-inline'` remains (inline `<style>` blocks and `style=""`
+  attributes); replace with per-response nonces or external stylesheets later.
 - **Branch protection on `main` is NOT enabled** (verified via the GitHub API at the time
   of writing: no required checks, no rulesets). The convention "never push to main,
   human merges" is currently enforced only by discipline. Enable require-PR + green CI
@@ -372,9 +379,10 @@ worst-case damage, "Exploitability" is how practical the attack is today.
 
 **Quick wins (each < half a day, bundle into one PR):**
 
-- Security headers: `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`,
+- ~~Security headers: `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`,
   a narrow `Content-Security-Policy` for the static pages; disable `x-powered-by`
-  (`app.disable("x-powered-by")`).
+  (`app.disable("x-powered-by")`).~~ **Done** — shipped with the baseline-headers PR
+  (upstream #9), including `script-src 'self'`-only CSP and the JSON-LD `<`-escaping fix.
 - Enable branch protection on `main` (require PR + green CI + no force push).
 - `npm audit --omit=dev --audit-level=high` as a CI step + bump vitest to ≥ 4.1.11
   (see §7).
@@ -422,9 +430,9 @@ anyone can run it anytime.
 
 - **Suspected key/secret leak:** rotate the secret first (VPS `.env` / GitHub Secrets /
   provider console), then investigate, then disclose per the disclosure policy below.
-- **Spam/illegal content:** delete via the H4 takedown path (or manual SQL until it
-  exists: `UPDATE items SET status='deleted' WHERE ...`), disable the seller's key,
-  preserve a DB snapshot for evidence before deleting anything.
+- **Spam/illegal content:** follow [`docs/moderation-runbook.md`](moderation-runbook.md) —
+  preserve a DB snapshot for evidence first, then soft-delete the listing and disable the
+  seller's key (all procedures tested; see the runbook).
 - **Compromise of the VPS:** assume DB + backups + `.env` are gone; rotate everything
   (DB password, session secret, provider keys, deploy key, npm token), redeploy from a
   clean checkout, and diff `main` against the last known-good tag.

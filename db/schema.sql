@@ -59,6 +59,12 @@ CREATE INDEX IF NOT EXISTS items_category_idx ON items (category);
 CREATE INDEX IF NOT EXISTS items_price_idx ON items (price_cents);
 CREATE INDEX IF NOT EXISTS items_attributes_idx ON items USING gin (attributes jsonb_path_ops);
 
+-- Seller-published shipping price (spec rev 3 §11.4, OQ5): charged to the buyer on top of
+-- price_cents when fulfillment = shipping. 0 = free shipping; ignored for pickup items
+-- (shipping_tier = 'local'). Snapshotted onto orders at creation.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS shipping_price_cents INTEGER NOT NULL DEFAULT 0
+                      CHECK (shipping_price_cents >= 0);
+
 INSERT INTO categories (name, description, attribute_definitions) VALUES
   ('sneakers', 'Trainers and sneakers',
    '[{"key":"size_eu","type":"number","required":true,"description":"EU shoe size, e.g. 43"},
@@ -170,10 +176,10 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
 );
 
 -- ---------------------------------------------------------------------------
--- Order flow (spec THI-3 rev 2, §3). One item, one seller, one buyer, an
--- explicit 11-state machine (§2), an append-only audit log, and a raw webhook
--- event store backing idempotency + replay (§5.4). All additive and idempotent
--- (expand-only migration); items gain no new columns or status values.
+-- Order flow (spec THI-3 rev 2 §3 + rev 3 §11 addendum, THI-10). One item, one
+-- seller, one buyer, an explicit 12-state machine (§2 + §11.2), an append-only
+-- audit log, and a raw webhook event store backing idempotency + replay (§5.4).
+-- All additive and idempotent (expand-only migration).
 CREATE TABLE IF NOT EXISTS orders (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   item_id             UUID NOT NULL REFERENCES items(id),
@@ -182,8 +188,14 @@ CREATE TABLE IF NOT EXISTS orders (
   status              TEXT NOT NULL DEFAULT 'pending'
                       CHECK (status IN ('pending','sold','label_issued','in_transit','delivered',
                                         'disputed','refunding','refunded','payout_pending',
-                                        'paid_out','cancelled')),
+                                        'paid_out','cancelled','completed')),
+  payment_mode        TEXT NOT NULL DEFAULT 'stripe'
+                      CHECK (payment_mode IN ('stripe','off_platform')),  -- §11.2 (OQ4): off_platform =
+                      -- order tracking without platform money; parties settle payment themselves
   price_cents         INTEGER NOT NULL CHECK (price_cents >= 0),  -- snapshot of item price at creation
+  shipping_price_cents INTEGER NOT NULL DEFAULT 0
+                      CHECK (shipping_price_cents >= 0),  -- §11.4 (OQ5): snapshot of
+                      -- items.shipping_price_cents; 0 for pickup or free shipping
   currency            CHAR(3) NOT NULL,
   fulfillment         TEXT NOT NULL CHECK (fulfillment IN ('shipping','pickup')),
   shipping_address    JSONB NOT NULL DEFAULT '{}'::jsonb,   -- PII; zod-validated at ingest (max
@@ -215,6 +227,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_live_order_per_item
   ON orders (item_id)
   WHERE status IN ('pending','sold','label_issued','in_transit','delivered',
                    'disputed','refunding','payout_pending');
+
+-- Rev 3 expand block (§11.2/§11.4): databases that already carry the PR-1 orders
+-- table (CREATE TABLE IF NOT EXISTS skips it) get the new columns and the widened
+-- status CHECK here. Idempotent — safe on every replay.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_mode TEXT NOT NULL DEFAULT 'stripe'
+                      CHECK (payment_mode IN ('stripe','off_platform'));
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_price_cents INTEGER NOT NULL DEFAULT 0
+                      CHECK (shipping_price_cents >= 0);
+DO $$
+BEGIN
+  -- Widen the status CHECK with 'completed' (off_platform terminal state, §11.2).
+  -- Skipped when the widened constraint is already in place.
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'orders_status_check'
+      AND conrelid = 'orders'::regclass
+      AND pg_get_constraintdef(oid) NOT LIKE '%completed%'
+  ) THEN
+    ALTER TABLE orders DROP CONSTRAINT orders_status_check;
+    ALTER TABLE orders ADD CONSTRAINT orders_status_check
+      CHECK (status IN ('pending','sold','label_issued','in_transit','delivered',
+                        'disputed','refunding','refunded','payout_pending',
+                        'paid_out','cancelled','completed'));
+  END IF;
+END $$;
 
 -- Append-only audit log: every transition, correction, webhook application,
 -- sweep firing, and operator alert lands here (spec §2.3, §3.2).

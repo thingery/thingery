@@ -81,66 +81,91 @@ export function mcpRoutes(limiters: McpLimiters): Router {
   const router = express.Router();
 
   router.post("/mcp", async (req, res) => {
-    const auth = await authenticateRequest(req);
-
-    // Rate limits first (§2.12): same buckets as today; the limiter key is the
-    // resolved seller, so OAuth-authed requests land in the authed bucket.
-    const limiter = auth.seller ? limiters.authedLimiter : limiters.anonLimiter;
-    const limitKey = auth.seller ? `key:${auth.seller.id}` : `ip:${req.ip ?? "unknown"}`;
-    if (!limiter.allow(limitKey)) {
-      res.status(429).json({ error: "rate limited", retry_after_ms: 60_000 });
-      return;
-    }
-
-    // §2.10b: a presented-but-invalid credential (unknown thg_ key,
-    // expired/revoked/unknown thgo_ token, unrecognized format) fails 401 with
-    // a challenge — never a silent downgrade to anonymous. A host whose token
-    // expired must be TOLD so it can refresh.
-    if (auth.failure === "invalid_token") {
-      unauthorized(res, issuerFromRequest(req), true);
-      return;
-    }
-
-    // §2.10c + F4: one 8 MB cap, buffer once, parse once, then hand the
-    // parsed body to the transport (handleRequest's documented pre-parsed
-    // body parameter — no stream replay, no double-consume).
-    const raw = await readBodyWithCap(req, res, MCP_MAX_BODY_BYTES);
-    if (raw === null) return;
-    let parsed: unknown;
+    // Fail securely (THI-27 review): every await in this handler can reject —
+    // authenticateRequest on a DB outage, the raw-request async iteration on a
+    // client abort mid-upload. Express 4 does NOT forward async rejections to
+    // an error handler, and Node >= 15 crashes the process on unhandled
+    // rejections — one aborted socket or one Postgres blip would otherwise
+    // take down the whole service. Unexpected failures degrade to 503
+    // (retry-later), never a silent anonymous downgrade and never a crash.
     try {
-      parsed = JSON.parse(raw.toString("utf8"));
-    } catch {
-      // Unparseable → the same parse error the transport itself would return.
-      res.status(400).json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
-      return;
-    }
+      const auth = await authenticateRequest(req);
 
-    if (!auth.seller) {
-      if (raw.length > MCP_ANON_MAX_BYTES) {
-        // Anonymous + large: no legitimate case exists (large bodies are
-        // protected-tool calls, which 401 anyway) — reject before parsing.
+      // Rate limits first (§2.12): same buckets as today; the limiter key is the
+      // resolved seller, so OAuth-authed requests land in the authed bucket.
+      const limiter = auth.seller ? limiters.authedLimiter : limiters.anonLimiter;
+      const limitKey = auth.seller ? `key:${auth.seller.id}` : `ip:${req.ip ?? "unknown"}`;
+      if (!limiter.allow(limitKey)) {
+        res.status(429).json({ error: "rate limited", retry_after_ms: 60_000 });
+        return;
+      }
+
+      // §2.10b: a presented-but-invalid credential (unknown thg_ key,
+      // expired/revoked/unknown thgo_ token, unrecognized format) fails 401 with
+      // a challenge — never a silent downgrade to anonymous. A host whose token
+      // expired must be TOLD so it can refresh.
+      if (auth.failure === "invalid_token") {
+        unauthorized(res, issuerFromRequest(req), true);
+        return;
+      }
+
+      // §2.10c + F4: one 8 MB cap, buffer once, parse once, then hand the
+      // parsed body to the transport (handleRequest's documented pre-parsed
+      // body parameter — no stream replay, no double-consume).
+      const raw = await readBodyWithCap(req, res, MCP_MAX_BODY_BYTES);
+      if (raw === null) return;
+
+      // Anonymous + large (F4): no legitimate anonymous request is ever this
+      // large (large bodies are protected-tool calls, which 401 anyway) —
+      // reject BEFORE paying the 8 MB JSON.parse cost, and un-parsed.
+      if (!auth.seller && raw.length > MCP_ANON_MAX_BYTES) {
         unauthorized(res, issuerFromRequest(req), false);
         return;
       }
-      if (jsonRpcRequiresSeller(parsed)) {
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw.toString("utf8"));
+      } catch {
+        // Unparseable → the same parse error the transport itself would return.
+        res.status(400).json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+        return;
+      }
+
+      if (!auth.seller && jsonRpcRequiresSeller(parsed)) {
         // No credentials presented → plain challenge (no error code) so the
         // host starts OAuth discovery / the browser onboarding flow.
         unauthorized(res, issuerFromRequest(req), false);
         return;
       }
-    }
 
-    try {
-      const server = buildServer({ seller: auth.seller });
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      res.on("close", () => {
-        transport.close();
-        server.close();
-      });
-      await server.connect(transport);
-      await transport.handleRequest(req, res, parsed);
+      try {
+        const server = buildServer({ seller: auth.seller });
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+        res.on("close", () => {
+          transport.close();
+          server.close();
+        });
+        await server.connect(transport);
+        await transport.handleRequest(req, res, parsed);
+      } catch (e) {
+        if (!res.headersSent) {
+          res.status(500).json({ error: `MCP handling failed: ${(e as Error).message}` });
+        } else {
+          res.destroy();
+        }
+      }
     } catch (e) {
-      res.status(500).json({ error: `MCP handling failed: ${(e as Error).message}` });
+      if (!res.headersSent) {
+        res.status(503).json({ error: "temporarily unavailable" });
+      } else {
+        // Response already started (e.g. SSE stream) and the request died —
+        // nothing safe to append; drop the connection.
+        res.destroy();
+      }
+      if (!(e instanceof Error && (e.message === "aborted" || (e as Error & { code?: string }).code === "ECONNRESET"))) {
+        console.error("mcp-gate: request failed:", e);
+      }
     }
   });
 

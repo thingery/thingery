@@ -7,6 +7,7 @@ import { addItemImageBase64 } from "./images.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
 import { cancelOrder, createOrder, getOrderView, OrderFlowError } from "./order-flow.js";
+import { confirmPayment, confirmReceipt, openDispute, recordTracking, releaseFunds } from "./fulfillment.js";
 
 export interface ToolContext {
   seller: SellerRow | null;
@@ -31,6 +32,11 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   "create_order",
   "get_order",
   "cancel_order",
+  "record_tracking",
+  "confirm_payment",
+  "confirm_receipt",
+  "open_dispute",
+  "release_funds",
 ]);
 
 function publicBaseUrl(): string {
@@ -461,6 +467,144 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
       } catch (e) {
         if (e instanceof OrderFlowError) return err(e.message, e.code);
         return err(`cancel_order failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  // ---- Fulfillment + dispute tools (spec THI-3 rev 2 §4.2/§5.2 + rev 3 §11.2; PR-5) ----
+
+  server.registerTool(
+    "record_tracking",
+    {
+      description:
+        "Seller records the shipment's carrier and tracking code (order moves sold → label_issued; " +
+        "shippable orders only — pickups have nothing to ship). Registers a carrier tracker when the " +
+        "deployment has EasyPost configured, so status updates (in transit, delivered) arrive " +
+        "automatically. Calling it again while still label_issued CORRECTS the tracking details.",
+      inputSchema: {
+        order_id: z.string().uuid(),
+        carrier: z.string().min(1).max(40).describe("Carrier name, e.g. 'DHL', 'DPD', 'UPS'"),
+        tracking_code: z.string().min(1).max(64),
+        label_url: z.string().url().startsWith("https://").max(500).optional()
+          .describe("https-only shipping label URL, if you generated one"),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const result = await recordTracking(args.order_id as string, seller.id, {
+          carrier: args.carrier as string,
+          trackingCode: args.tracking_code as string,
+          labelUrl: args.label_url as string | undefined,
+        });
+        return ok({
+          order: orderToPublic(result.order),
+          tracker_registered: result.trackerRegistered,
+          ...(result.note ? { note: result.note } : {}),
+        });
+      } catch (e) {
+        if (e instanceof OrderFlowError) return err(e.message, e.code);
+        return err(`record_tracking failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "confirm_payment",
+    {
+      description:
+        "Seller confirms receiving an OFF-PLATFORM payment (cash, bank transfer, …): the order " +
+        "moves pending → sold. Only exists for off_platform orders — Stripe-mode orders flip to " +
+        "sold automatically when payment succeeds.",
+      inputSchema: {
+        order_id: z.string().uuid(),
+        note: z.string().max(500).optional().describe("e.g. 'cash received at pickup'"),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const order = await confirmPayment(args.order_id as string, seller.id, args.note as string | undefined);
+        return ok({ order: orderToPublic(order) });
+      } catch (e) {
+        if (e instanceof OrderFlowError) return err(e.message, e.code);
+        return err(`confirm_payment failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "confirm_receipt",
+    {
+      description:
+        "Buyer confirms receiving the item: the order moves to delivered and the dispute window " +
+        "opens (48h default). For local pickup this is the delivery step; for shipped items it is " +
+        "an early confirm (carriers usually report delivery automatically).",
+      inputSchema: { order_id: z.string().uuid() },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const order = await confirmReceipt(args.order_id as string, seller.id);
+        return ok({
+          order: orderToPublic(order),
+          next_steps: ["open_dispute within the dispute window if something is wrong", "release_funds to release early otherwise"],
+        });
+      } catch (e) {
+        if (e instanceof OrderFlowError) return err(e.message, e.code);
+        return err(`confirm_receipt failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "open_dispute",
+    {
+      description:
+        "Buyer opens a dispute on a delivered order (within the dispute window). Payout is held " +
+        "while the order is disputed; a deployment operator resolves it.",
+      inputSchema: {
+        order_id: z.string().uuid(),
+        reason: z.string().min(1).max(1000).describe("What went wrong (required)"),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const order = await openDispute(args.order_id as string, seller.id, args.reason as string);
+        return ok({ order: orderToPublic(order) });
+      } catch (e) {
+        if (e instanceof OrderFlowError) return err(e.message, e.code);
+        return err(`open_dispute failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "release_funds",
+    {
+      description:
+        "Buyer waives the remaining dispute window and releases the seller's payout immediately " +
+        "(delivered → payout_pending for Stripe orders; → completed for off-platform). Use when " +
+        "everything arrived fine and you want the seller paid now.",
+      inputSchema: { order_id: z.string().uuid() },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const result = await releaseFunds(args.order_id as string, seller.id);
+        return ok({
+          order: orderToPublic(result.order),
+          ...(result.note ? { note: result.note } : {}),
+        });
+      } catch (e) {
+        if (e instanceof OrderFlowError) return err(e.message, e.code);
+        return err(`release_funds failed: ${describeError(e)}`);
       }
     },
   );

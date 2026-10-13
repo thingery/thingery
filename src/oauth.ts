@@ -330,6 +330,19 @@ const CODE_TTL_S = 60;
 const PKCE_CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/; // S256 digest length (base64url, 32 bytes)
 const MAX_STATE_LEN = 2048;
 
+/** The full authorize parameter set (spec §2.5) — every member must be a
+ * plain string when present (repeated params parse to arrays via qs). */
+const AUTHORIZE_PARAMS = [
+  "client_id",
+  "redirect_uri",
+  "response_type",
+  "scope",
+  "state",
+  "code_challenge",
+  "code_challenge_method",
+  "resource",
+] as const;
+
 /** Structured security-significant event log (spec §4.5). Never token/code material. */
 function securityEvent(kind: string, fields: Record<string, unknown>): void {
   console.error(JSON.stringify({ security_event: kind, ...fields, timestamp: new Date().toISOString() }));
@@ -535,6 +548,21 @@ function mountAuthorize(app: Express): void {
   const validateClientAndRedirect = async (q: AuthorizeQuery): Promise<
     { client: ClientRow; redirectUri: string } | { errorPage: { title: string; detail: string } }
   > => {
+    // Class-level type guard (THI-45 R1): repeated query params (Express qs)
+    // arrive as arrays, and a non-string state would TypeError inside the
+    // consent render (unhandled rejection → process kill). Any authorize
+    // param present but not a plain string is malformed input → 400 page.
+    for (const key of AUTHORIZE_PARAMS) {
+      const value = (q as Record<string, unknown>)[key];
+      if (value !== undefined && typeof value !== "string") {
+        return {
+          errorPage: {
+            title: "Malformed request",
+            detail: "Authorization parameters must each appear at most once.",
+          },
+        };
+      }
+    }
     if (typeof q.client_id !== "string" || !q.client_id) {
       return { errorPage: { title: "Missing client_id", detail: "The authorization request is incomplete." } };
     }

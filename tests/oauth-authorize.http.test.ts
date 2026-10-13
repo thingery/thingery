@@ -291,6 +291,20 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     expect(loc.pathname).toBe("/login.html");
   });
 
+  it("returns 400 (not a hang) for a repeated state param with a logged-in session (THI-45 R1)", async () => {
+    // F1 vector: state=["a","b"] passed every equality/length check and was
+    // rendered into the consent form → TypeError in htmlEscape → unhandled
+    // rejection → request hang / process kill. Must now hit the 400 error page.
+    const url = `/oauth/authorize?client_id=thgc_authtest&redirect_uri=${encodeURIComponent(
+      REDIRECT_URI,
+    )}&response_type=code&code_challenge=${CHALLENGE}&code_challenge_method=S256&state=a&state=b`;
+    const res = await fetch(`${baseUrl}${url}`, { headers: { cookie } });
+    expect(res.status).toBe(400);
+    expect(res.headers.get("location")).toBeNull();
+    const html = await res.text();
+    expect(html).toContain("Malformed request");
+  });
+
   it("re-validates on POST: tampered redirect_uri in the form is rejected with 400", async () => {
     const consent = await fetch(`${baseUrl}${authorizeUrl()}`, { headers: { cookie } });
     const form = { ...parseConsentForm(await consent.text()), action: "allow", redirect_uri: "http://localhost:51717/evil" };

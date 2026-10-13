@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import express from "express";
-import type { Express, Request, Response } from "express";
+import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { RateLimiter } from "./rate-limit.js";
@@ -127,6 +127,21 @@ export function validateClientRegistration(body: unknown): ClientRegistration {
   return { redirect_uris, client_name, client_uri };
 }
 
+/**
+ * THI-42 (Security review of THI-35): Express 4 does not route rejected
+ * promises from async handlers to error middleware, and Node >= 15
+ * terminates the process on an unhandled rejection — a transient DB fault
+ * (connection reset, deadlock abort) during any OAuth request would crash
+ * the app instead of answering 500. Every async handler below is wrapped so
+ * rejections reach the terminal error middleware in mountOauthRoutes:
+ * fail-securely by degrading, never by crashing.
+ */
+function asyncHandler(fn: (req: Request, res: Response) => Promise<void>): RequestHandler {
+  return (req, res, next) => {
+    fn(req, res).catch(next);
+  };
+}
+
 /** Mounts the OAuth authorization-server surface (spec §4.1). No CORS headers are ever set on /oauth/*. */
 export function mountOauthRoutes(app: Express): void {
   // OAUTH_DISABLED kill switch (spec §4.4): no OAuth route is mounted at all —
@@ -152,7 +167,7 @@ export function mountOauthRoutes(app: Express): void {
     wellKnown(authorizationServerDoc),
   );
 
-  app.post("/oauth/register", async (req: Request, res: Response) => {
+  app.post("/oauth/register", asyncHandler(async (req: Request, res: Response) => {
     res.set("Cache-Control", "no-store");
     if (!dcrLimiter.allow(`dcr:${req.ip ?? "unknown"}`)) {
       res.status(429).json({ error: "rate_limited", retry_after_ms: 60 * 60 * 1000 });
@@ -188,11 +203,54 @@ export function mountOauthRoutes(app: Express): void {
       console.error("oauth: DCR failed:", (e as Error).message);
       res.status(500).json({ error: "server_error" });
     }
-  });
+  }));
 
   mountAuthorize(app);
   mountToken(app);
   mountApps(app);
+
+  // THI-42: terminal error middleware for the OAuth surface. asyncHandler
+  // forwards rejected promises here; they become a plain 500 page carrying
+  // the page hardening headers and no error detail or token material.
+  // Non-OAuth paths pass through untouched (next(err)) so /api keeps its own
+  // error middleware (src/routes.ts) and body-parser 4xx statuses outside
+  // this surface keep their Express default handling. Body-parser errors on
+  // OAuth paths keep their 4xx status (413/400/415), everything else is 500.
+  // In-flight (headers-sent) responses are destroyed — nothing safe to append.
+  app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+    const onOauthSurface =
+      req.path === "/apps" ||
+      req.path.startsWith("/apps/") ||
+      req.path.startsWith("/oauth/") ||
+      req.path.startsWith("/.well-known/oauth-");
+    if (!onOauthSurface) {
+      next(err);
+      return;
+    }
+    securityEvent("unhandled_route_error", {
+      surface: "oauth",
+      method: req.method,
+      path: req.path,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+    const status =
+      typeof (err as { status?: unknown }).status === "number" &&
+      (err as { status: number }).status >= 400 &&
+      (err as { status: number }).status < 500
+        ? (err as { status: number }).status
+        : 500;
+    pageHeaders(res);
+    res.status(status).type("html").send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Something went wrong — Thingery</title>
+<style>body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:32rem;margin:2rem auto;padding:0 1rem;line-height:1.6}</style></head>
+<body><h1>Something went wrong</h1><p>Your request could not be completed. Please try again.</p>
+<p><a href="/">Back to Thingery</a></p></body></html>`);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +312,7 @@ ${grants.length === 0 ? `<p>No applications are connected to your account. Appli
 }
 
 function mountApps(app: Express): void {
-  app.get("/apps", async (req: Request, res: Response) => {
+  app.get("/apps", asyncHandler(async (req: Request, res: Response) => {
     const seller = await sellerFromSession(req);
     if (!seller) {
       pageHeaders(res);
@@ -277,12 +335,12 @@ function mountApps(app: Express): void {
     }));
     pageHeaders(res);
     res.status(200).type("html").send(appsPageHtml(bound, req.query.revoked === "1"));
-  });
+  }));
 
   app.post(
     "/apps/revoke",
     express.urlencoded({ extended: false, limit: "16kb" }),
-    async (req: Request, res: Response) => {
+    asyncHandler(async (req: Request, res: Response) => {
     const seller = await sellerFromSession(req);
     if (!seller) {
       pageHeaders(res);
@@ -319,7 +377,7 @@ function mountApps(app: Express): void {
     }
     pageHeaders(res);
     res.redirect(302, "/apps?revoked=1");
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +600,7 @@ function mountAuthorize(app: Express): void {
     return { client, redirectUri: new URL(q.redirect_uri).href };
   };
 
-  app.get("/oauth/authorize", async (req: Request, res: Response) => {
+  app.get("/oauth/authorize", asyncHandler(async (req: Request, res: Response) => {
     if (!authorizeLimiter.allow(`authz:${req.ip ?? "unknown"}`)) {
       res.status(429).type("text").send("Too many authorization requests. Try again later.");
       return;
@@ -597,12 +655,12 @@ function mountAuthorize(app: Express): void {
         nonce,
       }),
     );
-  });
+  }));
 
   app.post(
     "/oauth/authorize",
     express.urlencoded({ extended: false, limit: "64kb" }),
-    async (req: Request, res: Response) => {
+    asyncHandler(async (req: Request, res: Response) => {
       if (!authorizeLimiter.allow(`authz:${req.ip ?? "unknown"}`)) {
         res.status(429).type("text").send("Too many authorization requests. Try again later.");
         return;
@@ -713,7 +771,7 @@ function mountAuthorize(app: Express): void {
       }
       db.release();
       redirectWithParams(res, req, validated.redirectUri, { code, state: q.state });
-    },
+    }),
   );
 }
 
@@ -771,7 +829,7 @@ function mountToken(app: Express): void {
   app.post(
     "/oauth/token",
     express.urlencoded({ extended: false, limit: "64kb" }),
-    async (req: Request, res: Response) => {
+    asyncHandler(async (req: Request, res: Response) => {
       const body = req.body as Record<string, string>;
       const clientId = body.client_id ?? "";
       if (!tokenLimiter.allow(`token:${req.ip ?? "unknown"}:${clientId}`)) {
@@ -794,7 +852,7 @@ function mountToken(app: Express): void {
       } else {
         tokenError(res, "unsupported_grant_type", "only authorization_code and refresh_token are supported");
       }
-    },
+    }),
   );
 
   async function handleCodeExchange(body: Record<string, string>, clientId: string, res: Response): Promise<void> {
@@ -973,7 +1031,7 @@ function mountToken(app: Express): void {
   app.post(
     "/oauth/revoke",
     express.urlencoded({ extended: false, limit: "64kb" }),
-    async (req: Request, res: Response) => {
+    asyncHandler(async (req: Request, res: Response) => {
       const body = req.body as Record<string, string>;
       if (!body.token || !body.client_id) {
         tokenError(res, "invalid_request", "token and client_id are required");
@@ -1009,6 +1067,6 @@ function mountToken(app: Express): void {
         console.error("oauth: revoke failed:", (e as Error).message);
         res.set("Cache-Control", "no-store").json({}); // still 200 — never leak state
       }
-    },
+    }),
   );
 }

@@ -17,10 +17,10 @@ Chinese-market name: 物坊 (Wùfāng).
 
 | Tool | Auth | Purpose |
 |---|---|---|
-| `describe_category` | public | List categories and their expected attribute fields — the self-describing schema for agents |
-| `search_items` | public | Hybrid semantic + keyword search with price/category/condition/attribute filters |
+| `describe_category` | public | List categories and their declared attribute fields — the self-describing schema for agents. Declared fields get validated on create; undeclared keys are allowed and searchable |
+| `search_items` | public | Hybrid semantic + keyword search with price/category/condition/attribute filters (any attribute key, declared or not) |
 | `get_item` | public | Fetch one listing by id |
-| `create_listing` | seller | Publish an item — core fields plus a flexible `attributes` object |
+| `create_listing` | seller | Publish an item — core fields plus a flexible `attributes` object (declared keys validated, extras pass through and stay searchable) |
 | `add_item_image` | seller | Attach a photo to a listing (base64 in, stored server-side — no URLs needed) |
 | `my_listings` | seller | Your listings by status |
 | `update_listing` | seller | Mark reserved/sold, adjust price, edit text or attributes |

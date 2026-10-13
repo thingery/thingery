@@ -128,6 +128,9 @@ export const TRANSITIONS: readonly TransitionSpec[] = [
   { id: "17", from: ["delivered"], to: "payout_pending", trigger: "release_funds", actors: ["buyer"], mode: "stripe" },
   { id: "17b", from: ["delivered"], to: "completed", trigger: "release_funds", actors: ["buyer"], mode: "off_platform" },
   { id: "18", from: ["disputed"], to: "refunding", trigger: "admin_refund", actors: ["admin"], mode: "stripe", itemStatus: "active" },
+  // #18a — §11.3 rule 8 stripe arm: disputed with no recorded tracking past
+  // DISPUTE_AUTOREFUND_HOURS → full auto-refund (never-shipped; system actor).
+  { id: "18a", from: ["disputed"], to: "refunding", trigger: "dispute_autoresolve", actors: ["system", "admin"], mode: "stripe", itemStatus: "active" },
   { id: "18b", from: ["disputed"], to: "cancelled", trigger: "admin_refund", actors: ["admin"], mode: "off_platform", itemStatus: "active" },
   { id: "18c", from: ["disputed"], to: "cancelled", trigger: "dispute_autoresolve", actors: ["system", "admin"], mode: "off_platform", itemStatus: "active" },
   { id: "19", from: ["disputed"], to: "payout_pending", trigger: "admin_release", actors: ["admin"], mode: "stripe" },

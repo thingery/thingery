@@ -61,6 +61,7 @@ export interface OrderFlowConfig {
   disputeAutorefundHours: number;        // 72 (rev 3 §11.3 rule 8)
   disputeStaleDays: number;              // 7  (rev 3 §11.3 rule 9)
   stuckMoneyAlertDays: number;           // 7  (sweep rule 7)
+  sweepIntervalMinutes: number;          // 10 (sweep cadence, §4.5)
   maxPendingOrdersPerBuyer: number;      // 3  (F8)
   reorderCooldownMinutes: number;        // 60 (F8)
 }
@@ -113,6 +114,7 @@ export function orderFlowConfig(): OrderFlowConfig {
     disputeAutorefundHours: envInt("DISPUTE_AUTOREFUND_HOURS", 72),
     disputeStaleDays: envInt("DISPUTE_STALE_DAYS", 7),
     stuckMoneyAlertDays: envInt("STUCK_MONEY_ALERT_DAYS", 7),
+    sweepIntervalMinutes: envInt("SWEEP_INTERVAL_MINUTES", 10),
     maxPendingOrdersPerBuyer: envInt("MAX_PENDING_ORDERS_PER_BUYER", 3),
     reorderCooldownMinutes: envInt("REORDER_COOLDOWN_MINUTES", 60),
   };

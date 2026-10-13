@@ -263,7 +263,9 @@ async function handlePaymentSuccess(db: PoolClient, event: Stripe.Event, cfg: Or
   // recorded the state; nothing to do.
 }
 
-async function processStripeEvent(event: Stripe.Event, db: PoolClient, cfg: OrderFlowConfig): Promise<void> {
+// Exported for sweep rule 6 reprocessing (§4.5): re-fetches the event by id
+// from the Stripe API (the stored payload is redacted, F6) and re-applies it.
+export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cfg: OrderFlowConfig): Promise<void> {
   // SDK v23's event union predates/omits some transfer event names — the
   // spec names transfer.paid; Stripe's API emits transfer.created/updated
   // when funds land. All three map to #20; the transition is the arbiter.

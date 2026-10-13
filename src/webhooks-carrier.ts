@@ -269,7 +269,7 @@ interface EasyPostWebhook {
   };
 }
 
-interface RedactedCarrierEvent {
+export interface RedactedCarrierEvent {
   description: string | null;
   mode: string | null;
   tracker_id: string | null;
@@ -307,7 +307,9 @@ async function resolveOrder(
   return { order: undefined, note: "no live order matches carrier+tracking_code" };
 }
 
-async function processCarrierEvent(
+// Exported for sweep rule 6 reprocessing (§4.5): the stored payload is the
+// redacted carrier event, sufficient for reprocessing without the provider.
+export async function processCarrierEvent(
   ev: RedactedCarrierEvent,
   externalId: string,
   db: PoolClient,

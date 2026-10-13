@@ -1,6 +1,13 @@
 import { pool, type ItemRow } from "./db.js";
 import { embedText, itemEmbeddingText } from "./embed.js";
-import { attributeFilterClause, type Attributes, type CategoryRow } from "./attributes.js";
+import {
+  attributeShapeErrors,
+  AttributeValidationError,
+  attributeFilterClause,
+  UNDECLARED_KEY_PATTERN,
+  type Attributes,
+  type CategoryRow,
+} from "./attributes.js";
 
 export interface CreateItemInput {
   seller_id: string;
@@ -220,8 +227,14 @@ export async function updateItem(
   if (update.title !== undefined) sets.push(`title = ${add(update.title)}`);
   if (update.description !== undefined) sets.push(`description = ${add(update.description)}`);
   // Attributes are replaced wholesale (not merged) — agents should read,
-  // modify, write. Keeps the semantics predictable.
-  if (update.attributes !== undefined) sets.push(`attributes = ${add(JSON.stringify(update.attributes))}::jsonb`);
+  // modify, write. Keeps the semantics predictable. Shape caps (THI-83 §3.5)
+  // are enforced here: update_listing historically validated nothing, and
+  // this is the single choke point for both MCP and chat callers.
+  if (update.attributes !== undefined) {
+    const shapeErrors = attributeShapeErrors(update.attributes);
+    if (shapeErrors.length > 0) throw new AttributeValidationError(shapeErrors);
+    sets.push(`attributes = ${add(JSON.stringify(update.attributes))}::jsonb`);
+  }
   if (sets.length === 0) return getItem(id);
 
   params.push(id, sellerId);
@@ -232,4 +245,43 @@ export async function updateItem(
     params,
   );
   return rows[0] ?? null;
+}
+
+// Undeclared-key surfacing thresholds and cap (spec THI-83 §3.3) — module
+// constants, deliberately not env-configurable (same posture as CONDITIONS
+// in db.ts).
+const UNDECLARED_KEY_MIN_ITEMS = 2;
+const UNDECLARED_KEY_MIN_SELLERS = 2;
+const UNDECLARED_KEY_LIMIT = 20;
+
+export interface UndeclaredKeyUsage {
+  key: string;
+  items: number;
+  sellers: number;
+}
+
+/** Which undeclared attribute keys are actually in shared use in a category:
+ *  keys on >= 2 active listings from >= 2 distinct sellers, sorted by items
+ *  desc then key asc, capped at 20. `declaredKeys` is always an array
+ *  (default []) — passing a null array would silently surface every key, so
+ *  callers must never propagate null from the DB. */
+export async function undeclaredKeyUsage(
+  category: string,
+  declaredKeys: string[] = [],
+): Promise<UndeclaredKeyUsage[]> {
+  const { rows } = await pool.query<UndeclaredKeyUsage>(
+    `SELECT k AS key, COUNT(*)::int AS items, COUNT(DISTINCT i.seller_id)::int AS sellers
+     FROM items i
+     CROSS JOIN LATERAL jsonb_object_keys(i.attributes) AS k
+     WHERE i.category = $1 AND i.status = 'active'
+       AND NOT (k = ANY($2::text[]))
+       AND k ~ $3
+     GROUP BY k
+     HAVING COUNT(*) >= ${UNDECLARED_KEY_MIN_ITEMS}
+       AND COUNT(DISTINCT i.seller_id) >= ${UNDECLARED_KEY_MIN_SELLERS}
+     ORDER BY items DESC, key ASC
+     LIMIT ${UNDECLARED_KEY_LIMIT}`,
+    [category.toLowerCase(), declaredKeys, UNDECLARED_KEY_PATTERN],
+  );
+  return rows;
 }

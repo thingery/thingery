@@ -4,6 +4,11 @@ const { Pool } = pg;
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL ?? "postgres://thingery:thingery@localhost:5432/thingery",
+  // Guardrail (spec THI-83 §3.5): cap any single statement/query at 3s so a
+  // pathological attribute-heavy query can't pin a pool connection open.
+  // scripts/migrate.ts uses its own connection and stays uncapped by design.
+  statement_timeout: 3000,
+  query_timeout: 3000,
 });
 
 export interface ItemRow {

@@ -29,6 +29,16 @@ services:
       EMBED_API_URL: ${EMBED_API_URL:-https://api.openai.com/v1/embeddings}
       EMBED_API_KEY: ${EMBED_API_KEY:-}
       EMBED_MODEL: ${EMBED_MODEL:-text-embedding-3-small}
+      # Session cookie signing (login/consent). Unset → ephemeral secret,
+      # sessions reset on every restart.
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      # OAuth kill switch (spec THI-11 §4.4): "1"/"true" mounts no /oauth route at
+      # all (404) and thgo_ tokens 401. Empty → OAuth enabled. Restart to toggle.
+      OAUTH_DISABLED: ${OAUTH_DISABLED:-}
+      # OAuth tuning (defaults match .env.example / src).
+      OAUTH_DCR_HOURLY_LIMIT: ${OAUTH_DCR_HOURLY_LIMIT:-10}
+      OAUTH_ACCESS_TTL_S: ${OAUTH_ACCESS_TTL_S:-1800}
+      OAUTH_REFRESH_TTL_S: ${OAUTH_REFRESH_TTL_S:-2592000}
     depends_on:
       db:
         condition: service_healthy

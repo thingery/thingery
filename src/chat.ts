@@ -4,7 +4,7 @@
 // database — the same code paths the MCP tools use.
 
 import type { SellerRow } from "./db.js";
-import { getCategory, getItem, createItem, listCategories, myItems, searchItems, updateItem } from "./items.js";
+import { getCategory, getItem, createItem, listCategories, myItems, searchItems, undeclaredKeyUsage, updateItem } from "./items.js";
 import { validateAttributes, type Attributes } from "./attributes.js";
 
 export interface ChatMessage {
@@ -134,7 +134,9 @@ const TOOLS: ToolDef[] = [
   },
 ];
 
-async function executeTool(
+// Exported for the parity test (spec THI-83 §8/F3): both describe_category
+// surfaces must render undeclaredKeyUsage() output identically.
+export async function executeTool(
   name: string,
   args: Record<string, unknown>,
   seller: SellerRow | null,
@@ -148,9 +150,22 @@ async function executeTool(
     case "describe_category": {
       const cat = (args.category as string | undefined)?.toLowerCase();
       if (!cat) return { categories: await listCategories() };
+      const categoryRow = await getCategory(cat);
+      // Shape once, render twice (spec THI-83 §3.4/F3): same helper, same
+      // shape as the MCP tool in src/tools.ts — verbatim, and (field + note
+      // sentence both) omitted when empty, byte-identical to today otherwise.
+      const undeclared = await undeclaredKeyUsage(
+        cat,
+        categoryRow?.attribute_definitions.map((d) => d.key) ?? [],
+      );
+      const hasUndeclared = undeclared.length > 0;
       return {
-        category: await getCategory(cat),
-        note: "Declared keys are validated on create; listings may also carry undeclared keys, and attribute search filters match any key.",
+        category: categoryRow,
+        ...(hasUndeclared ? { undeclared_in_use: undeclared } : {}),
+        note: "Declared keys are validated on create; listings may also carry undeclared keys, and attribute search filters match any key." +
+          (hasUndeclared
+            ? " undeclared_in_use lists undeclared keys observed on active listings (item and distinct-seller counts); they are NOT validated — treat them as search hints, not contracts."
+            : ""),
       };
     }
     case "search_items":

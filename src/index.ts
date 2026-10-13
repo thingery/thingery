@@ -2,11 +2,12 @@
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { buildServer } from "./server.js";
-import { sellerFromRequest, sellerFromApiKey } from "./auth.js";
+import { sellerFromApiKey } from "./auth.js";
+import { mcpRoutes } from "./mcp-gate.js";
 import { mountOauthRoutes } from "./oauth.js";
+import { startOauthSweepTimer } from "./oauth-sweep.js";
 import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
 import { api } from "./routes.js";
@@ -58,38 +59,12 @@ function runHttp(): void {
   // (only the trusted hop's appended entry counts); regression-tested.
   app.set("trust proxy", 1);
 
-  // /mcp must be registered before any body-parsing middleware: the SDK
-  // consumes the raw request stream itself.
-  app.post("/mcp", async (req, res) => {
-    const seller = await sellerFromRequest(req).catch(() => null);
-    const limitKey = seller ? `key:${seller.id}` : `ip:${req.ip ?? "unknown"}`;
-    const limiter = seller ? authedLimiter : anonLimiter;
-    if (!limiter.allow(limitKey)) {
-      res.status(429).json({ error: "rate limited", retry_after_ms: 60_000 });
-      return;
-    }
-
-    try {
-      const server = buildServer({ seller });
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      res.on("close", () => {
-        transport.close();
-        server.close();
-      });
-      await server.connect(transport);
-      await transport.handleRequest(req, res);
-    } catch (e) {
-      res.status(500).json({ error: `MCP handling failed: ${(e as Error).message}` });
-    }
-  });
-
-  // Stateless HTTP transport: only POST is supported.
-  app.get("/mcp", (_req, res) => {
-    res.status(405).json({ error: "Method not allowed. Use POST with JSON-RPC. Stateles HTTP transport." });
-  });
-  app.delete("/mcp", (_req, res) => {
-    res.status(405).json({ error: "Method not allowed. Stateless HTTP transport." });
-  });
+  // /mcp with the method-aware 401 gate (spec THI-11 §2.10): dual-token
+  // auth (thg_ API key | thgo_ OAuth token), 401 challenge for anonymous
+  // protected-tool calls and present-but-invalid credentials, one 8 MB body
+  // cap, parsed body handed to the transport. Mounts before any
+  // body-parsing middleware — the gate consumes the raw stream itself.
+  app.use(mcpRoutes({ authedLimiter, anonLimiter }));
 
   // Browser API (accounts + chat). /mcp above consumes the raw body stream,
   // so the JSON parser starts here and never touches MCP traffic.
@@ -117,6 +92,8 @@ function runHttp(): void {
   app.use(express.static(websiteDir, { extensions: ["html"] }));
 
   app.listen(PORT, () => {
+    // OAuth retention sweeps (spec THI-11 §4.5): boot run + hourly, unref'd.
+    startOauthSweepTimer();
     console.log(`Thingery MCP server listening on http://localhost:${PORT}`);
     console.log(`  MCP endpoint:     http://localhost:${PORT}/mcp`);
     console.log(`  Health check:     http://localhost:${PORT}/healthz`);

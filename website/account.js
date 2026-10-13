@@ -1,11 +1,25 @@
 // Account page (login/signup, API key display) — loaded from /login.html.
+// ES module: imports the OAuth login-hop next filter (spec THI-11 §2.5(4)).
+import { safeNextTarget } from "./next-filter.js";
+
 let mode = "signup";
 const $ = (id) => document.getElementById(id);
+const nextParam = () => new URLSearchParams(location.search).get("next");
+const resumeNext = () => {
+  // OAuth login hop (spec THI-11 §2.5(4)): honor ?next= only when the
+  // normalize-then-origin filter passes — never navigate off-site.
+  const target = safeNextTarget(nextParam(), location.origin);
+  if (target) { location.assign(target); return true; }
+  return false;
+};
 
 async function checkSession() {
   const res = await fetch("/api/me");
   const data = await res.json();
-  if (data.seller) showDone(data.seller);
+  if (data.seller) {
+    if (resumeNext()) return; // already logged in: straight back to the authorization request
+    showDone(data.seller);
+  }
 }
 
 function showDone(seller) {
@@ -55,6 +69,7 @@ $("form").onsubmit = async (e) => {
   });
   const data = await res.json();
   if (!res.ok) { $("error").textContent = data.error || "Something went wrong."; return; }
+  if (resumeNext()) return; // signup mode carries next too — new users can sign up mid-flow
   showDone(data.seller);
 };
 

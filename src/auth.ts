@@ -24,11 +24,66 @@ export async function sellerFromApiKey(key: string): Promise<SellerRow | null> {
   return rows[0] ?? null;
 }
 
-/** Resolves the caller's seller from an Authorization: Bearer thg_... header. */
-export async function sellerFromRequest(req: Request): Promise<SellerRow | null> {
+/**
+ * Resolves a seller from an OAuth access token (spec THI-11 §2.10a).
+ * Opaque DB-backed token: one indexed lookup on token_hash joining the grant
+ * (revoked grants kill their tokens) — no fallback chain, no second query.
+ */
+export async function sellerFromAccessToken(token: string): Promise<SellerRow | null> {
+  if (!token.startsWith("thgo_")) return null;
+  const hash = crypto.createHash("sha256").update(token, "utf8").digest("hex");
+  const { rows } = await pool.query<SellerRow>(
+    `SELECT s.id, s.api_key, s.display_name
+       FROM oauth_tokens t
+       JOIN oauth_grants g ON g.id = t.grant_id
+       JOIN sellers s ON s.id = g.seller_id
+      WHERE t.token_hash = $1
+        AND t.kind = 'access'
+        AND t.expires_at > now()
+        AND t.revoked_at IS NULL
+        AND g.revoked_at IS NULL`,
+    [hash],
+  );
+  return rows[0] ?? null;
+}
+
+/** /mcp auth outcome (spec THI-11 §2.10a–b). */
+export type AuthResult = {
+  seller: SellerRow | null;
+  /** "none": no credential presented (anonymous). "invalid_token": a
+   * credential WAS presented (unknown key, expired/revoked token, or an
+   * unrecognized format) — the server must 401, never silently downgrade. */
+  failure: "none" | "invalid_token";
+};
+
+/** OAUTH_DISABLED kill switch (spec THI-11 §4.4): read per call so it can be
+ * toggled without restart tooling in tests; production toggles restart via
+ * deploy. When set, OAuth routes 404 and `thgo_` becomes an unrecognized
+ * credential format → 401 → hosts fall back to API keys. */
+export function oauthDisabled(): boolean {
+  const flag = process.env.OAUTH_DISABLED;
+  return flag === "1" || flag === "true";
+}
+
+/**
+ * Dual-token dispatch on the Authorization: Bearer header (spec THI-11
+ * §2.10): `thg_` → API key, `thgo_` → OAuth access token. Anything else that
+ * arrives as a Bearer credential is present-but-invalid.
+ */
+export async function authenticateRequest(req: Request): Promise<AuthResult> {
   const header = req.headers.authorization;
-  if (!header?.startsWith("Bearer ")) return null;
-  return sellerFromApiKey(header.slice("Bearer ".length).trim());
+  if (!header?.startsWith("Bearer ")) return { seller: null, failure: "none" };
+  const token = header.slice("Bearer ".length).trim();
+  if (token.startsWith("thg_")) {
+    const seller = await sellerFromApiKey(token);
+    return { seller, failure: seller ? "none" : "invalid_token" };
+  }
+  if (token.startsWith("thgo_")) {
+    if (oauthDisabled()) return { seller: null, failure: "invalid_token" }; // kill switch (§4.4)
+    const seller = await sellerFromAccessToken(token);
+    return { seller, failure: seller ? "none" : "invalid_token" };
+  }
+  return { seller: null, failure: "invalid_token" };
 }
 
 // ---------------------------------------------------------------------------
@@ -51,7 +106,7 @@ export function verifyPassword(password: string, stored: string | null): boolean
 }
 
 /** Ephemeral fallback: sessions reset on restart when SESSION_SECRET is unset. */
-const SESSION_SECRET =
+export const SESSION_SECRET =
   process.env.SESSION_SECRET ?? crypto.randomBytes(32).toString("hex");
 if (!process.env.SESSION_SECRET) {
   console.error("Warning: SESSION_SECRET not set — sessions will not survive restarts.");
@@ -61,7 +116,12 @@ export const SESSION_COOKIE = "thingery_session";
 const SESSION_MAX_AGE_S = 30 * 24 * 3600;
 
 export function signSession(sellerId: string): string {
-  const mac = crypto.createHmac("sha256", SESSION_SECRET).update(sellerId).digest("base64url");
+  // "session:" prefix = HMAC domain separation (spec THI-11 §2.5(5), F8): the
+  // shared SESSION_SECRET signs both session cookies and OAuth consent CSRF
+  // tokens ("csrf:" prefix in oauth.ts); the prefixes keep purposes distinct.
+  // One-time effect on deploy: cookies signed without the prefix stop validating
+  // (existing users log in again once).
+  const mac = crypto.createHmac("sha256", SESSION_SECRET).update(`session:${sellerId}`).digest("base64url");
   return `${sellerId}.${mac}`;
 }
 
@@ -71,7 +131,7 @@ export function parseSession(cookieValue: string | undefined): string | null {
   if (dot <= 0) return null;
   const sellerId = cookieValue.slice(0, dot);
   const mac = cookieValue.slice(dot + 1);
-  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(sellerId).digest("base64url");
+  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(`session:${sellerId}`).digest("base64url");
   const a = Buffer.from(mac);
   const b = Buffer.from(expected);
   return a.length === b.length && crypto.timingSafeEqual(a, b) ? sellerId : null;

@@ -11,9 +11,24 @@
       "protocol": "streamable-http-stateless",
       "method": "POST",
       "auth": {
-        "type": "bearer",
-        "key_format": "thg_...",
-        "required_for": ["create_listing", "add_item_image", "my_listings", "update_listing"]
+        "type": "oauth2",
+        "flows": {
+          "authorization_code": {
+            "authorization_endpoint": "https://thingery.dev/oauth/authorize",
+            "token_endpoint": "https://thingery.dev/oauth/token",
+            "revocation_endpoint": "https://thingery.dev/oauth/revoke",
+            "registration_endpoint": "https://thingery.dev/oauth/register",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "code_challenge_methods": ["S256"],
+            "scopes": ["mcp"]
+          }
+        },
+        "discovery": "https://thingery.dev/.well-known/oauth-authorization-server",
+        "resource_metadata": "https://thingery.dev/.well-known/oauth-protected-resource",
+        "token_format": "thgo_... (30 min) / thgr_... refresh (30 d, rotating)",
+        "legacy_bearer_key_format": "thg_...",
+        "required_for": ["create_listing", "add_item_image", "my_listings", "update_listing"],
+        "notes": "OAuth one-click sign-in recommended for MCP hosts; thg_ API key is the manual/legacy path. Connected applications can be reviewed and revoked at https://thingery.dev/apps. Anonymous public reads always work; invalid credentials get HTTP 401."
       },
       "public_tools": ["describe_category", "search_items", "get_item"],
       "seller_tools": ["create_listing", "add_item_image", "my_listings", "update_listing"]

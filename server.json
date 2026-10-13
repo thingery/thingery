@@ -15,6 +15,15 @@
       "transport": {
         "type": "stdio"
       }
+    },
+    {
+      "registryType": "npm",
+      "identifier": "thingery",
+      "version": "0.1.1",
+      "transport": {
+        "type": "http",
+        "url": "https://thingery.dev/mcp"
+      }
     }
   ]
 }

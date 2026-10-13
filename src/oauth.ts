@@ -765,8 +765,24 @@ async function issueTokenPair(
   return { access_token: access, token_type: "Bearer", expires_in: ACCESS_TTL_S, refresh_token: refresh, scope: "mcp" };
 }
 
+/** Positive-integer env parse: empty/invalid values fall back to the default (Number("") === 0 would 429 all traffic). */
+function envPositiveInt(name: string, fallback: number): number {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
 function mountToken(app: Express): void {
   const tokenLimiter = new RateLimiter(TOKEN_HOURLY_LIMIT, 60 * 60 * 1000);
+  // THI-43: client_id is free-form attacker-chosen body text, so the composite
+  // IP+client_id key mints a fresh 60/h bucket per request under rotation and
+  // the per-IP dimension of the §5 abuse control never bites. A coarse IP-only
+  // backstop bounds both endpoints regardless of key rotation; the composite
+  // bucket stays for per-client fairness. Read at mount time (startup / tests).
+  const tokenIpLimiter = new RateLimiter(envPositiveInt("OAUTH_TOKEN_IP_HOURLY_LIMIT", 600), 60 * 60 * 1000);
+  const ipBackstopAllows = (req: Request): boolean => tokenIpLimiter.allow(`token-ip:${req.ip ?? "unknown"}`);
+  const tooManyRequests = (res: Response): void => {
+    res.status(429).set("Cache-Control", "no-store").json({ error: "invalid_request", error_description: "rate limit exceeded" });
+  };
 
   app.post(
     "/oauth/token",
@@ -774,8 +790,8 @@ function mountToken(app: Express): void {
     async (req: Request, res: Response) => {
       const body = req.body as Record<string, string>;
       const clientId = body.client_id ?? "";
-      if (!tokenLimiter.allow(`token:${req.ip ?? "unknown"}:${clientId}`)) {
-        res.status(429).set("Cache-Control", "no-store").json({ error: "invalid_request", error_description: "rate limit exceeded" });
+      if (!ipBackstopAllows(req) || !tokenLimiter.allow(`token:${req.ip ?? "unknown"}:${clientId}`)) {
+        tooManyRequests(res);
         return;
       }
       if (!clientId || !body.grant_type) {
@@ -975,12 +991,17 @@ function mountToken(app: Express): void {
     express.urlencoded({ extended: false, limit: "64kb" }),
     async (req: Request, res: Response) => {
       const body = req.body as Record<string, string>;
+      // Backstop BEFORE the missing-param early return: malformed spam must be bounded too (THI-43).
+      if (!ipBackstopAllows(req)) {
+        tooManyRequests(res);
+        return;
+      }
       if (!body.token || !body.client_id) {
         tokenError(res, "invalid_request", "token and client_id are required");
         return;
       }
       if (!tokenLimiter.allow(`token:${req.ip ?? "unknown"}:${body.client_id}`)) {
-        res.status(429).set("Cache-Control", "no-store").json({ error: "invalid_request", error_description: "rate limit exceeded" });
+        tooManyRequests(res);
         return;
       }
       // Always 200 for well-formed requests — no token-enumeration oracle.

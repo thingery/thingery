@@ -12,6 +12,7 @@ import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
 import { mountApiRoutes } from "./routes.js";
 import { stripeWebhookRouter } from "./webhooks-stripe.js";
+import { carrierWebhookRouter } from "./webhooks-carrier.js";
 import { logConfigBootReport } from "./config.js";
 import { browsePage, itemPage } from "./web-pages.js";
 import { uploadsDir } from "./images.js";
@@ -73,6 +74,10 @@ function runHttp(): void {
   // until STRIPE_WEBHOOK_SECRET is set (F1); see config boot report.
   const cfg = logConfigBootReport();
   app.use(stripeWebhookRouter(cfg));
+
+  // Carrier webhook (spec THI-3 §4.3/§5): same raw-body-before-JSON
+  // constraint; fail-closed 503 stub until EASYPOST_WEBHOOK_SECRET is set.
+  app.use(carrierWebhookRouter(cfg));
 
   // Browser API (accounts + chat). /mcp above consumes the raw body stream,
   // so the JSON parser starts here and never touches MCP traffic.

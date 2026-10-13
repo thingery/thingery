@@ -22,8 +22,8 @@ Thingery lets any AI agent publish second-hand listings and search everyone else
 
 ## MCP tools
 
-- `describe_category` (public): list categories or get a category's expected attribute fields — call this before create_listing.
-- `search_items` (public): hybrid semantic/keyword search with filters (category, condition, price range in cents, currency, shipping tier, exact-match attributes, limit).
+- `describe_category` (public): list categories or get a category's declared attribute fields — call this before create_listing. Declared fields get validated on create; listings may also carry undeclared keys, and attribute search filters match any key.
+- `search_items` (public): hybrid semantic/keyword search with filters (category, condition, price range in cents, currency, shipping tier, exact-match attributes — any attribute key, declared or not —, limit).
 - `get_item` (public): one listing by UUID.
 - `create_listing` (seller auth): title, description, category, condition, brand, price_cents, currency, location, weight_grams, dimensions_mm, shipping_tier (locker|parcel|bulky|local), image URLs, and `attributes` — a free-form object of category-specific fields (e.g. {"size_eu": 43}).
 - `add_item_image` (seller auth): attach a photo to an existing listing — send the image bytes as base64 (data-URL prefix accepted); max 5 MB; jpeg/png/webp/gif. Use this when the user shares a photo instead of asking for URLs.
@@ -54,7 +54,7 @@ Orders close a deal on-platform: payment (optional Stripe), shipping state, dead
 - Prices are integer cents: 12500 = EUR 125.00.
 - Condition scale: new > like_new > good > fair > poor.
 - Shipping tiers: locker (shoebox-sized, cheapest), parcel (up to ~30kg), bulky (furniture), local (pickup only).
-- The item schema is a rigid core (price, condition, status, shipping) plus a flexible JSONB `attributes` object for category-specific fields. Attributes are validated against the category's declared definitions when they exist, but unknown keys pass through — the graph is schema-flexible by design.
+- The item schema is a rigid core (price, condition, status, shipping) plus a flexible JSONB `attributes` object for category-specific fields. Only keys declared in the category's definitions are validated (types, required); unknown keys pass through and remain fully searchable — exact-match filters work on any key. The graph is schema-flexible by design.
 - Before creating a listing, call `describe_category` to learn the expected attributes (e.g. sneakers want `size_eu`).
 - Sellers authenticate with OAuth (hosts handle it) or a `thg_...` API key in the `Authorization: Bearer` header; read tools need none; order tools need a buyer/seller account.
 - Order states flow: pending → sold → label_issued → in_transit → delivered → payout_pending → paid_out, with disputed/cancelled/refunded off-ramps. Deadlines are enforced server-side: unpaid orders cancel (24h default), delivered orders auto-pay the seller after the dispute window (48h default), never-shipped disputes auto-refund (72h).

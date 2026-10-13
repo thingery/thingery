@@ -102,7 +102,7 @@
       "unknown"
     ],
     "item_ids": "UUID v4",
-    "attributes": "flexible JSONB object of category-specific fields; declared definitions validate types and required keys, unknown keys pass through; discover per category via describe_category",
+    "attributes": "flexible JSONB object of category-specific fields; declared definitions validate types and required keys, unknown keys pass through and remain searchable (attribute filters match any key); discover per category via describe_category",
     "order_states": [
       "pending",
       "sold",

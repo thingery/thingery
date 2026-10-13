@@ -104,8 +104,10 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
     "describe_category",
     {
       description:
-        "Discover the expected attribute fields for a category (e.g. sneakers want size_eu, " +
-        "colorway...). Call with no arguments to list all categories. Use before create_listing " +
+        "Discover a category's declared attribute fields (e.g. sneakers want size_eu, " +
+        "colorway...). Declared fields are validated by create_listing; listings may also carry " +
+        "undeclared attribute keys, and search attribute filters match any key. " +
+        "Call with no arguments to list all categories. Use before create_listing " +
         "to fill attributes correctly. Public.",
       inputSchema: {
         category: z.string().min(2).max(40).optional().describe("Category slug, e.g. 'sneakers'"),
@@ -117,7 +119,9 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         const categories = await listCategories();
         return ok({
           categories,
-          note: "Call describe_category with a category name to get its attribute definitions.",
+          note: "Call describe_category with a category name to get its attribute definitions. " +
+            "Definitions cover declared keys, which create_listing validates; listings may also " +
+            "carry undeclared keys, and attribute search filters match any key.",
         });
       }
       const category = await getCategory(name);
@@ -125,7 +129,12 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         const categories = await listCategories();
         return err(`Unknown category '${name}'`, "unknown_category");
       }
-      return ok({ category });
+      return ok({
+        category,
+        note: "attribute_definitions are the declared keys — create_listing validates them " +
+          "(types, required, enums). Listings may also carry undeclared keys: they pass through " +
+          "unvalidated, and search_items attribute filters match any key, declared or not.",
+      });
     },
   );
 
@@ -135,7 +144,8 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
       description:
         "Create a listing for a second-hand item. Requires seller authentication (Bearer API key). " +
         "Prices are in integer cents (EUR 12.50 = 1250). Category-specific fields go in `attributes` " +
-        "(call describe_category first to see what's expected). Generates the item's embedding for semantic search.",
+        "(call describe_category first to see what's declared — undeclared keys are allowed " +
+        "and searchable). Generates the item's embedding for semantic search.",
       inputSchema: {
         title: z.string().min(3).max(200).describe("Short item title, e.g. 'Nike Air Max 90, size 43'"),
         description: z.string().max(5000).default("").describe("Honest description incl. flaws"),
@@ -216,7 +226,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         currency: z.string().length(3).default("EUR"),
         shipping_tier: z.enum(SHIPPING_TIERS).optional(),
         attributes: z.record(z.union([z.string(), z.number(), z.boolean()])).optional()
-          .describe("Exact-match attribute filter, e.g. {\"size_eu\": 43}"),
+          .describe("Exact-match attribute filter, e.g. {\"size_eu\": 43} — matches any attribute key, declared or not"),
         limit: z.number().int().min(1).max(50).default(10),
       },
     },

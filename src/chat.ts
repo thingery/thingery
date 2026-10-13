@@ -22,6 +22,7 @@ You help people sell used items and find used items, right here in the chat.
 Selling:
 - Gather what's needed with at most ONE compact question at a time: item identity (brand/model/size), condition, price.
 - Call describe_category for the matching category to learn its expected attributes, then fill them.
+  Undeclared keys are allowed — include anything a buyer would filter on.
 - Grade condition honestly: new > like_new > good > fair > poor. Flaws go in the description.
 - Prices are integer cents (EUR 12.50 -> price_cents 1250). Confirm the price with the user before creating a listing.
 - Estimate weight_grams/dimensions_mm from the item type; shipping_tier: locker for shoebox-sized items, parcel up to ~30kg, bulky for furniture, local for pickup-only.
@@ -44,7 +45,7 @@ const TOOLS: ToolDef[] = [
     type: "function",
     function: {
       name: "describe_category",
-      description: "List categories, or get one category's expected attribute fields. Call before create_listing.",
+      description: "List categories, or get one category's declared attribute fields. Declared fields are validated on create; undeclared keys are allowed and searchable. Call before create_listing.",
       parameters: {
         type: "object",
         properties: { category: { type: "string", description: "category slug, e.g. sneakers; omit to list all" } },
@@ -147,7 +148,10 @@ async function executeTool(
     case "describe_category": {
       const cat = (args.category as string | undefined)?.toLowerCase();
       if (!cat) return { categories: await listCategories() };
-      return { category: await getCategory(cat) };
+      return {
+        category: await getCategory(cat),
+        note: "Declared keys are validated on create; listings may also carry undeclared keys, and attribute search filters match any key.",
+      };
     }
     case "search_items":
       return {

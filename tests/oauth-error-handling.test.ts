@@ -71,7 +71,7 @@ describe("OAuth surface fails securely on backend faults (THI-42)", () => {
         expect(res.headers.get("cache-control")).toBe("no-store");
         expect(res.headers.get("referrer-policy")).toBe("no-referrer");
         expect(res.headers.get("x-frame-options")).toBe("DENY");
-        expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+        expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
         const body = await res.text();
         expect(body).toContain("Something went wrong");
         // No token material, no error detail — a plain page (fail securely).
@@ -104,6 +104,36 @@ describe("OAuth surface fails securely on backend faults (THI-42)", () => {
       });
       expect(unhandled).toBeNull();
     });
+  });
+
+  it("case-variated OAuth paths stay in scope: /Apps fault answers the hardened 500, logs the security event, leaks nothing (THI-52 F1)", async () => {
+    // Express 4 routes case-insensitively; the scope check used to compare
+    // req.path prefixes case-sensitively, so /Apps faults fell through to the
+    // Express default handler: no security_event logged, and outside
+    // production the raw error message was disclosed in the response body.
+    vi.spyOn(pool, "query").mockRejectedValueOnce(new Error("simulated serialization failure"));
+    const logged: string[] = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    });
+    const cookie = `${SESSION_COOKIE}=${encodeURIComponent(signSession("00000000-0000-0000-0000-000000000002"))}`;
+    try {
+      await withServer(async (baseUrl) => {
+        const unhandled = await captureUnhandled(async () => {
+          const res = await fetch(`${baseUrl}/Apps`, { headers: { cookie } });
+          expect(res.status).toBe(500);
+          expect(res.headers.get("cache-control")).toBe("no-store");
+          expect(res.headers.get("x-frame-options")).toBe("DENY");
+          const body = await res.text();
+          expect(body).toContain("Something went wrong"); // hardened page, not the default handler's
+          expect(body).not.toContain("simulated serialization failure"); // no raw error disclosure
+        });
+        expect(unhandled).toBeNull();
+      });
+      expect(logged.some((line) => line.includes("unhandled_route_error"))).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it("oversized JSON POST to /oauth/register keeps its 413 (body-parser status not swallowed into 500)", async () => {

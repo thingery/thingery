@@ -5,13 +5,15 @@
 // thgo_ token authorizes a protected tool; revocation flips it to 401).
 // Requires Postgres; skips otherwise.
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
+import net from "node:net";
 import crypto from "node:crypto";
 import pg from "pg";
 import { mountOauthRoutes } from "../src/oauth.js";
 import { mcpRoutes, MCP_MAX_BODY_BYTES, MCP_ANON_MAX_BYTES } from "../src/mcp-gate.js";
+import { pool } from "../src/db.js";
 import { RateLimiter } from "../src/rate-limit.js";
 import { SESSION_COOKIE, signSession } from "../src/auth.js";
 
@@ -250,6 +252,65 @@ describe.skipIf(!available)("/mcp method-aware 401 gate (HTTP)", () => {
     const res = await post(`{"jsonrpc":"2.0","id":1,"method":"initialize","padding":"${"x".repeat(MCP_ANON_MAX_BYTES)}"}`);
     expect(res.status).toBe(401);
     expect(res.headers.get("www-authenticate")).toContain("Bearer");
+  });
+
+  it("anonymous NON-JSON body above the 256 kB cutoff → 401 without parsing (not 400 parse error)", async () => {
+    // Regression (THI-27): the size cutoff must be enforced BEFORE JSON.parse,
+    // so anonymous callers never make us pay the parse cost on a big payload.
+    // Old code parsed first and returned 400 -32700 for non-JSON bodies.
+    const res = await post("x".repeat(MCP_ANON_MAX_BYTES + 1024));
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toContain("Bearer");
+  });
+
+  it("server survives a client aborting mid-body-upload (no unhandled rejection)", async () => {
+    // Regression (THI-27): Express 4 does not forward async rejections, so an
+    // aborted raw-request stream in readBodyWithCap crashed the process on
+    // Node >= 15. Register a listener so the default crash becomes an
+    // assertion instead, then prove liveness with a real request.
+    let unhandled: unknown = null;
+    const onUnhandled = (e: unknown) => {
+      unhandled = e;
+    };
+    process.on("unhandledRejection", onUnhandled);
+    const port = Number(new URL(baseUrl).port);
+    await new Promise<void>((resolve) => {
+      const sock = net.connect(port, "127.0.0.1", () => {
+        sock.write(
+          "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+            "Content-Length: 1000000\r\n\r\n" +
+            '{"jsonrpc":"2.0","id":1,"method":"tools/list"',
+        );
+      });
+      sock.on("error", () => {});
+      setTimeout(() => {
+        sock.destroy();
+        resolve();
+      }, 150);
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    process.off("unhandledRejection", onUnhandled);
+    expect(unhandled).toBeNull();
+    const res = await post(rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } }));
+    expect(res.status).toBe(200);
+  });
+
+  it("DB failure during credential resolution → 503, not a process crash", async () => {
+    // Regression (THI-27): authenticateRequest's pool.query rejection (e.g.
+    // transient Postgres outage) used to escape the async Express 4 handler
+    // as an unhandled rejection and crash the process. Fail securely: 503,
+    // never a silent anonymous downgrade.
+    const querySpy = vi.spyOn(pool, "query").mockRejectedValue(new Error("connection refused"));
+    try {
+      const res = await post(rpc("search_items", { q: "x" }), { authorization: "Bearer thg_db_down" });
+      expect(res.status).toBe(503);
+      expect(res.headers.get("www-authenticate")).toBeNull(); // not mislabeled invalid_token
+    } finally {
+      querySpy.mockRestore();
+    }
+    // process is alive and serves the next request normally
+    const res2 = await post(rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } }));
+    expect(res2.status).toBe(200);
   });
 
   it("authenticated body above 8 MB → 413 (single cap for everyone)", async () => {

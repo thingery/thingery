@@ -18,7 +18,7 @@ import { startSweepScheduler } from "./orders-sweep.js";
 import { browsePage, itemPage } from "./web-pages.js";
 import { uploadsDir } from "./images.js";
 import { securityHeaders } from "./security-headers.js";
-import { VERSION } from "./version.js";
+import { VERSION, COMMIT, BUILD_TIME } from "./version.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -91,7 +91,10 @@ function runHttp(): void {
   app.get("/healthz", async (_req, res) => {
     try {
       await pool.query("SELECT 1");
-      res.json({ ok: true, service: "thingery", version: VERSION });
+      // commit/buildTime are baked in at build time (see src/version.ts);
+      // "unknown" when the deployment didn't pass build args. Deliberately
+      // minimal: no paths, env, or host info (THI-68).
+      res.json({ ok: true, service: "thingery", version: VERSION, commit: COMMIT, buildTime: BUILD_TIME });
     } catch {
       res.status(503).json({ ok: false, db: "unreachable" });
     }

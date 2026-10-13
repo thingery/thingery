@@ -20,7 +20,14 @@ services:
       retries: 10
 
   app:
-    build: .
+    build:
+      context: .
+      # Baked into the image and surfaced on /healthz + site footer (THI-68).
+      # Export before `up -d --build`, e.g.
+      #   export GIT_COMMIT=$(git rev-parse HEAD) BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-thingery}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-thingery}

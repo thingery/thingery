@@ -3,7 +3,7 @@
 // Postgres-backed — same harness shape as stripe-webhook.test.ts.
 
 import { readFileSync } from "node:fs";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -12,7 +12,8 @@ import net from "node:net";
 import pg from "pg";
 import type Stripe from "stripe";
 import StripeCtor from "stripe";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { pool } from "../src/db.js";
 import { setStripeForTests } from "../src/stripe.js";
 import { carrierWebhookRouter } from "../src/webhooks-carrier.js";
 import { createOrder } from "../src/order-flow.js";
@@ -189,6 +190,54 @@ describe.skipIf(!available)("Carrier webhook endpoint (HTTP)", () => {
       },
       refunds: { create: async () => ({ id: `re_${n0}_${Math.random().toString(36).slice(2, 6)}` }) },
     } as unknown as Stripe);
+  });
+
+  it("returns 500 with no unhandled rejection when the DB fails at ingest — dedupe store (THI-66 V1 regression)", async () => {
+    const spy = vi.spyOn(pool, "query").mockRejectedValueOnce(new Error("ECONNREFUSED db down"));
+    let unhandled: unknown = null;
+    const onUnhandled = (e: unknown) => { unhandled = e; };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const r = await post(app, trackerEvent("in_transit", "trk_ing1"));
+      expect(r.status).toBe(500);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      spy.mockRestore();
+    }
+    expect(unhandled).toBeNull();
+  });
+
+  it("returns 500 with no unhandled rejection when pool.connect fails; row marked for sweep rule 6 (THI-66 V1 regression)", async () => {
+    // Pre-store the dedupe row (the mocked dedupe query below hands the
+    // handler this id) — node-pg's pool.query internally acquires via
+    // connect(), so the connect spy must only see the handler's explicit
+    // pool.connect() call, never a query's internal callback-style one.
+    const body = trackerEvent("in_transit", "trk_ing2");
+    const externalId = `easypost:${createHash("sha256").update(body).digest("hex")}`;
+    const pre = await db.query<{ id: string }>(
+      "INSERT INTO webhook_events (source, external_id, payload) VALUES ('carrier', $1, '{}'::jsonb) RETURNING id",
+      [externalId],
+    );
+    const querySpy = vi.spyOn(pool, "query").mockResolvedValueOnce({ rows: [{ id: pre.rows[0].id }] } as never);
+    const connectSpy = vi.spyOn(pool, "connect").mockRejectedValueOnce(new Error("pool exhausted"));
+    let unhandled: unknown = null;
+    const onUnhandled = (e: unknown) => { unhandled = e; };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const r = await post(app, body);
+      expect(r.status).toBe(500);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      querySpy.mockRestore();
+      connectSpy.mockRestore();
+    }
+    expect(unhandled).toBeNull();
+    const row = await db.query<{ process_error: string | null; processed_at: Date | null }>(
+      "SELECT process_error, processed_at FROM webhook_events WHERE source = 'carrier' AND external_id = $1",
+      [externalId],
+    );
+    expect(row.rows[0].process_error).toMatch(/^ingest failed/);
+    expect(row.rows[0].processed_at).toBeNull();
   });
 
   it("rejects non-JSON, empty bodies, missing/wrong/tampered/malformed signatures with 400 — and writes nothing (F12, §5.3)", async () => {

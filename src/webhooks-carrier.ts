@@ -100,6 +100,35 @@ export function carrierWebhookRouter(cfg: OrderFlowConfig = orderFlowConfig()): 
 }
 
 async function handleCarrierWebhook(req: Request, res: Response, cfg: OrderFlowConfig): Promise<void> {
+  // THI-66 V1 fix: void-mounted async handler — a rejection escaping the
+  // body is an unhandled rejection, and Node >= 15 crashes the whole process
+  // (THI-58 class) on any DB fault during an EasyPost delivery. One barrier
+  // around the entire ingest body: log, best-effort mark, 500 (EasyPost
+  // redelivers). 'ingest failed:' marks the row for sweep rule 6 (PR-8) so a
+  // stored-but-unprocessed row is never swallowed by the dedupe path.
+  let externalId: string | null = null;
+  try {
+    await ingestCarrierWebhook(req, res, cfg, (id) => (externalId = id));
+  } catch (err) {
+    console.error("[webhooks:carrier] ingest failed:", (err as Error).message);
+    if (externalId) {
+      await pool
+        .query(
+          "UPDATE webhook_events SET process_error = $2 WHERE source = 'carrier' AND external_id = $1 AND processed_at IS NULL",
+          [externalId, `ingest failed: ${(err as Error).message}`.slice(0, 500)],
+        )
+        .catch(() => undefined);
+    }
+    if (!res.headersSent) res.status(500).json({ error: "processing failed" });
+  }
+}
+
+async function ingestCarrierWebhook(
+  req: Request,
+  res: Response,
+  cfg: OrderFlowConfig,
+  onExternalId: (id: string) => void,
+): Promise<void> {
   if (!cfg.carrierWebhookReady) {
     // Fail-closed 503 stub (F1): API key set but webhook secret unset.
     res.status(503).json({ error: "carrier webhook not configured" });
@@ -118,11 +147,17 @@ async function handleCarrierWebhook(req: Request, res: Response, cfg: OrderFlowC
     res.status(400).json({ error: "missing X-Hmac-Signature header" });
     return;
   }
-  const verified =
-    verifyEasyPostSignature(req.body, signature, cfg.easypostWebhookSecret!) ||
-    (cfg.easypostWebhookSecretPrevious !== undefined &&
-      verifyEasyPostSignature(req.body, signature, cfg.easypostWebhookSecretPrevious));
-  if (!verified) {
+  // A3 (THI-66): surface old-secret verification so rotation completion is
+  // visible in logs, mirroring the Stripe handler (F13).
+  const verifiedCurrent = verifyEasyPostSignature(req.body, signature, cfg.easypostWebhookSecret!);
+  const verifiedPrevious =
+    !verifiedCurrent &&
+    cfg.easypostWebhookSecretPrevious !== undefined &&
+    verifyEasyPostSignature(req.body, signature, cfg.easypostWebhookSecretPrevious);
+  if (verifiedPrevious) {
+    console.warn("[webhooks:carrier] verified with EASYPOST_WEBHOOK_SECRET_PREVIOUS — finish the rotation");
+  }
+  if (!verifiedCurrent && !verifiedPrevious) {
     res.status(400).json({ error: "signature verification failed" });
     return;
   }
@@ -140,6 +175,7 @@ async function handleCarrierWebhook(req: Request, res: Response, cfg: OrderFlowC
   // Deterministic content id: EasyPost tracker webhooks carry no per-delivery
   // event id, so dedupe on the raw bytes' sha256 (see file header).
   const externalId = `easypost:${crypto.createHash("sha256").update(req.body).digest("hex")}`;
+  onExternalId(externalId);
 
   // F6: REDACT at ingest — tracking_details (signed-for names, facility
   // free text) never touch the store; only ids, statuses, timestamps.

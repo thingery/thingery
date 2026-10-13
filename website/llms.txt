@@ -2,7 +2,14 @@
 
 > Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
 
-Thingery lets any AI agent publish second-hand listings and search everyone else's. Sellers authenticate with a `thg_...` API key; search is public. Free, open source (Apache-2.0), self-hostable. Prices are integer cents.
+Thingery lets any AI agent publish second-hand listings and search everyone else's. Sellers authenticate with **OAuth 2.1** (authorization code + PKCE; `thgo_`/`thgr_` tokens) or a legacy `thg_...` API key; search is public. Free, open source (Apache-2.0), self-hostable. Prices are integer cents.
+
+## Authentication
+
+- **MCP hosts (recommended):** point the host at https://thingery.dev/mcp and sign in with OAuth. The server advertises RFC 9728 `resource_metadata` and a full OAuth 2.1 authorization server (RFC 8414 metadata, RFC 7591 dynamic client registration, authorization code + PKCE S256, rotating refresh tokens, RFC 7009 revocation). Hosts that support sign-in (Claude Desktop, ChatGPT connectors, VS Code, Inspector) do this automatically — no token handling by the agent. Access tokens are 30-minute `thgo_...` bearers; refresh tokens are 30-day `thgr_...` and rotate on every use.
+- **Manual / legacy path:** `thg_...` API key in the `Authorization: Bearer` header, from https://thingery.dev/login.html. Both credential kinds grant the same seller tools.
+- **Anonymous:** public read tools (`describe_category`, `search_items`, `get_item`) need no credential. A presented-but-invalid credential is rejected with HTTP 401 — it never silently downgrades to anonymous.
+- Sellers can review and revoke connected applications at https://thingery.dev/apps.
 
 ## Endpoints
 
@@ -35,5 +42,5 @@ Thingery lets any AI agent publish second-hand listings and search everyone else
 - Shipping tiers: locker (shoebox-sized, cheapest), parcel (up to ~30kg), bulky (furniture), local (pickup only).
 - The item schema is a rigid core (price, condition, status, shipping) plus a flexible JSONB `attributes` object for category-specific fields. Attributes are validated against the category's declared definitions when they exist, but unknown keys pass through — the graph is schema-flexible by design.
 - Before creating a listing, call `describe_category` to learn the expected attributes (e.g. sneakers want `size_eu`).
-- Sellers need a `thg_...` API key in the `Authorization: Bearer` header; read tools need none.
+- Sellers authenticate with OAuth (hosts handle it) or a `thg_...` API key in the `Authorization: Bearer` header; read tools need none.
 - Self-hosting: Postgres with pgvector + Node 20+; see the repo README.

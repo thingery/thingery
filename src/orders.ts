@@ -53,6 +53,7 @@ export type TransitionTrigger =
   | "confirm_receipt" // #6/#13
   | "open_dispute" // #15
   | "chargeback" // #22 — stripe only
+  | "dispute_won" // #22r — chargeback representment won, restore
   | "dispute_window_elapsed" // #16/#16b
   | "release_funds" // #17/#17b
   | "admin_refund" // #18/#18b
@@ -78,7 +79,10 @@ export interface TransitionSpec {
   /** Spec §2.3 transition number (rev 3 twins carry a letter suffix). */
   id: string;
   from: readonly OrderStatus[];
-  to: OrderStatus;
+  /** `"pre_dispute"` (chargeback-won restore, §6.5): the caller supplies the
+   *  recorded pre-dispute status via `restoreTo`, validated against
+   *  RESTORE_TARGETS — one entry, explicit targets, no dynamic matrix. */
+  to: OrderStatus | "pre_dispute";
   trigger: TransitionTrigger;
   actors: readonly ActorType[];
   /** Restricts the transition to one payment mode; omit for both. */
@@ -86,6 +90,13 @@ export interface TransitionSpec {
   /** items.status side effect applied in the same transaction. */
   itemStatus?: ItemStatus;
 }
+
+/** Legal chargeback-won restore targets (§6.5): non-terminal, post-charge.
+ * A chargeback recorded from `pending` restores to `sold` — the charge
+ * completing is what made the order disputable in the first place. */
+export const RESTORE_TARGETS: readonly OrderStatus[] = [
+  "sold", "label_issued", "in_transit", "delivered", "payout_pending",
+];
 
 const BUYER_SELLER: readonly ActorType[] = ["buyer", "seller"];
 
@@ -126,6 +137,8 @@ export const TRANSITIONS: readonly TransitionSpec[] = [
   // #22: a chargeback disputes from ANY non-terminal state except refunding
   // (a refund already in flight is the correct chargeback remedy — F3).
   { id: "22", from: NON_TERMINAL_EXCEPT_REFUNDING, to: "disputed", trigger: "chargeback", actors: ["stripe"], mode: "stripe" },
+  // #22r: representment won (§6.5) — restore the recorded pre-dispute state.
+  { id: "22r", from: ["disputed"], to: "pre_dispute", trigger: "dispute_won", actors: ["stripe"], mode: "stripe" },
   // #23 (tracking correction while still pre-transit) is not a state change;
   // PR-5 records it as an order_events row without calling applyTransition.
 ];
@@ -211,6 +224,8 @@ export interface ApplyTransitionInput {
   sets?: TransitionSets;
   /** Overrides the transition's items.status side effect (e.g. #14 lost → deleted vs RTS → active). */
   itemStatusOverride?: ItemStatus;
+  /** #22r only: the recorded pre-dispute status to restore (validated against RESTORE_TARGETS). */
+  restoreTo?: OrderStatus;
   /** Join a caller-owned transaction (webhook handlers); otherwise a new one is used. */
   client?: PoolClient;
 }
@@ -242,10 +257,20 @@ export async function applyTransition(input: ApplyTransitionInput): Promise<Orde
       throw new IllegalTransitionError(input.orderId, order.status, input.trigger, allowed);
     }
 
+    let target: OrderStatus;
+    if (spec.to === "pre_dispute") {
+      if (!input.restoreTo || !RESTORE_TARGETS.includes(input.restoreTo)) {
+        throw new IllegalTransitionError(input.orderId, order.status, input.trigger, []);
+      }
+      target = input.restoreTo;
+    } else {
+      target = spec.to;
+    }
+
     await db.query(begin);
     try {
       const setCols: string[] = ["status = $3", "status_changed_at = now()"];
-      const values: unknown[] = [input.orderId, order.status, spec.to];
+      const values: unknown[] = [input.orderId, order.status, target];
       let p = 4;
       for (const [col, val] of Object.entries(input.sets ?? {})) {
         setCols.push(`${col} = $${p}`);
@@ -275,7 +300,7 @@ export async function applyTransition(input: ApplyTransitionInput): Promise<Orde
           `INSERT INTO order_events (order_id, event_type, from_status, to_status, actor_type, actor_id, reason, dedupe_key)
            VALUES ($1, 'transition', $2, $3, $4, $5, $6, $7)`,
           [
-            input.orderId, order.status, spec.to, input.actor.type,
+            input.orderId, order.status, target, input.actor.type,
             input.actor.id ?? null, input.reason ?? null, input.dedupeKey ?? null,
           ],
         );

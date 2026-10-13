@@ -13,6 +13,7 @@ import {
   applyTransition,
   IllegalTransitionError,
   ORDER_STATUSES,
+  RESTORE_TARGETS,
   TERMINAL_STATUSES,
   TRANSITIONS,
   transitionsFrom,
@@ -27,10 +28,11 @@ const schemaPath = path.resolve(__dirname, "..", "db", "schema.sql");
 // Part 1 — the matrix (pure)
 
 describe("transition matrix integrity", () => {
-  it("every from/to is a known status", () => {
+  it("every from/to is a known status (pre_dispute targets are explicit)", () => {
     for (const t of TRANSITIONS) {
       for (const s of t.from) expect(ORDER_STATUSES).toContain(s);
-      expect(ORDER_STATUSES).toContain(t.to);
+      const tos = t.to === "pre_dispute" ? RESTORE_TARGETS : [t.to];
+      for (const s of tos) expect(ORDER_STATUSES).toContain(s);
     }
   });
 
@@ -46,7 +48,9 @@ describe("transition matrix integrity", () => {
       if (TERMINAL_STATUSES.includes(s)) return true;
       if (seen.has(s)) return false;
       seen.add(s);
-      return TRANSITIONS.filter((t) => t.from.includes(s)).some((t) => reachesTerminal(t.to, seen));
+      return TRANSITIONS.filter((t) => t.from.includes(s)).some((t) =>
+        t.to === "pre_dispute" ? RESTORE_TARGETS.some((r) => reachesTerminal(r, seen)) : reachesTerminal(t.to, seen),
+      );
     };
     for (const s of ORDER_STATUSES) {
       if (!TERMINAL_STATUSES.includes(s)) expect(reachesTerminal(s)).toBe(true);

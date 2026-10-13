@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  ATTRIBUTE_CAPS,
   attributeFilterClause,
+  attributeShapeErrors,
+  AttributeValidationError,
   attributesToText,
   validateAttributes,
   type AttributeDefinition,
@@ -21,6 +24,17 @@ describe("validateAttributes", () => {
       custom_future_field: "whatever",
     });
     expect(errors).toEqual([]);
+  });
+
+  it("includes shape errors (caps run first, inherited by every caller)", () => {
+    // Before THI-83 this input yielded only the definition error; the shape
+    // error must now be folded in ahead of it.
+    const errors = validateAttributes(sneakerDefs, {
+      colorway: "x".repeat(ATTRIBUTE_CAPS.maxValueLength + 1),
+    });
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toContain("value too long");
+    expect(errors[1]).toContain("size_eu");
   });
 
   it("flags missing required attributes", () => {
@@ -44,6 +58,54 @@ describe("validateAttributes", () => {
 
   it("allows empty attributes when nothing is required", () => {
     expect(validateAttributes([], {})).toEqual([]);
+  });
+});
+
+describe("attributeShapeErrors (write caps, THI-83 §3.5)", () => {
+  const entries = (n: number): Record<string, string> =>
+    Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, "v"]));
+
+  it("accepts the boundary: 64 entries, 128-char key, 500-char string", () => {
+    expect(attributeShapeErrors(entries(ATTRIBUTE_CAPS.maxEntries))).toEqual([]);
+    expect(attributeShapeErrors({ ["k".repeat(ATTRIBUTE_CAPS.maxKeyLength)]: "v" })).toEqual([]);
+    expect(attributeShapeErrors({ k: "v".repeat(ATTRIBUTE_CAPS.maxValueLength) })).toEqual([]);
+  });
+
+  it("rejects 65 entries", () => {
+    const errors = attributeShapeErrors(entries(ATTRIBUTE_CAPS.maxEntries + 1));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("too many attribute entries");
+    expect(errors[0]).toContain("65");
+  });
+
+  it("rejects a 129-char key", () => {
+    const errors = attributeShapeErrors({ ["k".repeat(ATTRIBUTE_CAPS.maxKeyLength + 1)]: "v" });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("key too long");
+    expect(errors[0]).toContain("129");
+  });
+
+  it("rejects a 501-char string value but not long numbers/booleans", () => {
+    const errors = attributeShapeErrors({ k: "v".repeat(ATTRIBUTE_CAPS.maxValueLength + 1) });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("value too long");
+    expect(errors[0]).toContain("501");
+    // Non-string values are unconstrained by design.
+    expect(attributeShapeErrors({ big: 1e15, flag: true })).toEqual([]);
+  });
+
+  it("accumulates one error per violation", () => {
+    const attrs: Record<string, string> = entries(ATTRIBUTE_CAPS.maxEntries + 1);
+    attrs["k".repeat(ATTRIBUTE_CAPS.maxKeyLength + 1)] = "v".repeat(ATTRIBUTE_CAPS.maxValueLength + 1);
+    const errors = attributeShapeErrors(attrs);
+    expect(errors).toHaveLength(3);
+  });
+
+  it("AttributeValidationError carries the joined messages and the MCP error code", () => {
+    const err = new AttributeValidationError(attributeShapeErrors({ k: "v".repeat(501) }));
+    expect(err).toBeInstanceOf(Error);
+    expect(err.code).toBe("invalid_attributes");
+    expect(err.message).toContain("value too long");
   });
 });
 

@@ -4,6 +4,7 @@ import { CONDITIONS, SHIPPING_TIERS, STATUSES } from "./db.js";
 import { getCategory, getItem, createItem, listCategories, myItems, searchItems, updateItem } from "./items.js";
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { addItemImageBase64 } from "./images.js";
+import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
 
 export interface ToolContext {
   seller: SellerRow | null;
@@ -24,6 +25,7 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   "my_listings",
   "update_listing",
   // Order-flow tools (spec THI-10) must be added here when they land.
+  "get_payout_setup",
 ]);
 
 function publicBaseUrl(): string {
@@ -292,6 +294,47 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
       );
       if ("error" in result) return err(result.error, "invalid_image");
       return ok({ added: true, image_url: `${publicBaseUrl()}${result.url}` });
+    },
+  );
+
+  server.registerTool(
+    "get_payout_setup",
+    {
+      description:
+        "Get this seller's payout setup for the order flow: a Stripe Express onboarding URL " +
+        "when payments are enabled for this Thingery deployment, plus current onboarding status. " +
+        "Onboarding is optional — items stay buyable as off-platform orders without it — but " +
+        "platform payment (Stripe Checkout with buyer protection) requires it. Requires seller auth.",
+      inputSchema: {},
+    },
+    async (_args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        if (!stripeConfigured()) {
+          return err(
+            "Stripe payments are not configured on this Thingery deployment (STRIPE_SECRET_KEY unset). " +
+              "Listings remain buyable as off-platform orders; platform payment is unavailable.",
+            "payments_not_configured",
+          );
+        }
+        const stripe = getStripe();
+        if (!stripe) return err("Stripe payments are not configured on this deployment.", "payments_not_configured");
+        const accountId = await getOrCreateStripeAccount(seller.id, stripe);
+        const link = await createOnboardingLink(accountId, publicBaseUrl(), stripe);
+        const setup = await getPayoutSetup(seller.id);
+        return ok({
+          onboarding_url: link.url,
+          onboarded: setup?.onboardedAt != null,
+          stripe_account_id: accountId,
+          note: setup?.onboardedAt
+            ? "Payout account is onboarded — your listings accept platform payment."
+            : "Open the onboarding URL to accept platform payment (Stripe Express, ~5 minutes). " +
+                "The link is single-use; call get_payout_setup again for a fresh one.",
+        });
+      } catch (e) {
+        return err(`get_payout_setup failed: ${describeError(e)}`);
+      }
     },
   );
 }

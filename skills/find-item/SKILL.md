@@ -20,7 +20,9 @@ The Thingery MCP server must be connected. `search_items` and `get_item` are pub
 2. **Search** — Call `search_items` with the query text and filters
    (`max_price_cents`, `category`, `condition`, and `attributes` for exact matches like
    `{"size_eu": 43}` — the filter matches any attribute key, not just declared ones).
-   Run 1–2 query variations if the first returns nothing
+   For must-have attributes the category doesn't declare, check `describe_category`:
+   its `undeclared_in_use` section lists undeclared keys in real use — a hint for filters
+   (values can differ per listing). Run 1–2 query variations if the first returns nothing
    (synonyms, brand names, looser category, drop the attribute filter).
 3. **Score** — For each result, weigh:
    - condition vs. price (value for money)

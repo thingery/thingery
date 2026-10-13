@@ -15,7 +15,7 @@ import { stripeWebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
 import { logConfigBootReport, orderFlowConfig } from "./config.js";
 import { startSweepScheduler } from "./orders-sweep.js";
-import { browsePage, itemPage } from "./web-pages.js";
+import { browsePage, itemPage, orderReturnPage, payoutSetupReturnPage } from "./web-pages.js";
 import { uploadsDir } from "./images.js";
 import { securityHeaders } from "./security-headers.js";
 import { VERSION, COMMIT, BUILD_TIME } from "./version.js";
@@ -102,6 +102,10 @@ function runHttp(): void {
 
   app.get("/item/:id", itemPage);
   app.get("/browse", browsePage);
+  // Order return pages (spec THI-3 §4.3 F15). The literal payout-setup route
+  // must be registered before the :id pattern to not be captured as an id.
+  app.get("/order/payout-setup", payoutSetupReturnPage);
+  app.get("/order/:id", orderReturnPage);
 
   // Uploaded item images (files under UPLOADS_DIR, served at /img/...)
   app.use("/img", express.static(uploadsDir(), { maxAge: "30d", immutable: true }));

@@ -25,6 +25,29 @@ Chinese-market name: 物坊 (Wùfāng).
 | `my_listings` | seller | Your listings by status |
 | `update_listing` | seller | Mark reserved/sold, adjust price, edit text or attributes |
 
+### Order flow
+
+| Tool | Auth | Purpose |
+|---|---|---|
+| `get_payout_setup` | seller | Stripe Express onboarding URL + status — optional, enables platform payment |
+| `create_order` | account | Order an item — returns a Stripe Checkout URL (stripe mode) or tracks an off-platform order |
+| `get_order` | account | One of your orders (buyer or seller side): status, tracking, deadlines |
+| `cancel_order` | account | Cancel while cancellable; paid orders refund instead |
+| `record_tracking` | seller | Record carrier + tracking code; auto carrier tracker when EasyPost is configured |
+| `confirm_payment` | seller | Confirm an off-platform payment (pending → sold) |
+| `confirm_receipt` | buyer | Confirm delivery — dispute window opens |
+| `open_dispute` | buyer | Dispute a delivered order; seller payout is held |
+| `release_funds` | buyer | Waive the dispute window, release the seller's payout now |
+
+Orders close a deal on-platform. **Stripe mode** (buyer protection: platform charges the
+buyer, holds funds, pays the seller after delivery + dispute window) runs when the deployment
+has Stripe configured *and* the seller finished payout onboarding; otherwise orders run in
+**off-platform mode** — Thingery tracks state and deadlines, parties settle payment themselves.
+States: `pending → sold → label_issued → in_transit → delivered → payout_pending → paid_out`
+with `disputed`/`cancelled`/`refunded` off-ramps; deadlines are enforced by a server-side sweep
+(unpaid cancels 24h, dispute window 48h, never-shipped disputes auto-refund 72h — defaults,
+env-tunable). Design record: [ADR 0003](docs/adr/0003-order-state-machine.md).
+
 Sellers authenticate with **OAuth** (one-click sign-in from any MCP host — see below) or a
 `thg_...` API key (`Authorization: Bearer`); search is anonymous.
 
@@ -150,6 +173,13 @@ Copy `.env.example` to `.env`. Key variables:
 | `DATABASE_URL` | Postgres connection string |
 | `PORT` / `PUBLIC_BASE_URL` | HTTP port and base URL used in item links |
 | `EMBED_API_URL` / `EMBED_API_KEY` / `EMBED_MODEL` | Any OpenAI-compatible embeddings endpoint; leave the key empty for keyword-only search |
+| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | Order flow payments (Stripe Connect). Empty key = platform payment off (orders run off-platform); key without webhook secret = payments stay pending until the webhook is configured (fail-closed) |
+| `EASYPOST_API_KEY` / `EASYPOST_WEBHOOK_SECRET` | Optional automatic carrier tracking; without it, buyers/sellers confirm delivery manually |
+| `ADMIN_API_KEY` | Admin dispute-resolution route; disabled unless ≥32 chars |
+
+Order-flow windows and abuse caps (`PAYMENT_DEADLINE_HOURS`, `DISPUTE_WINDOW_HOURS`,
+`PICKUP_AUTOCONFIRM_DAYS`, `MAX_PENDING_ORDERS_PER_BUYER`, …) are documented inline in
+[`.env.example`](.env.example) with their defaults.
 
 ## Agent skills
 
@@ -176,7 +206,7 @@ Growth path: when an attribute becomes a hot filter, promote it to a Postgres ge
 
 ## Roadmap
 
-1. **Order state machine** — `sold → label issued → in transit → delivered → payout released`, driven by carrier + payment webhooks (Stripe Connect / shipping aggregator).
+1. ~~**Order state machine**~~ — **shipped**: orders with Stripe Connect payouts, carrier webhooks, disputes, and deadline sweeps ([ADR 0003](docs/adr/0003-order-state-machine.md)). Next: live-mode Stripe after legal/ToS sign-off.
 2. **Seller skill upgrade** — photo capture flow, comparable-based pricing from live data.
 3. **Buyer alerts** — event stream: "new match for your intent".
 4. **Federation protocol** — instance-to-instance sync so anyone can host a node of the Item Graph.

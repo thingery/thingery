@@ -348,3 +348,28 @@ exports above. The site footer shows the same version + short commit.
 - Watch disk: `df -h` — item images are blobs stored in the app container's
   `/app/uploads` (nightly backup in section 4), so disk grows with uploads;
   the DB itself stays small.
+
+### Chat assistant enable/disable (THI-117)
+
+The chat assistant is dark until `LLM_API_KEY` is set in `/opt/thingery/.env`
+(`docker-compose.prod.yml` passes `LLM_API_URL`/`LLM_API_KEY`/`LLM_MODEL`
+through; empty key → `chatConfigured()` false → `/api/chat` answers 503, MCP
+and signup unaffected). Enabling is a **user-facing surface change**: it needs
+the chat hardening deployed and explicit CEO approval recorded on the issue.
+Use a dedicated provider key with a hard monthly cap; the value never enters
+the repo, docs, or chat logs — only the VPS `.env`.
+
+```bash
+# Enable (approval + key in .env first):
+cd /opt/thingery && docker compose -f docker-compose.prod.yml up -d app
+
+# Verify (expect HTTP 200 + {"reply": ...}):
+curl -s -X POST https://thingery.dev/api/chat -H 'content-type: application/json' \
+  -d '{"message":"hello","history":[]}'
+# Rate limits (expect 429 when exceeded): 10/h per IP anonymous, 60/h per
+# authed seller — chatAuthedLimiter / chatAnonLimiter in src/routes.ts.
+
+# Disable (rollback; chat returns to 503 — no schema, no code):
+#   comment out LLM_API_KEY in .env, then:
+docker compose -f docker-compose.prod.yml up -d app
+```

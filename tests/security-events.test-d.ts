@@ -26,7 +26,14 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
 
   it("reason accepts only the fixed slugs", () => {
     expectTypeOf<SecurityEventReason>().toEqualTypeOf<
-      "unsupported_media_type" | "empty" | "too_large" | "not_owned"
+      | "unsupported_media_type"
+      | "empty"
+      | "too_large"
+      | "not_owned"
+      | "bad_magic"
+      | "media_type_mismatch"
+      | "item_image_limit"
+      | "quota_exceeded"
     >();
   });
 

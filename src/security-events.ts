@@ -18,8 +18,18 @@
 /** Fixed route slugs for rate_limit events (THI-133). */
 export type SecurityEventRoute = "/api/signup" | "/api/login" | "/mcp";
 
-/** Fixed rejection reasons for image_upload events (THI-133). */
-export type SecurityEventReason = "unsupported_media_type" | "empty" | "too_large" | "not_owned";
+/** Fixed rejection reasons for image_upload events (THI-133; extended with
+ *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a
+ *  reviewed one-line addition, which is the point of this union). */
+export type SecurityEventReason =
+  | "unsupported_media_type"
+  | "empty"
+  | "too_large"
+  | "not_owned"
+  | "bad_magic"
+  | "media_type_mismatch"
+  | "item_image_limit"
+  | "quota_exceeded";
 
 export type SecurityEvent =
   | { type: "signup"; outcome: "success" }

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ItemRow, SellerRow } from "./db.js";
 import { CONDITIONS, SHIPPING_TIERS, STATUSES } from "./db.js";
-import { getCategory, getItem, createItem, listCategories, myItems, searchItems, undeclaredKeyUsage, updateItem } from "./items.js";
+import { getCategory, getItem, createItem, listCategories, ListingLimitError, myItems, searchItems, undeclaredKeyUsage, updateItem } from "./items.js";
 import { validateAttributes, AttributeValidationError, type Attributes } from "./attributes.js";
 import { addItemImageBase64 } from "./images.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
@@ -221,6 +221,14 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
           ],
         });
       } catch (e) {
+        // createItem throws ListingLimitError over the per-seller velocity
+        // caps (THI-113, security doc §6 H4.1): surface the message verbatim
+        // with the typed `rate_limited` code so agents can back off
+        // programmatically (no "create_listing failed:" prefix — the chat
+        // path reports the same bare message, THI-113 parity).
+        if (e instanceof ListingLimitError) {
+          return err(describeError(e), e.code);
+        }
         return err(`create_listing failed: ${describeError(e)}`);
       }
     },

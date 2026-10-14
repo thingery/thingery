@@ -21,7 +21,8 @@ export type SecurityEventRoute = "/api/signup" | "/api/login" | "/mcp" | "/api/i
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a
- *  reviewed one-line addition, which is the point of this union). */
+ *  reviewed one-line addition, which is the point of this union).
+ *  THI-156 rev 2 re-encode pipeline rejections — fixed slugs, no payload. */
 export type SecurityEventReason =
   | "unsupported_media_type"
   | "empty"
@@ -30,7 +31,11 @@ export type SecurityEventReason =
   | "bad_magic"
   | "media_type_mismatch"
   | "item_image_limit"
-  | "quota_exceeded";
+  | "quota_exceeded"
+  | "decode_failed"
+  | "pixel_limit"
+  | "reencode_failed"
+  | "output_too_large";
 
 export type SecurityEvent =
   | { type: "signup"; outcome: "success" }

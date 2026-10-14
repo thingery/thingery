@@ -388,7 +388,10 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         "Attach a photo to one of your listings. Pass the image as base64 (a data-URL prefix is " +
         "accepted — e.g. what you get when the user shares a photo in this conversation). " +
         "Max 5 MB decoded — a full-size image fits: ~6.7 MB as base64+JSON, under the 8 MiB " +
-        "/mcp request cap. jpeg, png, webp or gif. Requires API key.",
+        "/mcp request cap. jpeg, png, webp or gif. " +
+        "Images are re-encoded server-side: all metadata (EXIF/GPS/XMP) is stripped, orientation " +
+        "is baked in, and large images are downscaled to ≤ 2000 px before storage. Animated GIFs " +
+        "are stored as stills. Large PNGs may be rejected — prefer JPEG. Requires API key.",
       inputSchema: {
         item_id: z.string().uuid(),
         image_base64: z.string().min(50).describe("Base64-encoded image bytes (data-URL prefix allowed)"),

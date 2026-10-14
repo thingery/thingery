@@ -170,6 +170,16 @@ describe.skipIf(!available)("item image upload route (DB + HTTP)", () => {
     expect(body.error).toMatch(/unrecognized image data/i);
   });
 
+  it("answers 400, not 500, when a non-image content type leaves a parsed body", async () => {
+    const { itemId, cookie } = await seed();
+    // Content-Type application/json (< the parser limit) means express.json
+    // hands the handler a parsed object, not bytes (THI-123 obs 1 / THI-140).
+    const res = await post(itemId, Buffer.from(JSON.stringify({ hello: "world" })), cookie, "application/json");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/raw request body/i);
+  });
+
   it("rate-limits a seller past the burst with 429, without touching other sellers", async () => {
     const { sellerId, itemId, cookie } = await seed();
     for (let i = 0; i < 30; i++) {

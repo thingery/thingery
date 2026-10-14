@@ -156,7 +156,17 @@ api.post("/items/:id/images", imageUpload, asyncHandler(async (req: Request, res
   }
   const mediaType = (req.headers["content-type"] ?? "").split(";")[0].trim();
   const data = req.body as Buffer;
-  if (!data || data.length === 0) {
+  // THI-140 (THI-123 obs 1): a non-image Content-Type (e.g. application/json
+  // under the express.json limit) reaches the handler with req.body already a
+  // parsed object, not bytes — the length checks below would slide past it on
+  // `undefined`. Guard structurally: only a raw Buffer body proceeds to
+  // addItemImage; any other body shape is a client error (400), never a
+  // validator fault (500).
+  if (!Buffer.isBuffer(data)) {
+    res.status(400).json({ error: "Send the image bytes as the raw request body with an image Content-Type." });
+    return;
+  }
+  if (data.length === 0) {
     res.status(400).json({ error: "Empty upload — send the image bytes as the request body." });
     return;
   }

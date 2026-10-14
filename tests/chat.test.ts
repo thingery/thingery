@@ -18,6 +18,18 @@ import {
 } from "../src/chat.js";
 import type { SellerRow } from "../src/db.js";
 
+// THI-137 §1: a mockable seam over getItem so tests can simulate a FAILED
+// read (rejection) as distinct from "not found" (null). Everything else in
+// items.js stays real; the wrapper delegates to the real implementation
+// unless a test installs a mockRejectedValueOnce.
+vi.mock("../src/items.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/items.js")>();
+  return { ...actual, getItem: vi.fn(actual.getItem) };
+});
+import { getItem } from "../src/items.js";
+
+const realGetItem = (await vi.importActual<typeof import("../src/items.js")>("../src/items.js")).getItem;
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.resolve(__dirname, "..", "db", "schema.sql");
 
@@ -176,6 +188,10 @@ function mockLlm(script: unknown[]) {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // Defensive: if a test died before consuming its mockRejectedValueOnce,
+  // restore the real DB read so later tests are unaffected.
+  vi.mocked(getItem).mockReset();
+  vi.mocked(getItem).mockImplementation(realGetItem);
 });
 
 function toolCallMsg(id: string, name: string, args: Record<string, unknown>): unknown {
@@ -345,5 +361,59 @@ describe.skipIf(!available)("chat confirmation gate (DB)", () => {
     const declined = await chatTurn([], `chat-decline ${out.confirm!.token}`, sellerA);
     expect(declined.text).toContain("Cancelled");
     expect((await statusOf(bikeId)).status).toBe("active");
+  });
+
+  // --- THI-137 follow-ups (Architect note 1/2, cosmetic note 4) ------------
+
+  it("THI-137 §4 (cosmetic): a price drop to zero summarizes as 'free'", async () => {
+    mockLlm([toolCallMsg("c1", "update_listing", { id: bikeId, price_cents: 0 }), FINAL]);
+    const out = await chatTurn([], "make the bike free", sellerA);
+    expect(out.confirm?.op).toBe("price=0");
+    expect(out.confirm?.summary).toContain("free");
+    expect(out.confirm?.summary).not.toContain("0.00");
+    expect((await statusOf(bikeId)).price_cents).toBe(4000); // held, not executed
+  });
+
+  it("THI-137 §2: one card per turn — the second destructive op is held and described as still-pending, not dropped", async () => {
+    // Two destructive calls in a single turn. Pre-fix, both minted tokens but
+    // only the LAST card reached the client — the first op could never be
+    // confirmed. Post-fix the FIRST op keeps the card; the second is held
+    // and the model is told to guide the user to settle the card first.
+    const twoDestructiveCalls = {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        { id: "c1", type: "function", function: { name: "update_listing", arguments: JSON.stringify({ id: bikeId, price_cents: 1000 }) } },
+        { id: "c2", type: "function", function: { name: "update_listing", arguments: JSON.stringify({ id: bikeId, status: "deleted" }) } },
+      ],
+    };
+    const bodies = mockLlm([twoDestructiveCalls, FINAL]);
+    const out = await chatTurn([], "drop the bike to 10 and delete it too", sellerA);
+
+    expect(out.confirm?.op).toBe("price=1000"); // the FIRST op's card
+    const bike = await statusOf(bikeId);
+    expect(bike.price_cents).toBe(4000); // neither op executed
+    expect(bike.status).toBe("active");
+
+    const toolContents = bodies.flatMap((b) => b.messages).filter((m) => m.role === "tool").map((m) => m.content);
+    expect(toolContents.some((c) => c.includes("confirmation_required"))).toBe(true);
+    expect(toolContents.some((c) => c.includes("still_pending") && c.includes("NO new card"))).toBe(true);
+    expectAllToolMessagesWrapped(bodies);
+  });
+
+  it("THI-137 §1: a failed listing read holds the op — no ungated drop (fail-closed)", async () => {
+    // Architect note 1 on PR #68: a transient getItem rejection used to
+    // flatten into "not found" via .catch(() => null), so a >20% drop was
+    // treated as non-destructive and EXECUTED immediately. The gate must
+    // distinguish "not found" (decide normally) from "read failed" (hold).
+    vi.mocked(getItem).mockRejectedValueOnce(new Error("connection reset by peer"));
+    const bodies = mockLlm([toolCallMsg("c1", "update_listing", { id: bikeId, price_cents: 1000 }), FINAL]);
+    const out = await chatTurn([], "slash the bike price", sellerA);
+
+    expect((await statusOf(bikeId)).price_cents).toBe(4000); // NOT executed — fails on pre-fix code
+    expect(out.confirm).toBeUndefined(); // no card minted for an unreadable listing
+    const toolContent = bodies.flatMap((b) => b.messages).find((m) => m.role === "tool")?.content ?? "";
+    expect(toolContent).toContain("NOT applied"); // model-facing error, not execution
+    expectAllToolMessagesWrapped(bodies);
   });
 });

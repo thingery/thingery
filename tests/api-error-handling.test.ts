@@ -242,6 +242,34 @@ describe("/api surface fails as generic JSON on backend faults (THI-58)", () => 
     });
   });
 
+  it("T11 signup concurrent-email race: insert 23505 → 409, other insert faults stay generic 500 (THI-61)", async () => {
+    const headers = { ...JSON_HEADERS, "x-forwarded-for": "203.0.113.11" };
+    await withServer(async (base) => {
+      const unhandled = await captureUnhandled(async () => {
+        // Pre-check resolves empty (both racing signups passed it); the insert
+        // then loses on the sellers email unique constraint (pg 23505) — the
+        // same 409 body as the pre-check, not the generic 500 (Security N3).
+        vi.spyOn(pool, "query")
+          .mockResolvedValueOnce({ rows: [] })
+          .mockRejectedValueOnce(
+            Object.assign(new Error("duplicate key value violates unique constraint \"sellers_email_key\""), { code: "23505" }),
+          );
+        let res = await fetch(`${base()}/api/signup`, { method: "POST", headers, body: signupBody });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({ error: "An account with this email already exists." });
+
+        // Non-23505 insert faults keep the terminal generic 500 JSON (F5).
+        vi.spyOn(pool, "query")
+          .mockResolvedValueOnce({ rows: [] })
+          .mockRejectedValueOnce(new Error("simulated insert fault"));
+        res = await fetch(`${base()}/api/signup`, { method: "POST", headers, body: signupBody });
+        expect(res.status).toBe(500);
+        expect(await res.json()).toEqual({ error: "Something went wrong. Please try again." });
+      });
+      expect(unhandled).toBeNull();
+    });
+  });
+
   it("T10 residual pin (Security N2): /api%2Flogin and /api./login keep the Express-default HTML response", async () => {
     await withServer(async (base) => {
       for (const path of ["/api%2Flogin", "/api./login"]) {

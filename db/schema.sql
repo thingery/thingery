@@ -306,3 +306,14 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 -- webhook when capabilities.transfers = 'active' (known connected accounts only, F5).
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;           -- Express connected account
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS stripe_onboarded_at TIMESTAMPTZ;  -- transfers capability active
+
+-- Seller upload quota (THI-110 / docs/security.md §6 H3): per-seller daily
+-- count + byte caps for item-image uploads. The upload path upsert-increments
+-- atomically on accepted uploads; quota resets naturally per day (no sweep).
+CREATE TABLE IF NOT EXISTS seller_upload_quota (
+  seller_id UUID NOT NULL,
+  day       DATE NOT NULL,
+  uploads   INT NOT NULL DEFAULT 0,
+  bytes     BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (seller_id, day)
+);

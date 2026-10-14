@@ -4,6 +4,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pool } from "./db.js";
+import { logSecurityEvent } from "./security-events.js";
 
 const EXTENSION_BY_MEDIA_TYPE: Record<string, string> = {
   "image/jpeg": "jpg",
@@ -61,19 +62,33 @@ export async function addItemImage(
   data: Buffer,
   mediaType: string,
 ): Promise<{ url: string } | { error: string }> {
+  // THI-112 (H4.2): upload accept/reject events. `reason` is a fixed slug,
+  // never the raw (attacker-controlled) media type string — the no-payload
+  // rule keeps the log free of request content.
   const declared = mediaType.trim().toLowerCase();
   const ext = extensionForMediaType(declared);
-  if (!ext) return { error: `unsupported media type '${mediaType}' (use jpeg, png, webp or gif)` };
-  if (data.length === 0) return { error: "empty image" };
-  if (data.length > MAX_IMAGE_BYTES) return { error: "image too large (max 5 MB)" };
+  if (!ext) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "unsupported_media_type" }, { sellerId });
+    return { error: `unsupported media type '${mediaType}' (use jpeg, png, webp or gif)` };
+  }
+  if (data.length === 0) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "empty" }, { sellerId });
+    return { error: "empty image" };
+  }
+  if (data.length > MAX_IMAGE_BYTES) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "too_large" }, { sellerId });
+    return { error: "image too large (max 5 MB)" };
+  }
 
   // H3: the declared type is client-controlled; the bytes are not. Reject
   // anything whose magic bytes are not a real image, or don't match the claim.
   const detected = detectImageMediaType(data);
   if (!detected) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "bad_magic" }, { sellerId });
     return { error: "unrecognized image data — expected real jpeg, png, webp or gif bytes" };
   }
   if (detected !== declared) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "media_type_mismatch" }, { sellerId });
     return { error: `content-type '${declared}' does not match the actual image format (${detected})` };
   }
 
@@ -84,8 +99,12 @@ export async function addItemImage(
     `SELECT coalesce(array_length(images, 1), 0) AS image_count FROM items WHERE id = $1 AND seller_id = $2`,
     [itemId, sellerId],
   );
-  if (!owned.rows[0]) return { error: "item not found or not owned by this seller" };
+  if (!owned.rows[0]) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "not_owned" }, { sellerId });
+    return { error: "item not found or not owned by this seller" };
+  }
   if ((owned.rows[0].image_count ?? 0) >= MAX_IMAGES_PER_ITEM) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "item_image_limit" }, { sellerId });
     return { error: `image limit reached for this item (max ${MAX_IMAGES_PER_ITEM})` };
   }
 
@@ -107,6 +126,7 @@ export async function addItemImage(
     [sellerId, data.length, MAX_UPLOADS_PER_SELLER_PER_DAY, MAX_UPLOAD_BYTES_PER_SELLER_PER_DAY],
   );
   if (quota.rows.length === 0) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "quota_exceeded" }, { sellerId });
     return {
       error: `daily upload quota exceeded (max ${MAX_UPLOADS_PER_SELLER_PER_DAY} uploads or ${
         MAX_UPLOAD_BYTES_PER_SELLER_PER_DAY / (1024 * 1024)
@@ -121,6 +141,7 @@ export async function addItemImage(
 
   const url = `/img/items/${name}`;
   await pool.query(`UPDATE items SET images = images || $2 WHERE id = $1`, [itemId, [url]]);
+  logSecurityEvent({ type: "image_upload", outcome: "success" }, { sellerId });
   return { url };
 }
 

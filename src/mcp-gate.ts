@@ -13,6 +13,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { authenticateRequest } from "./auth.js";
 import { buildServer } from "./server.js";
 import { issuerFromRequest } from "./oauth.js";
+import { logSecurityEvent } from "./security-events.js";
 import { PROTECTED_TOOLS } from "./tools.js";
 import type { RateLimiter } from "./rate-limit.js";
 
@@ -96,6 +97,9 @@ export function mcpRoutes(limiters: McpLimiters): Router {
       const limiter = auth.seller ? limiters.authedLimiter : limiters.anonLimiter;
       const limitKey = auth.seller ? `key:${auth.seller.id}` : `ip:${req.ip ?? "unknown"}`;
       if (!limiter.allow(limitKey)) {
+        // THI-112 (H4.2): 429s on the MCP surface are security events — a
+        // flood here is the primary abuse signal this deployment has.
+        logSecurityEvent({ type: "rate_limit", route: "/mcp" }, { sellerId: auth.seller?.id, ip: req.ip ?? "unknown" });
         res.status(429).json({ error: "rate limited", retry_after_ms: 60_000 });
         return;
       }

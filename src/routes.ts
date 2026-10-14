@@ -21,6 +21,7 @@ import crypto from "node:crypto";
 import { pool } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
 import { applyTransition, IllegalTransitionError, type OrderRow } from "./orders.js";
+import { logSecurityEvent } from "./security-events.js";
 import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer } from "./stripe.js";
 
 const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/logins per IP per hour
@@ -49,6 +50,9 @@ const signupSchema = z.object({
 
 api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
   if (!authAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    // THI-112: brute-force attempts on the auth surface are first-class
+    // security events — the 429 response alone leaves no trace.
+    logSecurityEvent({ type: "rate_limit", route: "/api/signup" }, { ip: clientIp(req) });
     res.status(429).json({ error: "Too many attempts. Try again later." });
     return;
   }
@@ -78,21 +82,28 @@ api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
     }
     throw err;
   }
+  // THI-112: signup success — correlated by seller id + IP (H4.2).
+  logSecurityEvent({ type: "signup", outcome: "success" }, { sellerId: account.id, ip: clientIp(req) });
   res.cookie(SESSION_COOKIE, signSession(account.id), sessionCookieOptions());
   res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
 }));
 
 api.post("/login", asyncHandler(async (req: Request, res: Response) => {
   if (!authAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/login" }, { ip: clientIp(req) });
     res.status(429).json({ error: "Too many attempts. Try again later." });
     return;
   }
   const { email, password } = req.body as { email?: string; password?: string };
   const account = email ? await accountByEmail(email.toLowerCase()) : null;
   if (!account || !verifyPassword(password ?? "", (account as { password_hash?: string }).password_hash ?? null)) {
+    // THI-112: no email/username is logged — the failure event carries only
+    // outcome + IP, so the log can't become a credential-validity oracle.
+    logSecurityEvent({ type: "login", outcome: "failure" }, { ip: clientIp(req) });
     res.status(401).json({ error: "Wrong email or password." });
     return;
   }
+  logSecurityEvent({ type: "login", outcome: "success" }, { sellerId: account.id, ip: clientIp(req) });
   res.cookie(SESSION_COOKIE, signSession(account.id), sessionCookieOptions());
   res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
 }));

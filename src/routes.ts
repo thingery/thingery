@@ -84,7 +84,9 @@ api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
   }
   // THI-112: signup success — correlated by seller id + IP (H4.2).
   logSecurityEvent({ type: "signup", outcome: "success" }, { sellerId: account.id, ip: clientIp(req) });
-  res.cookie(SESSION_COOKIE, signSession(account.id), sessionCookieOptions());
+  // Sign at the live epoch (spec THI-115 §3): a fresh account is epoch 0, but
+  // passing the row's value keeps the cookie correct-by-construction.
+  res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
   res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
 }));
 
@@ -94,7 +96,14 @@ api.post("/login", asyncHandler(async (req: Request, res: Response) => {
     res.status(429).json({ error: "Too many attempts. Try again later." });
     return;
   }
-  const { email, password } = req.body as { email?: string; password?: string };
+  // THI-55 (repeated-param type-confusion sweep): a JSON body can carry
+  // arrays/objects where strings are expected, and email.toLowerCase() on an
+  // array is a TypeError → generic 500 via the terminal middleware. Treat
+  // non-string credentials as absent — the same fail-closed 401 as a wrong
+  // email. `?? {}` also covers a non-object body (top-level JSON array/string).
+  const body = (req.body ?? {}) as { email?: unknown; password?: unknown };
+  const email = typeof body.email === "string" ? body.email : undefined;
+  const password = typeof body.password === "string" ? body.password : undefined;
   const account = email ? await accountByEmail(email.toLowerCase()) : null;
   if (!account || !verifyPassword(password ?? "", (account as { password_hash?: string }).password_hash ?? null)) {
     // THI-112: no email/username is logged — the failure event carries only
@@ -104,7 +113,10 @@ api.post("/login", asyncHandler(async (req: Request, res: Response) => {
     return;
   }
   logSecurityEvent({ type: "login", outcome: "success" }, { sellerId: account.id, ip: clientIp(req) });
-  res.cookie(SESSION_COOKIE, signSession(account.id), sessionCookieOptions());
+  // Sign at the live epoch (spec THI-115 §3): after a future epoch bump (key
+  // regeneration), a cookie signed at a stale epoch would fail verification
+  // immediately — so login always reads the seller's current epoch.
+  res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
   res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
 }));
 

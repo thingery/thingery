@@ -20,6 +20,9 @@ import { RateLimiter } from "../src/rate-limit.js";
 import { logSecurityEvent, type SecurityEvent, type SecurityEventContext } from "../src/security-events.js";
 import { createItem, updateItem } from "../src/items.js";
 import { addItemImage } from "../src/images.js";
+import { registerTools } from "../src/tools.js";
+import { executeTool } from "../src/chat.js";
+import type { SellerRow } from "../src/db.js";
 import { AttributeValidationError } from "../src/attributes.js";
 import { pool } from "../src/db.js";
 import { hashPassword } from "../src/auth.js";
@@ -203,6 +206,92 @@ describe("call sites emit their events (THI-112)", () => {
       delete process.env.UPLOADS_DIR;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THI-133 F2 — create-time validation rejects (the family row the THI-112
+// table allowed but no call site emitted): both create_listing surfaces must
+// log listing_write/create/rejected before createItem ever runs.
+
+describe("create-time validation rejects emit listing_write/create/rejected (THI-133)", () => {
+  const seller: SellerRow = { id: "seller-create-rej", api_key: "thg_test", display_name: "Tester" };
+  const sneakersRow = {
+    name: "sneakers",
+    description: "",
+    attribute_definitions: [{ key: "size_eu", type: "number" as const, required: true }],
+  };
+  const rejectedEvent = {
+    ts: expect.any(String),
+    type: "listing_write",
+    action: "create",
+    outcome: "rejected",
+    sellerId: "seller-create-rej",
+    ip: null,
+  };
+
+  it("MCP create_listing (src/tools.ts): unknown_category and invalid_attributes both log the reject", async () => {
+    const handlers = new Map<string, (args: Record<string, unknown>) => Promise<unknown>>();
+    registerTools(
+      {
+        registerTool(
+          name: string,
+          _config: unknown,
+          handler: (args: Record<string, unknown>) => Promise<unknown>,
+        ) {
+          handlers.set(name, handler);
+        },
+      },
+      { seller },
+    );
+    const createListing = handlers.get("create_listing");
+    if (!createListing) throw new Error("create_listing tool was not registered");
+
+    const spy = spyLog();
+    // unknown_category: getCategory finds nothing, listCategories feeds the hint.
+    vi.spyOn(pool, "query")
+      .mockResolvedValueOnce({ rows: [] } as never)
+      .mockResolvedValueOnce({ rows: [] } as never);
+    const unknown = (await createListing({
+      title: "Vintage sneakers",
+      price_cents: 12500,
+      category: "nope",
+    })) as { isError?: boolean; content?: { text?: string }[] };
+    expect(unknown.isError).toBe(true);
+    expect(JSON.parse(unknown.content![0].text!).code).toBe("unknown_category");
+
+    // invalid_attributes: category declares a required number; a string fails.
+    vi.spyOn(pool, "query").mockResolvedValueOnce({ rows: [sneakersRow] } as never);
+    const invalid = (await createListing({
+      title: "Vintage sneakers",
+      price_cents: 12500,
+      category: "sneakers",
+      attributes: { size_eu: "forty-three" },
+    })) as { isError?: boolean; content?: { text?: string }[] };
+    expect(JSON.parse(invalid.content![0].text!).code).toBe("invalid_attributes");
+
+    expect(events(spy)).toEqual([rejectedEvent, rejectedEvent]);
+  });
+
+  it("chat create_listing (src/chat.ts): unknown category and invalid attributes both log the reject", async () => {
+    const spy = spyLog();
+    vi.spyOn(pool, "query").mockResolvedValueOnce({ rows: [] } as never);
+    const unknown = (await executeTool(
+      "create_listing",
+      { title: "Vintage sneakers", price_cents: 12500, category: "nope" },
+      seller,
+    )) as { error?: string };
+    expect(unknown.error).toContain("unknown category");
+
+    vi.spyOn(pool, "query").mockResolvedValueOnce({ rows: [sneakersRow] } as never);
+    const invalid = (await executeTool(
+      "create_listing",
+      { title: "Vintage sneakers", price_cents: 12500, category: "sneakers", attributes: { size_eu: "forty-three" } },
+      seller,
+    )) as { error?: string };
+    expect(invalid.error).toContain("size_eu");
+
+    expect(events(spy)).toEqual([rejectedEvent, rejectedEvent]);
   });
 });
 

@@ -36,6 +36,12 @@ services:
       EMBED_API_URL: ${EMBED_API_URL:-https://api.openai.com/v1/embeddings}
       EMBED_API_KEY: ${EMBED_API_KEY:-}
       EMBED_MODEL: ${EMBED_MODEL:-text-embedding-3-small}
+      # Chat assistant (docs/security.md §6 H2.3). Empty LLM_API_KEY keeps chat
+      # dark (503); MCP and signup are unaffected. Key value lives only in the
+      # VPS .env, never in this repo.
+      LLM_API_URL: ${LLM_API_URL:-https://api.openai.com/v1/chat/completions}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}

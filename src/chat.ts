@@ -327,6 +327,8 @@ export function verifyChatConfirmToken(token: string, nowMs: number = Date.now()
 
 const UPDATE_LISTING_STATUSES = ["active", "reserved", "sold", "deleted"] as const;
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * THI-126 must-fix (High): the single canonicalization point for
  * update_listing arguments, applied BEFORE the H5.2 gate so the gate and
@@ -343,10 +345,17 @@ export function normalizeUpdateArgs(
   for (const [key, value] of Object.entries(raw)) {
     switch (key) {
       case "id":
-        if (typeof value !== "string" || !value.trim()) {
+        // THI-139 finding 1 (low): enforce the UUID shape at this single
+        // canonicalization point. A malformed id makes the gate's getItem
+        // read fail PERMANENTLY (PG rejects non-uuid text with 22P02), so
+        // leaving it to the gate would classify a permanent invalid-args
+        // error as a transient "try again in a moment" failure. Rejected
+        // here, it becomes a model-facing validation error with no retry
+        // guidance and nothing executes.
+        if (typeof value !== "string" || !UUID_RE.test(value.trim())) {
           return { ok: false, error: "update_listing: id must be a listing UUID string" };
         }
-        out.id = value;
+        out.id = value.trim();
         break;
       case "status":
         if (typeof value !== "string" || !(UPDATE_LISTING_STATUSES as readonly string[]).includes(value)) {

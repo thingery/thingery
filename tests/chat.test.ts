@@ -109,32 +109,43 @@ describe("tool-result delimiters (H5.1)", () => {
 
 describe("normalizeUpdateArgs — THI-126 must-fix (gate/executor type agreement)", () => {
   const ok = (args: Record<string, unknown>) => normalizeUpdateArgs(args) as { ok: boolean; args?: Record<string, unknown>; error?: string };
+  const UID = "00000000-0000-0000-0000-000000000001";
 
   it("accepts canonical args and drops unknown keys", () => {
-    const out = ok({ id: "abc", status: "sold", price_cents: 500, title: "T", description: "D", bogus: ["x"] });
+    const out = ok({ id: UID, status: "sold", price_cents: 500, title: "T", description: "D", bogus: ["x"] });
     expect(out.ok).toBe(true);
-    expect((out as { args: Record<string, unknown> }).args).toEqual({ id: "abc", status: "sold", price_cents: 500, title: "T", description: "D" });
+    expect((out as { args: Record<string, unknown> }).args).toEqual({ id: UID, status: "sold", price_cents: 500, title: "T", description: "D" });
   });
 
   it("rejects string-typed price_cents (the gate bypass)", () => {
-    expect(ok({ id: "abc", price_cents: "1000" })).toMatchObject({ ok: false, error: expect.stringContaining("price_cents") });
+    expect(ok({ id: UID, price_cents: "1000" })).toMatchObject({ ok: false, error: expect.stringContaining("price_cents") });
   });
 
   it("rejects float, negative, NaN and array price_cents", () => {
     for (const price_cents of [999.5, -1, NaN, [1000]]) {
-      expect(ok({ id: "abc", price_cents })).toMatchObject({ ok: false });
+      expect(ok({ id: UID, price_cents })).toMatchObject({ ok: false });
     }
   });
 
   it("rejects statuses outside the allowlist (including casing)", () => {
-    expect(ok({ id: "abc", status: "SOLD" })).toMatchObject({ ok: false, error: expect.stringContaining("status") });
-    expect(ok({ id: "abc", status: "archived" })).toMatchObject({ ok: false });
+    expect(ok({ id: UID, status: "SOLD" })).toMatchObject({ ok: false, error: expect.stringContaining("status") });
+    expect(ok({ id: UID, status: "archived" })).toMatchObject({ ok: false });
   });
 
   it("rejects missing / non-string id and non-string text fields", () => {
     expect(ok({ price_cents: 500 })).toMatchObject({ ok: false, error: expect.stringContaining("id") });
     expect(ok({ id: 123 })).toMatchObject({ ok: false });
-    expect(ok({ id: "abc", title: { inject: true } })).toMatchObject({ ok: false, error: expect.stringContaining("title") });
+    expect(ok({ id: UID, title: { inject: true } })).toMatchObject({ ok: false, error: expect.stringContaining("title") });
+  });
+
+  it("THI-139 finding 1: rejects malformed ids — invalid args, not a transient read failure", () => {
+    // A non-UUID id makes the gate's getItem read reject permanently (PG
+    // 22P02); it must be classified as invalid args up front, never as a
+    // retryable "could not read" failure, and must reach neither the gate
+    // read nor the executor.
+    expect(ok({ id: "not-a-uuid", status: "sold" })).toMatchObject({ ok: false, error: expect.stringContaining("UUID") });
+    expect(ok({ id: "   " })).toMatchObject({ ok: false });
+    expect(ok({ id: "00000000-0000-0000-0000-000000000001\" OR 1=1--" })).toMatchObject({ ok: false });
   });
 });
 
@@ -415,5 +426,38 @@ describe.skipIf(!available)("chat confirmation gate (DB)", () => {
     const toolContent = bodies.flatMap((b) => b.messages).find((m) => m.role === "tool")?.content ?? "";
     expect(toolContent).toContain("NOT applied"); // model-facing error, not execution
     expectAllToolMessagesWrapped(bodies);
+  });
+
+  it("THI-137 §2 (two-round variant): a destructive call in a LATER round also hits the one-card hold", async () => {
+    // `confirm` is declared outside the round loop, so the same single-card
+    // rule must hold when the second destructive call arrives in a separate
+    // model round rather than the same tool_calls batch (THI-139 finding 2).
+    const bodies = mockLlm([
+      toolCallMsg("r1", "update_listing", { id: bikeId, price_cents: 2000 }),
+      toolCallMsg("r2", "update_listing", { id: bikeId, status: "deleted" }),
+      FINAL,
+    ]);
+    const out = await chatTurn([], "drop the bike a lot, and also delete it", sellerA);
+
+    expect(out.confirm?.op).toBe("price=2000"); // the FIRST round's op keeps the card
+    const bike = await statusOf(bikeId);
+    expect(bike.price_cents).toBe(4000); // neither op executed
+    expect(bike.status).toBe("active");
+
+    const toolContents = bodies.flatMap((b) => b.messages).filter((m) => m.role === "tool").map((m) => m.content);
+    expect(toolContents.some((c) => c.includes("confirmation_required"))).toBe(true);
+    expect(toolContents.some((c) => c.includes("still_pending") && c.includes("NO new card"))).toBe(true);
+    expectAllToolMessagesWrapped(bodies);
+  });
+
+  it("THI-139 finding 1: a malformed listing id is invalid args — no card, no read, no execution", async () => {
+    const bodies = mockLlm([toolCallMsg("c1", "update_listing", { id: "not-a-uuid", status: "sold" }), FINAL]);
+    const out = await chatTurn([], "mark that thing sold", sellerA);
+
+    expect(out.confirm).toBeUndefined(); // no card for invalid args
+    const toolContent = bodies.flatMap((b) => b.messages).find((m) => m.role === "tool")?.content ?? "";
+    expect(toolContent).toContain("must be a listing UUID"); // validation error, not "try again"
+    expect(toolContent).not.toContain("try again"); // permanent failure must not invite retries
+    expect((await statusOf(bikeId)).status).toBe("active"); // nothing executed anywhere
   });
 });

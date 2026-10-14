@@ -1,7 +1,7 @@
 // Human-facing HTML pages: public item pages and the browse page.
 // Server-rendered, crawler-friendly (also for LLM browsing agents), no JS needed.
 
-import type { Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import { getItem, searchItems } from "./items.js";
 import { sellerFromSession } from "./auth.js";
 import type { ItemRow } from "./db.js";
@@ -301,4 +301,55 @@ export async function payoutSetupReturnPage(_req: Request, res: Response): Promi
   <p class="meta">Thingery is the open item database and MCP server for AI agents to list,
   find, and trade second-hand goods.</p>`;
   res.send(page("Payout setup — Thingery", "Payout setup", body));
+}
+
+/** Terminal error middleware for the website surface (THI-54).
+ *
+ * Mounted last in src/index.ts, after the page routes and the static
+ * mounts. asyncHandler-wrapped page handlers forward rejections here —
+ * Express 4 never routes async rejections to error middleware on its own,
+ * so before THI-54 a handler bug throwing after an await was an unhandled
+ * rejection: a hung response and, on Node >= 15, a dead process. Mirrors
+ * the /api middleware (THI-58): genuine body-parser faults keep their 4xx
+ * status (F4); everything else — including a handler error carrying a
+ * forged or real .status — fails closed to a generic 500 (N1); no error
+ * detail reaches the body (F5); faults are logged server-side; and
+ * in-flight (headers-sent) responses are destroyed, nothing appended. */
+export function websiteErrorMiddleware(
+  err: unknown,
+  req: Request,
+  res: Response,
+  _next: NextFunction,
+): void {
+  const parserErr = err as { type?: unknown; status?: unknown };
+  let status = 500;
+  let heading = "Something went wrong";
+  let message = "This page could not be loaded. Please try again.";
+  if (
+    typeof parserErr.type === "string" &&
+    parserErr.type.startsWith("entity.") &&
+    typeof parserErr.status === "number" &&
+    parserErr.status >= 400 &&
+    parserErr.status < 500
+  ) {
+    status = parserErr.status;
+    heading = status === 413 ? "Request too large" : "Request could not be read";
+    message = status === 413 ? "The request body was too large." : "The request body could not be read.";
+  }
+  console.error("website error:", req.method, req.path, "->", status);
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+  res.set("Cache-Control", "no-store");
+  res
+    .status(status)
+    .type("html")
+    .send(
+      page(
+        `${heading} — Thingery`,
+        heading,
+        `<h1>${heading}</h1><p>${message}</p><p><a href="/browse">← Browse listings</a></p>`,
+      ),
+    );
 }

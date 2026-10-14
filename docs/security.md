@@ -208,6 +208,13 @@ phishing concerns — threat-model them before building, not after.
 - Network: only Caddy publishes ports; DB and app are `expose`-only; UFW SSH/80/443.
 - CI (typecheck, build, test) runs on every PR/push to `main`; deploys are SSH-gated
   behind `DEPLOY_ENABLED` + GitHub Secrets.
+- Branch protection on `main` (enabled 2026-10-14 via the classic branch-protection API):
+  PRs required before merging (0 approving reviews required), required checks `verify` +
+  `Secret scan (gitleaks)` (strict — branch must be up to date with `main`), force pushes
+  and deletions blocked, and `enforce_admins: true` — admins have no bypass. The
+  "never push to main" convention is now enforced by GitHub, not just discipline.
+  `deploy` is intentionally not a required check (it runs push-to-main only and never on
+  PRs).
 - `npm audit --omit=dev` on the current lockfile: **0 production vulnerabilities**.
 - Baseline security headers on every response (`src/security-headers.ts`): CSP with
   `script-src 'self'` only (no inline script — all executable scripts are static files),
@@ -230,10 +237,6 @@ phishing concerns — threat-model them before building, not after.
 - Prompt-injection hardening for the chat agent and downstream agent consumers (H5).
 - CSP `style-src 'unsafe-inline'` remains (inline `<style>` blocks and `style=""`
   attributes); replace with per-response nonces or external stylesheets later.
-- **Branch protection on `main` is NOT enabled** (verified via the GitHub API at the time
-  of writing: no required checks, no rulesets). The convention "never push to main,
-  human merges" is currently enforced only by discipline. Enable require-PR + green CI
-  + no direct pushes (quick wins).
 - `npm audit`/`npm outdated` are not part of CI (see §7 — current dev-dep findings exist).
 
 ## 5. Secrets hygiene policy
@@ -396,7 +399,11 @@ worst-case damage, "Exploitability" is how practical the attack is today.
   a narrow `Content-Security-Policy` for the static pages; disable `x-powered-by`
   (`app.disable("x-powered-by")`).~~ **Done** — shipped with the baseline-headers PR
   (upstream #9), including `script-src 'self'`-only CSP and the JSON-LD `<`-escaping fix.
-- Enable branch protection on `main` (require PR + green CI + no force push).
+- ~~Enable branch protection on `main` (require PR + green CI + no force push).~~
+  **Done** — enabled 2026-10-14 via the classic branch-protection API: PR required,
+  required checks `verify` + `Secret scan (gitleaks)` (strict), force pushes and
+  deletions blocked, admins included (`enforce_admins: true`). See §4, mitigations in
+  place.
 - `npm audit --omit=dev --audit-level=high` as a CI step + bump vitest to ≥ 4.1.11
   (see §7).
 - Uniform signup response to kill the 409 account-enumeration oracle (or accept and

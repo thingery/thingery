@@ -35,6 +35,18 @@ async function dbAvailable(): Promise<boolean> {
 
 const available = await dbAvailable();
 
+/** Extracts the `thingery_session=<value>` pair from a response's Set-Cookie
+ * (the regenerate endpoint re-signs the acting session after the epoch bump). */
+function sessionCookieFrom(res: Response): string {
+  const raw = res.headers.get("set-cookie");
+  expect(raw).toBeTruthy();
+  const part = String(raw)
+    .split(",")
+    .find((c) => c.trim().startsWith(`${SESSION_COOKIE}=`));
+  expect(part).toBeTruthy();
+  return part!.trim().split(";")[0];
+}
+
 describe.skipIf(!available)("API key hash at rest (THI-114)", () => {
   let db: pg.Client;
   const runTag = crypto.randomBytes(4).toString("hex");
@@ -92,6 +104,7 @@ describe.skipIf(!available)("API key hash at rest (THI-114)", () => {
     let base: string;
     let cookie: string;
     let signupKey: string;
+    let regenCookie: string;
     const email = `thi114-${runTag}@example.com`;
 
     beforeAll(async () => {
@@ -148,6 +161,7 @@ describe.skipIf(!available)("API key hash at rest (THI-114)", () => {
       });
       expect(regen.status).toBe(200);
       expect(regen.headers.get("cache-control")).toBe("no-store"); // never cache the plaintext key
+      regenCookie = sessionCookieFrom(regen); // re-signed at the bumped epoch
       const body = (await regen.json()) as { api_key: string };
       expect(body.api_key).toMatch(/^thg_[A-Za-z0-9_-]+$/);
       expect(body.api_key).not.toBe(signupKey);
@@ -157,6 +171,18 @@ describe.skipIf(!available)("API key hash at rest (THI-114)", () => {
       // plaintext fallback resolves it anymore.
       expect((await sellerFromApiKey(body.api_key))?.display_name).toBe("Key Tester");
       expect(await sellerFromApiKey(signupKey)).toBeNull();
+    });
+
+    it("regenerate revokes other sessions but keeps the acting one (THI-115 epoch bump)", async () => {
+      // The pre-rotation cookie (epoch 0) is revoked by the epoch bump in the
+      // regenerate UPDATE (THI-114 spec item 3)…
+      const stale = await fetch(`${base}/api/me`, { headers: { cookie } });
+      expect(stale.status).toBe(200);
+      expect(((await stale.json()) as { seller: unknown }).seller).toBeNull();
+      // …while the cookie re-signed in the regenerate response authenticates.
+      const fresh = await fetch(`${base}/api/me`, { headers: { cookie: regenCookie } });
+      expect(fresh.status).toBe(200);
+      expect(((await fresh.json()) as { seller: { name: string } }).seller?.name).toBe("Key Tester");
     });
 
     it("login still returns the key (show-once moment #2)", async () => {
@@ -174,12 +200,14 @@ describe.skipIf(!available)("API key hash at rest (THI-114)", () => {
     it("rotation is rate-limited per seller", async () => {
       let status = 0;
       for (let i = 0; i < 12 && status !== 429; i++) {
-        status = (
-          await fetch(`${base}/api/me/api-key`, {
-            method: "POST",
-            headers: { cookie, "x-forwarded-for": "203.0.113.53" },
-          })
-        ).status;
+        const res = await fetch(`${base}/api/me/api-key`, {
+          method: "POST",
+          headers: { cookie: regenCookie, "x-forwarded-for": "203.0.113.53" },
+        });
+        status = res.status;
+        // Each successful rotation bumps the epoch again — follow the latest
+        // re-signed cookie or the next request would 401 on a stale epoch.
+        if (status === 200) regenCookie = sessionCookieFrom(res);
       }
       expect(status).toBe(429);
     });

@@ -141,36 +141,123 @@ export function verifyPassword(password: string, stored: string | null): boolean
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-/** Ephemeral fallback: sessions reset on restart when SESSION_SECRET is unset. */
+/**
+ * Ephemeral fallback: sessions reset on restart when SESSION_SECRET is unset
+ * in development. In production the missing secret is fatal instead of silent
+ * — see `assertSecretConfigured` (docs/security.md §6 H2, fix 3).
+ */
 export const SESSION_SECRET =
   process.env.SESSION_SECRET ?? crypto.randomBytes(32).toString("hex");
-if (!process.env.SESSION_SECRET) {
+
+/**
+ * Boot guard (spec THI-115 §2, docs/security.md §6 H2 fix 3): without
+ * SESSION_SECRET the fallback secret is regenerated on every restart, so all
+ * sessions silently reset — and an unset secret in prod means the operator
+ * never made a deployment decision about it. When NODE_ENV=production (baked
+ * into the Dockerfile — a more reliable prod signal than an https
+ * PUBLIC_BASE_URL, which dev setups can also set) refuse to start with
+ * exit(1) and a clear message; otherwise keep the soft dev warning.
+ * Extracted as a function so tests can drive both branches without forking
+ * a real process.
+ */
+export function assertSecretConfigured(env: NodeJS.ProcessEnv = process.env): void {
+  // Empty string counts as unset: docker-compose passes `${SESSION_SECRET:-}`.
+  if ((env.SESSION_SECRET ?? "").length > 0) return;
+  if (env.NODE_ENV === "production") {
+    console.error(
+      "FATAL: SESSION_SECRET is not set but NODE_ENV=production — refusing to start. " +
+        "Generate one with `openssl rand -hex 32`, set SESSION_SECRET in the environment " +
+        "(see docker-compose.prod.yml), and restart. Without it every restart silently " +
+        "invalidates all sessions.",
+    );
+    process.exit(1);
+  }
   console.error("Warning: SESSION_SECRET not set — sessions will not survive restarts.");
 }
 
-export const SESSION_COOKIE = "thingery_session";
-const SESSION_MAX_AGE_S = 30 * 24 * 3600;
+assertSecretConfigured();
 
-export function signSession(sellerId: string): string {
-  // "session:" prefix = HMAC domain separation (spec THI-11 §2.5(5), F8): the
-  // shared SESSION_SECRET signs both session cookies and OAuth consent CSRF
-  // tokens ("csrf:" prefix in oauth.ts); the prefixes keep purposes distinct.
-  // One-time effect on deploy: cookies signed without the prefix stop validating
-  // (existing users log in again once).
-  const mac = crypto.createHmac("sha256", SESSION_SECRET).update(`session:${sellerId}`).digest("base64url");
-  return `${sellerId}.${mac}`;
+export const SESSION_COOKIE = "thingery_session";
+/** Canonical sellers.id shape (used to gate untrusted cookie segments before
+ *  they reach the UUID-typed SELECT — see sellerFromSession). */
+const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+/** Server-side session lifetime (spec THI-115 §1): tokens older than this are
+ * rejected even when the browser still holds the cookie — the cookie maxAge
+ * alone never expires the HMAC (docs/security.md §6 H2, fix 4). */
+export const SESSION_MAX_AGE_S = 30 * 24 * 3600;
+
+/**
+ * Session MAC input (spec THI-115 §1+§3). "session:" = HMAC domain separation
+ * (spec THI-11 §2.5(5), F8): the shared SESSION_SECRET also signs OAuth
+ * consent CSRF tokens ("csrf:" prefix in oauth.ts); the prefixes keep purposes
+ * distinct. The issue timestamp (`iat`, unix seconds) makes the token expire
+ * server-side after SESSION_MAX_AGE_S; the seller's `session_epoch`
+ * (sellers.session_epoch — bumped by the key-regeneration endpoint POST
+ * /api/me/api-key, THI-114 spec item 3, the first revocation trigger) kills
+ * every outstanding cookie for one seller at once. Cookie format: `${sellerId}.${iat}.${mac}`. One-time effect on
+ * deploy: cookies in the old `sellerId.mac` format stop validating — every
+ * existing session logs in again once (same accepted trade-off as the THI-11
+ * `session:` prefix rollout).
+ */
+function sessionMac(sellerId: string, iat: number, epoch: number): string {
+  return crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(`session:${sellerId}:${iat}:${epoch}`)
+    .digest("base64url");
 }
 
-export function parseSession(cookieValue: string | undefined): string | null {
+/** Structurally parsed session cookie — authenticated by `verifySessionToken`. */
+export interface SessionToken {
+  sellerId: string;
+  /** Issue time, unix seconds. */
+  iat: number;
+  mac: string;
+}
+
+/** Splits `${sellerId}.${iat}.${mac}` into parts without verifying anything. */
+export function splitSessionToken(cookieValue: string | undefined): SessionToken | null {
   if (!cookieValue) return null;
-  const dot = cookieValue.lastIndexOf(".");
-  if (dot <= 0) return null;
-  const sellerId = cookieValue.slice(0, dot);
-  const mac = cookieValue.slice(dot + 1);
-  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(`session:${sellerId}`).digest("base64url");
-  const a = Buffer.from(mac);
+  // Split from the right: the mac (base64url) and iat (digits) never contain
+  // dots, so a hostile dot-riddled sellerId still parses deterministically.
+  const macDot = cookieValue.lastIndexOf(".");
+  if (macDot <= 0) return null;
+  const head = cookieValue.slice(0, macDot);
+  const iatDot = head.lastIndexOf(".");
+  if (iatDot <= 0) return null;
+  const iat = Number(head.slice(iatDot + 1));
+  if (!Number.isInteger(iat) || iat < 0) return null;
+  return { sellerId: head.slice(0, iatDot), iat, mac: cookieValue.slice(macDot + 1) };
+}
+
+/** Freshness + constant-time MAC check against the seller's *current* epoch. */
+function verifySessionToken(token: SessionToken, epoch: number, nowMs: number = Date.now()): boolean {
+  if (nowMs / 1000 - token.iat > SESSION_MAX_AGE_S) return false;
+  const expected = sessionMac(token.sellerId, token.iat, epoch);
+  const a = Buffer.from(token.mac);
   const b = Buffer.from(expected);
-  return a.length === b.length && crypto.timingSafeEqual(a, b) ? sellerId : null;
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Signs a session cookie for `sellerId`. `epoch` must be the seller's current
+ * `sellers.session_epoch` (0 until the regeneration endpoint exists) — a
+ * cookie signed at a stale epoch fails verification immediately. `nowMs` is
+ * injectable for tests.
+ */
+export function signSession(sellerId: string, epoch = 0, nowMs = Date.now()): string {
+  const iat = Math.floor(nowMs / 1000);
+  return `${sellerId}.${iat}.${sessionMac(sellerId, iat, epoch)}`;
+}
+
+/** Verifies structure, 30-day freshness, and the MAC for the given epoch. */
+export function parseSession(
+  cookieValue: string | undefined,
+  epoch = 0,
+  nowMs = Date.now(),
+): string | null {
+  const token = splitSessionToken(cookieValue);
+  if (!token) return null;
+  return verifySessionToken(token, epoch, nowMs) ? token.sellerId : null;
 }
 
 function readCookie(req: Request, name: string): string | undefined {
@@ -186,13 +273,28 @@ function readCookie(req: Request, name: string): string | undefined {
 /** Resolves the logged-in seller from the session cookie (browser clients).
  * THI-114: no plaintext key selected — /api/me must not carry it. */
 export async function sellerFromSession(req: Request): Promise<SellerRow | null> {
-  const sellerId = parseSession(readCookie(req, SESSION_COOKIE));
-  if (!sellerId) return null;
-  const { rows } = await pool.query<SellerRow>(
-    `SELECT id, display_name FROM sellers WHERE id = $1`,
-    [sellerId],
+  const token = splitSessionToken(readCookie(req, SESSION_COOKIE));
+  if (!token) return null;
+  // Trust-boundary format gate (THI-122 review, finding 1): sellers.id is a
+  // UUID, and this SELECT runs before the MAC verifies — a non-UUID segment
+  // would make Postgres throw 22P02 ("invalid input syntax for type uuid"),
+  // turning a free HMAC rejection into a 500 + security_event on the OAuth
+  // surface. Reject at the boundary instead; splitSessionToken/parseSession
+  // stay format-agnostic (they are MAC-gated).
+  if (!UUID_RE.test(token.sellerId)) return null;
+  // One indexed SELECT as before — `session_epoch` rides along so a bumped
+  // epoch (revocation) kills outstanding cookies with no extra query (spec
+  // THI-115 §3). The cookie's sellerId is untrusted until the MAC verifies,
+  // but it is only used as a parameterized lookup key; nothing from this row
+  // is returned before `verifySessionToken` passes. THI-114: no plaintext key
+  // selected — /api/me must not carry it.
+  const { rows } = await pool.query<SellerRow & { session_epoch: number }>(
+    `SELECT id, display_name, session_epoch FROM sellers WHERE id = $1`,
+    [token.sellerId],
   );
-  return rows[0] ?? null;
+  const seller = rows[0];
+  if (!seller) return null;
+  return verifySessionToken(token, seller.session_epoch) ? seller : null;
 }
 
 export function sessionCookieOptions() {
@@ -211,6 +313,8 @@ export interface AccountRow extends SellerRow {
    * AccountRow is the one internal type that still carries it. */
   api_key: string;
   password_hash: string | null;
+  /** Sign-in must mint cookies at the seller's live epoch (spec THI-115 §3). */
+  session_epoch: number;
 }
 
 export async function createAccount(
@@ -221,10 +325,10 @@ export async function createAccount(
   // THI-114: the key is generated here and handed back from this variable —
   // the row itself never selects plaintext back out of the database.
   const apiKey = newApiKey();
-  const { rows } = await pool.query<SellerRow & { email: string }>(
+  const { rows } = await pool.query<SellerRow & { email: string; session_epoch: number }>(
     `INSERT INTO sellers (api_key, api_key_hash, display_name, email, password_hash)
      VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, display_name, email`,
+     RETURNING id, display_name, email, session_epoch`,
     [apiKey, apiKeyHash(apiKey), displayName, email, hashPassword(password)],
   );
   return { ...rows[0], api_key: apiKey, password_hash: null };
@@ -234,21 +338,30 @@ export async function createAccount(
  * the login response is one of the two show-once moments for the key. */
 export async function accountByEmail(email: string): Promise<AccountRow | null> {
   const { rows } = await pool.query<AccountRow>(
-    `SELECT id, api_key, display_name, email, password_hash FROM sellers WHERE email = $1`,
+    `SELECT id, api_key, display_name, email, password_hash, session_epoch FROM sellers WHERE email = $1`,
     [email],
   );
   return rows[0] ?? null;
 }
 
-/** Rotates a seller's API key (THI-114). One atomic UPDATE replaces the
- * hash and the legacy plaintext column together, so the old key stops
- * authenticating the instant the row commits. Returns the new key — its
- * only appearance outside the DB write (show-once). */
-export async function regenerateApiKey(sellerId: string): Promise<string | null> {
+/** Rotates a seller's API key (THI-114) and revokes every outstanding
+ * session cookie (THI-115 §3): one atomic UPDATE replaces the hash and the
+ * legacy plaintext column together — the old key stops authenticating the
+ * instant the row commits — and bumps `session_epoch`, which invalidates all
+ * cookies signed at earlier epochs. The regenerate endpoint immediately
+ * re-signs the acting session at the returned epoch, so the seller rotating
+ * their own key stays logged in while every other session is revoked.
+ * Returns the new key (show-once) plus the epoch it was signed at. */
+export async function regenerateApiKey(
+  sellerId: string,
+): Promise<{ apiKey: string; sessionEpoch: number } | null> {
   const apiKey = newApiKey();
-  const { rowCount } = await pool.query(
-    `UPDATE sellers SET api_key = $2, api_key_hash = $3 WHERE id = $1`,
+  const { rows } = await pool.query<{ session_epoch: number }>(
+    `UPDATE sellers
+       SET api_key = $2, api_key_hash = $3, session_epoch = session_epoch + 1
+     WHERE id = $1
+     RETURNING session_epoch`,
     [sellerId, apiKey, apiKeyHash(apiKey)],
   );
-  return rowCount ? apiKey : null;
+  return rows[0] ? { apiKey, sessionEpoch: rows[0].session_epoch } : null;
 }

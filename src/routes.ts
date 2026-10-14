@@ -80,7 +80,9 @@ api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
     }
     throw err;
   }
-  res.cookie(SESSION_COOKIE, signSession(account.id), sessionCookieOptions());
+  // Sign at the live epoch (spec THI-115 §3): a fresh account is epoch 0, but
+  // passing the row's value keeps the cookie correct-by-construction.
+  res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
   res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
 }));
 
@@ -89,13 +91,23 @@ api.post("/login", asyncHandler(async (req: Request, res: Response) => {
     res.status(429).json({ error: "Too many attempts. Try again later." });
     return;
   }
-  const { email, password } = req.body as { email?: string; password?: string };
+  // THI-55 (repeated-param type-confusion sweep): a JSON body can carry
+  // arrays/objects where strings are expected, and email.toLowerCase() on an
+  // array is a TypeError → generic 500 via the terminal middleware. Treat
+  // non-string credentials as absent — the same fail-closed 401 as a wrong
+  // email. `?? {}` also covers a non-object body (top-level JSON array/string).
+  const body = (req.body ?? {}) as { email?: unknown; password?: unknown };
+  const email = typeof body.email === "string" ? body.email : undefined;
+  const password = typeof body.password === "string" ? body.password : undefined;
   const account = email ? await accountByEmail(email.toLowerCase()) : null;
   if (!account || !verifyPassword(password ?? "", account.password_hash)) {
     res.status(401).json({ error: "Wrong email or password." });
     return;
   }
-  res.cookie(SESSION_COOKIE, signSession(account.id), sessionCookieOptions());
+  // Sign at the live epoch (spec THI-115 §3): after a future epoch bump (key
+  // regeneration), a cookie signed at a stale epoch would fail verification
+  // immediately — so login always reads the seller's current epoch.
+  res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
   res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
 }));
 
@@ -119,6 +131,10 @@ api.get("/me", asyncHandler(async (req: Request, res: Response) => {
 // THI-114 (security doc §6 H2): rotate the seller API key. Session-auth only;
 // the new key is returned exactly once and the old one dies atomically with
 // the UPDATE (both the hash and the legacy plaintext column are replaced).
+// The same UPDATE bumps sellers.session_epoch (THI-114 spec item 3), revoking
+// every outstanding session cookie — the response re-signs the acting session
+// at the new epoch so the seller rotating their own key stays logged in while
+// any other session (e.g. a stolen browser) is revoked.
 api.post("/me/api-key", asyncHandler(async (req: Request, res: Response) => {
   const seller = await sellerFromSession(req).catch(() => null);
   if (!seller) {
@@ -129,14 +145,19 @@ api.post("/me/api-key", asyncHandler(async (req: Request, res: Response) => {
     res.status(429).json({ error: "Too many regenerations. Try again later." });
     return;
   }
-  const apiKey = await regenerateApiKey(seller.id);
-  if (!apiKey) {
+  const rotated = await regenerateApiKey(seller.id);
+  if (!rotated) {
     // Session was valid but the row vanished between the two queries.
     res.status(404).json({ error: "Account not found." });
     return;
   }
+  res.cookie(
+    SESSION_COOKIE,
+    signSession(seller.id, rotated.sessionEpoch),
+    sessionCookieOptions(),
+  );
   res.set("Cache-Control", "no-store"); // show-once: never cache the plaintext key
-  res.json({ api_key: apiKey });
+  res.json({ api_key: rotated.apiKey });
 }));
 
 // --- item images (browser upload) -------------------------------------------

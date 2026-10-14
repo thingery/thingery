@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS sellers (
 -- Account system (chat/signup, v0.2). Idempotent ALTERs: safe on existing databases.
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS email TEXT UNIQUE;
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS password_hash TEXT;
+-- Session revocation groundwork (spec THI-115 §3, docs/security.md §6 H2 fix 4):
+-- per-seller epoch mixed into the session-cookie MAC (src/auth.ts). Bumping it
+-- (the key-regeneration endpoint) invalidates every outstanding session cookie
+-- for that seller at once. Default 0 keeps seeded/existing sellers usable.
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS session_epoch INT NOT NULL DEFAULT 0;
 
 -- API key hash at rest (security doc §6 H2 fix 1, THI-114 expand phase).
 -- sellers.api_key stays readable/writable until the contract PR drops it

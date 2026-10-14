@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { hashPassword, verifyPassword, signSession, parseSession } from "../src/auth.js";
+import type { Request } from "express";
+import {
+  hashPassword,
+  verifyPassword,
+  signSession,
+  parseSession,
+  sellerFromSession,
+  SESSION_COOKIE,
+  SESSION_MAX_AGE_S,
+} from "../src/auth.js";
 
 describe("password hashing", () => {
   it("round-trips a correct password and rejects a wrong one", () => {
@@ -18,17 +27,71 @@ describe("password hashing", () => {
   });
 });
 
-describe("session tokens", () => {
-  it("signs and parses a seller id", () => {
+describe("session tokens (THI-115: server-side expiry + epoch)", () => {
+  const DAY_MS = 24 * 3600 * 1000;
+
+  it("signs and parses a seller id (round-trip at the default epoch)", () => {
     const token = signSession("11111111-2222-3333-4444-555555555555");
     expect(parseSession(token)).toBe("11111111-2222-3333-4444-555555555555");
   });
 
+  it("emits sellerId.iat.mac with iat pinned to the issue time", () => {
+    const now = Date.now();
+    const parts = signSession("seller-a", 0, now).split(".");
+    expect(parts).toHaveLength(3);
+    expect(parts[1]).toBe(String(Math.floor(now / 1000)));
+  });
+
+  it("rejects tokens older than 30 days (server-side expiry)", () => {
+    expect(parseSession(signSession("seller-a", 0, Date.now() - (SESSION_MAX_AGE_S + 60) * 1000))).toBeNull();
+    // Just inside the window still validates.
+    expect(parseSession(signSession("seller-a", 0, Date.now() - 29 * DAY_MS))).toBe("seller-a");
+  });
+
+  it("rejects a tampered iat — the MAC covers it", () => {
+    const [sellerId, , mac] = signSession("seller-a").split(".");
+    // Same MAC, forged later issue time: not expired, so only the MAC can reject it.
+    const forged = `${sellerId}.${Math.floor(Date.now() / 1000) + 3600}.${mac}`;
+    expect(parseSession(forged)).toBeNull();
+  });
+
   it("rejects tampered tokens", () => {
-    const token = signSession("seller-a");
-    const forged = `seller-b.${token.split(".")[1]}`;
+    const [sellerId, iat, mac] = signSession("seller-a").split(".");
+    const forged = `seller-b.${iat}.${mac}`;
     expect(parseSession(forged)).toBeNull();
     expect(parseSession("nonsense")).toBeNull();
     expect(parseSession(undefined)).toBeNull();
+  });
+
+  it("rejects the pre-THI-115 two-part cookie format", () => {
+    // All existing cookies look like this on deploy → logged out once.
+    expect(parseSession(`seller-a.${"A".repeat(43)}`)).toBeNull();
+  });
+
+  it("rejects a non-numeric or negative iat", () => {
+    const mac = "A".repeat(43);
+    expect(parseSession(`seller-a.notanumber.${mac}`)).toBeNull();
+    expect(parseSession(`seller-a.-5.${mac}`)).toBeNull();
+    expect(parseSession(`seller-a..${mac}`)).toBeNull();
+  });
+
+  it("epoch bump invalidates old cookies; re-signing at the new epoch works", () => {
+    expect(parseSession(signSession("seller-a", 0), 1)).toBeNull(); // bumped → revoked
+    expect(parseSession(signSession("seller-a", 1), 1)).toBe("seller-a");
+  });
+});
+
+describe("sellerFromSession trust-boundary gate (THI-122 finding 1)", () => {
+  const reqWith = (cookie: string): Request => ({ headers: { cookie } }) as unknown as Request;
+
+  it("rejects a non-UUID sellerId segment before the SELECT (no 22P02 throw)", async () => {
+    // Review PoC, pre-fix: this cookie reached the UUID-typed SELECT and threw
+    // `invalid input syntax for type uuid` → 500 + security_event on /oauth.
+    const poc = `${SESSION_COOKIE}=not-a-uuid.1750000000.${"A".repeat(43)}`;
+    await expect(sellerFromSession(reqWith(poc))).resolves.toBeNull();
+    // Same for other 3-part-but-not-UUID shapes.
+    await expect(
+      sellerFromSession(reqWith(`${SESSION_COOKIE}=seller.a.1750000000.${"A".repeat(43)}`)),
+    ).resolves.toBeNull();
   });
 });

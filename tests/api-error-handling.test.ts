@@ -135,7 +135,7 @@ describe("/api surface fails as generic JSON on backend faults (THI-58)", () => 
 
   it("T4 /api/items/:id/images upload fault: 500 JSON, no unhandled rejection (F2)", async () => {
     vi.spyOn(pool, "query")
-      .mockResolvedValueOnce({ rows: [{ id: "seller-1", api_key: "thg_x", display_name: "S" }] }) // session lookup
+      .mockResolvedValueOnce({ rows: [{ id: "seller-1", api_key: "thg_x", display_name: "S", session_epoch: 0 }] }) // session lookup (THI-115: epoch rides along)
       .mockRejectedValueOnce(new Error("simulated failover")); // addItemImage ownership check
     await withServer(async (base) => {
       const unhandled = await captureUnhandled(async () => {
@@ -278,6 +278,42 @@ describe("/api surface fails as generic JSON on backend faults (THI-58)", () => 
         expect(res.headers.get("content-type")).toContain("text/html"); // default handler, not ours
         expect(await res.text()).not.toContain("Request body could not be read.");
       }
+    });
+  });
+
+  it("THI-55: non-string email/password on /api/login answer 401, never a 500", async () => {
+    // Repeated params are one way an array reaches a string-typed consumer;
+    // a JSON body can carry arrays (or any non-string) directly. On main an
+    // array email reaches email.toLowerCase() → TypeError → generic 500.
+    // Guards must treat non-strings as absent credentials (fail-closed 401).
+    await withServer(async (base) => {
+      const unhandled = await captureUnhandled(async () => {
+        const arrayEmail = await fetch(`${base()}/api/login`, {
+          method: "POST",
+          headers: { ...JSON_HEADERS, "x-forwarded-for": "203.0.113.21" },
+          body: JSON.stringify({ email: ["who@example.com", "other@example.com"], password: "password123" }),
+        });
+        expect(arrayEmail.status).toBe(401);
+        expect(await arrayEmail.json()).toEqual({ error: "Wrong email or password." });
+
+        const arrayPassword = await fetch(`${base()}/api/login`, {
+          method: "POST",
+          headers: { ...JSON_HEADERS, "x-forwarded-for": "203.0.113.22" },
+          body: JSON.stringify({ email: "who@example.com", password: ["password123", "password456"] }),
+        });
+        expect(arrayPassword.status).toBe(401);
+        expect(await arrayPassword.json()).toEqual({ error: "Wrong email or password." });
+
+        // Non-object bodies (JSON array/string top level) must also 401.
+        const arrayBody = await fetch(`${base()}/api/login`, {
+          method: "POST",
+          headers: { ...JSON_HEADERS, "x-forwarded-for": "203.0.113.23" },
+          body: JSON.stringify(["who@example.com", "password123"]),
+        });
+        expect(arrayBody.status).toBe(401);
+        expect(await arrayBody.json()).toEqual({ error: "Wrong email or password." });
+      });
+      expect(unhandled).toBeNull();
     });
   });
 });

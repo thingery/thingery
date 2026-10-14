@@ -6,7 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { buildServer } from "./server.js";
 import { sellerFromApiKey } from "./auth.js";
 import { mcpRoutes } from "./mcp-gate.js";
-import { mountOauthRoutes } from "./oauth.js";
+import { asyncHandler, mountOauthRoutes } from "./oauth.js";
 import { startOauthSweepTimer } from "./oauth-sweep.js";
 import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
@@ -15,14 +15,23 @@ import { stripeWebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
 import { logConfigBootReport, orderFlowConfig } from "./config.js";
 import { startSweepScheduler } from "./orders-sweep.js";
-import { browsePage, itemPage, orderReturnPage, payoutSetupReturnPage } from "./web-pages.js";
+import { browsePage, itemPage, orderReturnPage, payoutSetupReturnPage, websiteErrorMiddleware } from "./web-pages.js";
 import { uploadsDir } from "./images.js";
 import { securityHeaders } from "./security-headers.js";
+import { installProcessSafetyNet } from "./process-safety.js";
 import { VERSION, COMMIT, BUILD_TIME } from "./version.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT ?? 3000);
+
+// THI-54: last-resort process-level net, active in both transports. Every
+// mounted surface converts its own async faults into responses (see
+// src/process-safety.ts); this catches whatever they cannot reach — an
+// unwrapped future route, a background sweep timer, anything outside
+// request handling. Log loudly, keep serving: Node >= 15 would otherwise
+// terminate the process on the first stray rejection.
+installProcessSafetyNet();
 
 /**
  * Two ways to run Thingery:
@@ -88,7 +97,10 @@ function runHttp(): void {
   // PR-1): mount position unchanged, right where the router sat before.
   mountApiRoutes(app);
 
-  app.get("/healthz", async (_req, res) => {
+  // THI-54: /healthz has its own try/catch (DB fault → 503), but every
+  // async handler on the app is wrapped uniformly — the wrapper is a no-op
+  // for handlers that never reject.
+  app.get("/healthz", asyncHandler(async (_req, res) => {
     try {
       await pool.query("SELECT 1");
       // commit/buildTime are baked in at build time (see src/version.ts);
@@ -98,14 +110,19 @@ function runHttp(): void {
     } catch {
       res.status(503).json({ ok: false, db: "unreachable" });
     }
-  });
+  }));
 
-  app.get("/item/:id", itemPage);
-  app.get("/browse", browsePage);
+  // THI-54: page handlers are async — wrapped so a handler bug rejecting
+  // after an await reaches the terminal error middleware below instead of
+  // becoming an unhandled rejection (hung response, dead process on
+  // Node >= 15). Healthy paths are unchanged; each page keeps its own
+  // fail-secure .catch() degrade behavior.
+  app.get("/item/:id", asyncHandler(itemPage));
+  app.get("/browse", asyncHandler(browsePage));
   // Order return pages (spec THI-3 §4.3 F15). The literal payout-setup route
   // must be registered before the :id pattern to not be captured as an id.
-  app.get("/order/payout-setup", payoutSetupReturnPage);
-  app.get("/order/:id", orderReturnPage);
+  app.get("/order/payout-setup", asyncHandler(payoutSetupReturnPage));
+  app.get("/order/:id", asyncHandler(orderReturnPage));
 
   // Uploaded item images (files under UPLOADS_DIR, served at /img/...)
   app.use("/img", express.static(uploadsDir(), { maxAge: "30d", immutable: true }));
@@ -113,6 +130,12 @@ function runHttp(): void {
   // Static website + discovery files (llms.txt, robots.txt, .well-known/)
   const websiteDir = path.resolve(__dirname, "..", "website");
   app.use(express.static(websiteDir, { extensions: ["html"] }));
+
+  // THI-54: terminal error middleware for the website surface, mounted last.
+  // Errors from every earlier surface that its own middleware passed through
+  // (non-/api, non-oauth paths — the pages, /healthz, /img and static files)
+  // land here: logged server-side, generic 500 HTML to the client.
+  app.use(websiteErrorMiddleware);
 
   app.listen(PORT, () => {
     // OAuth retention sweeps (spec THI-11 §4.5): boot run + hourly, unref'd.

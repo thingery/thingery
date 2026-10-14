@@ -188,4 +188,6 @@ exports above. The site footer shows the same version + short commit.
 
 - Bigger VPS: resize, reboot, done.
 - Managed database: change `DATABASE_URL`, done.
-- Watch disk: `df -h` — images are URLs (not blobs), so the DB stays small for a long time.
+- Watch disk: `df -h` — item images are blobs stored in the app container's
+  `/app/uploads` (nightly backup in section 4), so disk grows with uploads;
+  the DB itself stays small.

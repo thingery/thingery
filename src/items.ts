@@ -1,5 +1,6 @@
 import { pool, type ItemRow } from "./db.js";
 import { embedText, itemEmbeddingText } from "./embed.js";
+import { logSecurityEvent } from "./security-events.js";
 import {
   attributeShapeErrors,
   AttributeValidationError,
@@ -48,6 +49,12 @@ export class ListingLimitError extends Error {
   }
 }
 
+/** THI-112: listing_write event action — a status update to 'deleted' is the
+ * delete path (listings are never row-deleted); everything else is an update. */
+function writeAction(status: string | undefined): "update" | "delete" {
+  return status === "deleted" ? "delete" : "update";
+}
+
 export async function createItem(input: CreateItemInput): Promise<ItemRow> {
   // Caps run BEFORE the embeddings call: every create costs an embeddings-API
   // request (the cost-DoS in security doc §6 H4), so rejecting after embedding
@@ -65,6 +72,10 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
     Number(capRows[0].creates_24h) >= MAX_LISTING_CREATES_PER_SELLER_PER_DAY ||
     Number(capRows[0].active) >= MAX_ACTIVE_LISTINGS_PER_SELLER
   ) {
+    // THI-112 × THI-113 merge synthesis: the cap rejection is the create path's
+    // "rejected" listing_write outcome (shape already in SecurityEvent; updateItem
+    // logs its rejections the same way). Seller id only — no-payload rule, §6.
+    logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: input.seller_id });
     throw new ListingLimitError();
   }
 
@@ -104,6 +115,9 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
       embedding ? JSON.stringify(embedding) : null,
     ],
   );
+  // THI-112 (H4.2): successful listing create — seller id only, never the
+  // title/description (no-payload rule in docs/security.md §6).
+  logSecurityEvent({ type: "listing_write", action: "create", outcome: "success" }, { sellerId: input.seller_id });
   return rows[0];
 }
 
@@ -273,7 +287,10 @@ export async function updateItem(
   // this is the single choke point for both MCP and chat callers.
   if (update.attributes !== undefined) {
     const shapeErrors = attributeShapeErrors(update.attributes);
-    if (shapeErrors.length > 0) throw new AttributeValidationError(shapeErrors);
+    if (shapeErrors.length > 0) {
+      logSecurityEvent({ type: "listing_write", action: writeAction(update.status), outcome: "rejected" }, { sellerId });
+      throw new AttributeValidationError(shapeErrors);
+    }
     sets.push(`attributes = ${add(JSON.stringify(update.attributes))}::jsonb`);
   }
   if (sets.length === 0) return getItem(id);
@@ -284,6 +301,12 @@ export async function updateItem(
      WHERE id = $${params.length - 1} AND seller_id = $${params.length}
      RETURNING *`,
     params,
+  );
+  // THI-112 (H4.2): update/delete outcome — null means the item was not
+  // found or not owned by this seller, which is the rejection worth logging.
+  logSecurityEvent(
+    { type: "listing_write", action: writeAction(update.status), outcome: rows[0] ? "success" : "rejected" },
+    { sellerId },
   );
   return rows[0] ?? null;
 }

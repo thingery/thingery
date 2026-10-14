@@ -103,16 +103,20 @@ enough to be polite; robots.txt already states our crawl preferences. If scrapin
 an operational problem, the lever is rate limits and caching, not access control.
 *Lens: Unrestricted Resource Consumption (API4:2023), Economy of Mechanism.*
 
-**Upload abuse.** Two upload paths: MCP `add_item_image` (base64, ≤ 5 MB claimed) and
+**Upload abuse.** Two upload paths: MCP `add_item_image` (base64, ≤ 5 MB enforced
+on the decoded bytes) and
 browser `POST /api/items/:id/images` (raw bytes, ≤ 5 MB + 64 KB enforced by
 `express.raw`). Both owner-check the item and allowlist media types — good. Gaps:
 **no cap on images per item** (`src/images.ts` `addItemImage` appends unbounded),
 **no per-seller storage quota**, **no rate limit on the browser upload route at all**,
 and **media type is client-asserted, not validated against actual bytes** (no magic-byte
 check). A single authenticated seller can fill the disk: 5 MB × request rate. Also,
-`create_listing` accepts arbitrary `z.string().url()` image URLs — including
-`javascript:`/`data:` schemes and attacker-controlled hosts (tracking pixels that
-deanonymize buyers who open item pages). *Lens: API4:2023, input validation, least
+`create_listing` accepts arbitrary `z.string().url()` image URLs — ~~including
+`javascript:`/`data:` schemes~~ (fixed — PR #70 / THI-111: image URLs are now
+http(s)-only; the SDK's zod parse rejects other schemes with a typed error before the
+handler) and attacker-controlled hosts (tracking pixels that
+deanonymize buyers who open item pages — host control is accepted residual risk for
+external image URLs). *Lens: API4:2023, input validation, least
 privilege.*
 
 **Key leakage.** API keys are stored **plaintext** in `sellers.api_key` (the schema's own
@@ -132,7 +136,7 @@ Failures (A02:2021), secrets management.*
 | **T**ampering | `create_listing`/`update_listing` payloads; `attributes` JSONB | TLS protects transit. Owner checks are correct (`updateItem` scopes `WHERE seller_id = $`); no cross-seller tampering found. Free-form attributes pass through by design — tampering with *semantic* integrity (fake ISBNs, wrong sizes) is unmitigated and accepted for now. Media type of uploads is client-asserted (tamperable). |
 | **R**epudiation | Listing creation/edit, logins, rate-limit hits | **No audit trail.** Logs are `console.log/error` only; who created/edited what is reconstructible from the DB but nothing logs auth failures or abuse. Repudiation currently fails. Fix in H4. |
 | **I**nformation disclosure | `get_item`, `/api/me`, error paths, headers, external image URLs | `get_item` returns `seller_id` (a UUID — acceptable, unguessable, no display name). Signup returns 409 "email exists" — account enumeration. Errors echo exception messages (`describeError`, signup 500). `x-powered-by` disabled since the baseline-headers PR. External image URLs leak viewer IPs to third parties. Plaintext keys in DB/backups (H2). No secrets found in repo/logs today. |
-| **D**enial of service | `/mcp`, `/api/*`, uploads, embeddings API, chat LLM | Body sizes bounded (4 MiB SDK cap on `/mcp`, 256 KB JSON on `/api`, 5 MB uploads). Query limits capped (≤ 50 search, ≤ 100 my_listings). Real DoS vectors: the shared-bucket bug (H1) lets one client lock out *all* anonymous users; disk fill via uploads (H3); cost DoS on `EMBED_API_KEY`/`LLM_API_KEY` via spam or chat. ILIKE wildcards are escaped (`src/items.ts`), preventing pattern-DoS. |
+| **D**enial of service | `/mcp`, `/api/*`, uploads, embeddings API, chat LLM | Body sizes bounded (8 MiB `/mcp` gate cap (`src/mcp-gate.ts`, THI-11 §2.10c — the gate pre-parses and hands the transport the body, so the SDK's 4 MiB default never applies on that path), 256 KB JSON on `/api`, 5 MB uploads). Query limits capped (≤ 50 search, ≤ 100 my_listings). Real DoS vectors: the shared-bucket bug (H1) lets one client lock out *all* anonymous users; disk fill via uploads (H3); cost DoS on `EMBED_API_KEY`/`LLM_API_KEY` via spam or chat. ILIKE wildcards are escaped (`src/items.ts`), preventing pattern-DoS. |
 | **E**levation of privilege | Tool surface, chat agent | **None found.** Every write tool re-checks `ctx.seller`; there is no admin surface at all (also means no privileged code to exploit — and no moderation capability; see H4). Chat agent tools execute with the *session* seller only (`src/chat.ts` `executeTool`). |
 
 ### 3.3 OWASP API Top 10 (2023) — every MCP tool is an API endpoint
@@ -191,7 +195,8 @@ phishing concerns — threat-model them before building, not after.
   cookies verified in constant time; 192-bit API keys.
 - Zod validation on every MCP tool input and browser API route (type/length/range).
 - Rate limiters: `/mcp` 120/min per key, 30/min per IP; signup+login 10/h per IP; chat
-  10/h anon / 60/h authed. Body caps: 4 MiB `/mcp` (SDK default), 256 KB `/api` JSON,
+  10/h anon / 60/h authed. Body caps: 8 MiB `/mcp` (gate, THI-11 §2.10c; the SDK's
+  4 MiB default is bypassed by the pre-parsed body), 256 KB `/api` JSON,
   5 MB uploads.
 - Upload allowlist by media type, generated filenames (no traversal), owner check, images
   served from `/img` with immutable caching.
@@ -203,6 +208,13 @@ phishing concerns — threat-model them before building, not after.
 - Network: only Caddy publishes ports; DB and app are `expose`-only; UFW SSH/80/443.
 - CI (typecheck, build, test) runs on every PR/push to `main`; deploys are SSH-gated
   behind `DEPLOY_ENABLED` + GitHub Secrets.
+- Branch protection on `main` (enabled 2026-10-14 via the classic branch-protection API):
+  PRs required before merging (0 approving reviews required), required checks `verify` +
+  `Secret scan (gitleaks)` (strict — branch must be up to date with `main`), force pushes
+  and deletions blocked, and `enforce_admins: true` — admins have no bypass. The
+  "never push to main" convention is now enforced by GitHub, not just discipline.
+  `deploy` is intentionally not a required check (it runs push-to-main only and never on
+  PRs).
 - `npm audit --omit=dev` on the current lockfile: **0 production vulnerabilities**.
 - Baseline security headers on every response (`src/security-headers.ts`): CSP with
   `script-src 'self'` only (no inline script — all executable scripts are static files),
@@ -225,10 +237,6 @@ phishing concerns — threat-model them before building, not after.
 - Prompt-injection hardening for the chat agent and downstream agent consumers (H5).
 - CSP `style-src 'unsafe-inline'` remains (inline `<style>` blocks and `style=""`
   attributes); replace with per-response nonces or external stylesheets later.
-- **Branch protection on `main` is NOT enabled** (verified via the GitHub API at the time
-  of writing: no required checks, no rulesets). The convention "never push to main,
-  human merges" is currently enforced only by discipline. Enable require-PR + green CI
-  + no direct pushes (quick wins).
 - `npm audit`/`npm outdated` are not part of CI (see §7 — current dev-dep findings exist).
 
 ## 5. Secrets hygiene policy
@@ -312,19 +320,27 @@ worst-case damage, "Exploitability" is how practical the attack is today.
   cap; no per-seller storage quota; `POST /api/items/:id/images` (`src/routes.ts`) has
   **no rate limiter at all** (only session auth); media type is taken from the client's
   `Content-Type`/tool argument, never checked against the bytes; `create_listing`
-  accepts `z.string().url()` for image URLs, which permits `javascript:`/`data:`
-  schemes and arbitrary third-party hosts (buyer IP leak via tracking pixels,
-  indirect-content risk for agents).
+  accepts `z.string().url()` for image URLs, which ~~permits `javascript:`/`data:`
+  schemes~~ (**fixed — PR #70 / THI-111**; http(s)-only now) and arbitrary third-party
+  hosts (buyer IP leak via tracking pixels,
+  indirect-content risk for agents — host control remains accepted residual risk).
 - **Severity: Medium** (disk exhaustion on a 20 GB VPS = full outage; illegal-content
   hosting is a real-world risk for any public upload surface). **Exploitability: High**
   (any free account; the browser route isn't even rate limited).
 - **Fix:** cap images per item (12, matching `create_listing`'s array cap), per-seller
   daily upload quota (count + bytes), rate-limit the upload route, validate magic bytes
-  (JPEG/PNG/WebP/GIF signatures) before accepting, allowlist `http(s)` for image URL
-  fields (reject other schemes), and document that the SDK's 4 MiB body cap currently
+  (JPEG/PNG/WebP/GIF signatures) before accepting, ~~allowlist `http(s)` for image URL
+  fields (reject other schemes)~~ **— Done, shipped with PR #70 (THI-111)**, and ~~document that the SDK's 4 MiB body cap currently
   makes the "max 5 MB" claim on `add_item_image` unreachable via `/mcp` (~3 MB real
   ceiling after base64 + JSON overhead — align the doc, tool description, or raise
-  `maxRequestBodySize` deliberately).
+  `maxRequestBodySize` deliberately)~~.
+  **Corrected (THI-111):** that premise was stale — since the THI-11 gate, `/mcp`
+  buffers requests itself (8 MiB cap) and passes a **pre-parsed** body to the SDK
+  transport, which skips `readRequestBody` entirely, so the SDK's 4 MiB
+  `maxRequestBodySize` never applies. Verified empirically (authed 5 MB image →
+  6.67 MiB base64+JSON body → HTTP 200, tool executes; 11.33 MiB body → 413 from the
+  gate). The "max 5 MB" claim is accurate as stated; the tool description and README
+  now spell out both limits (5 MB decoded, 8 MiB `/mcp` request cap).
 - **Owner:** Coder; Security reviews (upload paths are protected per AGENTS.md).
   **Effort: M (2–3 days).**
 
@@ -383,7 +399,11 @@ worst-case damage, "Exploitability" is how practical the attack is today.
   a narrow `Content-Security-Policy` for the static pages; disable `x-powered-by`
   (`app.disable("x-powered-by")`).~~ **Done** — shipped with the baseline-headers PR
   (upstream #9), including `script-src 'self'`-only CSP and the JSON-LD `<`-escaping fix.
-- Enable branch protection on `main` (require PR + green CI + no force push).
+- ~~Enable branch protection on `main` (require PR + green CI + no force push).~~
+  **Done** — enabled 2026-10-14 via the classic branch-protection API: PR required,
+  required checks `verify` + `Secret scan (gitleaks)` (strict), force pushes and
+  deletions blocked, admins included (`enforce_admins: true`). See §4, mitigations in
+  place.
 - `npm audit --omit=dev --audit-level=high` as a CI step + bump vitest to ≥ 4.1.11
   (see §7).
 - Uniform signup response to kill the 409 account-enumeration oracle (or accept and

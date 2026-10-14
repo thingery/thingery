@@ -417,6 +417,54 @@ exports above. The site footer shows the same version + short commit.
   sets `SESSION_SECRET` (it does if you followed §3) before upgrading. Rollback
   is `git revert` + users log in again — same one-time effect.
 
+### 5.1 Image pipeline: post-deploy spot-check, backfill, purge (THI-156/THI-166)
+
+Run this after any deploy that touches `src/images.ts`. Blast radius for image-pipeline
+deploys is the app container only (no schema/compose changes); rollback = rebuild at the
+previous commit.
+
+1. **Both-path fresh upload (F3).** Upload a large legal image (~49 MP, ≤ 5 MB) with EXIF/GPS
+   twice: via `/mcp` `add_item_image` (API key auth) and via `POST /api/items/:id/images`
+   (session cookie, raw body). CI tests glibc; prod runs musl — never rely on one path.
+   Fixture: `python3 -c` with PIL — 7000×7000 gradient, `Image.Exif()` with a marker string
+   and a GPS IFD (rational values as floats), saved as JPEG + WebP.
+2. **Assert the stored copies are clean.** Download the returned `/img/items/...` URLs and
+   verify: dims ≤ 2000, same-family format, zero EXIF/GPS/XMP/ICC, marker string absent
+   from raw bytes. PIL: `im.getexif()`, `im.get_ifd(0x8825)`, `im.info`.
+3. **RSS watch (Security N2).** During each upload sample
+   `docker stats --no-stream --format "{{.MemUsage}}" thingery-app-1` (~1 Hz) and read the
+   kernel high-water mark after: `docker exec thingery-app-1 awk '/VmHWM/{print $2}' /proc/1/status`.
+   Record baseline / peak / settle. Also note `docker inspect -f '{{.HostConfig.Memory}}'
+   thingery-app-1` (no cap → semaphore + `sequentialRead` are the bounds on the 2 GB box).
+   2026-10-14 baseline (49 MP uploads): VmRSS ~98 MB, peaks 152 MB (JPEG) / 156 MB (WebP),
+   settle ~106 MB, request times 1.0 s / 0.7 s.
+4. **Backfill existing uploads** (idempotent; skips already-clean files). The runtime image
+   has no `scripts/` or dev deps, so run a one-off musl container matching prod, with the
+   uploads volume nested under a host-persisted backup dir (the script writes originals to a
+   *sibling* of the uploads dir — outside the served tree — before overwriting):
+
+   ```bash
+   sudo mkdir -p /var/backups/thi166
+   docker run --rm \
+     -v /var/backups/thi166:/work \
+     -v thingery_uploads:/work/uploads \
+     -e UPLOADS_DIR=/work/uploads \
+     -v /opt/thingery:/src:ro \
+     node:22-alpine sh -c "cp -r /src /app2 && cd /app2 && npm ci --no-audit --no-fund >/dev/null 2>&1 && npx tsx scripts/reencode-existing-uploads.ts"
+   ```
+
+   Report the printed counts (processed/skipped/failed). A backup dir `uploads-backup-<date>/`
+   is created on the host at `/var/backups/thi166/` only when at least one file is re-encoded.
+   The empty `uploads/` dir docker creates there is just the volume mountpoint — ignore it.
+5. **Purge (F8b).** Backups are kept ≤ 7 days; root crontab:
+
+   ```bash
+   0 5 * * * find /var/backups/thi166 -maxdepth 1 -type d -name "uploads-backup-*" -mtime +7 -exec rm -rf {} +
+   ```
+
+   Scope is strictly `uploads-backup-*` under `/var/backups/thi166` — never touch the
+   age-encrypted nightly archives (`thingery-*.age`, key off-box).
+
 ## 6. Scaling later
 
 - Bigger VPS: resize, reboot, done.

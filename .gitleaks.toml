@@ -17,3 +17,15 @@ description = "Thingery seller API key"
 regex = '''\bthg_[A-Za-z0-9_-]{20,}\b'''
 keywords = ["thg_"]
 tags = ["secret", "thingery"]
+
+# False positive (2026-10-14): "definitely-wrong-hunter2" is the fake login
+# password used by tests/security-events.test.ts to assert that login-failure
+# events do not echo credential material. It is a test fixture, never a real
+# credential — but the generic-api-key rule flags it, and because CI scans all
+# refs, one branch carrying it fails the gitleaks job for every open PR.
+# Scoped to this exact string so any other occurrence still fails the scan.
+[allowlist]
+description = "Known test fixtures (fake credentials used by tests)"
+regexes = [
+  '''definitely-wrong-hunter2''',
+]

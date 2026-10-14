@@ -300,9 +300,18 @@ worst-case damage, "Exploitability" is how practical the attack is today.
   invalidation storms). **Exploitability: Low** (requires VPS/DB/backup access or a
   future read primitive — but backups get copied, rsynced, and forgotten).
 - **Fix:**
-  1. Store `sha256(api_key)` and look up by hash (the key has 192 bits of entropy, so a
+  1. ~~Store `sha256(api_key)` and look up by hash (the key has 192 bits of entropy, so a
      fast hash is appropriate; no salt needed for random tokens). Show-once semantics at
-     creation + a "regenerate key" endpoint that revokes the old key.
+     creation + a "regenerate key" endpoint that revokes the old key.~~ **Done — shipped
+     with PR #67 / THI-114** (expand phase: `api_key_hash` + backfill, hash-first dual-read,
+     show-once key, `POST /api/me/api-key`; dropping the legacy plaintext column is a
+     separate contract PR after release + one clean nightly backup). Key revocation on
+     rotate is atomic — the old key fails lookup the moment the UPDATE commits. The paired
+     session revocation (the rotate bumps `sellers.session_epoch`) is **eventual, not
+     zero-grace**: `sellerFromSession` reads the epoch at SELECT time, so a bump committing
+     after that read lets that single in-flight request through (THI-122 finding 2,
+     CEO-approved condition; the same one-request-wide race applies to any future epoch
+     bump, e.g. password change).
   2. Backup pipeline: encrypt dumps client-side (e.g. `age` with a key held offsite)
      before writing to disk, push offsite (object storage), keep the 14-day local prune.
   3. Add `SESSION_SECRET` (+ document rotation) and `LLM_API_KEY` to the prod compose

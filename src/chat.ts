@@ -6,6 +6,7 @@
 import type { SellerRow } from "./db.js";
 import { getCategory, getItem, createItem, listCategories, myItems, searchItems, undeclaredKeyUsage, updateItem } from "./items.js";
 import { validateAttributes, type Attributes } from "./attributes.js";
+import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import { logSecurityEvent } from "./security-events.js";
 import crypto from "node:crypto";
 import { SESSION_SECRET } from "./auth.js";
@@ -50,7 +51,10 @@ type ToolDef = {
   function: { name: string; description: string; parameters: Record<string, unknown> };
 };
 
-const TOOLS: ToolDef[] = [
+// Exported for the provenance parity test (spec THI-109 H5.3): the chat
+// search_items/get_item descriptions must carry the same canonical sentence
+// as the MCP tool descriptions (chat/MCP parity posture from THI-83).
+export const TOOLS: ToolDef[] = [
   {
     type: "function",
     function: {
@@ -66,7 +70,7 @@ const TOOLS: ToolDef[] = [
     type: "function",
     function: {
       name: "search_items",
-      description: "Search active second-hand listings (public).",
+      description: "Search active second-hand listings (public). " + CONTENT_PROVENANCE_NOTE,
       parameters: {
         type: "object",
         properties: {
@@ -84,7 +88,7 @@ const TOOLS: ToolDef[] = [
     type: "function",
     function: {
       name: "get_item",
-      description: "Fetch one listing by id (public).",
+      description: "Fetch one listing by id (public). " + CONTENT_PROVENANCE_NOTE,
       parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
     },
   },

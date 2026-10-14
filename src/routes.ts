@@ -29,6 +29,7 @@ const chatAnonLimiter = new RateLimiter(10, 60 * 60_000); // 10 anonymous chats 
 const chatAuthedLimiter = new RateLimiter(60, 60 * 60_000); // 60 logged-in chats per hour
 export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin calls per IP per hour (F7)
 export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
+export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 image upload attempts per IP per hour (THI-140 / THI-123 obs 2)
 
 function clientIp(req: Request): string {
   return req.ip ?? "unknown";
@@ -142,7 +143,23 @@ api.get("/me", asyncHandler(async (req: Request, res: Response) => {
 // Raw body for image uploads: express.raw with the image content types only.
 const imageUpload = express.raw({ type: ["image/jpeg", "image/png", "image/webp", "image/gif"], limit: MAX_IMAGE_BYTES + 64 * 1024 });
 
-api.post("/items/:id/images", imageUpload, asyncHandler(async (req: Request, res: Response) => {
+// THI-140 (THI-123 obs 2): pre-auth IP gate for the upload route. Mounted
+// BEFORE the express.raw buffer so an unauthenticated flood is answered 429
+// before the per-request session lookup and before up to ~5 MB of in-memory
+// body buffering per request. Sync by design — awaiting anything here would
+// reintroduce the cost this gate exists to avoid. Coarser than the seller
+// bucket (clients behind one NAT share it) and deliberately generous (4× the
+// per-seller cap): it bounds anonymous flood cost, while legitimate
+// per-seller use stays governed by imageUploadLimiter.
+function imageUploadIpGate(req: Request, res: Response, next: NextFunction): void {
+  if (!imageUploadIpLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).json({ error: "Too many uploads — try again later." });
+    return;
+  }
+  next();
+}
+
+api.post("/items/:id/images", imageUploadIpGate, imageUpload, asyncHandler(async (req: Request, res: Response) => {
   const seller = await sellerFromSession(req).catch(() => null);
   if (!seller) {
     res.status(401).json({ error: "Log in to add photos." });

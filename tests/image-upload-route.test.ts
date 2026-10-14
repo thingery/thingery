@@ -14,7 +14,7 @@ import pg from "pg";
 import type { Server } from "node:http";
 import express from "express";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { mountApiRoutes, imageUploadLimiter } from "../src/routes.js";
+import { mountApiRoutes, imageUploadLimiter, imageUploadIpLimiter } from "../src/routes.js";
 import { SESSION_COOKIE, signSession } from "../src/auth.js";
 import {
   MAX_IMAGES_PER_ITEM,
@@ -84,6 +84,7 @@ describe.skipIf(!available)("item image upload route (DB + HTTP)", () => {
 
   beforeEach(() => {
     imageUploadLimiter.reset();
+    imageUploadIpLimiter.reset();
   });
 
   /** Seeds one seller with one empty-images item; returns ids + session cookie. */
@@ -194,6 +195,20 @@ describe.skipIf(!available)("item image upload route (DB + HTTP)", () => {
     const other = await seed();
     const fine = await post(other.itemId, JPEG_BYTES, other.cookie, "image/jpeg");
     expect(fine.status).toBe(200);
+  });
+
+  it("429s an anonymous flood at the pre-auth IP gate, before any session lookup", async () => {
+    // Pre-drain the shared bucket in-process (same pattern as the seller 429
+    // test) instead of a 120-request loop: the contract under test is that the
+    // gate answers 429 for an unauthenticated request — no cookie at all.
+    const { itemId } = await seed();
+    for (let i = 0; i < 120; i++) {
+      expect(imageUploadIpLimiter.allow("ip:127.0.0.1")).toBe(true);
+    }
+    const res = await post(itemId, JPEG_BYTES, null, "image/jpeg");
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/Too many uploads/i);
   });
 
   it("rejects with 400 when the daily upload count quota is exhausted", async () => {

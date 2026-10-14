@@ -11,6 +11,7 @@ import { describe, expect, it, beforeAll, afterAll, afterEach, vi } from "vitest
 import {
   CHAT_CONFIRM_TTL_SECONDS,
   chatTurn,
+  normalizeUpdateArgs,
   signChatConfirmToken,
   verifyChatConfirmToken,
   wrapToolResult,
@@ -91,6 +92,37 @@ describe("tool-result delimiters (H5.1)", () => {
   it("keeps the 12 KB result truncation (H5, fix 4)", () => {
     const wrapped = wrapToolResult("search_items", { results: "x".repeat(40_000) });
     expect(wrapped.length).toBeLessThan(12_000 + 200);
+  });
+});
+
+describe("normalizeUpdateArgs — THI-126 must-fix (gate/executor type agreement)", () => {
+  const ok = (args: Record<string, unknown>) => normalizeUpdateArgs(args) as { ok: boolean; args?: Record<string, unknown>; error?: string };
+
+  it("accepts canonical args and drops unknown keys", () => {
+    const out = ok({ id: "abc", status: "sold", price_cents: 500, title: "T", description: "D", bogus: ["x"] });
+    expect(out.ok).toBe(true);
+    expect((out as { args: Record<string, unknown> }).args).toEqual({ id: "abc", status: "sold", price_cents: 500, title: "T", description: "D" });
+  });
+
+  it("rejects string-typed price_cents (the gate bypass)", () => {
+    expect(ok({ id: "abc", price_cents: "1000" })).toMatchObject({ ok: false, error: expect.stringContaining("price_cents") });
+  });
+
+  it("rejects float, negative, NaN and array price_cents", () => {
+    for (const price_cents of [999.5, -1, NaN, [1000]]) {
+      expect(ok({ id: "abc", price_cents })).toMatchObject({ ok: false });
+    }
+  });
+
+  it("rejects statuses outside the allowlist (including casing)", () => {
+    expect(ok({ id: "abc", status: "SOLD" })).toMatchObject({ ok: false, error: expect.stringContaining("status") });
+    expect(ok({ id: "abc", status: "archived" })).toMatchObject({ ok: false });
+  });
+
+  it("rejects missing / non-string id and non-string text fields", () => {
+    expect(ok({ price_cents: 500 })).toMatchObject({ ok: false, error: expect.stringContaining("id") });
+    expect(ok({ id: 123 })).toMatchObject({ ok: false });
+    expect(ok({ id: "abc", title: { inject: true } })).toMatchObject({ ok: false, error: expect.stringContaining("title") });
   });
 });
 
@@ -260,6 +292,19 @@ describe.skipIf(!available)("chat confirmation gate (DB)", () => {
     const out = await chatTurn([], "lower the bike price a bit", sellerA);
     expect(out.confirm).toBeUndefined();
     expect((await statusOf(bikeId)).price_cents).toBe(4000);
+  });
+
+  it("regression (THI-126 must-fix): string-typed price_cents cannot bypass the gate", async () => {
+    // Security-verified attack (THI-126 review): destructiveUpdateOp only
+    // evaluated numeric prices, so a JSON string fell through to updateItem,
+    // and Postgres cast "1000" to INTEGER — applying a 75% drop with no
+    // confirmation card. Normalization must reject it before execution.
+    const bodies = mockLlm([toolCallMsg("c1", "update_listing", { id: bikeId, price_cents: "1000" }), FINAL]);
+    const out = await chatTurn([], "slash the bike price", sellerA);
+    expect((await statusOf(bikeId)).price_cents).toBe(4000); // DB unchanged — fails on pre-fix code
+    const toolContent = bodies.flatMap((b) => b.messages).find((m) => m.role === "tool")?.content ?? "";
+    expect(toolContent).toContain("price_cents must be"); // model-facing validation error, not execution
+    expect(out.confirm).toBeUndefined();
   });
 
   it("injection fixture: listing-borne directive cannot execute a destructive update", async () => {

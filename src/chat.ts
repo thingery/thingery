@@ -324,6 +324,61 @@ export function verifyChatConfirmToken(token: string, nowMs: number = Date.now()
   return { itemId: parts[1], op: parts[2] };
 }
 
+const UPDATE_LISTING_STATUSES = ["active", "reserved", "sold", "deleted"] as const;
+
+/**
+ * THI-126 must-fix (High): the single canonicalization point for
+ * update_listing arguments, applied BEFORE the H5.2 gate so the gate and
+ * the executor see identical types. Without it, a JSON string price_cents
+ * (e.g. "1000") skips the >20%-drop gate (destructiveUpdateOp only handles
+ * numeric prices) and Postgres casts it to INTEGER inside updateItem — a
+ * destructive drop applied with no confirmation card. Non-canonical values
+ * fail closed with a model-facing error instead of reaching the executor.
+ */
+export function normalizeUpdateArgs(
+  raw: Record<string, unknown>,
+): { ok: true; args: Record<string, unknown> } | { ok: false; error: string } {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    switch (key) {
+      case "id":
+        if (typeof value !== "string" || !value.trim()) {
+          return { ok: false, error: "update_listing: id must be a listing UUID string" };
+        }
+        out.id = value;
+        break;
+      case "status":
+        if (typeof value !== "string" || !(UPDATE_LISTING_STATUSES as readonly string[]).includes(value)) {
+          return { ok: false, error: `update_listing: status must be one of ${UPDATE_LISTING_STATUSES.join("/")}` };
+        }
+        out.status = value;
+        break;
+      case "price_cents":
+        // Number.isSafeInteger is false for strings, floats, NaN, ±Infinity —
+        // exactly the type confusion the gate must not reason about.
+        if (!Number.isSafeInteger(value) || (value as number) < 0) {
+          return { ok: false, error: "update_listing: price_cents must be a non-negative integer (whole cents, not a string)" };
+        }
+        out.price_cents = value;
+        break;
+      case "title":
+      case "description":
+        if (typeof value !== "string") {
+          return { ok: false, error: `update_listing: ${key} must be a string` };
+        }
+        out[key] = value;
+        break;
+      default:
+        // Unknown keys are dropped; the executor's own allowlist ignores them.
+        break;
+    }
+  }
+  if (typeof out.id !== "string") {
+    return { ok: false, error: "update_listing: id is required" };
+  }
+  return { ok: true, args: out };
+}
+
 /**
  * An update is destructive — held for explicit user confirmation — when it
  * marks a listing sold/deleted or drops the price by more than 20%.
@@ -411,27 +466,38 @@ export async function chatTurn(
       let result: unknown;
       try {
         const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
-        // H5.2 gate: destructive updates never execute on the model's
-        // say-so — they are held and described to the model as pending the
-        // user's confirmation card.
-        const destructive = seller && call.function.name === "update_listing"
-          ? await destructiveUpdateOp(args)
-          : null;
-        if (destructive) {
-          confirm = {
-            token: signChatConfirmToken(args.id as string, destructive.op, Math.floor(Date.now() / 1000) + CHAT_CONFIRM_TTL_SECONDS),
-            item_id: args.id as string,
-            op: destructive.op,
-            summary: confirmSummary(destructive.op, destructive.title),
-          };
-          result = {
-            confirmation_required: true,
-            item_id: args.id,
-            op: destructive.op,
-            note: "ON HOLD until the user confirms via the card in the chat UI. NOT applied yet. Do not retry, do not report success, and never ask the user to type or paste codes.",
-          };
+        // THI-126 must-fix: canonicalize update_listing args BEFORE the gate
+        // decision so the gate and the executor see identical types. A JSON
+        // string price_cents ("1000") would otherwise skip the >20% gate and
+        // Postgres would cast it to INTEGER — executing a destructive drop
+        // with no confirmation card. Non-canonical values fail closed.
+        const norm = call.function.name === "update_listing" ? normalizeUpdateArgs(args) : null;
+        if (norm && !norm.ok) {
+          result = { error: norm.error };
         } else {
-          result = await executeTool(call.function.name, args, seller);
+          const canonicalArgs = norm ? norm.args : args;
+          // H5.2 gate: destructive updates never execute on the model's
+          // say-so — they are held and described to the model as pending the
+          // user's confirmation card.
+          const destructive = seller && call.function.name === "update_listing"
+            ? await destructiveUpdateOp(canonicalArgs)
+            : null;
+          if (destructive) {
+            confirm = {
+              token: signChatConfirmToken(canonicalArgs.id as string, destructive.op, Math.floor(Date.now() / 1000) + CHAT_CONFIRM_TTL_SECONDS),
+              item_id: canonicalArgs.id as string,
+              op: destructive.op,
+              summary: confirmSummary(destructive.op, destructive.title),
+            };
+            result = {
+              confirmation_required: true,
+              item_id: canonicalArgs.id,
+              op: destructive.op,
+              note: "ON HOLD until the user confirms via the card in the chat UI. NOT applied yet. Do not retry, do not report success, and never ask the user to type or paste codes.",
+            };
+          } else {
+            result = await executeTool(call.function.name, canonicalArgs, seller);
+          }
         }
       } catch (e) {
         result = { error: (e as Error).message };

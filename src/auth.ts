@@ -6,22 +6,37 @@ export function newApiKey(): string {
   return `thg_${crypto.randomBytes(24).toString("base64url")}`;
 }
 
+/** sha256 hex of a `thg_` key — the at-rest form in sellers.api_key_hash
+ * (THI-114, security doc §6 H2.1). A fast unsalted hash is appropriate for
+ * 192-bit random tokens; lookup stays a single indexed equality. */
+export function apiKeyHash(key: string): string {
+  return crypto.createHash("sha256").update(key, "utf8").digest("hex");
+}
+
 export async function createSeller(displayName: string, apiKey: string): Promise<SellerRow> {
   const { rows } = await pool.query<SellerRow>(
-    `INSERT INTO sellers (api_key, display_name) VALUES ($1, $2) RETURNING id, api_key, display_name`,
-    [apiKey, displayName],
+    `INSERT INTO sellers (api_key, api_key_hash, display_name) VALUES ($1, $2, $3) RETURNING id, display_name`,
+    [apiKey, apiKeyHash(apiKey), displayName],
   );
   return rows[0];
 }
 
-/** Resolves a seller by API key. */
+/** Resolves a seller by API key (THI-114 hash-first dual read). */
 export async function sellerFromApiKey(key: string): Promise<SellerRow | null> {
   if (!key.startsWith("thg_")) return null;
   const { rows } = await pool.query<SellerRow>(
-    `SELECT id, api_key, display_name FROM sellers WHERE api_key = $1`,
+    `SELECT id, display_name FROM sellers WHERE api_key_hash = $1`,
+    [apiKeyHash(key)],
+  );
+  if (rows[0]) return rows[0];
+  // Expand-phase fallback (THI-114): a row created between deploy and the
+  // backfill running carries no hash yet — authenticate it by plaintext for
+  // the migration window only. Migrated rows (hash set) never match here.
+  const legacy = await pool.query<SellerRow>(
+    `SELECT id, display_name FROM sellers WHERE api_key = $1 AND api_key_hash IS NULL`,
     [key],
   );
-  return rows[0] ?? null;
+  return legacy.rows[0] ?? null;
 }
 
 /**
@@ -40,7 +55,7 @@ export async function sellerFromAccessToken(token: string): Promise<SellerRow | 
   if (!token.startsWith("thgo_")) return null;
   const hash = crypto.createHash("sha256").update(token, "utf8").digest("hex");
   const { rows } = await pool.query<SellerRow & { token_id: string }>(
-    `SELECT s.id, s.api_key, s.display_name, t.id AS token_id
+    `SELECT s.id, s.display_name, t.id AS token_id
        FROM oauth_tokens t
        JOIN oauth_grants g ON g.id = t.grant_id
        JOIN sellers s ON s.id = g.seller_id
@@ -63,7 +78,9 @@ export async function sellerFromAccessToken(token: string): Promise<SellerRow | 
     .catch((err: unknown) => {
       console.error("oauth: last_used_at touch failed (ignored):", err);
     });
-  return { id: row.id, api_key: row.api_key, display_name: row.display_name };
+  // THI-114: the resolved seller carries no plaintext key — auth paths never
+  // need it and it must not ride along in response objects.
+  return { id: row.id, display_name: row.display_name };
 }
 
 /** /mcp auth outcome (spec THI-11 §2.10a–b). */
@@ -166,12 +183,13 @@ function readCookie(req: Request, name: string): string | undefined {
   return undefined;
 }
 
-/** Resolves the logged-in seller from the session cookie (browser clients). */
+/** Resolves the logged-in seller from the session cookie (browser clients).
+ * THI-114: no plaintext key selected — /api/me must not carry it. */
 export async function sellerFromSession(req: Request): Promise<SellerRow | null> {
   const sellerId = parseSession(readCookie(req, SESSION_COOKIE));
   if (!sellerId) return null;
   const { rows } = await pool.query<SellerRow>(
-    `SELECT id, api_key, display_name FROM sellers WHERE id = $1`,
+    `SELECT id, display_name FROM sellers WHERE id = $1`,
     [sellerId],
   );
   return rows[0] ?? null;
@@ -189,6 +207,10 @@ export function sessionCookieOptions() {
 
 export interface AccountRow extends SellerRow {
   email: string;
+  /** THI-114 show-once: only signup/login responses ever reveal the key;
+   * AccountRow is the one internal type that still carries it. */
+  api_key: string;
+  password_hash: string | null;
 }
 
 export async function createAccount(
@@ -196,19 +218,37 @@ export async function createAccount(
   password: string,
   displayName: string,
 ): Promise<AccountRow> {
-  const { rows } = await pool.query<AccountRow>(
-    `INSERT INTO sellers (api_key, display_name, email, password_hash)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id, api_key, display_name, email`,
-    [newApiKey(), displayName, email, hashPassword(password)],
+  // THI-114: the key is generated here and handed back from this variable —
+  // the row itself never selects plaintext back out of the database.
+  const apiKey = newApiKey();
+  const { rows } = await pool.query<SellerRow & { email: string }>(
+    `INSERT INTO sellers (api_key, api_key_hash, display_name, email, password_hash)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, display_name, email`,
+    [apiKey, apiKeyHash(apiKey), displayName, email, hashPassword(password)],
   );
-  return rows[0];
+  return { ...rows[0], api_key: apiKey, password_hash: null };
 }
 
+/** Login path. THI-114: keeps reading the plaintext column deliberately —
+ * the login response is one of the two show-once moments for the key. */
 export async function accountByEmail(email: string): Promise<AccountRow | null> {
   const { rows } = await pool.query<AccountRow>(
     `SELECT id, api_key, display_name, email, password_hash FROM sellers WHERE email = $1`,
     [email],
   );
   return rows[0] ?? null;
+}
+
+/** Rotates a seller's API key (THI-114). One atomic UPDATE replaces the
+ * hash and the legacy plaintext column together, so the old key stops
+ * authenticating the instant the row commits. Returns the new key — its
+ * only appearance outside the DB write (show-once). */
+export async function regenerateApiKey(sellerId: string): Promise<string | null> {
+  const apiKey = newApiKey();
+  const { rowCount } = await pool.query(
+    `UPDATE sellers SET api_key = $2, api_key_hash = $3 WHERE id = $1`,
+    [sellerId, apiKey, apiKeyHash(apiKey)],
+  );
+  return rowCount ? apiKey : null;
 }

@@ -16,6 +16,17 @@ CREATE TABLE IF NOT EXISTS sellers (
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS email TEXT UNIQUE;
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS password_hash TEXT;
 
+-- API key hash at rest (security doc §6 H2 fix 1, THI-114 expand phase).
+-- sellers.api_key stays readable/writable until the contract PR drops it
+-- (only after release + one clean nightly backup); auth resolves thg_ keys
+-- against api_key_hash first and falls back to plaintext rows created after
+-- a mid-upgrade restart (dual-read window). Backfill is idempotent.
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS api_key_hash TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS sellers_api_key_hash_idx
+  ON sellers (api_key_hash) WHERE api_key_hash IS NOT NULL;
+UPDATE sellers SET api_key_hash = encode(sha256(convert_to(api_key, 'utf8')), 'hex')
+  WHERE api_key_hash IS NULL AND api_key IS NOT NULL;
+
 -- Category registry: declares the expected attribute fields per category so
 -- agents can self-serve the schema (describe_category tool). Items are NOT
 -- locked to these definitions — unknown attribute keys pass through, which

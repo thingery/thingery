@@ -90,7 +90,10 @@ decrypts during drills) should be disk-encrypted.
 **Recovery key (recommended).** Generate a second keypair on a *different*
 operator account/machine, store it offline and separate from the primary
 (second vault entry or printed in a physical safe), and encrypt every backup
-to both recipients: `age -r "$PUBKEY" -r "$RECOVERY_PUBKEY"`. Cost is ~100
+to both recipients. The script supports this natively (THI-163): set
+`RECOVERY_PUBKEY=age1...` in `/etc/thingery-backup.env` and every backup is
+encrypted to both keys automatically — no script edit needed, and the log
+prints `recovery recipient active` on each run. Cost is ~100
 bytes per file; the win is that losing one secret no longer means losing all
 backups. Rotate on event (suspected compromise, custody change) — age keys
 have no calendar rotation requirement.
@@ -127,6 +130,9 @@ Script contents (`/usr/local/bin/thingery-backup`):
 #!/bin/bash
 # thingery-backup - nightly encrypted backup pipeline (docs/deploy-vps.md section 4).
 # DB dump and images tarball are encrypted with age BEFORE anything touches disk.
+# The age PRIVATE key lives offsite (operator password manager), never on the VPS.
+# Optional second recipient (recovery key): set RECOVERY_PUBKEY in
+# /etc/thingery-backup.env and every backup is encrypted to both keys (THI-163).
 set -uo pipefail
 umask 077
 
@@ -141,14 +147,25 @@ FAIL=0
 
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
 
+# 0. Optional config: /etc/thingery-backup.env (root:root 0600, VPS only) may set
+#    RECOVERY_PUBKEY (second age recipient, THI-163), RCLONE_* (offsite push),
+#    HEALTHCHECK_URL (dead-man's switch). Sourced BEFORE encryption so a recovery
+#    recipient applies to today's files immediately.
+if [ -r /etc/thingery-backup.env ]; then . /etc/thingery-backup.env; fi
+RECIPIENTS=(-r "$PUBKEY")
+if [ -n "${RECOVERY_PUBKEY:-}" ]; then
+  RECIPIENTS+=(-r "$RECOVERY_PUBKEY")
+  log "recovery recipient active (encrypting to both keys)"
+fi
+
 DB_FILE="$BACKUP_DIR/thingery-$DATE.sql.gz.age"
 IMG_FILE="$BACKUP_DIR/thingery-images-$DATE.tar.gz.age"
 
 # 1. Database: pg_dump | gzip | age -> atomic rename (no truncated .age left behind)
 DB_CID=$(docker ps -qf name=thingery-db)
 if [ -n "$DB_CID" ] && docker exec "$DB_CID" pg_dump -U thingery thingery \
-     | gzip | age -r "$PUBKEY" > "$DB_FILE.part"; then
-  if [ -s "$DB_FILE.part" ]; then
+     | gzip | age "${RECIPIENTS[@]}" > "$DB_FILE.part"; then
+  if [ -s "$DB_FILE.part" ] && [ "$(stat -c %s "$DB_FILE.part")" -ge 1024 ]; then
     mv "$DB_FILE.part" "$DB_FILE"
     log "db OK $DB_FILE $(stat -c %s "$DB_FILE")B"
   else log "db FAIL empty output"; rm -f "$DB_FILE.part"; FAIL=1; fi
@@ -157,10 +174,10 @@ else
 fi
 
 # 2. Images: tar runs INSIDE the app container, piped straight into age
-#    (plaintext images never land on VPS disk)
+#    (plaintext images never land on VPS disk; old flow copied them via img.tmp)
 APP_CID=$(docker ps -qf name=app)
 if [ -n "$APP_CID" ] && docker exec "$APP_CID" tar czf - -C /app/uploads . \
-     | age -r "$PUBKEY" > "$IMG_FILE.part"; then
+     | age "${RECIPIENTS[@]}" > "$IMG_FILE.part"; then
   if [ -s "$IMG_FILE.part" ]; then
     mv "$IMG_FILE.part" "$IMG_FILE"
     log "img OK $IMG_FILE $(stat -c %s "$IMG_FILE")B"
@@ -169,12 +186,13 @@ else
   log "img FAIL tar|age pipe"; rm -f "$IMG_FILE.part"; FAIL=1
 fi
 
-# 3. Local retention: 14 days (encrypted files only)
+# 3. Local retention: 14 days (encrypted files; old plaintext names are untouched here)
 find "$BACKUP_DIR" -name 'thingery-*.age' -mtime +14 -delete
 log "local prune (14d) done"
 
-# 4. Offsite push - gated on /etc/thingery-backup.env (root:root 0600, VPS only).
-if [ -r /etc/thingery-backup.env ]; then . /etc/thingery-backup.env; fi
+# 4. Offsite push - gated on /etc/thingery-backup.env (sourced in step 0).
+#    Expected vars: RCLONE_REMOTE="name:path" (+ RCLONE_CONFIG_<NAME>_* creds),
+#    optional RCLONE_KEEP_DAYS (default 30). No-op with a log line until configured.
 if [ -n "${RCLONE_REMOTE:-}" ]; then
   if rclone copy "$DB_FILE" "$RCLONE_REMOTE" && rclone copy "$IMG_FILE" "$RCLONE_REMOTE"; then
     log "offsite push OK -> $RCLONE_REMOTE"
@@ -190,6 +208,7 @@ fi
 
 # 5. Dead-man's-switch ping (optional; HEALTHCHECK_URL in /etc/thingery-backup.env).
 #    Bare URL = full success; /skip = local OK but offsite not configured; /fail = any FAIL.
+#    Endpoint is a CEO/vendor decision (e.g. healthchecks.io-style); unset = no ping.
 if [ -n "${HEALTHCHECK_URL:-}" ]; then
   if [ "$FAIL" -ne 0 ]; then SIG="/fail"
   elif [ -z "${RCLONE_REMOTE:-}" ]; then SIG="/skip"

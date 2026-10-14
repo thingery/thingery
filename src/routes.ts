@@ -78,7 +78,9 @@ api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
     }
     throw err;
   }
-  res.cookie(SESSION_COOKIE, signSession(account.id), sessionCookieOptions());
+  // Sign at the live epoch (spec THI-115 §3): a fresh account is epoch 0, but
+  // passing the row's value keeps the cookie correct-by-construction.
+  res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
   res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
 }));
 
@@ -100,7 +102,10 @@ api.post("/login", asyncHandler(async (req: Request, res: Response) => {
     res.status(401).json({ error: "Wrong email or password." });
     return;
   }
-  res.cookie(SESSION_COOKIE, signSession(account.id), sessionCookieOptions());
+  // Sign at the live epoch (spec THI-115 §3): after a future epoch bump (key
+  // regeneration), a cookie signed at a stale epoch would fail verification
+  // immediately — so login always reads the seller's current epoch.
+  res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
   res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
 }));
 

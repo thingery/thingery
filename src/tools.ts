@@ -177,12 +177,14 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         // scheme — javascript:/data:/file: URLs passed and were stored on items
         // (buyer-IP leak via tracking pixels, script-scheme footgun for naive
         // clients). Scheme allowlist: image URLs must be http(s).
+        // THI-130: also bound each URL to 2048 chars — previously the only cap
+        // was the 8 MiB /mcp body gate (~7 MiB of URL text across 12 images).
         images: z.array(
-          z.string().url().refine(
+          z.string().url().max(2048, "image URLs must be at most 2048 characters").refine(
             (v) => /^https?:\/\//i.test(v),
             "image URLs must be http(s) — javascript:, data:, file: and other schemes are rejected",
           ),
-        ).max(12).default([]).describe("Image URLs (http/https only)"),
+        ).max(12).default([]).describe("Image URLs (http/https only, max 2048 chars each)"),
         attributes: z.record(z.union([z.string(), z.number(), z.boolean()])).default({})
           .describe("Category-specific fields, e.g. {\"size_eu\": 43, \"colorway\": \"white/grey\"}"),
       },

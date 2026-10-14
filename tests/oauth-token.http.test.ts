@@ -415,4 +415,77 @@ describe.skipIf(!available)("oauth token + revoke endpoints (HTTP)", () => {
     const expiredRefresh = await tokenRequest({ grant_type: "refresh_token", client_id: "thgc_tok1", refresh_token: pair.refresh_token });
     expect(((await expiredRefresh.json()) as { error: string }).error).toBe("invalid_grant");
   });
+
+  it("THI-55: repeated form params (arrays) are invalid_request 400s, never 500s", async () => {
+    // Express qs/urlencoded parses ?k=a&k=b into arrays; the sha256Hex/
+    // DB consumers are string-typed and a raw array TypeErrors into the
+    // terminal middleware (500 HTML). The validation layer must reject them
+    // deterministically before any consumer runs.
+    const formHeaders = { "content-type": "application/x-www-form-urlencoded" };
+    const repeated = (fields: Record<string, string>, key: string, ...values: string[]): string => {
+      const p = new URLSearchParams(fields);
+      for (const v of values) p.append(key, v);
+      return p.toString();
+    };
+    const expectInvalidRequest = async (res: Response): Promise<void> => {
+      expect(res.status).toBe(400);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(((await res.json()) as { error: string }).error).toBe("invalid_request");
+    };
+
+    // Repeated code — reaches sha256Hex(code) on main → 500.
+    await expectInvalidRequest(
+      await fetch(`${baseUrl}/oauth/token`, {
+        method: "POST",
+        headers: formHeaders,
+        body: repeated(
+          { grant_type: "authorization_code", client_id: "thgc_tok1", redirect_uri: REDIRECT_URI, code_verifier: verifier },
+          "code",
+          "thga_a",
+          "thga_b",
+        ),
+      }),
+    );
+
+    // Repeated refresh_token — reaches sha256Hex(presented) on main → 500.
+    await expectInvalidRequest(
+      await fetch(`${baseUrl}/oauth/token`, {
+        method: "POST",
+        headers: formHeaders,
+        body: repeated({ grant_type: "refresh_token", client_id: "thgc_tok1" }, "refresh_token", "thgr_a", "thgr_b"),
+      }),
+    );
+
+    // Repeated client_id — incidentally 400 invalid_client on main (pg array
+    // literal never matches); must be the deterministic invalid_request.
+    await expectInvalidRequest(
+      await fetch(`${baseUrl}/oauth/token`, {
+        method: "POST",
+        headers: formHeaders,
+        body: repeated(
+          { grant_type: "authorization_code", redirect_uri: REDIRECT_URI, code_verifier: verifier, code: "thga_x" },
+          "client_id",
+          "thgc_tok1",
+          "thgc_tok1",
+        ),
+      }),
+    );
+
+    // Repeated token/client_id on revoke — on main the array TypeError rides
+    // the DB-fault catch and answers a bogus 200; must be invalid_request.
+    await expectInvalidRequest(
+      await fetch(`${baseUrl}/oauth/revoke`, {
+        method: "POST",
+        headers: formHeaders,
+        body: repeated({ client_id: "thgc_tok1" }, "token", "thgo_a", "thgo_b"),
+      }),
+    );
+    await expectInvalidRequest(
+      await fetch(`${baseUrl}/oauth/revoke`, {
+        method: "POST",
+        headers: formHeaders,
+        body: repeated({ token: "thgo_a" }, "client_id", "thgc_tok1", "thgc_tok1"),
+      }),
+    );
+  });
 });

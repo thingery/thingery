@@ -200,6 +200,11 @@ describe.skipIf(!available)("/mcp body limits for add_item_image (HTTP)", () => 
 
   it("a full 5 MB image (~6.7 MB base64+JSON) passes the gate and reaches the tool", async () => {
     const fiveMb = Buffer.alloc(5 * 1024 * 1024, 7);
+    // THI-110: add_item_image now magic-byte-validates before the ownership
+    // read, so the fixture must carry a real PNG signature (rest of the buffer
+    // is filler — signature-level check by design) to still reach the tool's
+    // owner check, which is what this test proves.
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(fiveMb);
     const body = call(fiveMb.toString("base64"));
     expect(body.length).toBeGreaterThan(6 * 1024 * 1024); // over the SDK's 4 MiB default
     expect(body.length).toBeLessThan(MCP_MAX_BODY_BYTES);

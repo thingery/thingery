@@ -4,6 +4,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pool } from "./db.js";
+import { logSecurityEvent } from "./security-events.js";
 
 const EXTENSION_BY_MEDIA_TYPE: Record<string, string> = {
   "image/jpeg": "jpg",
@@ -34,13 +35,28 @@ export async function addItemImage(
   data: Buffer,
   mediaType: string,
 ): Promise<{ url: string } | { error: string }> {
+  // THI-112 (H4.2): upload accept/reject events. `reason` is a fixed slug,
+  // never the raw (attacker-controlled) media type string — the no-payload
+  // rule keeps the log free of request content.
   const ext = extensionForMediaType(mediaType);
-  if (!ext) return { error: `unsupported media type '${mediaType}' (use jpeg, png, webp or gif)` };
-  if (data.length === 0) return { error: "empty image" };
-  if (data.length > MAX_IMAGE_BYTES) return { error: "image too large (max 5 MB)" };
+  if (!ext) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "unsupported_media_type" }, { sellerId });
+    return { error: `unsupported media type '${mediaType}' (use jpeg, png, webp or gif)` };
+  }
+  if (data.length === 0) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "empty" }, { sellerId });
+    return { error: "empty image" };
+  }
+  if (data.length > MAX_IMAGE_BYTES) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "too_large" }, { sellerId });
+    return { error: "image too large (max 5 MB)" };
+  }
 
   const owned = await pool.query(`SELECT 1 FROM items WHERE id = $1 AND seller_id = $2`, [itemId, sellerId]);
-  if (!owned.rows[0]) return { error: "item not found or not owned by this seller" };
+  if (!owned.rows[0]) {
+    logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "not_owned" }, { sellerId });
+    return { error: "item not found or not owned by this seller" };
+  }
 
   const dir = path.join(uploadsDir(), "items");
   await mkdir(dir, { recursive: true });
@@ -49,6 +65,7 @@ export async function addItemImage(
 
   const url = `/img/items/${name}`;
   await pool.query(`UPDATE items SET images = images || $2 WHERE id = $1`, [itemId, [url]]);
+  logSecurityEvent({ type: "image_upload", outcome: "success" }, { sellerId });
   return { url };
 }
 

@@ -25,7 +25,7 @@ import { executeTool } from "../src/chat.js";
 import type { SellerRow } from "../src/db.js";
 import { AttributeValidationError } from "../src/attributes.js";
 import { pool } from "../src/db.js";
-import { hashPassword } from "../src/auth.js";
+import { hashPassword, SESSION_COOKIE, signSession } from "../src/auth.js";
 
 // Deterministic embedText (null when unconfigured) — createItem must not
 // depend on an embedding endpoint existing in the test environment.
@@ -401,6 +401,53 @@ describe("HTTP call sites emit their events (THI-112)", () => {
     });
     expect(events(spy)).toEqual([
       { ts: expect.any(String), type: "rate_limit", route: "/api/signup", sellerId: null, ip: "198.51.100.10" },
+    ]);
+  });
+
+  it("upload IP-gate 429 logs rate_limit on the upload route, pre-auth (THI-144)", async () => {
+    // Same convention as the signup 429 above, for the THI-140 pre-auth IP
+    // gate: exhaust the 120/hour bucket for a distinct IP with anonymous
+    // requests (no cookie — the gate must reject before any session lookup,
+    // which is the point of the gate), then assert the 121st is both a 429
+    // and an event carrying the IP and nothing else.
+    const spy = spyLog();
+    const headers = { "x-forwarded-for": "198.51.100.12" };
+    await withApiServer(async (base) => {
+      let status = 0;
+      for (let i = 0; i < 121; i++) {
+        status = (await fetch(`${base()}/api/items/00000000-0000-0000-0000-000000000001/images`, { method: "POST", headers })).status;
+      }
+      expect(status).toBe(429);
+    });
+    expect(events(spy)).toEqual([
+      { ts: expect.any(String), type: "rate_limit", route: "/api/items/:id/images", sellerId: null, ip: "198.51.100.12" },
+    ]);
+  });
+
+  it("upload seller-limiter 429 logs rate_limit with the seller id (THI-144)", async () => {
+    // The THI-110 per-seller bucket: authenticated requests from a distinct
+    // IP (under the 120/h gate) exhaust the 30/hour seller bucket; the 31st
+    // is a 429 that logs the seller id — the attribution the seller key
+    // exists for. The first 30 pass the limiter and 400 on the non-image
+    // body (no content-type → not a Buffer, THI-140 guard), so no DB writes
+    // beyond the mocked session lookup.
+    vi.spyOn(pool, "query").mockResolvedValue({
+      rows: [{ id: "00000000-0000-0000-0000-0000000000f1", api_key: "thg_x", display_name: "Flood", session_epoch: 0 }],
+    } as never);
+    const headers = {
+      "x-forwarded-for": "198.51.100.13",
+      cookie: `${SESSION_COOKIE}=${encodeURIComponent(signSession("00000000-0000-0000-0000-0000000000f1"))}`,
+    };
+    const spy = spyLog();
+    await withApiServer(async (base) => {
+      let status = 0;
+      for (let i = 0; i < 31; i++) {
+        status = (await fetch(`${base()}/api/items/00000000-0000-0000-0000-000000000001/images`, { method: "POST", headers })).status;
+      }
+      expect(status).toBe(429);
+    });
+    expect(events(spy)).toEqual([
+      { ts: expect.any(String), type: "rate_limit", route: "/api/items/:id/images", sellerId: "00000000-0000-0000-0000-0000000000f1", ip: null },
     ]);
   });
 

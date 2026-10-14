@@ -84,7 +84,22 @@ age-keygen -o thingery-backup-key.age.txt
 
 The private key is the only way to restore. If it is lost, every backup is
 unrecoverable. It lives in the operator's password manager — never on the VPS,
-never in the repo, never in chat.
+never in the repo, never in chat. The operator machine that holds the key (and
+decrypts during drills) should be disk-encrypted.
+
+**Recovery key (recommended).** Generate a second keypair on a *different*
+operator account/machine, store it offline and separate from the primary
+(second vault entry or printed in a physical safe), and encrypt every backup
+to both recipients: `age -r "$PUBKEY" -r "$RECOVERY_PUBKEY"`. Cost is ~100
+bytes per file; the win is that losing one secret no longer means losing all
+backups. Rotate on event (suspected compromise, custody change) — age keys
+have no calendar rotation requirement.
+
+**Key rotation procedure.** Generate the new keypair on the operator machine →
+encrypt to **both** keys (`-r OLD -r NEW`) for a transition window of ≥45 days
+(local 14 d + offsite 30 d + margin) → verify a decrypt with NEW via the drill
+→ drop OLD from the script → keep OLD in the manager until the last OLD-only
+ciphertext has aged out of both retention windows, then destroy it.
 
 ### Backup script and cron (on the VPS)
 
@@ -115,7 +130,11 @@ Script contents (`/usr/local/bin/thingery-backup`):
 set -uo pipefail
 umask 077
 
-PUBKEY='age1...'                    # <- the public key from age-keygen (not secret)
+PUBKEY='age1ln7rs3dymzlgvtmtvj4kaly598ncpt80m3mxjlnndzw84tfgqehszz22vk'
+# ^ production key (2026-10-14, THI-116). Public — not secret. The copy on the
+# VPS (/usr/local/bin/thingery-backup) must match this line exactly; a monthly
+# drill decrypt failure or a diff here = possible key substitution, treat as a
+# security incident.
 BACKUP_DIR=/var/backups
 DATE=$(date +%F)
 FAIL=0
@@ -169,6 +188,17 @@ else
   log "offsite push SKIPPED (not configured; see section 4 Offsite push)"
 fi
 
+# 5. Dead-man's-switch ping (optional; HEALTHCHECK_URL in /etc/thingery-backup.env).
+#    Bare URL = full success; /skip = local OK but offsite not configured; /fail = any FAIL.
+if [ -n "${HEALTHCHECK_URL:-}" ]; then
+  if [ "$FAIL" -ne 0 ]; then SIG="/fail"
+  elif [ -z "${RCLONE_REMOTE:-}" ]; then SIG="/skip"
+  else SIG=""; fi
+  curl -fsS -m 10 --retry 2 "${HEALTHCHECK_URL}${SIG}" >/dev/null 2>&1 \
+    && log "healthcheck ping OK (${SIG:-success})" \
+    || { log "healthcheck ping FAIL"; FAIL=1; }
+fi
+
 exit $FAIL
 ```
 
@@ -190,6 +220,22 @@ RCLONE_CONFIG_OFFSITE_SECRET_ACCESS_KEY=<secret-key>
 
 Until this file exists the script logs `offsite push SKIPPED` and still writes
 the local encrypted backups every night.
+
+Offsite hardening requirements (security review THI-120 F2): use a **dedicated
+bucket and a dedicated S3 key scoped to that bucket only**; prefer **write-only
+credentials (no delete)** with retention enforced by a provider-side lifecycle
+rule instead of the script's `rclone delete` — then VPS compromise cannot
+destroy offsite history. If the provider supports it, bucket versioning or
+object-lock adds another layer. If client-side pruning stays, scope it to our
+files only: `rclone delete --min-age "${RCLONE_KEEP_DAYS:-30}d" --include 'thingery-*.age' "$RCLONE_REMOTE"`.
+
+Optionally set `HEALTHCHECK_URL` in the same env file (dead-man's-switch ping:
+bare URL on full success, `/skip` when offsite is not configured, `/fail` on
+any failure; endpoint is an operator choice, e.g. a healthchecks.io-style
+service). Until then, a daily log check stands in for alerting.
+
+> Status 2026-10-14: CEO decision — **local-only for now**; revisit offsite when
+> the service has real users. The push stays an env-gated no-op until then.
 
 **Rollback** to the pre-encryption pipeline (kept one cycle after the 2026-10-14
 switch): comment the `/usr/local/bin/thingery-backup` cron line, uncomment these
@@ -226,7 +272,10 @@ into the scratch container and is never written to the VPS disk.
    age -d -i thingery-backup-key.age.txt thingery-$(date +%F).sql.gz.age > dump.sql.gz
    gzip -t dump.sql.gz && echo GZIP_OK             # must print GZIP_OK
    sha256sum thingery-$(date +%F).sql.gz.age        # must match the VPS-side hash
+   rm dump.sql.gz                                  # delete the plaintext copy after the drill
    ```
+   (Or skip the local plaintext file entirely and stream end-to-end in step 5:
+   `age -d -i <key> <file>.age | gunzip -c | ssh <vps> 'docker exec -i …'`.)
 
 3. Start an isolated scratch Postgres (pgvector) container on the VPS — same image
    as prod, throwaway password, no `-p` port mappings:
@@ -289,7 +338,14 @@ into the scratch container and is never written to the VPS disk.
 
 Record in the ops log (issue tracker): backup filename, size, sha256, restore
 duration, live vs restored row counts, and the date. If any step fails, treat the
-nightly backup as broken until fixed and escalate.
+nightly backup as broken until fixed and escalate. A decrypt failure during the
+drill can also mean the VPS script's public key was substituted — diff the
+`PUBKEY=` line against this doc and treat a mismatch as a security incident.
+
+Checklist line: after every drill confirm **no non-`.age` thingery files exist**
+in `/var/backups` (`sudo find /var/backups -maxdepth 1 -name 'thingery-*' ! -name '*.age'`).
+Ad-hoc pre-deploy dumps must pipe straight into `age` too — never leave a
+plaintext twin: `docker exec $(docker ps -qf name=thingery-db) pg_dump -U thingery thingery | gzip | age -r <pubkey> > /var/backups/thingery-predeploy-<tag>.sql.gz.age`.
 
 Drill history: 2026-10-12 end-to-end against a plaintext nightly (3.3 KB, 0.24 s,
 counts matched); 2026-10-14 first end-to-end drill of the encrypted pipeline

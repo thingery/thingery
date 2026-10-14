@@ -835,6 +835,30 @@ const ACCESS_TTL_S = Number(process.env.OAUTH_ACCESS_TTL_S ?? 30 * 60);
 const REFRESH_TTL_S = Number(process.env.OAUTH_REFRESH_TTL_S ?? 30 * 24 * 3600);
 const CODE_VERIFIER_RE = /^[A-Za-z0-9-._~]{43,128}$/; // RFC 7636 §4.1
 
+/** THI-55 (class-level mirror of the AUTHORIZE_PARAMS guard): repeated
+ * form params parse to arrays through Express qs/urlencoded, and the token/
+ * revoke consumers (sha256Hex, string compare, DB lookups) are string-typed —
+ * a raw array TypeErrors into the terminal middleware as a 500, or rides the
+ * revoke DB-fault catch as a bogus 200. Any known param present but not a
+ * plain string is malformed input → invalid_request 400 at the validation
+ * layer, before any consumer runs. */
+const TOKEN_FORM_PARAMS = [
+  "client_id",
+  "grant_type",
+  "code",
+  "redirect_uri",
+  "resource",
+  "code_verifier",
+  "refresh_token",
+] as const;
+const REVOKE_FORM_PARAMS = ["token", "client_id"] as const;
+
+/** True when any listed param is present but not a plain string (repeated
+ * params arrive as arrays; JSON bodies can carry any non-string). */
+function hasNonStringParam(body: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.some((key) => body[key] !== undefined && typeof body[key] !== "string");
+}
+
 interface TokenRow {
   id: string;
   grant_id: string;
@@ -901,6 +925,11 @@ function mountToken(app: Express): void {
       const clientId = body.client_id ?? "";
       if (!ipBackstopAllows(req) || !tokenLimiter.allow(`token:${req.ip ?? "unknown"}:${clientId}`)) {
         tooManyRequests(res);
+        return;
+      }
+      // THI-55: reject arrays/non-strings before the string-typed consumers.
+      if (hasNonStringParam(body, TOKEN_FORM_PARAMS)) {
+        tokenError(res, "invalid_request", "parameters must each appear at most once");
         return;
       }
       if (!clientId || !body.grant_type) {
@@ -1109,6 +1138,13 @@ function mountToken(app: Express): void {
       // Backstop BEFORE the missing-param early return: malformed spam must be bounded too (THI-43).
       if (!ipBackstopAllows(req)) {
         tooManyRequests(res);
+        return;
+      }
+      // THI-55: reject arrays/non-strings at the validation layer — otherwise
+      // sha256Hex(body.token) TypeErrors and rides the DB-fault catch below
+      // as a bogus 200.
+      if (hasNonStringParam(body, REVOKE_FORM_PARAMS)) {
+        tokenError(res, "invalid_request", "parameters must each appear at most once");
         return;
       }
       if (!body.token || !body.client_id) {

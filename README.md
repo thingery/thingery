@@ -21,7 +21,7 @@ Chinese-market name: 物坊 (Wùfāng).
 | `search_items` | public | Hybrid semantic + keyword search with price/category/condition/attribute filters (any attribute key, declared or not) |
 | `get_item` | public | Fetch one listing by id |
 | `create_listing` | seller | Publish an item — core fields plus a flexible `attributes` object (declared keys validated, extras pass through and stay searchable) |
-| `add_item_image` | seller | Attach a photo to a listing (base64 in, stored server-side — no URLs needed) |
+| `add_item_image` | seller | Attach a photo to a listing (base64 in, stored server-side — no URLs needed; max 5 MB per image) |
 | `my_listings` | seller | Your listings by status |
 | `update_listing` | seller | Mark reserved/sold, adjust price, edit text or attributes |
 

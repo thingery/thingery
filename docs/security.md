@@ -111,9 +111,12 @@ browser `POST /api/items/:id/images` (raw bytes, ≤ 5 MB + 64 KB enforced by
 **no per-seller storage quota**, **no rate limit on the browser upload route at all**,
 and **media type is client-asserted, not validated against actual bytes** (no magic-byte
 check). A single authenticated seller can fill the disk: 5 MB × request rate. Also,
-`create_listing` accepts arbitrary `z.string().url()` image URLs — including
-`javascript:`/`data:` schemes and attacker-controlled hosts (tracking pixels that
-deanonymize buyers who open item pages). *Lens: API4:2023, input validation, least
+`create_listing` accepts arbitrary `z.string().url()` image URLs — ~~including
+`javascript:`/`data:` schemes~~ (fixed — PR #70 / THI-111: image URLs are now
+http(s)-only; the SDK's zod parse rejects other schemes with a typed error before the
+handler) and attacker-controlled hosts (tracking pixels that
+deanonymize buyers who open item pages — host control is accepted residual risk for
+external image URLs). *Lens: API4:2023, input validation, least
 privilege.*
 
 **Key leakage.** API keys are stored **plaintext** in `sellers.api_key` (the schema's own
@@ -314,16 +317,17 @@ worst-case damage, "Exploitability" is how practical the attack is today.
   cap; no per-seller storage quota; `POST /api/items/:id/images` (`src/routes.ts`) has
   **no rate limiter at all** (only session auth); media type is taken from the client's
   `Content-Type`/tool argument, never checked against the bytes; `create_listing`
-  accepts `z.string().url()` for image URLs, which permits `javascript:`/`data:`
-  schemes and arbitrary third-party hosts (buyer IP leak via tracking pixels,
-  indirect-content risk for agents).
+  accepts `z.string().url()` for image URLs, which ~~permits `javascript:`/`data:`
+  schemes~~ (**fixed — PR #70 / THI-111**; http(s)-only now) and arbitrary third-party
+  hosts (buyer IP leak via tracking pixels,
+  indirect-content risk for agents — host control remains accepted residual risk).
 - **Severity: Medium** (disk exhaustion on a 20 GB VPS = full outage; illegal-content
   hosting is a real-world risk for any public upload surface). **Exploitability: High**
   (any free account; the browser route isn't even rate limited).
 - **Fix:** cap images per item (12, matching `create_listing`'s array cap), per-seller
   daily upload quota (count + bytes), rate-limit the upload route, validate magic bytes
-  (JPEG/PNG/WebP/GIF signatures) before accepting, allowlist `http(s)` for image URL
-  fields (reject other schemes), and ~~document that the SDK's 4 MiB body cap currently
+  (JPEG/PNG/WebP/GIF signatures) before accepting, ~~allowlist `http(s)` for image URL
+  fields (reject other schemes)~~ **— Done, shipped with PR #70 (THI-111)**, and ~~document that the SDK's 4 MiB body cap currently
   makes the "max 5 MB" claim on `add_item_image` unreachable via `/mcp` (~3 MB real
   ceiling after base64 + JSON overhead — align the doc, tool description, or raise
   `maxRequestBodySize` deliberately)~~.

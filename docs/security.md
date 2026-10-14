@@ -103,7 +103,8 @@ enough to be polite; robots.txt already states our crawl preferences. If scrapin
 an operational problem, the lever is rate limits and caching, not access control.
 *Lens: Unrestricted Resource Consumption (API4:2023), Economy of Mechanism.*
 
-**Upload abuse.** Two upload paths: MCP `add_item_image` (base64, ≤ 5 MB claimed) and
+**Upload abuse.** Two upload paths: MCP `add_item_image` (base64, ≤ 5 MB enforced
+on the decoded bytes) and
 browser `POST /api/items/:id/images` (raw bytes, ≤ 5 MB + 64 KB enforced by
 `express.raw`). Both owner-check the item and allowlist media types — good. Gaps:
 **no cap on images per item** (`src/images.ts` `addItemImage` appends unbounded),
@@ -132,7 +133,7 @@ Failures (A02:2021), secrets management.*
 | **T**ampering | `create_listing`/`update_listing` payloads; `attributes` JSONB | TLS protects transit. Owner checks are correct (`updateItem` scopes `WHERE seller_id = $`); no cross-seller tampering found. Free-form attributes pass through by design — tampering with *semantic* integrity (fake ISBNs, wrong sizes) is unmitigated and accepted for now. Media type of uploads is client-asserted (tamperable). |
 | **R**epudiation | Listing creation/edit, logins, rate-limit hits | **No audit trail.** Logs are `console.log/error` only; who created/edited what is reconstructible from the DB but nothing logs auth failures or abuse. Repudiation currently fails. Fix in H4. |
 | **I**nformation disclosure | `get_item`, `/api/me`, error paths, headers, external image URLs | `get_item` returns `seller_id` (a UUID — acceptable, unguessable, no display name). Signup returns 409 "email exists" — account enumeration. Errors echo exception messages (`describeError`, signup 500). `x-powered-by` disabled since the baseline-headers PR. External image URLs leak viewer IPs to third parties. Plaintext keys in DB/backups (H2). No secrets found in repo/logs today. |
-| **D**enial of service | `/mcp`, `/api/*`, uploads, embeddings API, chat LLM | Body sizes bounded (4 MiB SDK cap on `/mcp`, 256 KB JSON on `/api`, 5 MB uploads). Query limits capped (≤ 50 search, ≤ 100 my_listings). Real DoS vectors: the shared-bucket bug (H1) lets one client lock out *all* anonymous users; disk fill via uploads (H3); cost DoS on `EMBED_API_KEY`/`LLM_API_KEY` via spam or chat. ILIKE wildcards are escaped (`src/items.ts`), preventing pattern-DoS. |
+| **D**enial of service | `/mcp`, `/api/*`, uploads, embeddings API, chat LLM | Body sizes bounded (8 MiB `/mcp` gate cap (`src/mcp-gate.ts`, THI-11 §2.10c — the gate pre-parses and hands the transport the body, so the SDK's 4 MiB default never applies on that path), 256 KB JSON on `/api`, 5 MB uploads). Query limits capped (≤ 50 search, ≤ 100 my_listings). Real DoS vectors: the shared-bucket bug (H1) lets one client lock out *all* anonymous users; disk fill via uploads (H3); cost DoS on `EMBED_API_KEY`/`LLM_API_KEY` via spam or chat. ILIKE wildcards are escaped (`src/items.ts`), preventing pattern-DoS. |
 | **E**levation of privilege | Tool surface, chat agent | **None found.** Every write tool re-checks `ctx.seller`; there is no admin surface at all (also means no privileged code to exploit — and no moderation capability; see H4). Chat agent tools execute with the *session* seller only (`src/chat.ts` `executeTool`). |
 
 ### 3.3 OWASP API Top 10 (2023) — every MCP tool is an API endpoint
@@ -191,7 +192,8 @@ phishing concerns — threat-model them before building, not after.
   cookies verified in constant time; 192-bit API keys.
 - Zod validation on every MCP tool input and browser API route (type/length/range).
 - Rate limiters: `/mcp` 120/min per key, 30/min per IP; signup+login 10/h per IP; chat
-  10/h anon / 60/h authed. Body caps: 4 MiB `/mcp` (SDK default), 256 KB `/api` JSON,
+  10/h anon / 60/h authed. Body caps: 8 MiB `/mcp` (gate, THI-11 §2.10c; the SDK's
+  4 MiB default is bypassed by the pre-parsed body), 256 KB `/api` JSON,
   5 MB uploads.
 - Upload allowlist by media type, generated filenames (no traversal), owner check, images
   served from `/img` with immutable caching.
@@ -321,10 +323,17 @@ worst-case damage, "Exploitability" is how practical the attack is today.
 - **Fix:** cap images per item (12, matching `create_listing`'s array cap), per-seller
   daily upload quota (count + bytes), rate-limit the upload route, validate magic bytes
   (JPEG/PNG/WebP/GIF signatures) before accepting, allowlist `http(s)` for image URL
-  fields (reject other schemes), and document that the SDK's 4 MiB body cap currently
+  fields (reject other schemes), and ~~document that the SDK's 4 MiB body cap currently
   makes the "max 5 MB" claim on `add_item_image` unreachable via `/mcp` (~3 MB real
   ceiling after base64 + JSON overhead — align the doc, tool description, or raise
-  `maxRequestBodySize` deliberately).
+  `maxRequestBodySize` deliberately)~~.
+  **Corrected (THI-111):** that premise was stale — since the THI-11 gate, `/mcp`
+  buffers requests itself (8 MiB cap) and passes a **pre-parsed** body to the SDK
+  transport, which skips `readRequestBody` entirely, so the SDK's 4 MiB
+  `maxRequestBodySize` never applies. Verified empirically (authed 5 MB image →
+  6.67 MiB base64+JSON body → HTTP 200, tool executes; 11.33 MiB body → 413 from the
+  gate). The "max 5 MB" claim is accurate as stated; the tool description and README
+  now spell out both limits (5 MB decoded, 8 MiB `/mcp` request cap).
 - **Owner:** Coder; Security reviews (upload paths are protected per AGENTS.md).
   **Effort: M (2–3 days).**
 

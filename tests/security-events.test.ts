@@ -9,6 +9,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import express from "express";
+import sharp from "sharp";
 import type { Server } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -196,7 +197,12 @@ describe("call sites emit their events (THI-112)", () => {
     try {
       vi.spyOn(pool, "query").mockResolvedValue({ rows: [{ 1: 1 }] } as never);
       const spy = spyLog();
-      const png = Buffer.from("89504e470d0a1a0a", "hex");
+      // Real decodable PNG generated at test time (THI-156): the re-encode
+      // pipeline decodes every upload, so a bare signature is no longer an
+      // "image".
+      const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: "#808080" } })
+        .png()
+        .toBuffer();
       const result = await addItemImage("seller-img", "00000000-0000-0000-0000-000000000002", png, "image/png");
       expect("url" in result).toBe(true);
       expect(events(spy)).toEqual([

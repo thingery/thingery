@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import sharp from "sharp";
 import type { Server } from "node:http";
 import express from "express";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -40,13 +41,16 @@ async function dbAvailable(): Promise<boolean> {
 }
 const available = await dbAvailable();
 
-// Minimal valid signature-prefixed buffers: the validator checks magic bytes,
-// not container structure, so a 4 KiB padded signature is a real "image" here.
-const PNG_BYTES = Buffer.concat([
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  Buffer.alloc(4088),
-]);
-const JPEG_BYTES = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(4092)]);
+// Real image fixtures generated at test time with sharp (THI-156): the
+// re-encode pipeline decodes every stored upload, so signature-padded junk
+// no longer passes — only tests rejected before decode keep using hand-made
+// buffers. No binary fixtures live in the repo.
+const PNG_BYTES = await sharp({ create: { width: 64, height: 64, channels: 3, background: { r: 80, g: 120, b: 160 } } })
+  .png()
+  .toBuffer();
+const JPEG_BYTES = await sharp({ create: { width: 64, height: 64, channels: 3, background: { r: 200, g: 80, b: 40 } } })
+  .jpeg()
+  .toBuffer();
 
 describe.skipIf(!available)("item image upload route (DB + HTTP)", () => {
   let db: pg.Client;

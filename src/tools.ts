@@ -8,6 +8,7 @@ import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStri
 import { orderFlowConfig } from "./config.js";
 import { cancelOrder, createOrder, getOrderView, OrderFlowError } from "./order-flow.js";
 import { confirmPayment, confirmReceipt, openDispute, recordTracking, releaseFunds } from "./fulfillment.js";
+import { logSecurityEvent } from "./security-events.js";
 
 export interface ToolContext {
   seller: SellerRow | null;
@@ -185,6 +186,9 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         const category = ((args.category as string) ?? "other").toLowerCase();
         const categoryRow = await getCategory(category);
         if (!categoryRow) {
+          // THI-133 F2: create-time validation rejection, correlated by
+          // sellerId (no request IP at this layer). Mirrors items.ts.
+          logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: seller.id });
           const available = (await listCategories()).map((c) => c.name).join(", ");
           return err(`Unknown category '${category}'. Available: ${available}`, "unknown_category");
         }
@@ -192,6 +196,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         const attributes = (args.attributes as Attributes | undefined) ?? {};
         const attributeErrors = validateAttributes(categoryRow.attribute_definitions, attributes);
         if (attributeErrors.length > 0) {
+          logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: seller.id });
           return err(`Invalid attributes for category '${category}': ${attributeErrors.join("; ")}`, "invalid_attributes");
         }
 

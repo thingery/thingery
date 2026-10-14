@@ -28,6 +28,7 @@ const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/login
 const chatAnonLimiter = new RateLimiter(10, 60 * 60_000); // 10 anonymous chats per IP per hour
 const chatAuthedLimiter = new RateLimiter(60, 60 * 60_000); // 60 logged-in chats per hour
 export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin calls per IP per hour (F7)
+export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
 
 function clientIp(req: Request): string {
   return req.ip ?? "unknown";
@@ -145,6 +146,12 @@ api.post("/items/:id/images", imageUpload, asyncHandler(async (req: Request, res
   const seller = await sellerFromSession(req).catch(() => null);
   if (!seller) {
     res.status(401).json({ error: "Log in to add photos." });
+    return;
+  }
+  // THI-110 (H3): the upload route is authenticated, so key the bucket by
+  // seller, not IP (IP attribution was the H1 bug; seller keys are exact).
+  if (!imageUploadLimiter.allow(`seller:${seller.id}`)) {
+    res.status(429).json({ error: "Too many uploads — try again later." });
     return;
   }
   const mediaType = (req.headers["content-type"] ?? "").split(";")[0].trim();

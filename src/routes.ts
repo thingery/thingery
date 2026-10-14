@@ -21,12 +21,14 @@ import crypto from "node:crypto";
 import { pool } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
 import { applyTransition, IllegalTransitionError, type OrderRow } from "./orders.js";
+import { logSecurityEvent } from "./security-events.js";
 import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer } from "./stripe.js";
 
 const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/logins per IP per hour
 const chatAnonLimiter = new RateLimiter(10, 60 * 60_000); // 10 anonymous chats per IP per hour
 const chatAuthedLimiter = new RateLimiter(60, 60 * 60_000); // 60 logged-in chats per hour
 export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin calls per IP per hour (F7)
+export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
 
 function clientIp(req: Request): string {
   return req.ip ?? "unknown";
@@ -49,6 +51,9 @@ const signupSchema = z.object({
 
 api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
   if (!authAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    // THI-112: brute-force attempts on the auth surface are first-class
+    // security events — the 429 response alone leaves no trace.
+    logSecurityEvent({ type: "rate_limit", route: "/api/signup" }, { ip: clientIp(req) });
     res.status(429).json({ error: "Too many attempts. Try again later." });
     return;
   }
@@ -78,6 +83,8 @@ api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
     }
     throw err;
   }
+  // THI-112: signup success — correlated by seller id + IP (H4.2).
+  logSecurityEvent({ type: "signup", outcome: "success" }, { sellerId: account.id, ip: clientIp(req) });
   // Sign at the live epoch (spec THI-115 §3): a fresh account is epoch 0, but
   // passing the row's value keeps the cookie correct-by-construction.
   res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
@@ -86,6 +93,7 @@ api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
 
 api.post("/login", asyncHandler(async (req: Request, res: Response) => {
   if (!authAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/login" }, { ip: clientIp(req) });
     res.status(429).json({ error: "Too many attempts. Try again later." });
     return;
   }
@@ -99,9 +107,13 @@ api.post("/login", asyncHandler(async (req: Request, res: Response) => {
   const password = typeof body.password === "string" ? body.password : undefined;
   const account = email ? await accountByEmail(email.toLowerCase()) : null;
   if (!account || !verifyPassword(password ?? "", (account as { password_hash?: string }).password_hash ?? null)) {
+    // THI-112: no email/username is logged — the failure event carries only
+    // outcome + IP, so the log can't become a credential-validity oracle.
+    logSecurityEvent({ type: "login", outcome: "failure" }, { ip: clientIp(req) });
     res.status(401).json({ error: "Wrong email or password." });
     return;
   }
+  logSecurityEvent({ type: "login", outcome: "success" }, { sellerId: account.id, ip: clientIp(req) });
   // Sign at the live epoch (spec THI-115 §3): after a future epoch bump (key
   // regeneration), a cookie signed at a stale epoch would fail verification
   // immediately — so login always reads the seller's current epoch.
@@ -134,6 +146,12 @@ api.post("/items/:id/images", imageUpload, asyncHandler(async (req: Request, res
   const seller = await sellerFromSession(req).catch(() => null);
   if (!seller) {
     res.status(401).json({ error: "Log in to add photos." });
+    return;
+  }
+  // THI-110 (H3): the upload route is authenticated, so key the bucket by
+  // seller, not IP (IP attribution was the H1 bug; seller keys are exact).
+  if (!imageUploadLimiter.allow(`seller:${seller.id}`)) {
+    res.status(429).json({ error: "Too many uploads — try again later." });
     return;
   }
   const mediaType = (req.headers["content-type"] ?? "").split(";")[0].trim();

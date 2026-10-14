@@ -153,6 +153,9 @@ const imageUpload = express.raw({ type: ["image/jpeg", "image/png", "image/webp"
 // per-seller use stays governed by imageUploadLimiter.
 function imageUploadIpGate(req: Request, res: Response, next: NextFunction): void {
   if (!imageUploadIpLimiter.allow(`ip:${clientIp(req)}`)) {
+    // THI-144: the gate is pre-auth, so the flood is anonymous — the event
+    // carries the IP (the only attribution available), never a body.
+    logSecurityEvent({ type: "rate_limit", route: "/api/items/:id/images" }, { ip: clientIp(req) });
     res.status(429).json({ error: "Too many uploads — try again later." });
     return;
   }
@@ -168,6 +171,9 @@ api.post("/items/:id/images", imageUploadIpGate, imageUpload, asyncHandler(async
   // THI-110 (H3): the upload route is authenticated, so key the bucket by
   // seller, not IP (IP attribution was the H1 bug; seller keys are exact).
   if (!imageUploadLimiter.allow(`seller:${seller.id}`)) {
+    // THI-144: same convention as the auth-surface limiters (THI-112) — a
+    // bounded-but-silent reject is a logging/monitoring failure.
+    logSecurityEvent({ type: "rate_limit", route: "/api/items/:id/images" }, { sellerId: seller.id });
     res.status(429).json({ error: "Too many uploads — try again later." });
     return;
   }

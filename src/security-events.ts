@@ -15,8 +15,9 @@
 // req.path) does not typecheck, and a new route/reason is a one-line type
 // change reviewers see. Pinned by tests/security-events.test-d.ts.
 
-/** Fixed route slugs for rate_limit events (THI-133). */
-export type SecurityEventRoute = "/api/signup" | "/api/login" | "/mcp";
+/** Fixed route slugs for rate_limit events (THI-133; "/api/items/:id/images"
+ *  added by THI-144 for the upload-route limiters' 429s). */
+export type SecurityEventRoute = "/api/signup" | "/api/login" | "/mcp" | "/api/items/:id/images";
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a

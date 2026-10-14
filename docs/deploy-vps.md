@@ -417,7 +417,7 @@ exports above. The site footer shows the same version + short commit.
   sets `SESSION_SECRET` (it does if you followed §3) before upgrading. Rollback
   is `git revert` + users log in again — same one-time effect.
 
-### 5.1 Image pipeline: post-deploy spot-check, backfill, purge (THI-156/THI-166)
+### 5.1 Image pipeline: post-deploy spot-check, backfill, purge (THI-156/THI-166, fixes THI-169)
 
 Run this after any deploy that touches `src/images.ts`. Blast radius for image-pipeline
 deploys is the app container only (no schema/compose changes); rollback = rebuild at the
@@ -436,12 +436,17 @@ previous commit.
    kernel high-water mark after: `docker exec thingery-app-1 awk '/VmHWM/{print $2}' /proc/1/status`.
    Record baseline / peak / settle. Also note `docker inspect -f '{{.HostConfig.Memory}}'
    thingery-app-1` (no cap → semaphore + `sequentialRead` are the bounds on the 2 GB box).
-   2026-10-14 baseline (49 MP uploads): VmRSS ~98 MB, peaks 152 MB (JPEG) / 156 MB (WebP),
-   settle ~106 MB, request times 1.0 s / 0.7 s.
-4. **Backfill existing uploads** (idempotent; skips already-clean files). The runtime image
-   has no `scripts/` or dev deps, so run a one-off musl container matching prod, with the
-   uploads volume nested under a host-persisted backup dir (the script writes originals to a
-   *sibling* of the uploads dir — outside the served tree — before overwriting):
+   Measured in prod 2026-10-14 (THI-168, ~49 MP uploads): baseline VmRSS 109.5 MB, peaks
+   VmHWM 172.3 MB (JPEG via `/mcp`) / 177.9 MB (WebP via HTTP path), settle ~130 MB, request
+   times 0.48 s / 0.55 s. (An earlier "baseline" recorded here predated THI-168 and had not
+   actually been measured in prod — treat this block as the measured reference.)
+4. **Backfill existing uploads** (idempotent; skips already-clean files — including
+   clean-dims JPEGs whose only dirt is a COM segment, detected at the byte level since THI-169).
+   The runtime image has no `scripts/` or dev deps, so run a one-off musl container matching
+   prod, with the uploads volume nested under a host-persisted backup dir (the script copies
+   originals — fsync + size-verified — to a *sibling* of the uploads dir, outside the served
+   tree, then swaps the sanitized file in with a same-directory atomic rename, so the
+   volume/bind-mount filesystem boundary never sees a cross-device rename):
 
    ```bash
    sudo mkdir -p /var/backups/thi166
@@ -456,14 +461,18 @@ previous commit.
    Report the printed counts (processed/skipped/failed). A backup dir `uploads-backup-<date>/`
    is created on the host at `/var/backups/thi166/` only when at least one file is re-encoded.
    The empty `uploads/` dir docker creates there is just the volume mountpoint — ignore it.
-5. **Purge (F8b).** Backups are kept ≤ 7 days; root crontab:
+5. **Purge (F8b).** Backups are purged once they are ≥ 7 whole days old (GNU find ignores
+   fractional days, so actual retention is 7–8 days; earlier revisions shipped `-mtime +7`,
+   which deletes on day 8+ — corrected in THI-169). Root crontab:
 
    ```bash
-   0 5 * * * find /var/backups/thi166 -maxdepth 1 -type d -name "uploads-backup-*" -mtime +7 -exec rm -rf {} +
+   0 5 * * * find /var/backups/thi166 -maxdepth 1 -type d -name "uploads-backup-*" -mtime +6 -exec rm -rf {} +
    ```
 
    Scope is strictly `uploads-backup-*` under `/var/backups/thi166` — never touch the
-   age-encrypted nightly archives (`thingery-*.age`, key off-box).
+   age-encrypted nightly archives (`thingery-*.age`, key off-box). **If the purge cron was
+   already installed with `-mtime +7`, update the line above as an announced runbook change**
+   (root crontab edit = prod change; DevOps executes, one line, `crontab -e` as root).
 
 ## 6. Scaling later
 

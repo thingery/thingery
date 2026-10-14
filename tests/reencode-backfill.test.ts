@@ -5,7 +5,7 @@
 // inside the uploads tree. Fixtures are generated at test time (same approach
 // as tests/image-reencode.test.ts); no DB needed.
 
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
@@ -89,6 +89,17 @@ async function jpegMagicJunk(): Promise<Buffer> {
   return Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.from("junk-not-a-jpeg-stream", "latin1")]);
 }
 
+/** JPEG whose ONLY dirt is a COM segment (0xFFFE) spliced in after SOI — the
+ * prod case from THI-169 bug 1: sharp's metadata() surfaces no EXIF/XMP for
+ * such a file, so the old isAlreadyClean wrongly reported it clean. */
+function jpegWithComSegment(jpeg: Buffer): Buffer {
+  const payload = Buffer.from("CREATOR: eBay listing tool (ImageMagick)", "latin1");
+  const len = Buffer.alloc(2);
+  len.writeUInt16BE(payload.length + 2); // length includes itself
+  const com = Buffer.concat([Buffer.from([0xff, 0xfe]), len, payload]);
+  return Buffer.concat([jpeg.subarray(0, 2), com, jpeg.subarray(2)]);
+}
+
 // --- backfill tests ----------------------------------------------------------
 
 describe("reencode-existing-uploads backfill (THI-165 / THI-156 F9)", () => {
@@ -115,6 +126,10 @@ describe("reencode-existing-uploads backfill (THI-165 / THI-156 F9)", () => {
     await writeFile(path.join(uploads, "items", "e-comment.gif"), await animatedGifWithComment());
     await writeFile(path.join(uploads, "items", "f-corrupt.jpg"), await jpegMagicJunk());
     await writeFile(path.join(uploads, "items", "g-not-an-image.txt"), Buffer.from("hello"));
+    const plainJpeg = await sharp({ create: { width: 320, height: 240, channels: 3, background: "#314159" } })
+      .jpeg()
+      .toBuffer();
+    await writeFile(path.join(uploads, "items", "h-com-marker.jpg"), jpegWithComSegment(plainJpeg));
   });
 
   afterAll(async () => {
@@ -123,7 +138,7 @@ describe("reencode-existing-uploads backfill (THI-165 / THI-156 F9)", () => {
 
   it("re-encodes dirty uploads in place, skips clean ones, records failures", async () => {
     const summary = await runBackfill(uploads, backup);
-    expect(summary).toMatchObject({ processed: 4, skipped: 1, failed: 2 });
+    expect(summary).toMatchObject({ processed: 5, skipped: 1, failed: 2 });
     expect(summary.failures.map((f) => f.file).sort()).toEqual(["f-corrupt.jpg", "g-not-an-image.txt"]);
     expect(summary.backupDir).toBe(path.resolve(backup));
 
@@ -153,6 +168,14 @@ describe("reencode-existing-uploads backfill (THI-165 / THI-156 F9)", () => {
       true,
     );
 
+    // JPEG COM segment: the one dirt vector sharp metadata() cannot see
+    // (THI-169 bug 1) — must be re-encoded, COM string gone from the served
+    // copy, original (COM intact) preserved in the backup dir.
+    expect((await readFile(path.join(uploads, "items", "h-com-marker.jpg"))).includes("eBay listing tool")).toBe(
+      false,
+    );
+    expect((await readFile(path.join(backup, "h-com-marker.jpg"))).includes("eBay listing tool")).toBe(true);
+
     // Failures and non-files are left exactly where they were, not backed up.
     expect((await readFile(path.join(uploads, "items", "f-corrupt.jpg"))).includes(Buffer.from("junk-not-a-jpeg"))).toBe(
       true,
@@ -164,13 +187,71 @@ describe("reencode-existing-uploads backfill (THI-165 / THI-156 F9)", () => {
       "d-text-chunk.png",
       "e-comment.gif",
       "c-oversize.jpg",
+      "h-com-marker.jpg",
     ].sort());
+    // No swap-temp leftovers under the served tree after a successful run.
+    expect((await readdir(path.join(uploads, "items"))).filter((n) => n.startsWith(".backfill-tmp-"))).toEqual([]);
   });
 
   it("is idempotent: a re-run skips every now-clean file and adds no backups", async () => {
     const summary = await runBackfill(uploads, backup);
-    expect(summary).toMatchObject({ processed: 0, skipped: 5, failed: 2 });
-    expect((await readdir(backup)).length).toBe(4);
+    expect(summary).toMatchObject({ processed: 0, skipped: 6, failed: 2 });
+    expect((await readdir(backup)).length).toBe(5);
+  });
+
+  it("ignores leftover swap-temp files from a crashed earlier run", async () => {
+    const stale = path.join(uploads, "items", ".backfill-tmp-h-com-marker.jpg-999-deadbeef");
+    await writeFile(stale, Buffer.from([0xff, 0xd8, 0xff]));
+    const summary = await runBackfill(uploads, backup);
+    expect(summary).toMatchObject({ processed: 0, skipped: 6, failed: 2 });
+    expect((await readdir(path.join(uploads, "items"))).includes(".backfill-tmp-h-com-marker.jpg-999-deadbeef")).toBe(
+      true,
+    );
+    await rm(stale, { force: true });
+  });
+
+  // THI-169 bug 2 regression: under the §5.1 container invocation the backup
+  // dir is a host bind mount while uploads live on the docker volume — the
+  // old rename-across-devices swap crashed with EXDEV before the file was
+  // touched. The fixed path copies the backup and renames only within the
+  // items dir, so a backup dir on a DIFFERENT filesystem must succeed.
+  it("succeeds when the backup dir lives on a different filesystem (EXDEV)", async (ctx) => {
+    const uploadsDev = (await stat(uploads)).dev;
+    let foreign: string | null = null;
+    for (const cand of ["/dev/shm", "/var/tmp", "/tmp", os.tmpdir()]) {
+      try {
+        const d = await mkdtemp(path.join(cand, "thi169-fdev-"));
+        if ((await stat(d)).dev !== uploadsDev) {
+          foreign = d;
+          break;
+        }
+        await rm(d, { recursive: true, force: true });
+      } catch {
+        /* candidate unavailable — try the next */
+      }
+    }
+    if (!foreign) {
+      // e.g. macOS dev machines: every candidate shares one filesystem.
+      // Linux CI has /dev/shm (tmpfs), so the EXDEV path is exercised there.
+      ctx.skip();
+      return;
+    }
+    const uploads2 = path.join(foreign, "uploads");
+    await mkdir(path.join(uploads2, "items"), { recursive: true });
+    const jpeg = await sharp({ create: { width: 300, height: 200, channels: 3, background: "#654321" } })
+      .jpeg()
+      .toBuffer();
+    await writeFile(path.join(uploads2, "items", "com-cross-device.jpg"), jpegWithComSegment(jpeg));
+    const backup2 = path.join(foreign, "uploads-backup-crossdevice");
+    const summary = await runBackfill(uploads2, backup2);
+    expect(summary).toMatchObject({ processed: 1, skipped: 0, failed: 0 });
+    expect((await readFile(path.join(uploads2, "items", "com-cross-device.jpg"))).includes("eBay listing tool")).toBe(
+      false,
+    );
+    expect((await readFile(path.join(backup2, "com-cross-device.jpg"))).includes("eBay listing tool")).toBe(true);
+    expect(
+      (await readdir(path.join(uploads2, "items"))).filter((n) => n.startsWith(".backfill-tmp-")),
+    ).toEqual([]);
   });
 
   it("hard-fails when the backup path resolves inside the uploads tree (F9)", async () => {

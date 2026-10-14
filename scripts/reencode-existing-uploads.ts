@@ -3,13 +3,18 @@
 // UPLOADS_DIR/items goes through the SAME pipeline as new uploads — the
 // reencodeImage import below is the ingest code path, never a fork.
 //
-// Before each overwrite the original is moved to a dated sibling backup dir
-// OUTSIDE the uploads tree (nothing is ever deleted — purge is DevOps' step).
-// Idempotent (F9): files that are already clean (≤ 2000 px, no metadata) are
+// Before each overwrite the original is preserved in a dated sibling backup
+// dir OUTSIDE the uploads tree via a verified copy (fsync + size check), and
+// the sanitized file is swapped in with a same-directory atomic rename
+// (THI-169: no cross-device rename — the backup dir is a different mount
+// under the documented container invocation). Nothing is ever deleted —
+// purge is DevOps' step. Idempotent (F9): files that are already clean
+// (≤ 2000 px, no metadata — including JPEG COM segments, THI-169 bug 1) are
 // skipped, so re-runs only churn what still needs work, and a crash mid-run
 // leaves at worst an unmigrated original plus its backup copy to re-run over.
 
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, stat, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import sharp from "sharp";
@@ -21,6 +26,39 @@ export interface BackfillSummary {
   failed: number;
   failures: { file: string; message: string }[];
   backupDir: string | null;
+}
+
+/** Temp-file prefix for the atomic swap. Leftovers from a crashed run are
+ * ignored by later runs (filtered out below) rather than treated as items. */
+const TEMP_PREFIX = ".backfill-tmp-";
+
+/** True when a JPEG carries a COM (0xFFFE) segment before SOS — the classic
+ * hiding spot for tool/origin strings (eBay/ImageMagick markers and the like;
+ * found live in prod, THI-169 bug 1). sharp's metadata() never surfaces COM
+ * segments, so this is a raw marker walk: SOI, then marker/length pairs.
+ * Standalone markers (RSTn/TEM/SOI) carry no length; fill bytes are skipped.
+ * Desync or a truncated walk reads as "no COM" — sharp still parses the file,
+ * so genuinely corrupt input fails closed through the decode path. */
+function jpegHasComSegment(data: Buffer): boolean {
+  if (data.length < 4 || data[0] !== 0xff || data[1] !== 0xd8) return false;
+  let off = 2;
+  while (off + 2 <= data.length) {
+    if (data[off] !== 0xff) return false; // desynchronized from the marker stream
+    const marker = data[off + 1];
+    if (marker === 0xff) {
+      off++; // fill byte — the marker follows the run of 0xFFs
+      continue;
+    }
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      off += 2; // standalone marker, no length field
+      continue;
+    }
+    if (off + 4 > data.length) return false;
+    if (marker === 0xfe) return true; // COM
+    if (marker === 0xda) return false; // SOS — entropy-coded data follows; stop
+    off += 2 + data.readUInt16BE(off + 2);
+  }
+  return false;
 }
 
 /** True when a PNG carries chunks outside the structural allowlist — tEXt,
@@ -40,10 +78,12 @@ function pngHasMetadataChunks(data: Buffer): boolean {
 
 /** Already clean = what the pipeline itself would produce: dimensions inside
  * the budget, no EXIF/XMP/IPTC/ICC, single-frame, and no container-level
- * metadata (PNG text chunks, GIF comment extensions). Undecodable → false,
+ * metadata (JPEG COM segments, PNG text chunks, GIF comment extensions —
+ * none of which sharp's metadata() reports as fields). Undecodable → false,
  * so the pipeline runs and records a classified failure instead. */
 async function isAlreadyClean(data: Buffer, mediaType: string): Promise<boolean> {
   if (mediaType === "image/png" && pngHasMetadataChunks(data)) return false;
+  if (mediaType === "image/jpeg" && jpegHasComSegment(data)) return false;
   if (mediaType === "image/gif" && data.includes(Buffer.from([0x21, 0xfe]))) return false; // comment extension
   try {
     const meta = await sharp(data, { limitInputPixels: MAX_INPUT_PIXELS }).metadata();
@@ -63,6 +103,24 @@ async function isAlreadyClean(data: Buffer, mediaType: string): Promise<boolean>
   }
 }
 
+/** Durable, cross-filesystem-safe write: open → write → fsync → close, then
+ * verify the on-disk size. Used for both the backup copy (the backup dir may
+ * be a host bind mount while uploads live on the docker volume) and the swap
+ * temp file. A short/failed write throws instead of leaving a silent fake. */
+async function writeVerified(dest: string, data: Buffer): Promise<void> {
+  const fh = await open(dest, "w");
+  try {
+    await fh.writeFile(data);
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  const { size } = await stat(dest);
+  if (size !== data.length) {
+    throw new Error(`size verify failed for ${dest}: ${size} bytes on disk, ${data.length} expected`);
+  }
+}
+
 export async function runBackfill(uploadsPath: string, backupPath: string): Promise<BackfillSummary> {
   const uploads = path.resolve(uploadsPath);
   const backupDir = path.resolve(backupPath);
@@ -76,7 +134,9 @@ export async function runBackfill(uploadsPath: string, backupPath: string): Prom
   const itemsDir = path.join(uploads, "items");
   let names: string[];
   try {
-    names = (await readdir(itemsDir, { withFileTypes: true })).filter((e) => e.isFile()).map((e) => e.name);
+    names = (await readdir(itemsDir, { withFileTypes: true }))
+      .filter((e) => e.isFile() && !e.name.startsWith(TEMP_PREFIX)) // ignore crashed-run temp leftovers
+      .map((e) => e.name);
   } catch {
     return summary; // no items dir → nothing to backfill
   }
@@ -103,12 +163,36 @@ export async function runBackfill(uploadsPath: string, backupPath: string): Prom
       summary.failed++, summary.failures.push({ file: name, message: out.message });
       continue;
     }
-    // Original leaves the served tree first, then the sanitized copy takes
-    // its name. A crash between the two leaves the original safe in backup.
+    // The original is preserved first via a verified copy (the backup dir may
+    // be on a different filesystem, which is fine for a copy), then the
+    // sanitized buffer replaces the file through a temp file created NEXT TO
+    // the final path — same filesystem, so the swap is an atomic rename with
+    // no EXDEV (THI-169 bug 2: uploads volume vs backup bind mount). A crash
+    // at any point leaves the served tree holding either the full original or
+    // the full cleaned file — never a hole, never a truncated file.
     await mkdir(backupDir, { recursive: true });
     summary.backupDir = backupDir;
-    await rename(file, path.join(backupDir, name));
-    await writeFile(file, out.data);
+    try {
+      await writeVerified(path.join(backupDir, name), data);
+      const tmp = path.join(itemsDir, `${TEMP_PREFIX}${name}-${process.pid}-${randomUUID()}`);
+      try {
+        await writeVerified(tmp, out.data);
+        await rename(tmp, file);
+        try {
+          const dir = await open(itemsDir, "r"); // best-effort dir fsync so the rename is durable
+          await dir.sync();
+          await dir.close();
+        } catch {
+          /* not all platforms/filesystems support directory fsync */
+        }
+      } catch (err) {
+        await unlink(tmp).catch(() => {}); // best-effort temp cleanup; the original is untouched
+        throw err;
+      }
+    } catch (err) {
+      summary.failed++, summary.failures.push({ file: name, message: `swap failed: ${String(err)}` });
+      continue;
+    }
     summary.processed++;
   }
   return summary;

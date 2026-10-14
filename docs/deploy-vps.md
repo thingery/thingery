@@ -326,6 +326,16 @@ curl -s https://thingery.dev/healthz   # {"ok":true,...,"version":"…","commit"
 If `commit` reports `"unknown"`, the deploy skipped the build args — rebuild with the
 exports above. The site footer shows the same version + short commit.
 
+### Upgrade notes (breaking deploys)
+
+- **Session hardening (THI-115):** the first deploy after this change ships a new
+  cookie format (`sellerId.iat.mac` with a server-side 30-day expiry and a
+  per-seller `session_epoch` in the MAC) — **all sessions are invalidated once**;
+  every logged-in user simply logs in again. The app also now refuses to start
+  when `NODE_ENV=production` and `SESSION_SECRET` is unset, so confirm `.env`
+  sets `SESSION_SECRET` (it does if you followed §3) before upgrading. Rollback
+  is `git revert` + users log in again — same one-time effect.
+
 ## 6. Scaling later
 
 - Bigger VPS: resize, reboot, done.

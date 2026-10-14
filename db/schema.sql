@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS sellers (
 -- Account system (chat/signup, v0.2). Idempotent ALTERs: safe on existing databases.
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS email TEXT UNIQUE;
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS password_hash TEXT;
+-- Session revocation groundwork (spec THI-115 §3, docs/security.md §6 H2 fix 4):
+-- per-seller epoch mixed into the session-cookie MAC (src/auth.ts). Bumping it
+-- (the key-regeneration endpoint) invalidates every outstanding session cookie
+-- for that seller at once. Default 0 keeps seeded/existing sellers usable.
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS session_epoch INT NOT NULL DEFAULT 0;
 
 -- Category registry: declares the expected attribute fields per category so
 -- agents can self-serve the schema (describe_category tool). Items are NOT
@@ -290,3 +295,14 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 -- webhook when capabilities.transfers = 'active' (known connected accounts only, F5).
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;           -- Express connected account
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS stripe_onboarded_at TIMESTAMPTZ;  -- transfers capability active
+
+-- Seller upload quota (THI-110 / docs/security.md §6 H3): per-seller daily
+-- count + byte caps for item-image uploads. The upload path upsert-increments
+-- atomically on accepted uploads; quota resets naturally per day (no sweep).
+CREATE TABLE IF NOT EXISTS seller_upload_quota (
+  seller_id UUID NOT NULL,
+  day       DATE NOT NULL,
+  uploads   INT NOT NULL DEFAULT 0,
+  bytes     BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (seller_id, day)
+);

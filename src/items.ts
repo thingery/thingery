@@ -1,5 +1,6 @@
 import { pool, type ItemRow } from "./db.js";
 import { embedText, itemEmbeddingText } from "./embed.js";
+import { logSecurityEvent } from "./security-events.js";
 import {
   attributeShapeErrors,
   AttributeValidationError,
@@ -24,6 +25,12 @@ export interface CreateItemInput {
   shipping_tier: string;
   images: string[];
   attributes?: Attributes;
+}
+
+/** THI-112: listing_write event action — a status update to 'deleted' is the
+ * delete path (listings are never row-deleted); everything else is an update. */
+function writeAction(status: string | undefined): "update" | "delete" {
+  return status === "deleted" ? "delete" : "update";
 }
 
 export async function createItem(input: CreateItemInput): Promise<ItemRow> {
@@ -63,6 +70,9 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
       embedding ? JSON.stringify(embedding) : null,
     ],
   );
+  // THI-112 (H4.2): successful listing create — seller id only, never the
+  // title/description (no-payload rule in docs/security.md §6).
+  logSecurityEvent({ type: "listing_write", action: "create", outcome: "success" }, { sellerId: input.seller_id });
   return rows[0];
 }
 
@@ -232,7 +242,10 @@ export async function updateItem(
   // this is the single choke point for both MCP and chat callers.
   if (update.attributes !== undefined) {
     const shapeErrors = attributeShapeErrors(update.attributes);
-    if (shapeErrors.length > 0) throw new AttributeValidationError(shapeErrors);
+    if (shapeErrors.length > 0) {
+      logSecurityEvent({ type: "listing_write", action: writeAction(update.status), outcome: "rejected" }, { sellerId });
+      throw new AttributeValidationError(shapeErrors);
+    }
     sets.push(`attributes = ${add(JSON.stringify(update.attributes))}::jsonb`);
   }
   if (sets.length === 0) return getItem(id);
@@ -243,6 +256,12 @@ export async function updateItem(
      WHERE id = $${params.length - 1} AND seller_id = $${params.length}
      RETURNING *`,
     params,
+  );
+  // THI-112 (H4.2): update/delete outcome — null means the item was not
+  // found or not owned by this seller, which is the rejection worth logging.
+  logSecurityEvent(
+    { type: "listing_write", action: writeAction(update.status), outcome: rows[0] ? "success" : "rejected" },
+    { sellerId },
   );
   return rows[0] ?? null;
 }

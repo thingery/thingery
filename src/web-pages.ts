@@ -125,7 +125,10 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
 
   const imagesHtml = item.images.length
     ? `<div class="gallery">${item.images
-        .map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(item.title)}" loading="lazy">`)
+        // THI-130 (THI-128 review follow-up): never send the viewer's referrer to
+        // arbitrary https image hosts — partial mitigation for the accepted H3
+        // residual risk (tracking pixels still learn the viewer's IP).
+        .map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer">`)
         .join("\n")}</div>`
     : `<p class="meta">No photos yet.</p>`;
 

@@ -135,14 +135,16 @@ describe("/api surface fails as generic JSON on backend faults (THI-58)", () => 
 
   it("T4 /api/items/:id/images upload fault: 500 JSON, no unhandled rejection (F2)", async () => {
     vi.spyOn(pool, "query")
-      .mockResolvedValueOnce({ rows: [{ id: "seller-1", api_key: "thg_x", display_name: "S" }] }) // session lookup
+      .mockResolvedValueOnce({ rows: [{ id: "seller-1", api_key: "thg_x", display_name: "S", session_epoch: 0 }] }) // session lookup (THI-115: epoch rides along)
       .mockRejectedValueOnce(new Error("simulated failover")); // addItemImage ownership check
     await withServer(async (base) => {
       const unhandled = await captureUnhandled(async () => {
         const res = await fetch(`${base()}/api/items/item-1/images`, {
           method: "POST",
           headers: { "content-type": "image/png", cookie: sellerCookie() },
-          body: Buffer.alloc(16),
+          // Real PNG magic bytes (THI-110): signature validation runs before any
+          // DB access, so zero-fill bytes would now 400 before the mocked fault.
+          body: Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(8)]),
         });
         expect(res.status).toBe(500);
         expect(res.headers.get("content-type")).toContain("application/json");

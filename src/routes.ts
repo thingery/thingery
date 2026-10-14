@@ -11,6 +11,7 @@ import {
   signSession,
   verifyPassword,
   SESSION_COOKIE,
+  type AccountRow,
 } from "./auth.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { addItemImage, MAX_IMAGE_BYTES } from "./images.js";
@@ -63,7 +64,20 @@ api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
   }
   // createAccount rejections flow to the terminal middleware as a generic
   // JSON 500 — the old local catch leaked raw driver detail (spec THI-58 F5).
-  const account = await createAccount(email, parsed.data.password, parsed.data.name ?? email.split("@")[0]);
+  // THI-61 (Security THI-60 note N3 / spec THI-58 §9 OQ3): two concurrent
+  // signups can both pass the pre-check above; the insert loser hits the
+  // sellers email unique constraint (pg 23505) and gets the same 409 body
+  // as the pre-check. Any other fault rethrows — generic 500, no detail.
+  let account: AccountRow;
+  try {
+    account = await createAccount(email, parsed.data.password, parsed.data.name ?? email.split("@")[0]);
+  } catch (err) {
+    if ((err as { code?: string }).code === "23505") {
+      res.status(409).json({ error: "An account with this email already exists." });
+      return;
+    }
+    throw err;
+  }
   res.cookie(SESSION_COOKIE, signSession(account.id), sessionCookieOptions());
   res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
 }));

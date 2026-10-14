@@ -2,7 +2,7 @@
 
 Target: any fresh Ubuntu 24.04 / Debian 12 VPS (2 GB RAM / 20 GB SSD is enough to start).
 Result: `https://thingery.dev` serving the MCP endpoint, website, and discovery files,
-with automatic HTTPS and nightly database backups.
+with automatic HTTPS and encrypted nightly backups (§4).
 
 Total time: ~15 minutes.
 
@@ -68,37 +68,168 @@ curl https://thingery.dev/llms.txt | head
 
 ## 4. Nightly backups (do not skip)
 
-The Item Graph is the asset. Local dumps at minimum, object storage better:
+The Item Graph is the asset. Backups are **encrypted before they touch disk**
+(client-side `age`) and pushed offsite to object storage; the decryption key
+never lives on the VPS. Local retention: 14 days. Offsite retention: 30 days.
+
+### Key management (one-time)
 
 ```bash
-sudo crontab -e
-# add:
-0 3 * * * docker exec $(docker ps -qf name=db) pg_dump -U thingery thingery | gzip > /var/backups/thingery-$(date +\%F).sql.gz && find /var/backups -name 'thingery-*.sql.gz' -mtime +14 -delete
-0 4 * * * docker cp $(docker ps -qf name=app):/app/uploads /var/backups/img.tmp && tar czf /var/backups/thingery-images-$(date +\%F).tar.gz -C /var/backups/img.tmp . && rm -rf /var/backups/img.tmp && find /var/backups -name 'thingery-images-*.tar.gz' -mtime +14 -delete
+# on the OPERATOR's machine (never on the VPS):
+age-keygen -o thingery-backup-key.age.txt
+# prints: Public key: age1...  <- goes on the VPS in the backup script (not secret)
+# the file itself is the PRIVATE key -> store it in a password manager,
+# confirm it is saved, then delete the file.
 ```
 
-The second job backs up uploaded item images. On 2026-10-12 the DB restore procedure
-below was executed end-to-end on the production VPS against a real nightly backup
-(3.3 KB dump, restore in 0.24 s, row counts matched live). Re-run it monthly —
-a backup that has never been restored is not a backup.
+The private key is the only way to restore. If it is lost, every backup is
+unrecoverable. It lives in the operator's password manager — never on the VPS,
+never in the repo, never in chat.
+
+### Backup script and cron (on the VPS)
+
+```bash
+sudo apt install -y age rclone                 # prerequisites
+sudo nano /usr/local/bin/thingery-backup       # paste the script below
+sudo chmod 0750 /usr/local/bin/thingery-backup
+sudo tee /etc/logrotate.d/thingery-backup <<'LR'
+/var/log/thingery-backup.log {
+  weekly
+  rotate 8
+  compress
+  missingok
+  notifempty
+}
+LR
+sudo crontab -e
+# add (single entry; script does DB + images + prune + offsite push):
+0 3 * * * /usr/local/bin/thingery-backup >> /var/log/thingery-backup.log 2>&1
+```
+
+Script contents (`/usr/local/bin/thingery-backup`):
+
+```bash
+#!/bin/bash
+# thingery-backup - nightly encrypted backup pipeline (docs/deploy-vps.md section 4).
+# DB dump and images tarball are encrypted with age BEFORE anything touches disk.
+set -uo pipefail
+umask 077
+
+PUBKEY='age1...'                    # <- the public key from age-keygen (not secret)
+BACKUP_DIR=/var/backups
+DATE=$(date +%F)
+FAIL=0
+
+log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
+
+DB_FILE="$BACKUP_DIR/thingery-$DATE.sql.gz.age"
+IMG_FILE="$BACKUP_DIR/thingery-images-$DATE.tar.gz.age"
+
+# 1. Database: pg_dump | gzip | age -> atomic rename (no truncated .age left behind)
+DB_CID=$(docker ps -qf name=thingery-db)
+if [ -n "$DB_CID" ] && docker exec "$DB_CID" pg_dump -U thingery thingery \
+     | gzip | age -r "$PUBKEY" > "$DB_FILE.part"; then
+  if [ -s "$DB_FILE.part" ]; then
+    mv "$DB_FILE.part" "$DB_FILE"
+    log "db OK $DB_FILE $(stat -c %s "$DB_FILE")B"
+  else log "db FAIL empty output"; rm -f "$DB_FILE.part"; FAIL=1; fi
+else
+  log "db FAIL pg_dump|gzip|age pipe"; rm -f "$DB_FILE.part"; FAIL=1
+fi
+
+# 2. Images: tar runs INSIDE the app container, piped straight into age
+#    (plaintext images never land on VPS disk)
+APP_CID=$(docker ps -qf name=app)
+if [ -n "$APP_CID" ] && docker exec "$APP_CID" tar czf - -C /app/uploads . \
+     | age -r "$PUBKEY" > "$IMG_FILE.part"; then
+  if [ -s "$IMG_FILE.part" ]; then
+    mv "$IMG_FILE.part" "$IMG_FILE"
+    log "img OK $IMG_FILE $(stat -c %s "$IMG_FILE")B"
+  else log "img FAIL empty output"; rm -f "$IMG_FILE.part"; FAIL=1; fi
+else
+  log "img FAIL tar|age pipe"; rm -f "$IMG_FILE.part"; FAIL=1
+fi
+
+# 3. Local retention: 14 days (encrypted files only)
+find "$BACKUP_DIR" -name 'thingery-*.age' -mtime +14 -delete
+log "local prune (14d) done"
+
+# 4. Offsite push - gated on /etc/thingery-backup.env (root:root 0600, VPS only).
+if [ -r /etc/thingery-backup.env ]; then . /etc/thingery-backup.env; fi
+if [ -n "${RCLONE_REMOTE:-}" ]; then
+  if rclone copy "$DB_FILE" "$RCLONE_REMOTE" && rclone copy "$IMG_FILE" "$RCLONE_REMOTE"; then
+    log "offsite push OK -> $RCLONE_REMOTE"
+    if rclone delete --min-age "${RCLONE_KEEP_DAYS:-30}d" "$RCLONE_REMOTE"; then
+      log "offsite prune (${RCLONE_KEEP_DAYS:-30}d) done"
+    else log "offsite prune FAIL"; FAIL=1; fi
+  else
+    log "offsite push FAIL"; FAIL=1
+  fi
+else
+  log "offsite push SKIPPED (not configured; see section 4 Offsite push)"
+fi
+
+exit $FAIL
+```
+
+### Offsite push (object storage)
+
+Credentials live only in `/etc/thingery-backup.env` on the VPS (root:root, 0600).
+Never in the repo. Any S3-compatible destination works via rclone:
+
+```bash
+RCLONE_REMOTE="offsite:thingery-backups/"        # <remote-name>:<bucket/path>
+RCLONE_KEEP_DAYS=30                              # offsite retention
+# remote defined inline via env vars (no rclone.conf needed):
+RCLONE_CONFIG_OFFSITE_TYPE=s3
+RCLONE_CONFIG_OFFSITE_PROVIDER=Other             # e.g. Infomaniak public cloud
+RCLONE_CONFIG_OFFSITE_ENDPOINT=https://<s3-endpoint>
+RCLONE_CONFIG_OFFSITE_ACCESS_KEY_ID=<access-key>
+RCLONE_CONFIG_OFFSITE_SECRET_ACCESS_KEY=<secret-key>
+```
+
+Until this file exists the script logs `offsite push SKIPPED` and still writes
+the local encrypted backups every night.
+
+**Rollback** to the pre-encryption pipeline (kept one cycle after the 2026-10-14
+switch): comment the `/usr/local/bin/thingery-backup` cron line, uncomment these
+two old lines:
+
+```bash
+# 0 3 * * * docker exec $(docker ps -qf name=db) pg_dump -U thingery thingery | gzip > /var/backups/thingery-$(date +\%F).sql.gz && find /var/backups -name 'thingery-*.sql.gz' -mtime +14 -delete
+# 0 4 * * * docker cp $(docker ps -qf name=app):/app/uploads /var/backups/img.tmp && tar czf /var/backups/thingery-images-$(date +\%F).tar.gz -C /var/backups/img.tmp . && rm -rf /var/backups/img.tmp && find /var/backups -name 'thingery-images-*.tar.gz' -mtime +14 -delete
+```
 
 ### Restore test (monthly, ~5 minutes)
 
-Never restore over the live database. The procedure below restores into an
-isolated scratch container with **no published ports** — it is reachable only
-via `docker exec`, so production cannot be touched. All commands run on the VPS.
+Never restore over the live database. The procedure restores into an isolated
+scratch container with **no published ports** — reachable only via `docker exec`,
+so production cannot be touched. Decryption happens **on the operator's machine**
+(private key from the password manager); plaintext SQL streams over SSH straight
+into the scratch container and is never written to the VPS disk.
 
-1. Pick the latest backup and verify its integrity:
+1. On the VPS: pick the latest backup and record its sha256:
 
    ```bash
-   sudo ls -lh --time-style=long-iso /var/backups/thingery-*.sql.gz | tail -3
-   B=/var/backups/thingery-$(date +%F).sql.gz   # or the newest file from the listing
-   sudo gzip -t "$B" && echo GZIP_OK            # must print GZIP_OK
-   sudo sha256sum "$B"                          # record this in the ops log
+   sudo ls -lh --time-style=long-iso /var/backups/thingery-*.age | tail -4
+   B=/var/backups/thingery-$(date +%F).sql.gz.age   # or the newest from the listing
+   sudo sha256sum "$B"                              # record this in the ops log
    ```
 
-2. Start an isolated scratch Postgres (pgvector) container — same image as prod,
-   throwaway password, no `-p` port mappings:
+2. Fetch the encrypted file to the operator machine and verify it decrypts
+   (integrity check happens after decrypt — you cannot gzip -t an .age file):
+
+   ```bash
+   # on the VPS: sudo cp "$B" /tmp/ && sudo chown $USER /tmp/"$(basename "$B")"
+   scp <vps>:/tmp/thingery-$(date +%F).sql.gz.age .
+   # on the VPS: rm /tmp/thingery-*.age
+   age -d -i thingery-backup-key.age.txt thingery-$(date +%F).sql.gz.age > dump.sql.gz
+   gzip -t dump.sql.gz && echo GZIP_OK             # must print GZIP_OK
+   sha256sum thingery-$(date +%F).sql.gz.age        # must match the VPS-side hash
+   ```
+
+3. Start an isolated scratch Postgres (pgvector) container on the VPS — same image
+   as prod, throwaway password, no `-p` port mappings:
 
    ```bash
    docker run -d --name thingery-restore-test \
@@ -112,22 +243,23 @@ via `docker exec`, so production cannot be touched. All commands run on the VPS.
    done
    ```
 
-3. Confirm the scratch target is empty (must print `0`):
+4. Confirm the scratch target is empty (must print `0`):
 
    ```bash
    docker exec thingery-restore-test psql -U thingery -d thingery -tc \
      "SELECT count(*) FROM pg_tables WHERE schemaname='public';"
    ```
 
-4. Restore and time it. `ON_ERROR_STOP=1` makes any SQL error fail loudly instead
-   of producing a silently-partial restore:
+5. Restore and time it, streaming the decrypted dump from the operator machine.
+   `ON_ERROR_STOP=1` makes any SQL error fail loudly instead of producing a
+   silently-partial restore:
 
    ```bash
-   time (sudo zcat "$B" | docker exec -i thingery-restore-test \
-     psql -U thingery -d thingery -v ON_ERROR_STOP=1 -q)
+   time (gunzip -c dump.sql.gz | ssh <vps> 'docker exec -i thingery-restore-test \
+     psql -U thingery -d thingery -v ON_ERROR_STOP=1 -q')
    ```
 
-5. Verify the restored data. Row counts must match the live DB; run a joined query
+6. Verify the restored data. Row counts must match the live DB; run a joined query
    and check the pgvector extension so you know the data is usable, not just present:
 
    ```bash
@@ -143,25 +275,35 @@ via `docker exec`, so production cannot be touched. All commands run on the VPS.
      "SELECT (SELECT count(*) FROM sellers), (SELECT count(*) FROM items), (SELECT count(*) FROM categories);"
    ```
 
-6. Clean up the scratch container (never delete the backup file itself):
+7. Clean up the scratch container (never delete the backup file itself):
 
    ```bash
    docker rm -f -v thingery-restore-test
    ```
 
-7. Confirm production is untouched:
+8. Confirm production is untouched:
 
    ```bash
    curl -sf https://thingery.dev/healthz   # {"ok":true,...}
    ```
 
-Record in the ops log: backup filename, size, sha256, restore duration, live vs
-restored row counts, and the date. If any step fails, treat the nightly backup as
-broken until fixed and escalate.
+Record in the ops log (issue tracker): backup filename, size, sha256, restore
+duration, live vs restored row counts, and the date. If any step fails, treat the
+nightly backup as broken until fixed and escalate.
 
-The images backup (`thingery-images-*.tar.gz`) can be spot-checked with
-`mkdir /tmp/img-verify && tar xzf <file> -C /tmp/img-verify && ls /tmp/img-verify | head`
-then `rm -rf /tmp/img-verify`.
+Drill history: 2026-10-12 end-to-end against a plaintext nightly (3.3 KB, 0.24 s,
+counts matched); 2026-10-14 first end-to-end drill of the encrypted pipeline
+(7.7 KB `.age`, decrypt + restore 2.1 s, counts matched, pgvector OK, images
+tarball decrypts and lists). Re-run monthly — a backup that has never been
+restored is not a backup.
+
+The images backup (`thingery-images-*.tar.gz.age`) can be spot-checked on the
+operator machine with:
+
+```bash
+age -d -i thingery-backup-key.age.txt thingery-images-$(date +%F).tar.gz.age \
+  | tar tzf - | head    # list entries without extracting
+```
 
 ## 5. Updating
 

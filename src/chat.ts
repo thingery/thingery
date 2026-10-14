@@ -6,6 +6,7 @@
 import type { SellerRow } from "./db.js";
 import { getCategory, getItem, createItem, listCategories, myItems, searchItems, undeclaredKeyUsage, updateItem } from "./items.js";
 import { validateAttributes, type Attributes } from "./attributes.js";
+import { logSecurityEvent } from "./security-events.js";
 import crypto from "node:crypto";
 import { SESSION_SECRET } from "./auth.js";
 
@@ -196,10 +197,18 @@ export async function executeTool(
       const s = requireSeller();
       const category = ((args.category as string) ?? "other").toLowerCase();
       const categoryRow = await getCategory(category);
-      if (!categoryRow) return { error: `unknown category '${category}'` };
+      if (!categoryRow) {
+        // THI-133 F2: create-time validation rejection, correlated by
+        // sellerId (no request IP at this layer). Mirrors src/tools.ts.
+        logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: s.id });
+        return { error: `unknown category '${category}'` };
+      }
       const attributes = (args.attributes as Attributes | undefined) ?? {};
       const attributeErrors = validateAttributes(categoryRow.attribute_definitions, attributes);
-      if (attributeErrors.length > 0) return { error: attributeErrors.join("; ") };
+      if (attributeErrors.length > 0) {
+        logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: s.id });
+        return { error: attributeErrors.join("; ") };
+      }
       const item = await createItem({
         seller_id: s.id,
         title: args.title as string,

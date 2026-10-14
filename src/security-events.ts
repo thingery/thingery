@@ -9,14 +9,34 @@
 // built field-by-field from the fixed whitelist below, never by stringifying
 // the event or context objects, so an extra runtime property on either
 // cannot leak into the log. Values that come from callers are short slugs
-// (route names, reason codes), never raw request data.
+// (route names, reason codes), never raw request data. Since THI-133 those
+// slugs are compile-time literal unions (SecurityEventRoute /
+// SecurityEventReason below): a dynamic, request-derived string (e.g.
+// req.path) does not typecheck, and a new route/reason is a one-line type
+// change reviewers see. Pinned by tests/security-events.test-d.ts.
+
+/** Fixed route slugs for rate_limit events (THI-133). */
+export type SecurityEventRoute = "/api/signup" | "/api/login" | "/mcp";
+
+/** Fixed rejection reasons for image_upload events (THI-133; extended with
+ *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a
+ *  reviewed one-line addition, which is the point of this union). */
+export type SecurityEventReason =
+  | "unsupported_media_type"
+  | "empty"
+  | "too_large"
+  | "not_owned"
+  | "bad_magic"
+  | "media_type_mismatch"
+  | "item_image_limit"
+  | "quota_exceeded";
 
 export type SecurityEvent =
   | { type: "signup"; outcome: "success" }
   | { type: "login"; outcome: "success" | "failure" }
-  | { type: "rate_limit"; route: string }
+  | { type: "rate_limit"; route: SecurityEventRoute }
   | { type: "listing_write"; action: "create" | "update" | "delete"; outcome: "success" | "rejected" }
-  | { type: "image_upload"; outcome: "success" | "rejected"; reason?: string };
+  | { type: "image_upload"; outcome: "success" | "rejected"; reason?: SecurityEventReason };
 
 export interface SecurityEventContext {
   sellerId?: string;

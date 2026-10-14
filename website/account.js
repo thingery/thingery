@@ -1,6 +1,9 @@
 // Account page (login/signup, API key display) — loaded from /login.html.
 // ES module: imports the OAuth login-hop next filter (spec THI-11 §2.5(4)).
+// THI-114: the API key is show-once — revealed only right after
+// signup/login/regeneration; /api/me no longer carries it.
 import { safeNextTarget } from "./next-filter.js";
+import { MASKED_KEY_HINT, MASKED_KEY_PLACEHOLDER, mcpConfigText } from "./account-view.js";
 
 let mode = "signup";
 const $ = (id) => document.getElementById(id);
@@ -26,15 +29,14 @@ function showDone(seller) {
   $("auth").hidden = true;
   $("done").hidden = false;
   $("welcome").textContent = `Logged in as ${seller.name}`;
-  $("apikey").textContent = seller.api_key;
 
   const mcpUrl = `${location.origin}/mcp`;
   $("mcp-url").textContent = mcpUrl;
-  $("mcp-config").textContent = JSON.stringify(
-    { mcpServers: { thingery: { type: "http", url: mcpUrl, headers: { Authorization: `Bearer ${seller.api_key}` } } } },
-    null,
-    2,
-  );
+  // Signup/login just handed us the key (show-once): reveal it and the ready
+  // MCP config. A plain /api/me session has no key: masked hint + regenerate.
+  if (seller.api_key) revealKey(seller.api_key, mcpUrl);
+  else maskKey(mcpUrl);
+
   $("copy-config").onclick = () => {
     navigator.clipboard.writeText($("mcp-config").textContent);
     $("copy-config").textContent = "Copied ✓";
@@ -44,6 +46,36 @@ function showDone(seller) {
     $("copy-url").textContent = "Copied ✓";
   };
 }
+
+function revealKey(apiKey, mcpUrl) {
+  $("apikey").textContent = apiKey;
+  $("mcp-config").textContent = mcpConfigText(mcpUrl, apiKey);
+  $("key-note").textContent =
+    "Keep it private — it publishes listings as you. Shown only once; regenerate to view or rotate it later.";
+}
+
+function maskKey(mcpUrl) {
+  $("apikey").textContent = MASKED_KEY_HINT;
+  $("mcp-config").textContent = mcpConfigText(mcpUrl, MASKED_KEY_PLACEHOLDER);
+  $("key-note").textContent =
+    "Keep it private — it publishes listings as you. It is shown only when created or regenerated.";
+}
+
+$("regen").onclick = async () => {
+  $("key-error").textContent = "";
+  $("regen").disabled = true;
+  try {
+    const res = await fetch("/api/me/api-key", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+      $("key-error").textContent = data.error || "Could not regenerate the key.";
+      return;
+    }
+    revealKey(data.api_key, `${location.origin}/mcp`); // new show-once moment
+  } finally {
+    $("regen").disabled = false;
+  }
+};
 
 $("mode").onclick = (e) => {
   e.preventDefault();

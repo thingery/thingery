@@ -309,12 +309,17 @@ age -d -i thingery-backup-key.age.txt thingery-images-$(date +%F).tar.gz.age \
 
 Deploys are automated via the `deploy.yml` workflow (on push to `main`) once you set the
 repo variables/secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, and `DEPLOY_ENABLED=true`.
-The workflow exports `GIT_COMMIT`/`BUILD_TIME` before building, so `/healthz` reports the
-deployed commit. Manual equivalent:
+The workflow applies `db/schema.sql` (idempotent) **before** rebuilding — expand-phase
+migrations are additive, so the running containers ignore them while the new code may
+require the new columns; applying first avoids a window where authenticated traffic hits
+`column ... does not exist` errors. It also exports `GIT_COMMIT`/`BUILD_TIME` before
+building, so `/healthz` reports the deployed commit. Manual equivalent:
 
 ```bash
 cd /opt/thingery && git pull && \
-  GIT_COMMIT=$(git rev-parse HEAD) BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  docker compose -f docker-compose.prod.yml exec -T db \\
+    psql -U thingery -d thingery -v ON_ERROR_STOP=1 < db/schema.sql && \
+  GIT_COMMIT=$(git rev-parse HEAD) BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \\
   docker compose -f docker-compose.prod.yml up -d --build
 ```
 

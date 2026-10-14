@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   accountByEmail,
   createAccount,
+  regenerateApiKey,
   sellerFromSession,
   sessionCookieOptions,
   signSession,
@@ -25,6 +26,7 @@ import { logSecurityEvent } from "./security-events.js";
 import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer } from "./stripe.js";
 
 const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/logins per IP per hour
+const apiKeyRotateLimiter = new RateLimiter(10, 60 * 60_000); // 10 key rotations per seller per hour (THI-114)
 const chatAnonLimiter = new RateLimiter(10, 60 * 60_000); // 10 anonymous chats per IP per hour
 const chatAuthedLimiter = new RateLimiter(60, 60 * 60_000); // 60 logged-in chats per hour
 export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin calls per IP per hour (F7)
@@ -107,7 +109,7 @@ api.post("/login", asyncHandler(async (req: Request, res: Response) => {
   const email = typeof body.email === "string" ? body.email : undefined;
   const password = typeof body.password === "string" ? body.password : undefined;
   const account = email ? await accountByEmail(email.toLowerCase()) : null;
-  if (!account || !verifyPassword(password ?? "", (account as { password_hash?: string }).password_hash ?? null)) {
+  if (!account || !verifyPassword(password ?? "", account.password_hash)) {
     // THI-112: no email/username is logged — the failure event carries only
     // outcome + IP, so the log can't become a credential-validity oracle.
     logSecurityEvent({ type: "login", outcome: "failure" }, { ip: clientIp(req) });
@@ -135,7 +137,40 @@ api.get("/me", asyncHandler(async (req: Request, res: Response) => {
     res.json({ seller: null });
     return;
   }
-  res.json({ seller: { name: seller.display_name, api_key: seller.api_key } });
+  // THI-114: no api_key here — the key is show-once (signup/login/regenerate).
+  res.json({ seller: { name: seller.display_name } });
+}));
+
+// THI-114 (security doc §6 H2): rotate the seller API key. Session-auth only;
+// the new key is returned exactly once and the old one dies atomically with
+// the UPDATE (both the hash and the legacy plaintext column are replaced).
+// The same UPDATE bumps sellers.session_epoch (THI-114 spec item 3), revoking
+// every outstanding session cookie — the response re-signs the acting session
+// at the new epoch so the seller rotating their own key stays logged in while
+// any other session (e.g. a stolen browser) is revoked.
+api.post("/me/api-key", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage your API key." });
+    return;
+  }
+  if (!apiKeyRotateLimiter.allow(`seller:${seller.id}`)) {
+    res.status(429).json({ error: "Too many regenerations. Try again later." });
+    return;
+  }
+  const rotated = await regenerateApiKey(seller.id);
+  if (!rotated) {
+    // Session was valid but the row vanished between the two queries.
+    res.status(404).json({ error: "Account not found." });
+    return;
+  }
+  res.cookie(
+    SESSION_COOKIE,
+    signSession(seller.id, rotated.sessionEpoch),
+    sessionCookieOptions(),
+  );
+  res.set("Cache-Control", "no-store"); // show-once: never cache the plaintext key
+  res.json({ api_key: rotated.apiKey });
 }));
 
 // --- item images (browser upload) -------------------------------------------

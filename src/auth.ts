@@ -6,22 +6,37 @@ export function newApiKey(): string {
   return `thg_${crypto.randomBytes(24).toString("base64url")}`;
 }
 
+/** sha256 hex of a `thg_` key — the at-rest form in sellers.api_key_hash
+ * (THI-114, security doc §6 H2.1). A fast unsalted hash is appropriate for
+ * 192-bit random tokens; lookup stays a single indexed equality. */
+export function apiKeyHash(key: string): string {
+  return crypto.createHash("sha256").update(key, "utf8").digest("hex");
+}
+
 export async function createSeller(displayName: string, apiKey: string): Promise<SellerRow> {
   const { rows } = await pool.query<SellerRow>(
-    `INSERT INTO sellers (api_key, display_name) VALUES ($1, $2) RETURNING id, api_key, display_name`,
-    [apiKey, displayName],
+    `INSERT INTO sellers (api_key, api_key_hash, display_name) VALUES ($1, $2, $3) RETURNING id, display_name`,
+    [apiKey, apiKeyHash(apiKey), displayName],
   );
   return rows[0];
 }
 
-/** Resolves a seller by API key. */
+/** Resolves a seller by API key (THI-114 hash-first dual read). */
 export async function sellerFromApiKey(key: string): Promise<SellerRow | null> {
   if (!key.startsWith("thg_")) return null;
   const { rows } = await pool.query<SellerRow>(
-    `SELECT id, api_key, display_name FROM sellers WHERE api_key = $1`,
+    `SELECT id, display_name FROM sellers WHERE api_key_hash = $1`,
+    [apiKeyHash(key)],
+  );
+  if (rows[0]) return rows[0];
+  // Expand-phase fallback (THI-114): a row created between deploy and the
+  // backfill running carries no hash yet — authenticate it by plaintext for
+  // the migration window only. Migrated rows (hash set) never match here.
+  const legacy = await pool.query<SellerRow>(
+    `SELECT id, display_name FROM sellers WHERE api_key = $1 AND api_key_hash IS NULL`,
     [key],
   );
-  return rows[0] ?? null;
+  return legacy.rows[0] ?? null;
 }
 
 /**
@@ -40,7 +55,7 @@ export async function sellerFromAccessToken(token: string): Promise<SellerRow | 
   if (!token.startsWith("thgo_")) return null;
   const hash = crypto.createHash("sha256").update(token, "utf8").digest("hex");
   const { rows } = await pool.query<SellerRow & { token_id: string }>(
-    `SELECT s.id, s.api_key, s.display_name, t.id AS token_id
+    `SELECT s.id, s.display_name, t.id AS token_id
        FROM oauth_tokens t
        JOIN oauth_grants g ON g.id = t.grant_id
        JOIN sellers s ON s.id = g.seller_id
@@ -63,7 +78,9 @@ export async function sellerFromAccessToken(token: string): Promise<SellerRow | 
     .catch((err: unknown) => {
       console.error("oauth: last_used_at touch failed (ignored):", err);
     });
-  return { id: row.id, api_key: row.api_key, display_name: row.display_name };
+  // THI-114: the resolved seller carries no plaintext key — auth paths never
+  // need it and it must not ride along in response objects.
+  return { id: row.id, display_name: row.display_name };
 }
 
 /** /mcp auth outcome (spec THI-11 §2.10a–b). */
@@ -175,9 +192,9 @@ export const SESSION_MAX_AGE_S = 30 * 24 * 3600;
  * consent CSRF tokens ("csrf:" prefix in oauth.ts); the prefixes keep purposes
  * distinct. The issue timestamp (`iat`, unix seconds) makes the token expire
  * server-side after SESSION_MAX_AGE_S; the seller's `session_epoch`
- * (sellers.session_epoch — bumped by the future key-regeneration endpoint,
- * the first revocation trigger) kills every outstanding cookie for one seller
- * at once. Cookie format: `${sellerId}.${iat}.${mac}`. One-time effect on
+ * (sellers.session_epoch — bumped by the key-regeneration endpoint POST
+ * /api/me/api-key, THI-114 spec item 3, the first revocation trigger) kills
+ * every outstanding cookie for one seller at once. Cookie format: `${sellerId}.${iat}.${mac}`. One-time effect on
  * deploy: cookies in the old `sellerId.mac` format stop validating — every
  * existing session logs in again once (same accepted trade-off as the THI-11
  * `session:` prefix rollout).
@@ -253,7 +270,8 @@ function readCookie(req: Request, name: string): string | undefined {
   return undefined;
 }
 
-/** Resolves the logged-in seller from the session cookie (browser clients). */
+/** Resolves the logged-in seller from the session cookie (browser clients).
+ * THI-114: no plaintext key selected — /api/me must not carry it. */
 export async function sellerFromSession(req: Request): Promise<SellerRow | null> {
   const token = splitSessionToken(readCookie(req, SESSION_COOKIE));
   if (!token) return null;
@@ -268,9 +286,10 @@ export async function sellerFromSession(req: Request): Promise<SellerRow | null>
   // epoch (revocation) kills outstanding cookies with no extra query (spec
   // THI-115 §3). The cookie's sellerId is untrusted until the MAC verifies,
   // but it is only used as a parameterized lookup key; nothing from this row
-  // is returned before `verifySessionToken` passes.
+  // is returned before `verifySessionToken` passes. THI-114: no plaintext key
+  // selected — /api/me must not carry it.
   const { rows } = await pool.query<SellerRow & { session_epoch: number }>(
-    `SELECT id, api_key, display_name, session_epoch FROM sellers WHERE id = $1`,
+    `SELECT id, display_name, session_epoch FROM sellers WHERE id = $1`,
     [token.sellerId],
   );
   const seller = rows[0];
@@ -290,6 +309,10 @@ export function sessionCookieOptions() {
 
 export interface AccountRow extends SellerRow {
   email: string;
+  /** THI-114 show-once: only signup/login responses ever reveal the key;
+   * AccountRow is the one internal type that still carries it. */
+  api_key: string;
+  password_hash: string | null;
   /** Sign-in must mint cookies at the seller's live epoch (spec THI-115 §3). */
   session_epoch: number;
 }
@@ -299,19 +322,46 @@ export async function createAccount(
   password: string,
   displayName: string,
 ): Promise<AccountRow> {
-  const { rows } = await pool.query<AccountRow>(
-    `INSERT INTO sellers (api_key, display_name, email, password_hash)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id, api_key, display_name, email, session_epoch`,
-    [newApiKey(), displayName, email, hashPassword(password)],
+  // THI-114: the key is generated here and handed back from this variable —
+  // the row itself never selects plaintext back out of the database.
+  const apiKey = newApiKey();
+  const { rows } = await pool.query<SellerRow & { email: string; session_epoch: number }>(
+    `INSERT INTO sellers (api_key, api_key_hash, display_name, email, password_hash)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, display_name, email, session_epoch`,
+    [apiKey, apiKeyHash(apiKey), displayName, email, hashPassword(password)],
   );
-  return rows[0];
+  return { ...rows[0], api_key: apiKey, password_hash: null };
 }
 
+/** Login path. THI-114: keeps reading the plaintext column deliberately —
+ * the login response is one of the two show-once moments for the key. */
 export async function accountByEmail(email: string): Promise<AccountRow | null> {
   const { rows } = await pool.query<AccountRow>(
     `SELECT id, api_key, display_name, email, password_hash, session_epoch FROM sellers WHERE email = $1`,
     [email],
   );
   return rows[0] ?? null;
+}
+
+/** Rotates a seller's API key (THI-114) and revokes every outstanding
+ * session cookie (THI-115 §3): one atomic UPDATE replaces the hash and the
+ * legacy plaintext column together — the old key stops authenticating the
+ * instant the row commits — and bumps `session_epoch`, which invalidates all
+ * cookies signed at earlier epochs. The regenerate endpoint immediately
+ * re-signs the acting session at the returned epoch, so the seller rotating
+ * their own key stays logged in while every other session is revoked.
+ * Returns the new key (show-once) plus the epoch it was signed at. */
+export async function regenerateApiKey(
+  sellerId: string,
+): Promise<{ apiKey: string; sessionEpoch: number } | null> {
+  const apiKey = newApiKey();
+  const { rows } = await pool.query<{ session_epoch: number }>(
+    `UPDATE sellers
+       SET api_key = $2, api_key_hash = $3, session_epoch = session_epoch + 1
+     WHERE id = $1
+     RETURNING session_epoch`,
+    [sellerId, apiKey, apiKeyHash(apiKey)],
+  );
+  return rows[0] ? { apiKey, sessionEpoch: rows[0].session_epoch } : null;
 }

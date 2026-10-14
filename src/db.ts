@@ -36,7 +36,6 @@ export interface ItemRow {
 
 export interface SellerRow {
   id: string;
-  api_key: string;
   display_name: string;
 }
 

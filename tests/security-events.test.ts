@@ -392,7 +392,15 @@ describe("HTTP call sites emit their events (THI-112)", () => {
     const spy = spyLog();
     const headers = { ...JSON_HEADERS, "x-forwarded-for": "198.51.100.10" };
     await withApiServer(async (base) => {
-      vi.spyOn(pool, "query").mockResolvedValue({ rows: [] } as never);
+      // Merge note (THI-144 × THI-114): main's createAccount returned rows[0]
+      // directly, so an empty-rows mock made every exhausting attempt 500
+      // before the success log. THI-114's createAccount spreads rows[0] and
+      // synthesizes the key client-side, so empty rows no longer fail — mock
+      // a pre-existing account instead: the 10 exhausting attempts hit the
+      // 409 duplicate pre-check (no events), and only the 11th is a 429.
+      vi.spyOn(pool, "query").mockResolvedValue({
+        rows: [{ id: "seller-signup-rl", api_key: "thg_rl", display_name: "A", email: "a@b.co", password_hash: null, session_epoch: 0 }],
+      } as never);
       let status = 0;
       for (let i = 0; i < 11; i++) {
         status = (await fetch(`${base()}/api/signup`, { method: "POST", headers, body: JSON.stringify({ email: "a@b.co", password: "password123" }) })).status;

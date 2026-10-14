@@ -29,6 +29,7 @@
     "test": "vitest run",
     "db:migrate": "tsx scripts/migrate.ts",
     "db:seed": "tsx scripts/seed.ts",
+    "backfill:reencode": "tsx scripts/reencode-existing-uploads.ts",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {

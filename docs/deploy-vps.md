@@ -166,6 +166,7 @@ DB_CID=$(docker ps -qf name=thingery-db)
 if [ -n "$DB_CID" ] && docker exec "$DB_CID" pg_dump -U thingery thingery \
      | gzip | age "${RECIPIENTS[@]}" > "$DB_FILE.part"; then
   if [ -s "$DB_FILE.part" ] && [ "$(stat -c %s "$DB_FILE.part")" -ge 1024 ]; then
+    # size floor: a truncated-but-nonempty dump must not log OK (THI-120 nit)
     mv "$DB_FILE.part" "$DB_FILE"
     log "db OK $DB_FILE $(stat -c %s "$DB_FILE")B"
   else log "db FAIL empty output"; rm -f "$DB_FILE.part"; FAIL=1; fi

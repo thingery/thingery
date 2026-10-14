@@ -173,7 +173,16 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         weight_grams: z.number().int().min(1).optional().describe("For shipping estimation"),
         dimensions_mm: z.string().max(40).optional().describe("LxWxH, e.g. '320x220x120'"),
         shipping_tier: z.enum(SHIPPING_TIERS).default("unknown").describe("locker | parcel | bulky | local"),
-        images: z.array(z.string().url()).max(12).default([]).describe("Image URLs"),
+        // THI-111 (security doc §6 H3): z.string().url() validates URL shape, not
+        // scheme — javascript:/data:/file: URLs passed and were stored on items
+        // (buyer-IP leak via tracking pixels, script-scheme footgun for naive
+        // clients). Scheme allowlist: image URLs must be http(s).
+        images: z.array(
+          z.string().url().refine(
+            (v) => /^https?:\/\//i.test(v),
+            "image URLs must be http(s) — javascript:, data:, file: and other schemes are rejected",
+          ),
+        ).max(12).default([]).describe("Image URLs (http/https only)"),
         attributes: z.record(z.union([z.string(), z.number(), z.boolean()])).default({})
           .describe("Category-specific fields, e.g. {\"size_eu\": 43, \"colorway\": \"white/grey\"}"),
       },
@@ -346,7 +355,8 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
       description:
         "Attach a photo to one of your listings. Pass the image as base64 (a data-URL prefix is " +
         "accepted — e.g. what you get when the user shares a photo in this conversation). " +
-        "Max 5 MB; jpeg, png, webp or gif. Requires API key.",
+        "Max 5 MB decoded — a full-size image fits: ~6.7 MB as base64+JSON, under the 8 MiB " +
+        "/mcp request cap. jpeg, png, webp or gif. Requires API key.",
       inputSchema: {
         item_id: z.string().uuid(),
         image_base64: z.string().min(50).describe("Base64-encoded image bytes (data-URL prefix allowed)"),

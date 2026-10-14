@@ -350,6 +350,24 @@ worst-case damage, "Exploitability" is how practical the attack is today.
   6.67 MiB base64+JSON body → HTTP 200, tool executes; 11.33 MiB body → 413 from the
   gate). The "max 5 MB" claim is accurate as stated; the tool description and README
   now spell out both limits (5 MB decoded, 8 MiB `/mcp` request cap).
+- **Re-encode at ingest — shipped (THI-156 rev 2 / ADR 0004; pipeline PR #87,
+  backfill THI-165).** Every upload — MCP `add_item_image` and the browser
+  route — is now re-encoded server-side by sharp (libvips, exact-pinned
+  0.35.5) into a same-family display copy: EXIF/GPS/XMP stripped, orientation
+  baked in, downscaled to ≤ 2000 px, output magic-byte + 5 MB re-validated;
+  original bytes are never persisted anywhere. Decode is bounded by a
+  header-parsed pixel budget (`limitInputPixels` 50 MP, `failOn: "warning"`),
+  a libvips loader blocklist (only the four allowlisted buffer loaders
+  unblocked process-wide), `concurrency(2)` + `cache(false)`, and a fast-fail
+  decode semaphore (max 2 in-flight re-encodes, reject-never-queue). A
+  one-shot backfill (`npm run backfill:reencode`) re-encodes pre-existing
+  uploads in place, originals moved to a dated sibling dir outside the served
+  tree; nothing is deleted (purge is DevOps' step). **Residual risks
+  (disclosed, THI-159):** `create_listing` image *URLs* are still
+  third-party-hosted (buyer IP leak via tracking pixels unchanged — host
+  control remains out of scope at this scale), and the pre-existing encrypted
+  nightly archives retain EXIF originals for up to 14 d local / 30 d offsite
+  after the backfill runs.
 - **Owner:** Coder; Security reviews (upload paths are protected per AGENTS.md).
   **Effort: M (2–3 days).**
 

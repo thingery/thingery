@@ -161,6 +161,9 @@ export function assertSecretConfigured(env: NodeJS.ProcessEnv = process.env): vo
 assertSecretConfigured();
 
 export const SESSION_COOKIE = "thingery_session";
+/** Canonical sellers.id shape (used to gate untrusted cookie segments before
+ *  they reach the UUID-typed SELECT — see sellerFromSession). */
+const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 /** Server-side session lifetime (spec THI-115 §1): tokens older than this are
  * rejected even when the browser still holds the cookie — the cookie maxAge
  * alone never expires the HMAC (docs/security.md §6 H2, fix 4). */
@@ -254,6 +257,13 @@ function readCookie(req: Request, name: string): string | undefined {
 export async function sellerFromSession(req: Request): Promise<SellerRow | null> {
   const token = splitSessionToken(readCookie(req, SESSION_COOKIE));
   if (!token) return null;
+  // Trust-boundary format gate (THI-122 review, finding 1): sellers.id is a
+  // UUID, and this SELECT runs before the MAC verifies — a non-UUID segment
+  // would make Postgres throw 22P02 ("invalid input syntax for type uuid"),
+  // turning a free HMAC rejection into a 500 + security_event on the OAuth
+  // surface. Reject at the boundary instead; splitSessionToken/parseSession
+  // stay format-agnostic (they are MAC-gated).
+  if (!UUID_RE.test(token.sellerId)) return null;
   // One indexed SELECT as before — `session_epoch` rides along so a bumped
   // epoch (revocation) kills outstanding cookies with no extra query (spec
   // THI-115 §3). The cookie's sellerId is untrusted until the MAC verifies,

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
+import type { Request } from "express";
 import {
   hashPassword,
   verifyPassword,
   signSession,
   parseSession,
+  sellerFromSession,
+  SESSION_COOKIE,
   SESSION_MAX_AGE_S,
 } from "../src/auth.js";
 
@@ -75,5 +78,20 @@ describe("session tokens (THI-115: server-side expiry + epoch)", () => {
   it("epoch bump invalidates old cookies; re-signing at the new epoch works", () => {
     expect(parseSession(signSession("seller-a", 0), 1)).toBeNull(); // bumped → revoked
     expect(parseSession(signSession("seller-a", 1), 1)).toBe("seller-a");
+  });
+});
+
+describe("sellerFromSession trust-boundary gate (THI-122 finding 1)", () => {
+  const reqWith = (cookie: string): Request => ({ headers: { cookie } }) as unknown as Request;
+
+  it("rejects a non-UUID sellerId segment before the SELECT (no 22P02 throw)", async () => {
+    // Review PoC, pre-fix: this cookie reached the UUID-typed SELECT and threw
+    // `invalid input syntax for type uuid` → 500 + security_event on /oauth.
+    const poc = `${SESSION_COOKIE}=not-a-uuid.1750000000.${"A".repeat(43)}`;
+    await expect(sellerFromSession(reqWith(poc))).resolves.toBeNull();
+    // Same for other 3-part-but-not-UUID shapes.
+    await expect(
+      sellerFromSession(reqWith(`${SESSION_COOKIE}=seller.a.1750000000.${"A".repeat(43)}`)),
+    ).resolves.toBeNull();
   });
 });

@@ -19,8 +19,16 @@ jobs:
           username: ${{ vars.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
+            set -e
             cd /opt/thingery
             git pull --ff-only
+            # Apply the idempotent schema BEFORE bringing up the new build (THI-114
+            # review N1): expand-phase migrations are additive, so the running
+            # containers ignore them, while the new code may require the new
+            # columns — applying first avoids a window where authenticated
+            # traffic hits `column ... does not exist` errors.
+            docker compose -f docker-compose.prod.yml exec -T db \
+              psql -U thingery -d thingery -v ON_ERROR_STOP=1 < db/schema.sql
             export GIT_COMMIT=$(git rev-parse HEAD)
             export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             docker compose -f docker-compose.prod.yml up -d --build

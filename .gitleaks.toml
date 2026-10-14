@@ -17,3 +17,14 @@ description = "Thingery seller API key"
 regex = '''\bthg_[A-Za-z0-9_-]{20,}\b'''
 keywords = ["thg_"]
 tags = ["secret", "thingery"]
+
+# Known false positive: a deliberately-wrong test password fixture
+# (tests/security-events.test.ts, THI-112 branch) whose entropy trips the
+# generic-api-key rule when the history scan (fetch-depth: 0) reaches that
+# commit. It is not a credential. Allowlist the exact string so CI does not
+# block every PR that scans that branch's history.
+[allowlist]
+description = "Explicitly allowed non-secrets (test fixtures)"
+regexes = [
+  '''\bdefinitely-wrong-hunter2\b''',
+]

@@ -3,8 +3,32 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import sharp from "sharp";
 import { pool } from "./db.js";
-import { logSecurityEvent } from "./security-events.js";
+import { logSecurityEvent, type SecurityEventReason } from "./security-events.js";
+
+// --- startup hardening (spec THI-156 rev 2, Security review THI-159 F2/F4) ---
+//
+// F4 loader allowlist: block every VipsForeignLoad subclass, then re-enable
+// only the *buffer* loaders for the four formats the upload path accepts.
+// SVG/HEIF/PDF/Magick loaders stay blocked process-wide, so even a bug in the
+// magic-byte allowlist upstream cannot hand an untrusted format to libvips.
+// GIF is decoded by libnsgif on the libvips sharp bundles (verified at
+// runtime); VipsForeignLoadGifBuffer is re-enabled too for giflib builds.
+sharp.block({ operation: ["VipsForeignLoad"] });
+sharp.unblock({
+  operation: [
+    "VipsForeignLoadJpegBuffer",
+    "VipsForeignLoadPngBuffer",
+    "VipsForeignLoadWebpBuffer",
+    "VipsForeignLoadNsgifBuffer",
+    "VipsForeignLoadGifBuffer",
+  ],
+});
+// Bound decode worker threads and disable the libvips cache: re-encodes are
+// one-shot, so caching only pins decoded pixels in memory (F2).
+sharp.concurrency(2);
+sharp.cache(false);
 
 const EXTENSION_BY_MEDIA_TYPE: Record<string, string> = {
   "image/jpeg": "jpg",
@@ -14,6 +38,33 @@ const EXTENSION_BY_MEDIA_TYPE: Record<string, string> = {
 };
 
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB per image
+
+// --- re-encode pipeline constants (spec THI-156 rev 2) ---
+export const MAX_INPUT_PIXELS = 50_000_000; // decode bomb guard: 50 MP
+export const MAX_DIMENSION = 2000; // stored images fit inside 2000×2000
+
+/**
+ * Fast-fail semaphore (THI-156, ~20 lines, no new dependency): at most 2
+ * concurrent re-encodes per process. Saturated → the caller rejects fast
+ * (429-style "try again") instead of queueing — a waiting queue of decoded
+ * images is exactly the peak-memory cost the cap exists to bound.
+ */
+export class FastFailSemaphore {
+  private inFlight = 0;
+  constructor(readonly max: number) {}
+  tryAcquire(): boolean {
+    if (this.inFlight >= this.max) return false;
+    this.inFlight += 1;
+    return true;
+  }
+  release(): void {
+    this.inFlight = Math.max(0, this.inFlight - 1);
+  }
+  get size(): number {
+    return this.inFlight;
+  }
+}
+export const reencodeSemaphore = new FastFailSemaphore(2);
 
 // THI-110 (docs/security.md §6 H3): upload abuse controls. Constants live in
 // code, deliberately not env-configurable — same posture as src/items.ts.
@@ -53,6 +104,82 @@ export function uploadsDir(): string {
 /** Strips an optional data-URL prefix ("data:image/png;base64,….") from base64 input. */
 export function stripDataUrl(base64: string): string {
   return base64.startsWith("data:") ? base64.slice(base64.indexOf(",") + 1) : base64;
+}
+
+/** Same-family re-encode settings; `.withMetadata()` is never called — the
+ * whole point of the pipeline is that nothing (EXIF/GPS/XMP) survives. */
+function applyReencode(pipeline: ReturnType<typeof sharp>, mediaType: string): ReturnType<typeof sharp> {
+  switch (mediaType) {
+    case "image/jpeg":
+      return pipeline.jpeg({ quality: 82, mozjpeg: true });
+    case "image/png":
+      return pipeline.png({ compressionLevel: 6 });
+    case "image/webp":
+      return pipeline.webp({ quality: 82 });
+    default:
+      // GIF: `animated: false` (set in the constructor) reads only the first
+      // frame, so the re-encode writes a single-frame still.
+      return pipeline.gif();
+  }
+}
+
+/**
+ * Re-encodes an already-validated upload through sharp (spec THI-156 rev 2):
+ * auto-orient, downscale to ≤ 2000 px, same-family re-encode with all
+ * metadata stripped. Originals are never persisted — only this buffer is.
+ * Rejects with a fixed `reason` slug (logged as a security event, no payload)
+ * and a client-safe message; buffer contents are never echoed back.
+ */
+export async function reencodeImage(
+  data: Buffer,
+  mediaType: string,
+): Promise<{ data: Buffer } | { reason: SecurityEventReason | null; message: string }> {
+  if (!reencodeSemaphore.tryAcquire()) {
+    // Load-shed, not an integrity failure and not client error — no security
+    // event slug for it; the quota spent on this attempt fails closed.
+    return { reason: null, message: "image server is busy — try again shortly" };
+  }
+  try {
+    const pipeline = sharp(data, {
+      limitInputPixels: MAX_INPUT_PIXELS,
+      failOn: "warning",
+      sequentialRead: true,
+      animated: false, // GIF first frame only — the constructor default, explicit
+    });
+    let output: Buffer;
+    try {
+      output = await applyReencode(
+        pipeline
+          .autoOrient() // bake EXIF orientation in before metadata is stripped
+          .resize({
+            width: MAX_DIMENSION,
+            height: MAX_DIMENSION,
+            fit: "inside",
+            withoutEnlargement: true,
+          }),
+        mediaType,
+      ).toBuffer();
+    } catch (err) {
+      return classifyDecodeError(err);
+    }
+    if (output.length > MAX_IMAGE_BYTES) {
+      return { reason: "output_too_large", message: "re-encoded image exceeds the 5 MB limit — try a smaller image" };
+    }
+    if (detectImageMediaType(output) !== mediaType) {
+      return { reason: "reencode_failed", message: "image could not be re-encoded — try a standard jpeg, png, webp or gif" };
+    }
+    return { data: output };
+  } finally {
+    reencodeSemaphore.release();
+  }
+}
+
+function classifyDecodeError(err: unknown): { reason: SecurityEventReason; message: string } {
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.includes("pixel limit")) {
+    return { reason: "pixel_limit", message: `image dimensions exceed the ${MAX_INPUT_PIXELS / 1_000_000}-megapixel limit` };
+  }
+  return { reason: "decode_failed", message: "image could not be decoded — the file may be corrupt or truncated" };
 }
 
 /** Validates, stores one image for an item (owner-checked), appends the URL to images[]. */
@@ -137,7 +264,17 @@ export async function addItemImage(
   const dir = path.join(uploadsDir(), "items");
   await mkdir(dir, { recursive: true });
   const name = `${itemId}-${Date.now().toString(36)}.${ext}`;
-  await writeFile(path.join(dir, name), data);
+  // THI-156 re-encode pipeline: only the sanitized buffer is ever written —
+  // originals touch neither disk nor object storage. Runs after the quota
+  // consume (fail-closed ordering preserved) and before the write.
+  const reencoded = await reencodeImage(data, detected);
+  if ("reason" in reencoded) {
+    if (reencoded.reason !== null) {
+      logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: reencoded.reason }, { sellerId });
+    }
+    return { error: reencoded.message };
+  }
+  await writeFile(path.join(dir, name), reencoded.data);
 
   const url = `/img/items/${name}`;
   await pool.query(`UPDATE items SET images = images || $2 WHERE id = $1`, [itemId, [url]]);

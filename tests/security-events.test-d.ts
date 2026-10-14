@@ -34,6 +34,10 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       | "media_type_mismatch"
       | "item_image_limit"
       | "quota_exceeded"
+      | "decode_failed" // THI-156 re-encode pipeline (spec rev 2)
+      | "pixel_limit"
+      | "reencode_failed"
+      | "output_too_large"
     >();
   });
 

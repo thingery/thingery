@@ -134,7 +134,10 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
 
   const uploadHtml = isOwner
     ? `<div class="upload">
-        <strong>Add photos</strong> (jpg/png/webp/gif, up to 5 MB each)
+        <strong>Add photos</strong> (jpg/png/webp/gif, up to 5 MB each)<br>
+        Images are re-encoded server-side: all metadata (EXIF/GPS/XMP) is stripped, orientation
+        is baked in, and large images are downscaled to ≤ 2000 px before storage. Animated GIFs
+        are stored as stills. Large PNGs may be rejected — prefer JPEG.
         <form id="upload-form" data-item-id="${escapeHtml(item.id)}">
           <input type="file" id="file" accept="image/jpeg,image/png,image/webp,image/gif" required>
           <button type="submit">Upload</button>

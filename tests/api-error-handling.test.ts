@@ -135,7 +135,7 @@ describe("/api surface fails as generic JSON on backend faults (THI-58)", () => 
 
   it("T4 /api/items/:id/images upload fault: 500 JSON, no unhandled rejection (F2)", async () => {
     vi.spyOn(pool, "query")
-      .mockResolvedValueOnce({ rows: [{ id: "seller-1", api_key: "thg_x", display_name: "S" }] }) // session lookup
+      .mockResolvedValueOnce({ rows: [{ id: "seller-1", api_key: "thg_x", display_name: "S", session_epoch: 0 }] }) // session lookup (THI-115: epoch rides along)
       .mockRejectedValueOnce(new Error("simulated failover")); // addItemImage ownership check
     await withServer(async (base) => {
       const unhandled = await captureUnhandled(async () => {

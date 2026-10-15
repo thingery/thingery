@@ -1,0 +1,100 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "thingery",
+  "version": "1.0.0",
+  "description": "PENDING(THI-217): directory description for Thingery — search a marketplace of physical items, view item details, create and manage your own listings, and order items with Stripe Checkout via secure per-user sign-in.",
+  "author": {
+    "name": "Thingery",
+    "url": "https://thingery.dev"
+  },
+  "homepage": "https://thingery.dev",
+  "repository": "https://github.com/thingery/thingery",
+  "license": "Apache-2.0",
+  "keywords": ["marketplace", "second-hand", "shopping", "listings", "mcp"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Thingery",
+        "shortDescription": "PENDING(THI-217): one-line tagline, max 30 chars",
+        "longDescription": "PENDING(THI-217): approved directory copy (opening paragraph).\n\nThingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods. Search active listings by category, price, condition and attributes; view full item details; and, after signing in with your Thingery account (OAuth per-user authorization), create and manage your own listings and order items.\n\nHow it treats your data: listings are public by design — anyone, including anonymous search, can see them. Signed-in access is scoped to your own account: the plugin only ever manages your listings and your orders. Personal data involved in a purchase is your email and shipping address, used solely to fulfil the order.\n\nPayments: ordering an item returns a Stripe Checkout URL — payment completes on Stripe's hosted page, never in chat. No tool moves money directly; release_funds only advances an order's state after delivery, and refunds are issued through Stripe.",
+        "developerName": "Thingery",
+        "category": "PENDING(board): Shopping",
+        "capabilities": [
+          "Search items by category, price, condition and attributes",
+          "View item details",
+          "Create and manage your own listings",
+          "Order items (Stripe Checkout payment URL)",
+          "Track orders, shipments and disputes"
+        ],
+        "websiteURL": "https://thingery.dev",
+        "supportURL": "PENDING(gap): https://thingery.dev/support — page does not exist yet; board to confirm URL (or GitHub issues)",
+        "privacyPolicyURL": "PENDING(THI-216): https://thingery.dev/privacy",
+        "termsOfServiceURL": "PENDING(gap): https://thingery.dev/terms — page does not exist yet; not covered by THI-216",
+        "defaultPrompt": [
+          "Search for sneakers in size 43",
+          "List what I'm currently selling",
+          "Help me sell my coffee machine"
+        ],
+        "brandColor": "PENDING(THI-217)",
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/logo.png"
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "Search active listings by category and attribute (public, no sign-in)",
+              "prompt": "Search Thingery for sneakers in size 43.",
+              "tools_triggered": "search_items",
+              "expected_behavior": "Returns matching active sneaker listings with title, price, condition and item URL. Works without signing in; no account data is touched."
+            },
+            {
+              "description": "View full details of a listing found in search",
+              "prompt": "Show me the full details of one of the sneakers you found.",
+              "tools_triggered": "search_items, get_item",
+              "expected_behavior": "Returns the item's title, description, price, condition, category attributes and item URL, and notes that listing fields are user-generated content."
+            },
+            {
+              "description": "Create a listing as a signed-in seller",
+              "prompt": "List my Nike Air Max 90, size 43, good condition, for 95 euros in the sneakers category.",
+              "tools_triggered": "describe_category, create_listing",
+              "expected_behavior": "Creates the listing on the connected seller's account and returns the item summary with its public URL. Requires the reviewer's connected test account; the new listing shows up in search."
+            },
+            {
+              "description": "Order an item as a signed-in buyer — payment completes on Stripe's hosted page",
+              "prompt": "I'd like to buy the Nike Air Max 90 listing. Ship it to Alex Rossi, Via Torino 1, Milan, 20123, IT.",
+              "tools_triggered": "get_item, create_order",
+              "expected_behavior": "Creates a pending order on the buyer's account and returns a Stripe Checkout payment URL. Payment itself happens on Stripe's hosted page (card details are never exchanged in chat); the order is trackable with get_order and expires unpaid after 24 hours. If platform payment is unavailable for that listing, the order is created off-platform with next steps agreed directly with the seller."
+            },
+            {
+              "description": "Show only the connected account's own listings",
+              "prompt": "What listings do I currently have for sale?",
+              "tools_triggered": "my_listings",
+              "expected_behavior": "Returns only the listings owned by the connected account, with seller name matching the signed-in user. Never includes other sellers' listings."
+            }
+          ],
+          "negative": [
+            {
+              "description": "Buyer attempts to purchase their own listing",
+              "prompt": "Buy the Nike Air Max 90 listing I just created."
+            },
+            {
+              "description": "Invalid or expired credentials must not leak data",
+              "prompt": "What am I selling? (asked after the plugin's access token has expired or been revoked)"
+            },
+            {
+              "description": "Unknown item id returns a structured not-found error",
+              "prompt": "Show me item 00000000-0000-0000-0000-000000000000."
+            }
+          ]
+        },
+        "demo_recording_url": "PENDING(gap): video walkthrough not produced yet — required for MCP review",
+        "commerce": true,
+        "commerce_description": "Thingery is a marketplace for physical goods. Ordering an item creates an order and returns a Stripe Checkout URL; the buyer completes payment on Stripe's hosted page, and card details are never exchanged in chat. No plugin tool moves money directly: release_funds only advances an order's state after delivery, and refunds are issued through Stripe. Listings are public by design; the personal data involved in a purchase is the buyer's email and shipping address, used solely to fulfil the order."
+      },
+      "publication": {
+        "release_notes": "Initial submission of the Thingery MCP connector: public search and item details, per-user OAuth sign-in for creating and managing listings, and the order flow with Stripe Checkout payment URLs."
+      }
+    }
+  }
+}

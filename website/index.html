@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Thingery — sell your things by telling your AI</title>
   <meta name="description" content="Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.">
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link rel="icon" href="/assets/favicon.ico" sizes="48x48">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <meta property="og:title" content="Thingery — sell your things by telling your AI">
@@ -46,8 +47,8 @@
     }
     .wrap { max-width: 62rem; margin-inline: auto; padding: 0 1.4rem; }
     header { display: flex; justify-content: space-between; align-items: center; padding: 1.2rem 0; }
-    .logo { font-weight: 750; font-size: 1.15rem; text-decoration: none; color: inherit; }
-    .logo img { display: block; height: 34px; width: auto; }
+    .logo { display: inline-flex; align-items: center; gap: .55rem; font-weight: 750; font-size: 1.15rem; text-decoration: none; color: inherit; }
+    .logo .logo-mark { display: block; height: 26px; width: auto; }
     nav a { margin-left: 1.1rem; text-decoration: none; color: var(--muted); font-size: .95rem; }
     nav a:hover { color: inherit; }
     .hero { text-align: center; padding: 3.5rem 0 2.5rem; }
@@ -87,7 +88,7 @@
   <div class="wrap">
 
   <header>
-    <a class="logo" href="/"><img src="/assets/logo-header.png" alt="Thingery" width="183" height="34"></a>
+    <a class="logo" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="28" height="26">Thingery</a>
     <nav>
       <a href="/browse">Browse</a>
       <a href="/chat.html">Chat</a>

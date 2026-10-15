@@ -7,10 +7,11 @@
 //
 // Fixtures use byo_test_… strings so no real provider key format is matched;
 // NOTE (gitleaks, THI-191 N1): prefix alone does NOT defeat the
-// generic-api-key rule — entropy is the trigger (byo_test_key_verify_ok
-// crossed 3.5). The fixtures that crossed the floor are allowlisted as exact
-// strings in .gitleaks.toml; new fixtures must stay under it (or be added
-// there as exact strings when CI says so).
+// generic-api-key rule — entropy is the trigger (byo_test_key_verify_401/404
+// crossed 3.5; the G2 fixtures later did the same). The fixtures that
+// crossed the floor are allowlisted as exact strings in .gitleaks.toml;
+// new fixtures must stay under it (or be added there as exact strings
+// when CI says so).
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -470,6 +471,27 @@ describe.skipIf(!available)("BYO credential store (DB, spec §1–§2)", () => {
       expect(await resolveLlmCredential(sellerId)).toBeNull(); // silent company fallback, no exception
     } finally {
       setMasterKey();
+    }
+  });
+
+  it("rejects IPv4-mapped-IPv6 and `::` literals regardless of scheme (G1 R1, THI-194 PoC)", () => {
+    for (const bad of [
+      "https://[::ffff:169.254.169.254]/v1", // mapped cloud-metadata
+      "https://[::ffff:127.0.0.1]/v1", // mapped loopback
+      "https://[::]/v1", // unspecified
+      "https://[::1]/v1", // loopback
+    ]) {
+      expect(normalizeBaseUrl(bad), bad).toBeNull();
+    }
+    // Public v6 and hostnames unaffected
+    expect(normalizeBaseUrl("https://[2600:1f18:6a4:cd03::1]/v1")).toContain("2600:");
+    // localhost by name is loopback — gated too (flag-off), https notwithstanding
+    expect(normalizeBaseUrl("https://localhost:8443/v1")).toBeNull();
+    process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS = "1";
+    try {
+      expect(normalizeBaseUrl("https://localhost:8443/v1")).toBe("https://localhost:8443/v1/chat/completions");
+    } finally {
+      delete process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS;
     }
   });
 

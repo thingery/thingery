@@ -128,17 +128,21 @@ export function modelAllowedForByo(model: string): boolean {
 
 export const DEFAULT_BYO_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
 
-/** G1 (Security review THI-191): private/loopback IPv4 and IPv6 literals —
- *  rejected as BYO endpoints unless local endpoints are explicitly enabled
- *  (an internal-scanner primitive otherwise). Literal check only; DNS
- *  rebinding to a private IP is a documented residual, not covered here. */
+/** G1 (Security review THI-191, R1 per THI-194): private/loopback IPv4 and
+ *  IPv6 literals — rejected as BYO endpoints unless local endpoints are
+ *  explicitly enabled (an internal-scanner primitive otherwise). The IPv6
+ *  pattern anchors on a leading `::`, which covers `::`, `::1`, and the
+ *  IPv4-mapped `::ffff:a.b.c.d` forms that otherwise bypass the check
+ *  (THI-194 PoC); public v6 addresses (e.g. 2600:…) do not start with `::`.
+ *  Literal check only; DNS rebinding to a private IP is a documented
+ *  residual, not covered here. */
 const PRIVATE_IP_V4 =
   /^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
-const PRIVATE_IP_V6 = /^\[?(::1|f[cd][0-9a-f]{2}:|fe[89ab][0-9a-f]:)/i;
+const PRIVATE_IP_V6 = /^\[?(::|f[cd][0-9a-f]{2}:|fe[89ab][0-9a-f]:)/i;
 
 function isPrivateHost(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, "");
-  return PRIVATE_IP_V4.test(host) || PRIVATE_IP_V6.test(host);
+  return host === "localhost" || PRIVATE_IP_V4.test(host) || PRIVATE_IP_V6.test(host);
 }
 
 /** G1: local endpoints (plain http / localhost / loopback IPs) are opt-in —
@@ -154,8 +158,8 @@ export function localEndpointsAllowed(): boolean {
  * URL (used as-is) or a base such as `https://api.openai.com/v1` (append
  * `/chat/completions`). https only, except plain http for localhost/
  * 127.0.0.1/[::1] when LLM_BYO_ALLOW_LOCAL_ENDPOINTS is set (G1). Private-IP
- *  literal hosts are rejected regardless of scheme. Returns null when
- * invalid.
+ * literals (v4, v6 incl. `::`/loopback/ULA/mapped forms) and the name
+ * `localhost` itself are rejected regardless of scheme unless that flag is
  */
 export function normalizeBaseUrl(input: string | undefined | null): string | null {
   const trimmed = (input ?? "").trim();

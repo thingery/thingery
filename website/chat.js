@@ -15,8 +15,12 @@ fetch("/api/me").then(r => r.json()).then(data => {
     const account = document.createElement("a");
     account.href = "/login.html";
     account.textContent = "account";
+    // THI-186 Phase 1: sellers can run this assistant on their own LLM key.
+    const byo = document.createElement("a");
+    byo.href = "/login.html";
+    byo.textContent = "use your own model";
     // Display name is untrusted text — build text nodes only, never HTML strings.
-    $("account-link").replaceChildren("Logged in as ", data.seller.name, " · ", account);
+    $("account-link").replaceChildren("Logged in as ", data.seller.name, " · ", byo, " · ", account);
   }
 });
 

@@ -36,6 +36,7 @@
 </head>
 <body>
   <h1><a href="/"><img src="/assets/logo-header.png" alt="Thingery" width="161" height="30"></a> — account</h1>
+  <nav aria-label="Site" style="font-size:.9rem;opacity:.85;margin:-.8rem 0 1.4rem"><a href="/browse">Browse</a> · <a href="/chat.html">Chat</a></nav>
 
   <section id="auth">
     <h2 id="form-title">Create your account</h2>
@@ -82,7 +83,7 @@
 
     <!-- Bring-your-own LLM key (spec THI-186 Phase 1 / THI-189): the chat
          assistant can run on the seller's own OpenAI-compatible key. -->
-    <h2 style="font-size:1.05rem">Use your own model <small>(for the chat assistant)</small></h2>
+    <h2 style="font-size:1.05rem">Use your own model <small>(for the <a href="/chat.html">chat assistant</a>)</small></h2>
     <p style="font-size:.9rem;opacity:.85">Store an OpenAI-compatible API key and the assistant chats on your key instead of Thingery's. The key is encrypted at rest and verified once before saving — it is never shown again.</p>
     <p id="byo-status" style="font-size:.9rem"></p>
     <form id="byo-form" hidden>

@@ -105,8 +105,14 @@ describe("chat.js account link (gh#8)", () => {
         json: async () => ({ seller: { name: HOSTILE_NAME } }),
       });
     };
+    // THI-193 PR-4: chat.js also polls /api/me/chatgpt for the plan
+    // indicator — answer it with a non-ok response so it stays hidden.
+    const fetchWithChatgptStatus = (url: string) =>
+      url === "/api/me"
+        ? fetch(url)
+        : Promise.resolve({ ok: false, json: async () => ({}) });
 
-    new Function("document", "fetch", script)(document, fetch);
+    new Function("document", "fetch", script)(document, fetchWithChatgptStatus);
     await new Promise((r) => setTimeout(r, 0)); // let the fetch chain settle
 
     const accountLink = byId.get("account-link")!;

@@ -4,6 +4,13 @@
 // signup/login/regeneration; /api/me no longer carries it.
 import { safeNextTarget } from "./next-filter.js";
 import { MASKED_KEY_HINT, MASKED_KEY_PLACEHOLDER, mcpConfigText } from "./account-view.js";
+import {
+  chatgptBanner,
+  chatgptModalDismissed,
+  chatgptSlotVisible,
+  chatgptStatusText,
+  rememberChatgptModal,
+} from "./chatgpt-view.js";
 
 let mode = "signup";
 const $ = (id) => document.getElementById(id);
@@ -30,6 +37,7 @@ function showDone(seller) {
   $("done").hidden = false;
   $("welcome").textContent = `Logged in as ${seller.name}`;
   loadByo();
+  loadChatgpt();
 
   const mcpUrl = `${location.origin}/mcp`;
   $("mcp-url").textContent = mcpUrl;
@@ -201,4 +209,84 @@ $("byo-remove").onclick = async () => {
   }
 };
 
+// --- ChatGPT plan connection (spec THI-193 §3.6, PR-4) ---------------------
+// Slot gated by GET /api/me/chatgpt: a 404 (flag off) or enabled:false keeps
+// the section hidden — flag off means zero UI footprint on this page. The
+// status response is metadata only (fingerprint/model), so nothing here can
+// surface token material (it never reaches the browser at all).
+
+function renderChatgpt(data) {
+  if (!chatgptSlotVisible(data)) return;
+  $("chatgpt").hidden = false;
+  const connected = data.connected === true;
+  $("chatgpt-connect").hidden = connected;
+  $("chatgpt-usage").hidden = !connected;
+  $("chatgpt-disconnect").hidden = !connected;
+  $("chatgpt-status").textContent = connected
+    ? chatgptStatusText(data)
+    : "Not connected — the assistant runs on Thingery's key or your own key above.";
+}
+
+async function loadChatgpt() {
+  try {
+    const res = await fetch("/api/me/chatgpt");
+    if (!res.ok) return; // 404 flag off / 401 mid-session: slot stays hidden
+    const data = await res.json();
+    renderChatgpt(data);
+    // First-connect welcome modal (OpenAI UX guidelines): shown once per
+    // browser while connected — the dismissal is remembered locally.
+    if (data.connected === true && !chatgptModalDismissed(localStorage)) {
+      $("chatgpt-modal-overlay").hidden = false;
+    }
+  } catch {
+    /* offline: leave hidden */
+  }
+}
+
+$("chatgpt-modal-ok").onclick = () => {
+  rememberChatgptModal(localStorage);
+  $("chatgpt-modal-overlay").hidden = true;
+};
+
+// Callback banner from ?chatgpt=<slug> (fixed copy from chatgpt-view.js):
+// the slug is never reflected as text; unknown values render nothing.
+function showChatgptBanner() {
+  const params = new URLSearchParams(location.search);
+  const banner = chatgptBanner(params.get("chatgpt"));
+  if (!banner) return;
+  const el = $("chatgpt-banner");
+  el.hidden = false;
+  el.className = banner.tone === "ok" ? "" : "error";
+  el.textContent = banner.text;
+  // Drop the slug so a refresh doesn't replay the banner; keep other params.
+  params.delete("chatgpt");
+  const qs = params.toString();
+  history.replaceState(null, "", qs ? `${location.pathname}?${qs}` : location.pathname);
+}
+
+$("chatgpt-disconnect").onclick = async () => {
+  if (!confirm("Disconnect your ChatGPT plan? The assistant will stop using it.")) return;
+  $("chatgpt-error").textContent = "";
+  $("chatgpt-disconnect").disabled = true;
+  try {
+    const res = await fetch("/api/me/chatgpt", { method: "DELETE" });
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      renderChatgpt({ enabled: true, connected: false, fingerprint: null, model: null });
+      // Server-side revocation is best-effort: if it couldn't be confirmed,
+      // the seller should also remove the app on the ChatGPT side.
+      if (data.revocation_unconfirmed) {
+        $("chatgpt-error").textContent =
+          "Disconnected here. To be safe, also remove Thingery in ChatGPT → Settings → Connections.";
+      }
+    } else {
+      const data = await res.json().catch(() => ({}));
+      $("chatgpt-error").textContent = data.error || "Could not disconnect.";
+    }
+  } finally {
+    $("chatgpt-disconnect").disabled = false;
+  }
+};
+
+showChatgptBanner();
 checkSession();

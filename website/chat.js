@@ -24,6 +24,19 @@ fetch("/api/me").then(r => r.json()).then(data => {
   }
 });
 
+// THI-193 §3.6 (smallest viable version): when the status endpoint reports
+// a connected ChatGPT plan, show the static "Using ChatGPT plan" indicator
+// near the composer. A 404 (flag off), 401 (anonymous), or any error keeps
+// it hidden — per-turn telemetry wiring comes later if ever needed.
+fetch("/api/me/chatgpt")
+  .then((r) => (r.ok ? r.json() : null))
+  .then((data) => {
+    if (data && data.enabled === true && data.connected === true) {
+      $("plan-indicator").hidden = false;
+    }
+  })
+  .catch(() => {});
+
 // THI-108 (docs/security.md §6 H5.2): the server can attach a signed
 // pending-op card to a reply when the assistant proposes a destructive
 // update (mark sold/deleted, big price drop). Yes/No send the token back

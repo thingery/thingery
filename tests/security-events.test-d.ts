@@ -20,13 +20,14 @@ import {
 describe("SecurityEvent route/reason literal unions (THI-133)", () => {
   it("route accepts only the fixed literals", () => {
     expectTypeOf<SecurityEventRoute>().toEqualTypeOf<
-      "/api/signup" | "/api/login" | "/mcp" | "/api/items/:id/images" | "/api/me/llm-credential"
+      "/api/signup" | "/api/login" | "/mcp" | "/api/items/:id/images" | "/api/chat" | "/api/me/llm-credential"
     >();
     const routes: SecurityEventRoute[] = [
       "/api/signup",
       "/api/login",
       "/mcp",
       "/api/items/:id/images",
+      "/api/chat",
       "/api/me/llm-credential",
     ];
     expectTypeOf(routes).toEqualTypeOf<SecurityEventRoute[]>();
@@ -67,5 +68,43 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
     // @ts-expect-error /api/logout is not in the route union — adding a route is a reviewed type change
     const event: SecurityEvent = { type: "rate_limit", route: "/api/logout" };
     expectTypeOf(event).toBeObject();
+  });
+});
+
+describe("chat_usage event fields (THI-180 §3.3)", () => {
+  it("carries exactly model/rounds/tokens_in/tokens_out/daily_total/budget/usage_source", () => {
+    const event: SecurityEvent = {
+      type: "chat_usage",
+      model: "gpt-4o-mini",
+      rounds: 2,
+      tokens_in: 450,
+      tokens_out: 120,
+      daily_total: 570,
+      budget: 2_000_000,
+      usage_source: "provider",
+    };
+    expectTypeOf(event).toEqualTypeOf<{
+      type: "chat_usage";
+      model: string;
+      rounds: number;
+      tokens_in: number;
+      tokens_out: number;
+      daily_total: number;
+      budget: number;
+      usage_source: "provider" | "estimate_fallback";
+    }>();
+  });
+
+  it("usage_source is a fixed slug union, not free text (rev 2 N1)", () => {
+    const dynamic: string = "provider"; // type is string — value irrelevant
+    // @ts-expect-error usage_source must be a literal — dynamic strings do not typecheck
+    const event: SecurityEvent = { type: "chat_usage", model: "m", rounds: 1, tokens_in: 1, tokens_out: 1, daily_total: 1, budget: 1, usage_source: dynamic };
+    expectTypeOf(event).toBeObject();
+  });
+
+  it("has no optional extra fields (whitelist is exact)", () => {
+    // @ts-expect-error unknown fields (e.g. a future message-content leak) must not typecheck
+    const leaky: SecurityEvent = { type: "chat_usage", model: "m", rounds: 1, tokens_in: 1, tokens_out: 1, daily_total: 1, budget: 1, usage_source: "provider", content: "user text" };
+    expectTypeOf(leaky).toBeObject();
   });
 });

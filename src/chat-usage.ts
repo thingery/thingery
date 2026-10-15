@@ -46,8 +46,12 @@ export interface ChatTurnUsage {
   /** Tool calls whose arguments failed to parse or canonicalize. */
   toolArgErrors: number;
   durationMs: number;
-  outcome: "ok" | "max_rounds" | "error";
+  outcome: "ok" | "max_rounds" | "budget_exhausted" | "error";
   sellerId: string | null;
+  /** THI-180: process-wide daily budget total after this turn charged it
+   *  (UTC-day; always a number — a deployment without a budget cap still
+   *  gets the running total). Appended per the single-meter contract. */
+  dailyTotal: number;
 }
 
 /** Sums the present values; null when the provider never reported usage
@@ -81,6 +85,7 @@ export function buildChatTurnUsageLine(u: ChatTurnUsage): Record<string, unknown
     tool_names: u.toolNames,
     tool_arg_errors: u.toolArgErrors,
     duration_ms: u.durationMs,
+    daily_total: u.dailyTotal,
     sellerId: u.sellerId,
   };
 }

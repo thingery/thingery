@@ -96,6 +96,36 @@ describe("logSecurityEvent JSON line", () => {
     expect(ok).not.toHaveProperty("reason");
   });
 
+  it("chat_usage (THI-180 §3.3): numbers + env model + usage_source only, exact field whitelist", () => {
+    const spy = spyLog();
+    logSecurityEvent(
+      { type: "chat_usage", model: "gpt-4o-mini", rounds: 2, tokens_in: 450, tokens_out: 120, daily_total: 570, budget: 2_000_000, usage_source: "provider" },
+      { ip: "198.51.100.7" },
+    );
+    expect(spy).toHaveBeenCalledTimes(1);
+    const raw = spy.mock.calls[0][0] as string;
+    expect(raw).not.toContain("\n");
+    expect(JSON.parse(raw)).toEqual({
+      ts: expect.any(String),
+      type: "chat_usage",
+      model: "gpt-4o-mini",
+      rounds: 2,
+      tokens_in: 450,
+      tokens_out: 120,
+      daily_total: 570,
+      budget: 2_000_000,
+      usage_source: "provider",
+      sellerId: null,
+      ip: "198.51.100.7",
+    });
+    // H4.2: no outcome/action/route/reason fields on this family, and no
+    // message content can ride along (field-by-field construction).
+    const parsed = JSON.parse(raw);
+    expect(Object.keys(parsed).sort()).toEqual(
+      ["budget", "daily_total", "ip", "model", "rounds", "sellerId", "tokens_in", "tokens_out", "ts", "type", "usage_source"].sort(),
+    );
+  });
+
   it("no-payload guarantee: secret-looking extra properties never reach the log", () => {
     const spy = spyLog();
     const SECRET = "hunter2-sk-SECRET-mothers-maiden-name";

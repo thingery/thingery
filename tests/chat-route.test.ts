@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { mountApiRoutes, chatAnonLimiter, chatAuthedLimiter } from "../src/routes.js";
 import { SESSION_COOKIE, signSession } from "../src/auth.js";
 import { dailyTokenBudget } from "../src/chat-limits.js";
+import { LLM_CREDENTIALS_MASTER_KEY_ENV, upsertLlmCredential } from "../src/llm-credentials.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.resolve(__dirname, "..", "db", "schema.sql");
@@ -49,6 +50,9 @@ describe.skipIf(!available)("/api/chat hard limits (DB + HTTP)", () => {
     // Chat is "configured" (passes the 503 branch) without any network: the
     // LLM fetch is stubbed where a 200 is needed and never reached otherwise.
     process.env.LLM_API_KEY = "test-key";
+    // THI-197: BYO store usable in these tests (no rows exist unless a test
+    // stores one, so every pre-existing test stays a company turn).
+    process.env[LLM_CREDENTIALS_MASTER_KEY_ENV] = "17".repeat(31) + "ef";
     const app = express();
     app.use(express.json({ limit: "100kb" }));
     mountApiRoutes(app);
@@ -64,6 +68,7 @@ describe.skipIf(!available)("/api/chat hard limits (DB + HTTP)", () => {
     server.close();
     await db.end();
     delete process.env.LLM_API_KEY;
+    delete process.env[LLM_CREDENTIALS_MASTER_KEY_ENV];
   });
 
   beforeEach(() => {
@@ -136,6 +141,142 @@ describe.skipIf(!available)("/api/chat hard limits (DB + HTTP)", () => {
     );
   }
 
+  /** Capturing LLM stub (THI-197): records url/auth/body of every provider
+   * call; route requests still pass through to the real fetch. */
+  function stubLlmCapture(respond: () => Response) {
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ url: string; auth: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (u.startsWith(base)) return realFetch(url, init);
+        calls.push({
+          url: u,
+          auth: String((init?.headers as Record<string, string> | undefined)?.authorization),
+          body: JSON.parse(String(init?.body)),
+        });
+        return respond();
+      }),
+    );
+    return calls;
+  }
+
+  /** Fresh seller + (optionally) a stored BYO credential row; returns the
+   * session cookie. Fixtures use byo_test_… keys (gitleaks convention). */
+  async function seedByoSeller(cred: { apiKey: string; model: string; baseUrl: string | null } | null): Promise<string> {
+    const tag = `thi197-${n}`;
+    const seller = await db.query(
+      "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1, $2, $3) RETURNING id",
+      [`thg_${tag}`, tag, `${tag}@t.dev`],
+    );
+    const sellerId = seller.rows[0].id as string;
+    if (cred) await upsertLlmCredential(sellerId, { label: "test key", ...cred });
+    return `${SESSION_COOKIE}=${signSession(sellerId)}`;
+  }
+
+  it("THI-197 BYO turn: stored credential wins — user url/key/model in the request, budget uncharged, chat_usage labels user", async () => {
+    const cookie = await seedByoSeller({ apiKey: "byo_test_chat_key_1", model: "gpt-4.1", baseUrl: "https://byo-chat.example.com/v1" });
+    const calls = stubLlmCapture(
+      () => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Understood." } }], usage: { prompt_tokens: 80, completion_tokens: 20 } }), { status: 200 }),
+    );
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const res = await post({ message: "hello" }, cookie);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ reply: { text: "Understood." } }); // client shape byte-identical
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe("https://byo-chat.example.com/v1/chat/completions"); // stored base_url normalized
+      expect(calls[0].auth).toBe("Bearer byo_test_chat_key_1"); // user key, not the env company key
+      expect(calls[0].body.model).toBe("gpt-4.1"); // stored model
+      expect(calls[0].body.max_tokens).toBe(1200); // safety rail unchanged
+      expect(dailyTokenBudget.used()).toBe(0); // company meter untouched by a user turn
+      const lines = spy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('"chat_usage"'));
+      expect(lines).toHaveLength(1);
+      const event = JSON.parse(lines[0]);
+      expect(event).toMatchObject({
+        type: "chat_usage",
+        model: "gpt-4.1", // actual resolved model, not process.env.LLM_MODEL
+        credential_source: "user",
+        rounds: 1,
+        tokens_in: 80,
+        tokens_out: 20,
+        usage_source: "provider",
+      });
+      expect(event.daily_total).toBe(0); // meter still reports company state only
+    } finally {
+      await db.query("DELETE FROM llm_credentials");
+    }
+  });
+
+  it("THI-197 budget exhausted + stored credential → 200 (BYO bypasses the company budget); no credential → 429 (test above)", async () => {
+    const cookie = await seedByoSeller({ apiKey: "byo_test_chat_key_2", model: "gpt-4o-mini", baseUrl: null });
+    dailyTokenBudget.record(null, Number.MAX_SAFE_INTEGER); // company budget gone for today
+    const calls = stubLlmCapture(() => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "ok" } }] }), { status: 200 }));
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const res = await post({ message: "hello" }, cookie);
+      expect(res.status).toBe(200); // NOT the budget 429 — the user's key pays
+      expect(calls).toHaveLength(1);
+      const lines = spy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('"chat_usage"'));
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]).credential_source).toBe("user");
+    } finally {
+      await db.query("DELETE FROM llm_credentials");
+    }
+  });
+
+  it("THI-197 user-key 401: friendly text to the client, exactly one LLM call (no company fallback), error-outcome usage lines", async () => {
+    const cookie = await seedByoSeller({ apiKey: "byo_test_chat_key_3", model: "gpt-4.1", baseUrl: null });
+    const calls = stubLlmCapture(() => new Response("unauthorized", { status: 401 }));
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const res = await post({ message: "hello" }, cookie);
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as Record<string, unknown>;
+      expect(Object.keys(json)).toEqual(["reply"]); // error text rides reply.text — no shape change
+      expect((json.reply as { text: string }).text).toContain("Your saved model key was rejected");
+      expect((json.reply as { text: string }).text).toContain("Model settings");
+      expect(calls).toHaveLength(1); // never a second, company-key call
+      const usage = spy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('"chat_usage"')).map((l) => JSON.parse(l));
+      expect(usage).toHaveLength(1);
+      expect(usage[0]).toMatchObject({ credential_source: "user", model: "gpt-4.1" });
+      const turn = spy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('"chat_turn_usage"')).map((l) => JSON.parse(l));
+      expect(turn).toHaveLength(1);
+      expect(turn[0].outcome).toBe("error");
+    } finally {
+      await db.query("DELETE FROM llm_credentials");
+    }
+  });
+
+  it("THI-197 decrypt failure (wrong master key over the stored row): byo_credential_error slug + company turn still succeeds", async () => {
+    const cookie = await seedByoSeller({ apiKey: "byo_test_chat_key_4", model: "gpt-4.1", baseUrl: "https://byo-chat.example.com/v1" });
+    const savedMaster = process.env[LLM_CREDENTIALS_MASTER_KEY_ENV];
+    // Rotate the master key under the stored row: GCM auth fails → resolveLlmCredential throws → wrapper catches.
+    process.env[LLM_CREDENTIALS_MASTER_KEY_ENV] = "2b".repeat(31) + "cd";
+    const calls = stubLlmCapture(() => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "company ok" } }] }), { status: 200 }));
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const res = await post({ message: "hello" }, cookie);
+      expect(res.status).toBe(200); // falls back to company — never a 500
+      expect((await res.json()).reply.text).toBe("company ok");
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe("https://api.openai.com/v1/chat/completions"); // env/company URL, not the stored base_url
+      const events = spy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('"byo_credential_error"')).map((l) => JSON.parse(l));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ type: "byo_credential_error", route: "/api/chat" });
+      expect(events[0].sellerId).toBeTypeOf("string");
+      expect(JSON.stringify(events[0])).not.toContain("byo-chat.example.com"); // no base_url in the log
+      expect(JSON.stringify(events[0])).not.toContain("byo_test_chat_key_4"); // no key material in the log
+      const usage = spy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('"chat_usage"')).map((l) => JSON.parse(l));
+      expect(usage).toHaveLength(1);
+      expect(usage[0]).toMatchObject({ credential_source: "company", model: "gpt-4o-mini" });
+    } finally {
+      process.env[LLM_CREDENTIALS_MASTER_KEY_ENV] = savedMaster;
+      await db.query("DELETE FROM llm_credentials");
+    }
+  });
+
   it("hourly-limit 429 also logs a rate_limit line (N3): exhausted anonymous limiter", async () => {
     chatAnonLimiter.reset();
     dailyTokenBudget.reset();
@@ -183,6 +324,7 @@ describe.skipIf(!available)("/api/chat hard limits (DB + HTTP)", () => {
     expect(event).toMatchObject({
       type: "chat_usage",
       model: "gpt-4o-mini", // env default, not request data
+      credential_source: "company", // no stored row ⇒ company turn (THI-197)
       rounds: 1,
       tokens_in: 120,
       tokens_out: 30,

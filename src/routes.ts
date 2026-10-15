@@ -22,8 +22,10 @@ import {
   getLlmCredential,
   modelAllowedForByo,
   normalizeBaseUrl,
+  resolveLlmCredential,
   upsertLlmCredential,
   verifyLlmCredential,
+  type ResolvedLlmCredential,
   type VerifyLlmCredentialResult,
 } from "./llm-credentials.js";
 import { addItemImage, MAX_IMAGE_BYTES } from "./images.js";
@@ -373,6 +375,22 @@ const chatSchema = z.object({
 
 // No inner try/catch → next(e): asyncHandler forwards rejections to the
 // terminal middleware — one idiom everywhere (THI-59, spec THI-58 D1).
+
+/** THI-197 resolution (spec THI-188 PR-3 §1): the seller's stored BYO
+ *  credential for this turn, or null ⇒ company key. resolveLlmCredential
+ *  returns null for every fail-closed state (no row, master key unset,
+ *  stored base_url/model no longer passing the gates) and throws only on
+ *  tamper/corruption — caught here, logged as a byo_credential_error slug
+ *  (never key material, ciphertext or base_url), still company, never 500. */
+async function resolveByoCredential(sellerId: string): Promise<ResolvedLlmCredential | null> {
+  try {
+    return await resolveLlmCredential(sellerId);
+  } catch {
+    logSecurityEvent({ type: "byo_credential_error", route: "/api/chat" }, { sellerId });
+    return null;
+  }
+}
+
 api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
   const seller = await sellerFromSession(req).catch(() => null);
   const limiter = seller ? chatAuthedLimiter : chatAnonLimiter;
@@ -394,12 +412,15 @@ api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
     });
     return;
   }
-  // THI-180 §3.2 checkpoint 1 — process-wide daily LLM token budget
-  // (pre-flight; the between-rounds checkpoint lives in chatTurn). Order per
-  // spec: turn limiter → configured → budget → zod parse. THI-189 seam: wrap
-  // in the credential-resolution check (company credential) when BYO keys
-  // land — user-key turns skip the company budget.
-  if (dailyTokenBudget.isExhausted()) {
+  // THI-197: resolve BYO credentials for logged-in sellers BEFORE the
+  // budget gate — user-key turns bypass the company daily token budget
+  // entirely (rate limits and per-call max_tokens stay on ALL turns: abuse
+  // control, not cost control). Anonymous and every fail-closed state
+  // resolve to null ⇒ company key ⇒ budget gate as before. Order: turn
+  // limiter → configured → BYO resolution → pre-flight budget (company
+  // turns only) → zod parse.
+  const byo = seller ? await resolveByoCredential(seller.id) : null;
+  if (byo === null && dailyTokenBudget.isExhausted()) {
     logSecurityEvent({ type: "rate_limit", route: "/api/chat" }, seller ? { sellerId: seller.id } : { ip: clientIp(req) });
     res.status(429).json({ error: "Daily chat budget exhausted — please try again tomorrow." });
     return;
@@ -409,15 +430,21 @@ api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
     res.status(400).json({ error: "Message required (max 4000 characters)." });
     return;
   }
-  const { usage, ...reply } = await chatTurn(parsed.data.history as ChatMessage[], parsed.data.message, seller);
+  const { usage, ...reply } = await chatTurn(parsed.data.history as ChatMessage[], parsed.data.message, seller, byo);
   if (usage) {
-    // One usage line per LLM-backed turn (numbers + env model + source slug
-    // only — no message content, H4.2). Confirm/decline fast paths emit none.
-    // THI-189 seam: user-credential turns return no usage → no line.
+    // One usage line per LLM-backed turn (numbers + slugs only — no message
+    // content, H4.2). Confirm/decline fast paths emit none. THI-197: every
+    // LLM-backed turn is labeled — including user-key turns (Architect
+    // reconciliation: labeling supersedes the earlier no-line comment;
+    // Phase 3 per-user usage reuses these lines). `model` is the model the
+    // turn actually ran on (credential ?? env, never request data);
+    // daily_total/budget keep reporting the company meter (unchanged by
+    // user-key turns).
     logSecurityEvent(
       {
         type: "chat_usage",
-        model: process.env.LLM_MODEL ?? "gpt-4o-mini", // env config string, never request data
+        model: usage.model,
+        credential_source: usage.credentialSource,
         rounds: usage.rounds,
         tokens_in: usage.tokensIn,
         tokens_out: usage.tokensOut,

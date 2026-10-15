@@ -256,6 +256,25 @@ describe("Responses adapter (THI-193 §3.4, chatTurn on a plan token)", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("HTTP 503 usage_unavailable: fixed unavailable string, one call (THI-210 N2)", async () => {
+    const calls = captureFetch(
+      () => new Response(JSON.stringify({ error: { code: "subscription_sharing_usage_unavailable" } }), { status: 503 }),
+    );
+    const out = await chatTurn([], "hi", null, OAUTH_CRED);
+    expect(out.text).toContain("temporarily unavailable");
+    expect(JSON.stringify(out)).not.toContain("usage_unavailable"); // fixed strings only, code not leaked
+    expect(calls).toHaveLength(1);
+  });
+
+  it("HTTP 400 unsupported_capability: plan-rejected string (THI-210 N2)", async () => {
+    const calls = captureFetch(
+      () => new Response(JSON.stringify({ error: { code: "subscription_sharing_unsupported_capability" } }), { status: 400 }),
+    );
+    const out = await chatTurn([], "hi", null, OAUTH_CRED);
+    expect(out.text).toContain("couldn't be used for chat right now");
+    expect(calls).toHaveLength(1);
+  });
+
   it("caps: roundsPerTurn bounds OAuth turns — 6 calls, then the friendly bound message", async () => {
     let n = 0;
     captureFetch(() => {

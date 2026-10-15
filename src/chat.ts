@@ -591,6 +591,10 @@ const CHATGPT_RECONNECT =
   "⚠️ Your ChatGPT connection is no longer valid — please reconnect it in Account settings to keep chatting on your plan.";
 const CHATGPT_PLAN_REJECTED =
   "⚠️ Your ChatGPT plan couldn't be used for chat right now — check your plan status in ChatGPT → Settings → Usage, or disconnect in Account settings.";
+/** THI-210 N2: 503 usage_unavailable also surfaces as a fixed plan string,
+ *  not the generic 500 (bounded-retry posture per §2; one-shot here). */
+const CHATGPT_PLAN_UNAVAILABLE =
+  "⚠️ Your ChatGPT plan is temporarily unavailable — please try again in a moment.";
 
 /** Pending-op tokens are valid for 15 minutes. */
 export const CHAT_CONFIRM_TTL_SECONDS = 15 * 60;
@@ -971,6 +975,15 @@ export async function chatTurn(
           return { text: CHATGPT_RECONNECT, usage: usageSummary() };
         }
         if (e.status === 402 || e.status === 403) {
+          return { text: CHATGPT_PLAN_REJECTED, usage: usageSummary() };
+        }
+        // THI-210 N2: the remaining §2 taxonomy cases (503 unavailable / 400
+        // unsupported capability) get fixed plan strings too — never the
+        // generic "Something went wrong" 500 path.
+        if (e.code === "subscription_sharing_usage_unavailable" || e.status === 503) {
+          return { text: CHATGPT_PLAN_UNAVAILABLE, usage: usageSummary() };
+        }
+        if (e.code === "subscription_sharing_unsupported_capability" || e.status === 400) {
           return { text: CHATGPT_PLAN_REJECTED, usage: usageSummary() };
         }
       } else if (e.status === 401 || e.status === 402 || e.status === 403) {

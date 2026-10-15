@@ -5,7 +5,9 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS sellers (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  api_key      TEXT UNIQUE NOT NULL,          -- format: thg_<random>; store hashed in production
+  -- API keys live only as sha256 hex in api_key_hash (added below). The
+  -- plaintext api_key column (v0.1 → THI-114 expand) is dropped by the
+  -- contract block below on legacy databases; fresh databases never get it.
   display_name TEXT NOT NULL,
   profile      JSONB NOT NULL DEFAULT '{}'::jsonb,  -- flexible per-seller fields: locale, currency,
                                                     -- notification prefs, negotiation mandates, ...
@@ -21,16 +23,36 @@ ALTER TABLE sellers ADD COLUMN IF NOT EXISTS password_hash TEXT;
 -- for that seller at once. Default 0 keeps seeded/existing sellers usable.
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS session_epoch INT NOT NULL DEFAULT 0;
 
--- API key hash at rest (security doc §6 H2 fix 1, THI-114 expand phase).
--- sellers.api_key stays readable/writable until the contract PR drops it
--- (only after release + one clean nightly backup); auth resolves thg_ keys
--- against api_key_hash first and falls back to plaintext rows created after
--- a mid-upgrade restart (dual-read window). Backfill is idempotent.
+-- API key hash at rest (security doc §6 H2 fix 1; THI-114 expand → THI-158
+-- contract). Fresh databases store only the sha256 hash. Legacy databases
+-- are migrated hash-before-drop so no seller key is ever invalidated:
+--   1. ADD api_key_hash (no-op on expand-phase databases).
+--   2. Guarded backfill: hash any plaintext key that has no hash yet — this
+--      is what protects direct upgraders from a pre-expand schema (plaintext
+--      key, no hash column). The DO block also tolerates the steady state
+--      where api_key is already gone (undefined_column → skip), keeping the
+--      whole file idempotent.
+--   3. Unique partial index on the hash.
+--   4. DROP the plaintext column. No rollback after this (the deploy ran
+--      only after a verified clean nightly backup, THI-158 gate).
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS api_key_hash TEXT;
+DO $$
+BEGIN
+  UPDATE sellers
+     SET api_key_hash = encode(sha256(convert_to(api_key, 'utf8')), 'hex')
+   WHERE api_key_hash IS NULL AND api_key IS NOT NULL;
+EXCEPTION WHEN undefined_column THEN NULL;  -- steady state: column already dropped
+END $$;
+-- R4 (THI-125 note N2): the build deliberately stays a plain CREATE ... IF
+-- NOT EXISTS, not CONCURRENTLY. Expand-phase databases already have the
+-- index (no-op, no lock); fresh databases build it on an empty table
+-- (instant). CONCURRENTLY cannot run inside a transaction, and this file is
+-- applied as one multi-statement query by the test suite and
+-- scripts/migrate.ts — a split-apply rework is its own ticket if sellers
+-- ever grows enough that a fresh plain build's lock matters.
 CREATE UNIQUE INDEX IF NOT EXISTS sellers_api_key_hash_idx
   ON sellers (api_key_hash) WHERE api_key_hash IS NOT NULL;
-UPDATE sellers SET api_key_hash = encode(sha256(convert_to(api_key, 'utf8')), 'hex')
-  WHERE api_key_hash IS NULL AND api_key IS NOT NULL;
+ALTER TABLE sellers DROP COLUMN IF EXISTS api_key;
 
 -- Category registry: declares the expected attribute fields per category so
 -- agents can self-serve the schema (describe_category tool). Items are NOT

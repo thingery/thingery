@@ -11,7 +11,7 @@ import pg from "pg";
 import { mountOauthRoutes } from "../src/oauth.js";
 import { mcpRoutes } from "../src/mcp-gate.js";
 import { RateLimiter } from "../src/rate-limit.js";
-import { SESSION_COOKIE, signSession } from "../src/auth.js";
+import { apiKeyHash, SESSION_COOKIE, signSession } from "../src/auth.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://thingery:thingery@localhost:5432/thingery";
@@ -51,6 +51,7 @@ describe.skipIf(!available)("/apps connected-applications page + kill switch (HT
   let sellerId: string;
   let otherCookie: string;
   let accessToken: string;
+  let ownerKey = ""; // set by beforeAll — mk()'s generated owner key (show-once semantics, THI-158)
   const clientId = "thgc_apps1";
 
   beforeAll(async () => {
@@ -62,15 +63,19 @@ describe.skipIf(!available)("/apps connected-applications page + kill switch (HT
     await db.connect();
 
     const runTag = crypto.randomBytes(4).toString("hex");
-    const mk = async (name: string): Promise<{ id: string; cookie: string }> => {
+    // THI-158: sellers.api_key is gone — mk keeps the plaintext key so the
+    // kill-switch test below can present it as a Bearer credential.
+    const mk = async (name: string): Promise<{ id: string; cookie: string; key: string }> => {
       const s = await db.query<{ id: string }>(
-        `INSERT INTO sellers (api_key, display_name, email, password_hash)
+        `INSERT INTO sellers (api_key_hash, display_name, email, password_hash)
          VALUES ($1, $2, $3, $4) RETURNING id`,
-        [`thg_apps_${name}_${runTag}`, name === "owner" ? "Apps Owner" : "Other", `apps-${name}-${runTag}@example.com`, "x"],
+        [apiKeyHash(`thg_apps_${name}_${runTag}`), name === "owner" ? "Apps Owner" : "Other", `apps-${name}-${runTag}@example.com`, "x"],
       );
-      return { id: s.rows[0].id, cookie: `${SESSION_COOKIE}=${encodeURIComponent(signSession(s.rows[0].id))}` };
+      const key = `thg_apps_${name}_${runTag}`;
+      return { id: s.rows[0].id, cookie: `${SESSION_COOKIE}=${encodeURIComponent(signSession(s.rows[0].id))}`, key };
     };
     const owner = await mk("owner");
+    ownerKey = owner.key;
     sellerId = owner.id;
     cookie = owner.cookie;
     otherCookie = (await mk("other")).cookie;
@@ -281,7 +286,7 @@ describe.skipIf(!available)("/apps connected-applications page + kill switch (HT
           headers: {
             "content-type": "application/json",
             accept: "application/json, text/event-stream",
-            authorization: `Bearer ${(await db.query<{ api_key: string }>(`SELECT api_key FROM sellers WHERE id = $1`, [sellerId])).rows[0].api_key}`,
+            authorization: `Bearer ${ownerKey}`,
           },
           body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "my_listings", arguments: {} } }),
         });

@@ -150,7 +150,7 @@ describe.skipIf(!available)("applyTransition (DB)", () => {
     const s = `s${n}`;
     const b = `b${n}`;
     await client.query(
-      "INSERT INTO sellers (api_key, display_name, email) VALUES ($1, $2, $3), ($4, $5, $6)",
+      "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1, $2, $3), ($4, $5, $6)",
       [`thg_${s}`, s, `${s}@t.dev`, `thg_${b}`, b, `${b}@t.dev`],
     );
     const item = await client.query(
@@ -168,7 +168,7 @@ describe.skipIf(!available)("applyTransition (DB)", () => {
   }
 
   const accountBy = async (key: string) => {
-    const r = await client.query("SELECT id FROM sellers WHERE api_key = $1", [key]);
+    const r = await client.query("SELECT id FROM sellers WHERE api_key_hash = $1", [key]);
     return r.rows[0].id as string;
   };
 

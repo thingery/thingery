@@ -96,7 +96,7 @@ describe.skipIf(!available)("item image upload route (DB + HTTP)", () => {
     n += 1;
     const tag = `thi110-${n}`;
     const seller = await db.query(
-      "INSERT INTO sellers (api_key, display_name, email) VALUES ($1, $2, $3) RETURNING id",
+      "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1, $2, $3) RETURNING id",
       [`thg_${tag}`, tag, `${tag}@t.dev`],
     );
     const sellerId = seller.rows[0].id as string;

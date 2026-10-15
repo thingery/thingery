@@ -15,7 +15,7 @@ import { mountOauthRoutes } from "../src/oauth.js";
 import { mcpRoutes, MCP_MAX_BODY_BYTES, MCP_ANON_MAX_BYTES } from "../src/mcp-gate.js";
 import { pool } from "../src/db.js";
 import { RateLimiter } from "../src/rate-limit.js";
-import { SESSION_COOKIE, signSession } from "../src/auth.js";
+import { apiKeyHash, SESSION_COOKIE, signSession } from "../src/auth.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://thingery:thingery@localhost:5432/thingery";
@@ -71,9 +71,9 @@ describe.skipIf(!available)("/mcp method-aware 401 gate (HTTP)", () => {
     const runTag = crypto.randomBytes(4).toString("hex");
     apiKey = `thg_gate_${runTag}`;
     const seller = await db.query<{ id: string }>(
-      `INSERT INTO sellers (api_key, display_name, email, password_hash)
+      `INSERT INTO sellers (api_key_hash, display_name, email, password_hash)
        VALUES ($1, $2, $3, $4) RETURNING id`,
-      [apiKey, "Gate Tester", `gate-test-${runTag}@example.com`, "x"],
+      [apiKeyHash(apiKey), "Gate Tester", `gate-test-${runTag}@example.com`, "x"],
     );
     sellerId = seller.rows[0].id;
     cookie = `${SESSION_COOKIE}=${encodeURIComponent(signSession(sellerId))}`;

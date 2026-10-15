@@ -55,7 +55,7 @@ describe.skipIf(!available)("/order payment-return pages (F15)", () => {
       const tag = `ordpage${Date.now()}${n}`;
       try {
         await client.query(
-          "INSERT INTO sellers (api_key, display_name, email) VALUES ($1, $2, $3), ($4, $5, $6)",
+          "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1, $2, $3), ($4, $5, $6)",
           [`thg_${tag}s`, `${tag}s`, `${tag}s@t.dev`, `thg_${tag}b`, `${tag}b`, `${tag}b@t.dev`],
         );
         const item = await client.query(

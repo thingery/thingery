@@ -32,8 +32,9 @@ function showDone(seller) {
 
   const mcpUrl = `${location.origin}/mcp`;
   $("mcp-url").textContent = mcpUrl;
-  // Signup/login just handed us the key (show-once): reveal it and the ready
-  // MCP config. A plain /api/me session has no key: masked hint + regenerate.
+  // Signup just handed us the key (show-once): reveal it and the ready
+  // MCP config. THI-158: login no longer returns the key, so a plain
+  // login or /api/me session gets the masked hint + regenerate path.
   if (seller.api_key) revealKey(seller.api_key, mcpUrl);
   else maskKey(mcpUrl);
 

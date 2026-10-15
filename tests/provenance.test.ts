@@ -115,7 +115,7 @@ describe.skipIf(!available)("provenance labels — get_item output (DB)", () => 
   beforeEach(async () => {
     await db.query("TRUNCATE items, sellers RESTART IDENTITY CASCADE");
     await db.query(
-      "INSERT INTO sellers (api_key, display_name, email) VALUES ($1,$2,$3)",
+      "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1,$2,$3)",
       ["thg_prov", "prov", "prov@t.dev"],
     );
     const r = await db.query(

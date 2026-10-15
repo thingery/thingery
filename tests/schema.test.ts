@@ -115,7 +115,7 @@ describe.skipIf(!available)("db schema", () => {
 
   it("cascades seller deletion through grants and tokens", async () => {
     const seller = await client.query<{ id: string }>(
-      `INSERT INTO sellers (api_key, display_name) VALUES ($1, $2) RETURNING id`,
+      `INSERT INTO sellers (api_key_hash, display_name) VALUES ($1, $2) RETURNING id`,
       [`thg_schema_${Date.now()}`, "schema-test"],
     );
     const sellerId = seller.rows[0].id;

@@ -70,7 +70,7 @@ describe.skipIf(!available)("create_order / get_order / cancel_order (DB)", () =
     n += 1;
     const s = `os${n}`, b = `ob${n}`;
     await db.query(
-      "INSERT INTO sellers (api_key, display_name, email) VALUES ($1,$2,$3), ($4,$5,$6)",
+      "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1,$2,$3), ($4,$5,$6)",
       [`thg_${s}`, s, `${s}@t.dev`, `thg_${b}`, b, `${b}@t.dev`],
     );
     const r = await db.query(

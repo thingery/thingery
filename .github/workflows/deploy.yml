@@ -1,36 +1,39 @@
 name: Deploy to VPS
 
 # Deploys to production on every push to main, once configured:
-#   repo variables: DEPLOY_ENABLED="true", DEPLOY_HOST, DEPLOY_USER
-#   repo secrets:   DEPLOY_SSH_KEY (private key)
+#   repo variables:          DEPLOY_ENABLED="true", DEPLOY_HOST, DEPLOY_USER
+#   environment secret:      DEPLOY_SSH_KEY, in the protected `production`
+#                            environment (deployment-branch policy: main only —
+#                            THI-224 F1; unreviewed refs cannot resolve it)
+# The SSH key can ONLY run the server-side wrapper
+# /usr/local/bin/thingery-deploy.sh (authorized_keys forced command — THI-224
+# F3): this workflow controls WHEN deploys run; the server controls WHAT a
+# deploy can do. Runbook: docs/deploy-vps.md §5/§5.0.
 on:
   push:
     branches: [main]
-  workflow_dispatch: {} # manual no-op/re-deploy (THI-223); same job + guards as push
+  workflow_dispatch: {} # manual re-deploy/no-op; safe — server forces the wrapper
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false # never cancel a deploy mid-schema-apply/build (THI-224 F5)
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: production
     if: vars.DEPLOY_ENABLED == 'true'
     steps:
       - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1
+        uses: appleboy/ssh-action@823bd89e131d8d508129f9443cad5855e9ba96f0 # v1.2.4, SHA-pinned (THI-224 F2)
         with:
           host: ${{ vars.DEPLOY_HOST }}
           username: ${{ vars.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          # The authorized_keys forced command ignores this script and runs the
+          # canonical server-side wrapper instead — its output appears below.
           script: |
-            set -e
-            cd /opt/thingery
-            git pull --ff-only
-            # Apply the idempotent schema BEFORE bringing up the new build (THI-114
-            # review N1): expand-phase migrations are additive, so the running
-            # containers ignore them, while the new code may require the new
-            # columns — applying first avoids a window where authenticated
-            # traffic hits `column ... does not exist` errors.
-            docker compose -f docker-compose.prod.yml exec -T db \
-              psql -U thingery -d thingery -v ON_ERROR_STOP=1 < db/schema.sql
-            export GIT_COMMIT=$(git rev-parse HEAD)
-            export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            docker compose -f docker-compose.prod.yml up -d --build
-            docker image prune -f
+            echo "deploy requested; server-side wrapper /usr/local/bin/thingery-deploy.sh executes the documented steps"

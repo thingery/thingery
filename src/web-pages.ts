@@ -71,6 +71,9 @@ function page(title: string, description: string, body: string, og?: OgMeta): st
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="icon" href="/assets/favicon.ico" sizes="48x48">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <title>${escapeHtml(title)}</title>
   <meta name="description" content="${escapeHtml(description)}">${ogMetaHtml(og)}
   <style>

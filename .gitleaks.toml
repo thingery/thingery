@@ -35,6 +35,8 @@ tags = ["secret", "thingery"]
 description = "Known test fixtures (fake credentials used by tests)"
 regexes = [
   '''definitely-wrong-hunter2''',
-  '''byo_test_key_verify_ok''',
+  '''byo_test_key_verify_401''',
   '''byo_test_key_verify_404''',
+  '''byo_test_key_verify_g2''',
+  '''byo_test_key_verify_g2b''',
 ]

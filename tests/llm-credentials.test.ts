@@ -8,8 +8,9 @@
 // Fixtures use byo_test_… strings so no real provider key format is matched;
 // NOTE (gitleaks, THI-191 N1): prefix alone does NOT defeat the
 // generic-api-key rule — entropy is the trigger (byo_test_key_verify_ok
-// crossed 3.5). The two flagged fixtures are allowlisted as exact strings in
-// .gitleaks.toml; everything else must stay under the entropy floor.
+// crossed 3.5). The fixtures that crossed the floor are allowlisted as exact
+// strings in .gitleaks.toml; new fixtures must stay under it (or be added
+// there as exact strings when CI says so).
 
 import { readFileSync } from "node:fs";
 import path from "node:path";

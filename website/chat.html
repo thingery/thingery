@@ -43,6 +43,8 @@
     button { padding: .7rem 1.2rem; font: inherit; border-radius: 10px; cursor: pointer;
       border: 1px solid rgba(127,127,127,.5); background: rgba(127,127,127,.15); color: inherit; }
     button:disabled { opacity: .5; cursor: wait; }
+    #plan-indicator { font-size: .8rem; opacity: .75; padding: .25rem 1.2rem .1rem; border-top: 1px solid rgba(127,127,127,.3); }
+    #plan-indicator img { width: .95rem; height: .95rem; vertical-align: -0.15rem; }
   </style>
 </head>
 <body>
@@ -54,6 +56,15 @@
   <div id="log">
     <div class="msg bot">Hi! Tell me what you'd like to sell — a few words and I'll turn it into a listing.
 Or ask me to find something used. <em>(Searching works without an account; publishing needs one.)</em></div>
+  </div>
+
+  <!-- THI-193 §3.6 + OpenAI UX guidelines: while the turn runs on the
+       user's ChatGPT plan, show "Using ChatGPT plan" with a Manage usage
+       link near the composer. chat.js reveals it when the status endpoint
+       reports a connected plan; hidden otherwise (flag off = no element). -->
+  <div id="plan-indicator" hidden>
+    <img src="/assets/chatgpt-logo-white.svg" alt="" width="21" height="21"> Using ChatGPT plan ·
+    <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener">Manage usage</a>
   </div>
 
   <form id="chat-form">

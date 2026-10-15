@@ -555,6 +555,87 @@ see plaintext; there is no admin read path).
 it unset, plain-http/localhost/loopback and private-IP literal endpoints (including
 cloud-metadata addresses) are rejected at save and verify time.
 
+## 8b. Sign in with ChatGPT — operator runbook (THI-193)
+
+Mirrors §8a (same store, same key, same rotation story) for the OAuth
+feature: logged-in sellers connect their ChatGPT account and chat turns run
+on their plan. Off by default in every environment until the board flips it.
+
+**What is stored:** one row per seller in `llm_credentials` with
+`kind='chatgpt_oauth'` — a single AES-256-GCM-encrypted JSON bundle
+`{access_token, refresh_token, id_token, scopes, access_expires_at,
+earliest_refresh_at, sub}` under the **same** `LLM_CREDENTIALS_MASTER_KEY`
+as BYO keys (§8a; never the session secret). AAD binds the row to
+`seller_id:chatgpt_oauth`, so it cannot be re-attached to another account.
+`key_fingerprint = keyFingerprint(sub)` — stable across token refreshes,
+shown to the seller as the connection fingerprint. Access tokens live ~1 h;
+refresh rotates the whole bundle server-side (CAS-guarded, §3.3 of the
+spec). Tokens never reach the browser in any response, redirect URL, or log
+line — the status route returns metadata only (fingerprint/model).
+
+**Enable (per VPS):** the board first completes OpenAI's client application
+("Sign in with ChatGPT", commercial lane) and receives an `oaiapp_…` client
+id. Then set `CHATGPT_OAUTH_ENABLED=1`, `CHATGPT_OAUTH_CLIENT_ID`, and
+(optionally) `CHATGPT_OAUTH_REDIRECT_URI` in the VPS `.env`, confirm
+`LLM_CREDENTIALS_MASTER_KEY` is set (§8a), and `docker compose up -d app`.
+Canonical registered redirect URIs: **prod
+`https://thingery.dev/api/me/chatgpt/callback`** (the env default derives
+from `PUBLIC_BASE_URL`); optional dev rig
+`http://localhost:3000/api/me/chatgpt/callback`. The registered URI and the
+env value must match exactly. Confidential clients also set
+`CHATGPT_OAUTH_CLIENT_SECRET` (sent only as Basic auth at the token
+endpoint). Enabling makes the account-page slot appear for logged-in
+sellers ("Continue with ChatGPT", official button format) and a "Using
+ChatGPT plan" indicator appear on the chat page while connected.
+
+**What flag-off means:** with `CHATGPT_OAUTH_ENABLED` unset/≠1 every
+`/api/me/chatgpt*` route returns 404 (connect, callback, status, DELETE) —
+a disabled surface is indistinguishable from an absent one — and chat
+resolution skips OAuth rows entirely: dormant connections are never
+consulted or decrypted, and turns use the existing user-key → company order.
+The UI footprint is zero (the settings slot and chat indicator stay hidden).
+This is the rollback lever at any time; no restart beyond the env reload.
+
+**Disconnect & revocation semantics:** `DELETE /api/me/chatgpt` revokes the
+refresh token at OpenAI first (best-effort, bounded retries), then deletes
+the row either way — a stored-but-revoked pair is worthless. If revocation
+could not be confirmed (network/5xx, or the bundle is unreadable after a key
+rotation), the response carries `revocation_unconfirmed: true` and the UI
+tells the seller to also remove the app under ChatGPT → Settings →
+Connections. Revoking from the ChatGPT side works too: the next refresh
+fails terminally, the row is deleted automatically, and the account page
+shows disconnected (chat falls back to user key → company). Providers' usage
+limits are the seller's to manage — the UI links to
+`https://chatgpt.com/settings/usage` (OpenAI UX guidelines).
+
+**Master-key rotation:** same interaction as §8a. Set the new
+`LLM_CREDENTIALS_MASTER_KEY` and existing `chatgpt_oauth` rows fail
+auth-tag verification (safe fail-closed; turns fall back to user-key →
+company). No re-encrypt migration exists — list affected sellers with
+`SELECT seller_id FROM llm_credentials WHERE kind='chatgpt_oauth'`, drop
+those rows, and ask the sellers to reconnect; the fresh connect re-writes
+(re-encrypts) the bundle under the new key. BYO `api_key` rows rotate via
+the §8a procedure — both kinds can be handled in one pass.
+
+**Real-account E2E checklist at flag-flip time** (run on prod with a real
+ChatGPT account; requires the board's client id):
+1. Log in → account page → the slot shows "Continue with ChatGPT" (official
+   black button + logo) → click → approve plan usage at OpenAI (scopes
+   include `chatgpt.tokens.use.direct`).
+2. Back on `/login.html?chatgpt=connected`: green banner, connected slot
+   (fingerprint + model), the one-time "You're using your ChatGPT plan"
+   modal (Got it — must not reappear on reload).
+3. `/chat` shows "Using ChatGPT plan" with a Manage-usage link near the
+   composer; send one turn and confirm a normal reply.
+4. `docker compose logs app | grep chat_usage` for that turn: the event
+   carries `provider=chatgpt_oauth` and `credential_source=user` — the turn
+   skipped the company budget meter's credential.
+5. Account page → Disconnect (confirm) → row gone
+   (`SELECT count(*) FROM llm_credentials WHERE kind='chatgpt_oauth' AND
+   seller_id='<id>'` → 0), the slot returns to "Continue with ChatGPT",
+   and the chat indicator disappears; a chat turn now logs
+   `provider=company` (or `user_key`).
+
 ## 9. Keeping this document honest
 
 Review triggers: any PR touching `src/auth.ts`, `src/rate-limit.ts`, `src/routes.ts`,

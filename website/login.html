@@ -32,11 +32,33 @@
     a { color: inherit; }
     .key { font-family: ui-monospace, Menlo, monospace; font-size: .9em; word-break: break-all;
       background: rgba(127,127,127,.12); padding: .6rem .8rem; border-radius: 8px; margin: .5rem 0 1rem; }
+    /* Approved "Continue with ChatGPT" button format (OpenAI sign-in brand
+       guidelines): solid black, official logo asset, white label. */
+    .chatgpt-btn { display: inline-flex; align-items: center; gap: .55rem; background: #000; color: #fff;
+      padding: .55rem 1.15rem; font: inherit; border-radius: 8px; cursor: pointer;
+      border: 1px solid rgba(127,127,127,.5); text-decoration: none; }
+    .chatgpt-btn:hover { background: #222; }
+    .chatgpt-btn img { width: 1.15rem; height: 1.15rem; display: block; }
+    #chatgpt-banner { font-size: .9rem; padding: .55rem .8rem; border-radius: 8px; margin: .6rem 0;
+      background: rgba(127,127,127,.12); }
+    #chatgpt-banner.error { background: transparent; }
+    #chatgpt-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
+      display: flex; align-items: center; justify-content: center; padding: 1rem; }
+    #chatgpt-modal-overlay[hidden] { display: none; } /* display:flex must not beat [hidden] */
+    #chatgpt-modal { background: canvas; color: canvastext; border: 1px solid rgba(127,127,127,.5);
+      border-radius: 12px; padding: 1.4rem 1.6rem; max-width: 24rem; text-align: center; }
+    #chatgpt-modal img { width: 1.6rem; height: 1.6rem; margin-bottom: .3rem; }
   </style>
 </head>
 <body>
   <h1><a href="/"><img src="/assets/logo-header.png" alt="Thingery" width="161" height="30"></a> — account</h1>
   <nav aria-label="Site" style="font-size:.9rem;opacity:.85;margin:-.8rem 0 1.4rem"><a href="/browse">Browse</a> · <a href="/chat.html">Chat</a></nav>
+
+  <!-- Callback banner for the ChatGPT OAuth round-trip (spec THI-193 §3.2/
+       §3.6): /api/me/chatgpt/callback redirects here with ?chatgpt=<slug>.
+       account.js maps the slug to fixed friendly copy — provider text and
+       token material never appear. -->
+  <p id="chatgpt-banner" hidden></p>
 
   <section id="auth">
     <h2 id="form-title">Create your account</h2>
@@ -94,6 +116,31 @@
       <p class="error" id="byo-error"></p>
       <p><button type="submit" id="byo-save">Save &amp; verify</button> <button type="button" id="byo-remove" hidden>Remove</button></p>
     </form>
+
+    <!-- ChatGPT-plan connection (spec THI-193 §3.6, PR-4): hidden until
+         /api/me/chatgpt reports enabled:true — flag off leaves zero UI
+         footprint on this page. -->
+    <section id="chatgpt" hidden>
+      <h2 style="font-size:1.05rem">Use your ChatGPT plan <small>(for the chat assistant)</small></h2>
+      <p style="font-size:.9rem;opacity:.85">Connect your ChatGPT account and eligible chat turns run on your ChatGPT plan instead of a Thingery key. You can disconnect anytime.</p>
+      <p id="chatgpt-status" style="font-size:.9rem"></p>
+      <p id="chatgpt-usage" hidden style="font-size:.9rem;opacity:.85">Your ChatGPT plan's usage limits apply — manage them in <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener">ChatGPT → Settings → Usage</a>.</p>
+      <p><a class="chatgpt-btn" id="chatgpt-connect" href="/api/me/chatgpt/connect" hidden><img src="/assets/chatgpt-logo-white.svg" alt="" width="21" height="21">Continue with ChatGPT</a></p>
+      <p class="error" id="chatgpt-error"></p>
+      <p><button type="button" id="chatgpt-disconnect" hidden>Disconnect</button></p>
+    </section>
+
+    <!-- First-connect confirmation (spec §3.6 + OpenAI UX guidelines): shown
+         once per browser while the plan is connected; account.js remembers the
+         dismissal locally. -->
+    <div id="chatgpt-modal-overlay" hidden>
+      <div id="chatgpt-modal" role="dialog" aria-modal="true" aria-labelledby="chatgpt-modal-title">
+        <img src="/assets/chatgpt-logo-white.svg" alt="">
+        <h3 id="chatgpt-modal-title" style="margin:.2rem 0 .4rem">You're using your ChatGPT plan</h3>
+        <p style="font-size:.9rem;opacity:.85">Eligible requests in this assistant now use your ChatGPT plan. You can review usage and limits anytime in ChatGPT settings.</p>
+        <button type="button" id="chatgpt-modal-ok">Got it</button>
+      </div>
+    </div>
   </section>
 
   <script type="module" src="/account.js"></script>

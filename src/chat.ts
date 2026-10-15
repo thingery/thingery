@@ -310,19 +310,16 @@ async function callLlm(
 
 // --- THI-193 §3.4: Responses adapter (ChatGPT plan-usage tokens) -------------
 
-/** One item of the Responses API `input` array (the subset the adapter
- *  emits: chat messages, prior function calls, tool results). */
+/** One item of the Responses API `input` array (the subset the adapter emits). */
 type ResponsesInputItem =
   | { role: "user" | "assistant"; content: string }
   | { type: "function_call"; call_id: string; name: string; arguments: string }
   | { type: "function_call_output"; call_id: string; output: string };
 
-/** Chat-completions message list → Responses `instructions` + `input`.
- *  System content becomes top-level `instructions`; user/assistant stay
- *  {role, content}; assistant tool_calls become {type:"function_call", …};
- *  tool results become {type:"function_call_output", …} carrying the
- *  existing wrapToolResult output unchanged (H5.1 delimiters on every
- *  protocol). */
+/** Chat-completions messages → Responses `instructions` + `input`: system
+ *  content becomes `instructions`; tool_calls/tool results become
+ *  function_call / function_call_output (wrapToolResult output unchanged —
+ *  H5.1 delimiters on every protocol). */
 function toResponsesInput(messages: LlmMessage[]): { instructions: string; input: ResponsesInputItem[] } {
   const system: string[] = [];
   const input: ResponsesInputItem[] = [];
@@ -343,10 +340,19 @@ function toResponsesInput(messages: LlmMessage[]): { instructions: string; input
   return { instructions: system.join("\n\n"), input };
 }
 
-/** §2 taxonomy: a mid-stream response.failed carries `error.code` but no
- *  HTTP status — map the known sharing codes back to their HTTP status so
- *  chatTurn's friendly-failure branches classify pre-stream and mid-stream
- *  rejections identically (fixed slugs only, never provider text). */
+/** One Responses function_call output item → the LlmMessage.tool_calls
+ *  shape, so the round loop + local tool execution stay unchanged. */
+const parseCallItem = (item: { call_id?: unknown; name?: unknown; arguments?: unknown }): NonNullable<LlmMessage["tool_calls"]>[number] => ({
+  id: typeof item.call_id === "string" ? item.call_id : "",
+  type: "function",
+  function: {
+    name: typeof item.name === "string" ? item.name : "",
+    arguments: typeof item.arguments === "string" ? item.arguments : "{}",
+  },
+});
+/** §2: a mid-stream response.failed carries `error.code`, not an HTTP
+ *  status — map the sharing codes back to their statuses so pre-stream and
+ *  mid-stream rejections classify identically (fixed slugs, no bodies). */
 const SHARING_ERROR_STATUS: Readonly<Record<string, number>> = {
   subscription_sharing_invalid_user: 401,
   subscription_sharing_user_not_eligible: 403,
@@ -365,9 +371,9 @@ function providerErrorCode(body: string): string | undefined {
   }
 }
 
-/** §3.4 usage mapping with THI-182 N1 semantics: anything other than a
- *  finite non-negative {input_tokens, output_tokens} pair is MISSING (the
- *  caller charges the deterministic estimate — garbage never credits). */
+/** §3.4 usage mapping, THI-182 N1 semantics: anything other than a finite
+ *  non-negative pair is MISSING (caller charges the estimate — garbage
+ *  never credits). */
 function parseResponsesUsage(raw: unknown): NormalizedUsage | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
   const { input_tokens, output_tokens } = raw as Record<string, unknown>;
@@ -377,12 +383,11 @@ function parseResponsesUsage(raw: unknown): NormalizedUsage | undefined {
     : undefined;
 }
 
-/** The one call per round on a ChatGPT plan token (THI-193 §3.4): POSTs the
- *  mapped body to the pinned /v1/responses endpoint (store:false +
- *  stream:true are REQUIRED for plan usage; max_output_tokens = the same
- *  per-call cap), then runs the minimal SSE reader. Terminal ONLY on
- *  response.completed; response.failed / response.incomplete are distinct
- *  failures; a stream that ends without completion is a failure too. */
+/** The one call per round on a plan token (§3.4): POSTs to the pinned
+ *  /v1/responses endpoint (store:false + stream:true required for plan
+ *  usage) and runs the minimal SSE reader — terminal ONLY on
+ *  response.completed; failed/incomplete distinct; a stream ending without
+ *  completion is a failure too. */
 async function callLlmResponses(
   messages: LlmMessage[],
   credential: ResolvedLlmCredential,
@@ -426,18 +431,7 @@ async function callLlmResponses(
    *  items with it (repairs missed output_item.done events, dedupes). */
   const finalizeCalls = (output: unknown): void => {
     if (!Array.isArray(output)) return;
-    const calls: NonNullable<LlmMessage["tool_calls"]> = [];
-    for (const item of output as Array<{ type?: unknown; call_id?: unknown; name?: unknown; arguments?: unknown }>) {
-      if (item?.type !== "function_call") continue;
-      calls.push({
-        id: typeof item.call_id === "string" ? item.call_id : "",
-        type: "function",
-        function: {
-          name: typeof item.name === "string" ? item.name : "",
-          arguments: typeof item.arguments === "string" ? item.arguments : "{}",
-        },
-      });
-    }
+    const calls = (output as Array<Parameters<typeof parseCallItem>[0] & { type?: unknown }>).filter((i) => i?.type === "function_call").map(parseCallItem);
     toolCalls.splice(0, toolCalls.length, ...calls);
   };
 
@@ -454,17 +448,8 @@ async function callLlmResponses(
         if (typeof ev.delta === "string") text += ev.delta;
         return;
       case "response.output_item.done": {
-        const item = ev.item as { type?: unknown; call_id?: unknown; name?: unknown; arguments?: unknown } | undefined;
-        if (item?.type === "function_call") {
-          toolCalls.push({
-            id: typeof item.call_id === "string" ? item.call_id : "",
-            type: "function",
-            function: {
-              name: typeof item.name === "string" ? item.name : "",
-              arguments: typeof item.arguments === "string" ? item.arguments : "{}",
-            },
-          });
-        }
+        const item = ev.item as { type?: unknown } | undefined;
+        if (item?.type === "function_call") toolCalls.push(parseCallItem(ev.item as { call_id?: unknown; name?: unknown; arguments?: unknown }));
         return;
       }
       case "response.completed": {
@@ -475,9 +460,8 @@ async function callLlmResponses(
         return;
       }
       case "response.failed": {
-        const code = typeof (ev.response as { error?: { code?: unknown } } | undefined)?.error?.code === "string"
-          ? ((ev.response as { error: { code: string } }).error.code)
-          : undefined;
+        const err = (ev.response as { error?: { code?: unknown } } | undefined)?.error;
+        const code = typeof err?.code === "string" ? err.code : undefined;
         failure = new LlmApiError(code ? (SHARING_ERROR_STATUS[code] ?? 502) : 502, `response.failed${code ? ` ${code}` : ""}`, code);
         terminal = true;
         return;
@@ -598,10 +582,9 @@ const CHAT_BUDGET_EXHAUSTED = "Sorry — the daily chat budget just ran out. Ple
 const BYO_KEY_REJECTED =
   "⚠️ Your saved model key was rejected by the provider — update or remove it under Account → Model settings to keep chatting.";
 
-/** THI-193 §3.4: fixed friendly strings for ChatGPT plan (OAuth) turns —
- *  never provider bodies. Usage-limit (429) points at the plan's own usage
- *  manager; invalid_user / terminal 401 invalidates the row (the turn
- *  still fails — no silent company fallback) and asks for a reconnect. */
+/** THI-193 §3.4: fixed friendly strings for ChatGPT plan turns — never
+ *  provider bodies. invalid_user / terminal 401 invalidates the row (the
+ *  turn still fails — no silent company fallback) and asks for a reconnect. */
 const CHATGPT_PLAN_USAGE_LIMIT =
   "⚠️ Your ChatGPT plan usage limit was reached — manage it in ChatGPT → Settings → Usage, or disconnect in Account settings.";
 const CHATGPT_RECONNECT =
@@ -972,10 +955,8 @@ export async function chatTurn(
   } catch (e) {
     outcome = "error";
     // THI-197 / THI-193 §3.4: NO mid-turn fallback — a user-credential turn
-    // whose provider rejects it fails the turn with a friendly, actionable,
-    // fixed string (never a provider body); it never silently re-runs on the
-    // company key (misattributes cost, overrides the user's choice). The
-    // usage line below still emits with zero company attribution.
+    // rejected by the provider fails with a fixed friendly string (never a
+    // provider body), never silently re-runs on the company key.
     if (credential !== null && e instanceof LlmApiError) {
       if (credential.protocol === "responses") {
         // ChatGPT plan turns: fixed plan-specific strings (§3.4).

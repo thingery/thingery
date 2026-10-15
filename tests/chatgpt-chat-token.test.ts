@@ -19,10 +19,21 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { chatTurn, wrapToolResult, type ChatUsageSummary } from "../src/chat.js";
 import { chatLimits, dailyTokenBudget } from "../src/chat-limits.js";
 import type { ResolvedLlmCredential } from "../src/llm-credentials.js";
+import {
+  CHATGPT_OAUTH_TOKEN_URL,
+  getChatgptConnection,
+  upsertChatgptConnection,
+  type ChatgptTokenBundle,
+} from "../src/chatgpt-oauth.js";
+import { mountApiRoutes, chatAnonLimiter, chatAuthedLimiter } from "../src/routes.js";
+import { SESSION_COOKIE, signSession } from "../src/auth.js";
+import { LLM_CREDENTIALS_MASTER_KEY_ENV, upsertLlmCredential } from "../src/llm-credentials.js";
 import { STUB_DEFAULT_MODEL, STUB_FULL_SCOPES, STUB_SUB } from "./chatgpt-oauth-stub.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.resolve(__dirname, "..", "db", "schema.sql");
+const connectionString =
+  process.env.DATABASE_URL ?? "postgres://thingery:thingery@localhost:5432/thingery";
 
 /** OAuth credential exactly as resolveChatgptCredential returns it (§3.4). */
 const OAUTH_CRED: ResolvedLlmCredential = {
@@ -259,5 +270,296 @@ describe("Responses adapter (THI-193 §3.4, chatTurn on a plan token)", () => {
     expect(out.text).toBe("Sorry — that took too many steps. Could you simplify the request?");
     expect(out.usage?.rounds).toBe(chatLimits.roundsPerTurn);
     expect(n).toBe(chatLimits.roundsPerTurn);
+  });
+});
+
+// --- Resolution order matrix (routes seam, §3.4: OAuth → key → company) -------
+
+const RESPONSES_URL = "https://api.openai.com/v1/responses";
+const KEY_URL = "https://byo-chat.example.com/v1/chat/completions";
+const ENV_URL = "https://api.openai.com/v1/chat/completions"; // no LLM_API_URL set in tests
+
+async function dbAvailable(): Promise<boolean> {
+  const client = new pg.Client({ connectionString, connectionTimeoutMillis: 1500 });
+  try {
+    await client.connect();
+    await client.end();
+    return true;
+  } catch {
+    await client.end().catch(() => {});
+    return false;
+  }
+}
+const available = await dbAvailable();
+
+describe.skipIf(!available)("resolution order matrix: user OAuth → user key → company (THI-193 §3.4, DB + HTTP)", () => {
+  let db: pg.Client;
+  let server: Server;
+  let base = "";
+  let n = 0;
+
+  beforeAll(async () => {
+    db = new pg.Client({ connectionString });
+    await db.connect();
+    await db.query(readFileSync(schemaPath, "utf8"));
+    await db.query("TRUNCATE items, sellers RESTART IDENTITY CASCADE");
+    process.env.LLM_API_KEY = "test-key";
+    process.env[LLM_CREDENTIALS_MASTER_KEY_ENV] = "17".repeat(31) + "ef";
+    process.env.CHATGPT_OAUTH_ENABLED = "1";
+    process.env.CHATGPT_OAUTH_CLIENT_ID = "chatgpt_test_client";
+    const app = express();
+    app.use(express.json({ limit: "100kb" }));
+    mountApiRoutes(app);
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, "127.0.0.1", () => {
+        base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    server.close();
+    await db.end();
+    delete process.env.LLM_API_KEY;
+    delete process.env[LLM_CREDENTIALS_MASTER_KEY_ENV];
+    delete process.env.CHATGPT_OAUTH_ENABLED;
+    delete process.env.CHATGPT_OAUTH_CLIENT_ID;
+  });
+
+  beforeEach(() => {
+    chatAnonLimiter.reset();
+    chatAuthedLimiter.reset();
+    dailyTokenBudget.reset();
+    n += 1;
+  });
+
+  afterEach(async () => {
+    dailyTokenBudget.reset();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    await db.query("DELETE FROM llm_credentials");
+  });
+
+  async function seedSeller(): Promise<{ cookie: string; sellerId: string }> {
+    const tag = `thi193c-${n}`;
+    const seller = await db.query(
+      "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1, $2, $3) RETURNING id",
+      [`thg_${tag}`, tag, `${tag}@t.dev`],
+    );
+    const sellerId = seller.rows[0].id as string;
+    return { cookie: `${SESSION_COOKIE}=${signSession(sellerId)}`, sellerId };
+  }
+
+  function oauthBundle(
+    o: { at?: string; expMs?: number; earliestMs?: number; scopes?: string } = {},
+  ): ChatgptTokenBundle {
+    return {
+      accessToken: o.at ?? "chatgpt_test_at_1",
+      refreshToken: "chatgpt_test_rt_1",
+      idToken: "chatgpt_test_idt_1",
+      scopes: o.scopes ?? STUB_FULL_SCOPES,
+      accessExpiresAt: new Date(o.expMs ?? Date.now() + 3_600_000),
+      earliestRefreshAt: new Date(o.earliestMs ?? Date.now() - 60_000),
+      sub: STUB_SUB,
+    };
+  }
+
+  async function seedKeyRow(sellerId: string): Promise<void> {
+    await upsertLlmCredential(sellerId, { label: "test key", apiKey: "byo_test_chat_key_9", model: "gpt-4.1", baseUrl: "https://byo-chat.example.com/v1" });
+  }
+
+  const post = (body: unknown, cookie: string) =>
+    fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify(body),
+    });
+
+  /** URL-dispatching provider stub: records every non-app call (url/auth/raw
+   * body — the token endpoint posts a form, the LLM endpoints post JSON). */
+  function stubProvider(respond: (url: string, raw: string) => Response) {
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ url: string; auth: string; body: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (u.startsWith(base)) return realFetch(url, init);
+        calls.push({ url: u, auth: String((init?.headers as Record<string, string> | undefined)?.authorization), body: String(init?.body ?? "") });
+        return respond(u, calls[calls.length - 1].body);
+      }),
+    );
+    return calls;
+  }
+
+  const responsesOk = () => sse([delta("plan reply"), completed()]);
+  const ccOk = () =>
+    new Response(
+      JSON.stringify({ choices: [{ message: { role: "assistant", content: "key reply" } }], usage: { prompt_tokens: 80, completion_tokens: 20 } }),
+      { status: 200 },
+    );
+
+  const usageEvents = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('"chat_usage"'));
+
+  it("fresh OAuth connection WINS over a stored user key: plan token to /v1/responses, provider chatgpt_oauth, budget uncharged", async () => {
+    const { cookie, sellerId } = await seedSeller();
+    await seedKeyRow(sellerId);
+    await upsertChatgptConnection(sellerId, oauthBundle({ at: "chatgpt_test_at_1" }), STUB_DEFAULT_MODEL);
+    const calls = stubProvider((u) => (u === RESPONSES_URL ? responsesOk() : new Response(`unexpected ${u}`, { status: 500 })));
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const res = await post({ message: "hello" }, cookie);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { reply: { text: string } }).reply.text).toBe("plan reply");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(RESPONSES_URL);
+    expect(calls[0].auth).toBe("Bearer chatgpt_test_at_1"); // plan token, not the user key or env key
+    const body = JSON.parse(calls[0].body);
+    expect(body.model).toBe(STUB_DEFAULT_MODEL); // connection model
+    expect(body.store).toBe(false);
+    expect(body.stream).toBe(true);
+    expect(JSON.parse(usageEvents(spy)[0])).toMatchObject({
+      type: "chat_usage",
+      credential_source: "user",
+      provider: "chatgpt_oauth",
+      model: STUB_DEFAULT_MODEL,
+    });
+    expect(dailyTokenBudget.used()).toBe(0); // user-billed turn: company meter untouched
+  });
+
+  it("flag off ⇒ dormant row: falls to the stored user key (chat-completions wire), provider user_key", async () => {
+    const saved = process.env.CHATGPT_OAUTH_ENABLED;
+    delete process.env.CHATGPT_OAUTH_ENABLED; // fail closed, §3.1
+    try {
+      const { cookie, sellerId } = await seedSeller();
+      await seedKeyRow(sellerId);
+      await upsertChatgptConnection(sellerId, oauthBundle(), STUB_DEFAULT_MODEL);
+      const calls = stubProvider((u) => (u === KEY_URL ? ccOk() : new Response(`unexpected ${u}`, { status: 500 })));
+      const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const res = await post({ message: "hello" }, cookie);
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { reply: { text: string } }).reply.text).toBe("key reply");
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe(KEY_URL);
+      expect(calls[0].auth).toBe("Bearer byo_test_chat_key_9");
+      expect(JSON.parse(calls[0].body).max_tokens).toBe(1200); // chat-completions wire
+      expect(JSON.parse(usageEvents(spy)[0])).toMatchObject({ type: "chat_usage", provider: "user_key", credential_source: "user", model: "gpt-4.1" });
+    } finally {
+      process.env.CHATGPT_OAUTH_ENABLED = saved;
+    }
+  });
+
+  it("connection missing the plan-usage scope is dormant: falls to the key", async () => {
+    const { cookie, sellerId } = await seedSeller();
+    await seedKeyRow(sellerId);
+    const scopes = STUB_FULL_SCOPES.split(" ").filter((s) => s !== "chatgpt.tokens.use.direct").join(" ");
+    await upsertChatgptConnection(sellerId, oauthBundle({ scopes }), STUB_DEFAULT_MODEL);
+    const calls = stubProvider((u) => (u === KEY_URL ? ccOk() : new Response(`unexpected ${u}`, { status: 500 })));
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const res = await post({ message: "hello" }, cookie);
+    expect(res.status).toBe(200);
+    expect(calls.map((c) => c.url)).toEqual([KEY_URL]);
+    expect(JSON.parse(usageEvents(spy)[0])).toMatchObject({ type: "chat_usage", provider: "user_key" });
+  });
+
+  it("no credentials ⇒ company key: provider company, company budget charged", async () => {
+    const { cookie } = await seedSeller();
+    const calls = stubProvider((u) => (u === ENV_URL ? ccOk() : new Response(`unexpected ${u}`, { status: 500 })));
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const res = await post({ message: "hello" }, cookie);
+    expect(res.status).toBe(200);
+    expect(calls[0].url).toBe(ENV_URL);
+    expect(calls[0].auth).toBe("Bearer test-key"); // env company key
+    expect(JSON.parse(usageEvents(spy)[0])).toMatchObject({ type: "chat_usage", provider: "company", credential_source: "company" });
+    expect(dailyTokenBudget.used()).toBeGreaterThan(0); // company turn charges the meter
+  });
+
+  it("expired access token is refreshed at RESOLUTION (before the turn): one token-endpoint call, turn runs on the NEW token", async () => {
+    const { cookie, sellerId } = await seedSeller();
+    await upsertChatgptConnection(sellerId, oauthBundle({ at: "chatgpt_test_at_expired", expMs: Date.now() - 600_000 }), STUB_DEFAULT_MODEL);
+    const calls = stubProvider((u) => {
+      if (u === CHATGPT_OAUTH_TOKEN_URL)
+        return new Response(JSON.stringify({ access_token: "chatgpt_test_at_refreshed", refresh_token: "chatgpt_test_rt_2", expires_in: 3600 }), { status: 200 });
+      if (u === RESPONSES_URL) return responsesOk();
+      return new Response(`unexpected ${u}`, { status: 500 });
+    });
+
+    const res = await post({ message: "hello" }, cookie);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { reply: { text: string } }).reply.text).toBe("plan reply");
+    // Exactly one refresh, §2 refresh-grant shape (scope deliberately omitted, PR-1).
+    const tokenCalls = calls.filter((c) => c.url === CHATGPT_OAUTH_TOKEN_URL);
+    expect(tokenCalls).toHaveLength(1);
+    const form = new URLSearchParams(tokenCalls[0].body);
+    expect(form.get("grant_type")).toBe("refresh_token");
+    expect(form.get("refresh_token")).toBe("chatgpt_test_rt_1");
+    expect(form.get("scope")).toBeNull();
+    // The turn itself ran on the refreshed token.
+    expect(calls).toHaveLength(2);
+    expect(calls[1].url).toBe(RESPONSES_URL);
+    expect(calls[1].auth).toBe("Bearer chatgpt_test_at_refreshed");
+  });
+
+  it("terminal refresh error (invalid_grant): row already deleted (PR-1), turn falls to the key BEFORE starting — no /v1/responses call", async () => {
+    const { cookie, sellerId } = await seedSeller();
+    await seedKeyRow(sellerId);
+    await upsertChatgptConnection(sellerId, oauthBundle({ expMs: Date.now() - 600_000 }), STUB_DEFAULT_MODEL);
+    const calls = stubProvider((u) => {
+      if (u === CHATGPT_OAUTH_TOKEN_URL) return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+      if (u === KEY_URL) return ccOk();
+      return new Response(`unexpected ${u}`, { status: 500 });
+    });
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const res = await post({ message: "hello" }, cookie);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { reply: { text: string } }).reply.text).toBe("key reply");
+    expect(calls.map((c) => c.url)).toEqual([CHATGPT_OAUTH_TOKEN_URL, KEY_URL]); // resolution failure, not a mid-turn switch
+    expect(await getChatgptConnection(sellerId)).toBeNull(); // terminal path deleted the row
+    expect(spy.mock.calls.some((c) => String(c[0]).includes('"chatgpt_oauth_error"'))).toBe(true);
+    expect(JSON.parse(usageEvents(spy)[0])).toMatchObject({ type: "chat_usage", provider: "user_key" });
+  });
+
+  it("401 subscription_sharing_invalid_user mid-turn: row invalidated, reconnect message, exactly ONE LLM call (no company fallback)", async () => {
+    const { cookie, sellerId } = await seedSeller();
+    await upsertChatgptConnection(sellerId, oauthBundle(), STUB_DEFAULT_MODEL);
+    const calls = stubProvider(
+      (u) =>
+        u === RESPONSES_URL
+          ? new Response(JSON.stringify({ error: { code: "subscription_sharing_invalid_user", message: "dead session" } }), { status: 401 })
+          : new Response(`unexpected ${u}`, { status: 500 }),
+    );
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const res = await post({ message: "hello" }, cookie);
+    expect(res.status).toBe(200); // friendly failure, not a 500
+    expect(((await res.json()) as { reply: { text: string } }).reply.text).toBe(RECONNECT_TEXT);
+    expect(calls).toHaveLength(1); // the failed OAuth turn is NOT re-run on the company key
+    expect(await getChatgptConnection(sellerId)).toBeNull(); // invalidated so the NEXT turn resolves key → company
+    expect(JSON.parse(usageEvents(spy)[0])).toMatchObject({ type: "chat_usage", provider: "chatgpt_oauth", credential_source: "user" });
+  });
+
+  it("HTTP 429 usage limit at route level: exact friendly text, chat_usage chatgpt_oauth, budget uncharged", async () => {
+    const { cookie, sellerId } = await seedSeller();
+    await upsertChatgptConnection(sellerId, oauthBundle(), STUB_DEFAULT_MODEL);
+    const calls = stubProvider(
+      (u) =>
+        u === RESPONSES_URL
+          ? new Response(JSON.stringify({ error: { code: "subscription_sharing_usage_limit_exceeded" } }), { status: 429 })
+          : new Response(`unexpected ${u}`, { status: 500 }),
+    );
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const res = await post({ message: "hello" }, cookie);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { reply: { text: string } }).reply.text).toBe(USAGE_LIMIT_TEXT);
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(usageEvents(spy)[0])).toMatchObject({ type: "chat_usage", provider: "chatgpt_oauth" });
+    expect(dailyTokenBudget.used()).toBe(0);
   });
 });

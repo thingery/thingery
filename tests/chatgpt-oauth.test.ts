@@ -177,7 +177,12 @@ describe.skipIf(!available)("chatgpt_oauth store (DB, spec §3.3)", () => {
     expect(meta?.fingerprint).toMatch(/^[0-9a-f]{12}$/);
     expect(JSON.stringify(meta).includes("chatgpt_test_at_a")).toBe(false);
     expect(JSON.stringify(meta).includes("chatgpt_test_rt_a")).toBe(false);
-    expect(await resolveChatgptCredential(sellerId)).toEqual({ accessToken: "chatgpt_test_at_a", model: "gpt-5.1" });
+    expect(await resolveChatgptCredential(sellerId)).toEqual({
+      apiKey: "chatgpt_test_at_a",
+      model: "gpt-5.1",
+      completionsUrl: "https://api.openai.com/v1/responses",
+      protocol: "responses",
+    });
     await deleteChatgptConnection(sellerId);
     expect(await getChatgptConnection(sellerId)).toBeNull();
     expect(await resolveChatgptCredential(sellerId)).toBeNull();
@@ -369,7 +374,12 @@ describe.skipIf(!available)("chatgpt_oauth store (DB, spec §3.3)", () => {
     );
     const fetchMock = vi.fn(async () => tokenResponse({ at: "chatgpt_test_at_b", rt: "chatgpt_test_rt_b" }));
     vi.stubGlobal("fetch", fetchMock);
-    expect(await resolveChatgptCredential(sellerId)).toEqual({ accessToken: "chatgpt_test_at_b", model: "gpt-5.1" });
+    expect(await resolveChatgptCredential(sellerId)).toEqual({
+      apiKey: "chatgpt_test_at_b",
+      model: "gpt-5.1",
+      completionsUrl: "https://api.openai.com/v1/responses",
+      protocol: "responses",
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(JSON.parse(await storedJson(sellerId))).toMatchObject({ access_token: "chatgpt_test_at_b" });
   });

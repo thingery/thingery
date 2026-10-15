@@ -97,11 +97,18 @@ export interface ChatgptConnectionMeta {
   updated_at: Date;
 }
 
+/** §2: the Responses-API inference endpoint plan usage runs on. */
+export const CHATGPT_RESPONSES_URL = "https://api.openai.com/v1/responses";
+
 /** Decrypted credential for one chat turn. Request-scoped: never cache,
- *  never log, never put in a response. */
+ *  never log, never put in a response. THI-193 §3.4: the shape is
+ *  ResolvedLlmCredential-compatible — apiKey IS the access token, and
+ *  protocol "responses" selects the Responses adapter in callLlm. */
 export interface ResolvedChatgptCredential {
-  accessToken: string;
+  apiKey: string;
   model: string;
+  completionsUrl: string;
+  protocol: "responses";
 }
 
 interface DbRow {
@@ -327,8 +334,12 @@ export async function resolveChatgptCredential(sellerId: string): Promise<Resolv
   const b = parseBundle(decryptSecret(sellerId, CHATGPT_OAUTH_KIND, row.ciphertext));
   if (!b.scopes.split(/\s+/).includes(CHATGPT_PLAN_USAGE_SCOPE)) return null;
   const now = Date.now();
-  if (b.accessExpiresAt.getTime() > now) return { accessToken: b.accessToken, model: row.model };
+  if (b.accessExpiresAt.getTime() > now) {
+    return { apiKey: b.accessToken, model: row.model, completionsUrl: CHATGPT_RESPONSES_URL, protocol: "responses" };
+  }
   if (b.earliestRefreshAt.getTime() > now) return null; // not refreshable yet → fall through this turn
   const refreshed = await refreshChatgptTokens(sellerId);
-  return refreshed.ok ? { accessToken: refreshed.accessToken, model: row.model } : null;
+  return refreshed.ok
+    ? { apiKey: refreshed.accessToken, model: row.model, completionsUrl: CHATGPT_RESPONSES_URL, protocol: "responses" }
+    : null;
 }

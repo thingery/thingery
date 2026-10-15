@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy — Thingery</title>
+  <meta name="description" content="What thingery.dev stores, how AI apps access it, and how you control or delete it.">
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="/assets/favicon.ico" sizes="48x48">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --ink: #1a1d23;
+      --muted: #5c6470;
+      --line: rgba(127,127,127,.22);
+      --card: rgba(127,127,127,.07);
+      --accent: #0f7b6c;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --ink: #e8eaee; --muted: #9aa3af; --card: rgba(127,127,127,.1); --accent: #2dd4bf; }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      line-height: 1.65; color: var(--ink); background:
+      radial-gradient(1200px 500px at 15% -10%, rgba(15,123,108,.12), transparent 60%),
+      radial-gradient(900px 400px at 90% 0%, rgba(183,121,31,.10), transparent 55%);
+    }
+    .wrap { max-width: 46rem; margin-inline: auto; padding: 0 1.4rem 3rem; }
+    header { display: flex; justify-content: space-between; align-items: center; padding: 1.2rem 0; }
+    .logo { font-weight: 750; font-size: 1.15rem; text-decoration: none; color: inherit; }
+    .logo img { display: block; height: 34px; width: auto; }
+    header a.home { text-decoration: none; color: var(--muted); font-size: .95rem; }
+    h1 { font-size: 1.9rem; letter-spacing: -.02em; margin: 1.5rem 0 .4rem; }
+    p.updated { color: var(--muted); margin: 0 0 1.5rem; font-size: .92rem; }
+    section { padding: 1.3rem 0; border-top: 1px solid var(--line); }
+    section h2 { font-size: 1.2rem; margin: 0 0 .6rem; letter-spacing: -.01em; }
+    section p { margin: .5rem 0; }
+    ul { padding-left: 1.3rem; }
+    li { margin: .35rem 0; }
+    .card { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 1rem 1.2rem; margin: .8rem 0; }
+    a { color: var(--accent); }
+    a.mail { font-weight: 600; }
+    footer { border-top: 1px solid var(--line); margin-top: 2rem; padding: 1.2rem 0 0; color: var(--muted); font-size: .92rem; }
+    footer a { color: inherit; }
+    code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .88em; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+  <header>
+    <a class="logo" href="/"><img src="/assets/logo-header.png" alt="Thingery" width="183" height="34"></a>
+    <a class="home" href="/">← Back to Thingery</a>
+  </header>
+
+  <h1>Privacy Policy</h1>
+  <p class="updated">Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+  This policy covers the service at <strong>thingery.dev</strong>. Last updated: 16 October 2026.</p>
+
+  <section id="short-version">
+    <h2>The short version</h2>
+    <div class="card">
+      <ul>
+        <li><strong>Sell and search second-hand goods with your AI assistant.</strong> To do that, we store your account, your listings and their photos, and — if you connect an app like ChatGPT — a revocable connection record.</li>
+        <li><strong>Listings are public by design.</strong> Anyone can browse and search them. Don't put personal details in a listing.</li>
+        <li><strong>Connected apps act only as you.</strong> A signed-in app sees and manages <em>your</em> listings and orders — never anyone else's, and never your password.</li>
+        <li><strong>You are in control.</strong> Delete a listing, revoke an app, or delete your whole account. Details below.</li>
+        <li><strong>Questions or deletion requests:</strong> <a class="mail" href="mailto:privacy@thingery.dev">privacy@thingery.dev</a>.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="what-we-store">
+    <h2>What we store</h2>
+    <p>Only the categories below. We do not buy, sell, or share your data for advertising, and we run no tracking cookies or analytics.</p>
+    <ul>
+      <li><strong>Your account</strong> (if you create one): a display name, your email address, your password stored only as a salted <a href="https://en.wikipedia.org/wiki/Scrypt">scrypt</a> hash, account preferences (like locale and currency), and your MCP API key stored only as a SHA-256 hash. We never keep your password or API key in readable form.</li>
+      <li><strong>Your listings</strong>: everything you publish — title, description, category, condition, brand, price, currency, location, size and shipping details, and any item attributes you or your assistant provide (for example shoe size or ISBN).</li>
+      <li><strong>Item photos</strong>: images your assistant uploads with a listing, or that you upload from the account area.</li>
+      <li><strong>Search vectors</strong>: a numeric representation of your listing's text, so search understands meaning, not just keywords.</li>
+      <li><strong>App connections (OAuth)</strong>: when you connect an app such as ChatGPT or Claude Desktop, we store the app's registration (its name and redirect address), your approval linking it to your account, and the access and refresh tokens it uses — all tokens stored only as SHA-256 hashes, never in readable form.</li>
+      <li><strong>Orders</strong> (when you buy or sell with order tracking): order status and its history, the agreed price, and — for shipped orders — the delivery address and carrier tracking code. The address is visible only to the two parties of the order. When you pay on-platform, we store references to the payment (for example a Stripe payment ID).</li>
+      <li><strong>Optional chat-assistant credentials</strong>: if you add your own AI provider key, or use “Sign in with ChatGPT” for the built-in chat page, these are stored encrypted (AES-256-GCM) and you can remove them at any time.</li>
+      <li><strong>Technical records</strong>: rate-limiting counters and security/usage event logs (counts and identifiers only — never message content, secrets, or cookies), plus standard server logs kept for a short period.</li>
+    </ul>
+  </section>
+
+  <section id="ai-access">
+    <h2>How ChatGPT and other AI apps access data</h2>
+    <p>Apps connect through <strong>per-user OAuth 2.1 sign-in</strong> — the same “sign in with…” flow you know from other services:</p>
+    <ul>
+      <li>When you add Thingery to an app, you sign in on thingery.dev and approve the connection yourself. The app receives a token tied to <strong>your account only</strong>: it can see and manage your listings and your orders. It can never see another person's account, and it never sees your password.</li>
+      <li>Sign-in tokens are short-lived (30 minutes) and refresh automatically for at most 30 days, rotating on every use.</li>
+      <li><strong>Without signing in</strong>, an app gets read-only public search: it can find and read public listings, and nothing more.</li>
+      <li>You can review every connected app and cut one off instantly at <a href="/apps">thingery.dev/apps</a>.</li>
+    </ul>
+  </section>
+
+  <section id="public-by-design">
+    <h2>What is public</h2>
+    <p>Listings are meant to be found: people, AI agents, and search engines can all read public listing pages. Please keep phone numbers, home addresses, and similar personal details <em>out</em> of listing text and photos — buyers and sellers exchange delivery details privately through the order flow, where the shipping address is visible only to the two parties.</p>
+  </section>
+
+  <section id="your-control">
+    <h2>Your control</h2>
+    <ul>
+      <li><strong>Delete a listing:</strong> ask your connected assistant (“delete my listing of the blue sofa”) — deleting sets its status to deleted and removes it from search and public pages immediately. You can also request removal by email.</li>
+      <li><strong>Revoke an app:</strong> open <a href="/apps">thingery.dev/apps</a> and revoke. The connection and all its tokens stop working immediately.</li>
+      <li><strong>Rotate your API key:</strong> from the <a href="/login.html">account page</a> — the old key stops working right away.</li>
+      <li><strong>Remove chat credentials:</strong> also on the account page, including disconnecting “Sign in with ChatGPT”.</li>
+      <li><strong>Delete your account:</strong> email <a class="mail" href="mailto:privacy@thingery.dev">privacy@thingery.dev</a> from your account's address. We will delete your account, listings, photos, and app connections. For orders you completed with another person, we may keep an anonymized record where needed for disputes and accounting — it will not identify you.</li>
+    </ul>
+  </section>
+
+  <section id="retention">
+    <h2>How long we keep data</h2>
+    <ul>
+      <li><strong>Listings</strong> stay until you delete them. Deleted listings are hidden from everyone immediately; the underlying record is kept internally only for abuse handling and disputes, and is permanently removed on request or with your account.</li>
+      <li><strong>OAuth data</strong> is removed automatically: sign-in codes after at most an hour, expired access tokens after a day, unused refresh tokens after 30 days, app registrations no one approved after 7 days, and revoked connections after 90 days.</li>
+      <li><strong>Accounts</strong> stay until you ask us to delete them.</li>
+    </ul>
+  </section>
+
+  <section id="providers">
+    <h2>Service providers</h2>
+    <p>We use as few as possible, each receiving only what its job needs: an AI embedding provider receives listing text to build search vectors; the payment processor (Stripe, when you choose on-platform payment) receives what a payment requires; the shipping carrier service receives the delivery address and parcel details needed for labels and tracking. Thingery itself runs on our own server.</p>
+  </section>
+
+  <section id="cookies">
+    <h2>Cookies</h2>
+    <p>One functional cookie when you log in (to keep you signed in). No advertising, tracking, or third-party cookies.</p>
+  </section>
+
+  <section id="self-hosting">
+    <h2>Self-hosted instances</h2>
+    <p>Thingery is open source (Apache-2.0) and anyone can run their own instance. This policy covers only the service we operate at thingery.dev. If you use another instance, that operator's policy applies.</p>
+  </section>
+
+  <section id="contact">
+    <h2>Contact</h2>
+    <p>For access, correction, export, or deletion of your data, or any privacy question: <a class="mail" href="mailto:privacy@thingery.dev">privacy@thingery.dev</a>. We answer within 30 days.</p>
+    <p>If we change this policy, we will update the date at the top of this page.</p>
+  </section>
+
+  <footer>
+    <p><strong>Thingery</strong> — the open item database and MCP server for AI agents to list, find,
+    and trade second-hand goods.</p>
+    <p><a href="/">Home</a> · <a href="/browse">Browse</a> · <a href="/chat.html">Chat</a> ·
+    <a href="/login.html">Account</a> · <a href="/apps">Connected apps</a> ·
+    <a href="https://github.com/thingery/thingery">GitHub</a></p>
+  </footer>
+
+  </div>
+</body>
+</html>

@@ -215,7 +215,9 @@ phishing concerns — threat-model them before building, not after.
   security event (THI-180: token counts + `usage_source` slug, no message content;
   THI-197: `model` is the **resolved** model — the stored credential's model when a
   BYO key paid for the turn, else the env config — and a `credential_source:
-  "company" | "user"` slug labels whose key paid, while `daily_total`/`budget` keep
+  "company" | "user"` slug labels whose key paid, plus an additive `provider:
+  "company" | "user_key" | "chatgpt_oauth"` slug (THI-193) distinguishing the
+  ChatGPT-plan OAuth turns from pasted-key turns, while `daily_total`/`budget` keep
   reporting the company meter). A stored BYO credential that fails to decrypt during
   `/api/chat` resolution logs a `byo_credential_error` slug (route + sellerId only —
   never key material, ciphertext, or base_url) and the turn fails closed to the

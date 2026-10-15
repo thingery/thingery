@@ -444,7 +444,7 @@ describe("THI-180 budget gates + usage summary on the single meter", () => {
     const bodies = scriptedLlm([UNKNOWN_TOOL("c1"), FINAL], { prompt_tokens: 100, completion_tokens: 50 });
     const out = await chatTurn([], "hello", null);
     expect(out.text).toBe("Understood.");
-    expect(out.usage).toEqual({ rounds: 2, tokensIn: 200, tokensOut: 100, source: "provider", model: "gpt-4o-mini", credentialSource: "company" });
+    expect(out.usage).toEqual({ rounds: 2, tokensIn: 200, tokensOut: 100, source: "provider", model: "gpt-4o-mini", credentialSource: "company", provider: "company" });
     expect(bodies).toHaveLength(2);
   });
 
@@ -479,7 +479,7 @@ describe("THI-180 budget gates + usage summary on the single meter", () => {
     const out = await chatTurn([], "hello", null);
     expect(bodies).toHaveLength(1); // round 0 ran; round 1 never started
     expect(out.text).toBe("Sorry — the daily chat budget just ran out. Please try again tomorrow.");
-    expect(out.usage).toEqual({ rounds: 1, tokensIn: 100, tokensOut: 50, source: "provider", model: "gpt-4o-mini", credentialSource: "company" });
+    expect(out.usage).toEqual({ rounds: 1, tokensIn: 100, tokensOut: 50, source: "provider", model: "gpt-4o-mini", credentialSource: "company", provider: "company" });
     const lines = usageLines();
     expect(lines).toHaveLength(1);
     expect(lines[0].outcome).toBe("budget_exhausted");
@@ -550,7 +550,7 @@ describe("THI-197 BYO credential turns (callLlm seam)", () => {
     expect(calls[0].auth).toBe(`Bearer ${CRED.apiKey}`);
     expect(calls[0].body.model).toBe(CRED.model);
     expect(dailyTokenBudget.used()).toBe(0); // company meter untouched
-    expect(out.usage).toEqual({ rounds: 1, tokensIn: 80, tokensOut: 20, source: "provider", model: CRED.model, credentialSource: "user" });
+    expect(out.usage).toEqual({ rounds: 1, tokensIn: 80, tokensOut: 20, source: "provider", model: CRED.model, credentialSource: "user", provider: "user_key" });
   });
 
   it("safety rails unchanged on user-key turns: max_tokens + tools stay in the request body", async () => {

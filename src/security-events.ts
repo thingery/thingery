@@ -76,6 +76,9 @@ export type SecurityEvent =
       type: "chat_usage";
       model: string;
       credential_source: "company" | "user";
+      /** THI-193 §3.5 (additive): which credential paid — company env key,
+       *  the user's pasted key, or the user's ChatGPT plan (OAuth). */
+      provider: "company" | "user_key" | "chatgpt_oauth";
       rounds: number;
       tokens_in: number;
       tokens_out: number;
@@ -118,6 +121,7 @@ export function logSecurityEvent(event: SecurityEvent, ctx: SecurityEventContext
       ? {
           model: event.model,
           credential_source: event.credential_source,
+          provider: event.provider,
           rounds: event.rounds,
           tokens_in: event.tokens_in,
           tokens_out: event.tokens_out,

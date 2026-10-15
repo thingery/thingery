@@ -96,10 +96,10 @@ describe("logSecurityEvent JSON line", () => {
     expect(ok).not.toHaveProperty("reason");
   });
 
-  it("chat_usage (THI-180 §3.3 / THI-197): numbers + resolved model + credential_source + usage_source only, exact field whitelist", () => {
+  it("chat_usage (THI-180 §3.3 / THI-197 / THI-193 §3.5): numbers + resolved model + credential_source + provider + usage_source only, exact field whitelist", () => {
     const spy = spyLog();
     logSecurityEvent(
-      { type: "chat_usage", model: "gpt-4o-mini", credential_source: "company", rounds: 2, tokens_in: 450, tokens_out: 120, daily_total: 570, budget: 2_000_000, usage_source: "provider" },
+      { type: "chat_usage", model: "gpt-4o-mini", credential_source: "company", provider: "company", rounds: 2, tokens_in: 450, tokens_out: 120, daily_total: 570, budget: 2_000_000, usage_source: "provider" },
       { ip: "198.51.100.7" },
     );
     expect(spy).toHaveBeenCalledTimes(1);
@@ -110,6 +110,7 @@ describe("logSecurityEvent JSON line", () => {
       type: "chat_usage",
       model: "gpt-4o-mini",
       credential_source: "company",
+      provider: "company",
       rounds: 2,
       tokens_in: 450,
       tokens_out: 120,
@@ -123,7 +124,7 @@ describe("logSecurityEvent JSON line", () => {
     // message content can ride along (field-by-field construction).
     const parsed = JSON.parse(raw);
     expect(Object.keys(parsed).sort()).toEqual(
-      ["budget", "credential_source", "daily_total", "ip", "model", "rounds", "sellerId", "tokens_in", "tokens_out", "ts", "type", "usage_source"].sort(),
+      ["budget", "credential_source", "daily_total", "ip", "model", "provider", "rounds", "sellerId", "tokens_in", "tokens_out", "ts", "type", "usage_source"].sort(),
     );
   });
 

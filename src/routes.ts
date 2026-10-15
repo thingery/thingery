@@ -36,6 +36,7 @@ import {
   revokeChatgptRefreshToken,
   verifyChatgptIdToken,
 } from "./chatgpt-oauth-flow.js";
+import { resolveChatgptCredential } from "./chatgpt-oauth.js";
 import {
   byoMasterKeyConfigured,
   deleteLlmCredential,
@@ -577,13 +578,20 @@ const chatSchema = z.object({
 // No inner try/catch → next(e): asyncHandler forwards rejections to the
 // terminal middleware — one idiom everywhere (THI-59, spec THI-58 D1).
 
-/** THI-197 resolution (spec THI-188 PR-3 §1): the seller's stored BYO
- *  credential for this turn, or null ⇒ company key. resolveLlmCredential
- *  returns null for every fail-closed state (no row, master key unset,
- *  stored base_url/model no longer passing the gates) and throws only on
- *  tamper/corruption — caught here, logged as a byo_credential_error slug
- *  (never key material, ciphertext or base_url), still company, never 500. */
+/** THI-193 §3.4 resolution order (rev fa3288ff; extends THI-197): user
+ *  OAuth → user key → company (null). OAuth wins when the flag is on and a
+ *  row resolves a fresh plan-scoped token — expired ones refresh HERE,
+ *  before the turn; terminal refresh errors already deleted the row (PR-1)
+ *  and fall through. Resolvers return null for fail-closed states and
+ *  throw only on tamper — logged as a fixed slug, still falling through.
+ *  No mid-turn switching (THI-197 posture). */
 async function resolveByoCredential(sellerId: string): Promise<ResolvedLlmCredential | null> {
+  try {
+    const oauth = await resolveChatgptCredential(sellerId);
+    if (oauth) return oauth;
+  } catch {
+    logSecurityEvent({ type: "byo_credential_error", route: "/api/chat" }, { sellerId });
+  }
   try {
     return await resolveLlmCredential(sellerId);
   } catch {
@@ -613,13 +621,11 @@ api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
     });
     return;
   }
-  // THI-197: resolve BYO credentials for logged-in sellers BEFORE the
-  // budget gate — user-key turns bypass the company daily token budget
-  // entirely (rate limits and per-call max_tokens stay on ALL turns: abuse
-  // control, not cost control). Anonymous and every fail-closed state
-  // resolve to null ⇒ company key ⇒ budget gate as before. Order: turn
-  // limiter → configured → BYO resolution → pre-flight budget (company
-  // turns only) → zod parse.
+  // THI-197/THI-193 §3.4: resolve the credential BEFORE the budget gate —
+  // user-billed turns (OAuth plan token or user key) bypass the company
+  // daily budget; rate limits and per-call caps stay on ALL turns. Order:
+  // limiter → configured → credential (OAuth → key → company) → budget
+  // (company turns only) → zod parse.
   const byo = seller ? await resolveByoCredential(seller.id) : null;
   if (byo === null && dailyTokenBudget.isExhausted()) {
     logSecurityEvent({ type: "rate_limit", route: "/api/chat" }, seller ? { sellerId: seller.id } : { ip: clientIp(req) });
@@ -646,6 +652,7 @@ api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
         type: "chat_usage",
         model: usage.model,
         credential_source: usage.credentialSource,
+        provider: usage.provider,
         rounds: usage.rounds,
         tokens_in: usage.tokensIn,
         tokens_out: usage.tokensOut,

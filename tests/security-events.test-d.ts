@@ -103,11 +103,12 @@ describe("chatgpt_oauth_error reason union (THI-193 §3.3)", () => {
 });
 
 describe("chat_usage event fields (THI-180 §3.3 / THI-197)", () => {
-  it("carries exactly model/credential_source/rounds/tokens_in/tokens_out/daily_total/budget/usage_source", () => {
+  it("carries exactly model/credential_source/provider/rounds/tokens_in/tokens_out/daily_total/budget/usage_source", () => {
     const event: SecurityEvent = {
       type: "chat_usage",
       model: "gpt-4o-mini",
       credential_source: "company",
+      provider: "company",
       rounds: 2,
       tokens_in: 450,
       tokens_out: 120,
@@ -119,6 +120,7 @@ describe("chat_usage event fields (THI-180 §3.3 / THI-197)", () => {
       type: "chat_usage";
       model: string;
       credential_source: "company" | "user";
+      provider: "company" | "user_key" | "chatgpt_oauth";
       rounds: number;
       tokens_in: number;
       tokens_out: number;
@@ -131,20 +133,27 @@ describe("chat_usage event fields (THI-180 §3.3 / THI-197)", () => {
   it("usage_source is a fixed slug union, not free text (rev 2 N1)", () => {
     const dynamic: string = "provider"; // type is string — value irrelevant
     // @ts-expect-error usage_source must be a literal — dynamic strings do not typecheck
-    const event: SecurityEvent = { type: "chat_usage", model: "m", credential_source: "company", rounds: 1, tokens_in: 1, tokens_out: 1, daily_total: 1, budget: 1, usage_source: dynamic };
+    const event: SecurityEvent = { type: "chat_usage", model: "m", credential_source: "company", provider: "company", rounds: 1, tokens_in: 1, tokens_out: 1, daily_total: 1, budget: 1, usage_source: dynamic };
     expectTypeOf(event).toBeObject();
   });
 
   it("credential_source is a fixed slug union, not free text (THI-197)", () => {
     const dynamic: string = "user"; // type is string — value irrelevant
     // @ts-expect-error credential_source must be a literal — dynamic strings do not typecheck
-    const event: SecurityEvent = { type: "chat_usage", model: "m", credential_source: dynamic, rounds: 1, tokens_in: 1, tokens_out: 1, daily_total: 1, budget: 1, usage_source: "provider" };
+    const event: SecurityEvent = { type: "chat_usage", model: "m", credential_source: dynamic, provider: "company", rounds: 1, tokens_in: 1, tokens_out: 1, daily_total: 1, budget: 1, usage_source: "provider" };
+    expectTypeOf(event).toBeObject();
+  });
+
+  it("provider is a fixed slug union, not free text (THI-193 §3.5)", () => {
+    const dynamic: string = "chatgpt_oauth"; // type is string — value irrelevant
+    // @ts-expect-error provider must be a literal — dynamic strings do not typecheck
+    const event: SecurityEvent = { type: "chat_usage", model: "m", credential_source: "user", provider: dynamic, rounds: 1, tokens_in: 1, tokens_out: 1, daily_total: 1, budget: 1, usage_source: "provider" };
     expectTypeOf(event).toBeObject();
   });
 
   it("has no optional extra fields (whitelist is exact)", () => {
     // @ts-expect-error unknown fields (e.g. a future message-content leak) must not typecheck
-    const leaky: SecurityEvent = { type: "chat_usage", model: "m", credential_source: "company", rounds: 1, tokens_in: 1, tokens_out: 1, daily_total: 1, budget: 1, usage_source: "provider", content: "user text" };
+    const leaky: SecurityEvent = { type: "chat_usage", model: "m", credential_source: "company", provider: "company", rounds: 1, tokens_in: 1, tokens_out: 1, daily_total: 1, budget: 1, usage_source: "provider", content: "user text" };
     expectTypeOf(leaky).toBeObject();
   });
 });

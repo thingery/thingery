@@ -306,11 +306,16 @@ export interface LlmCredentialRow {
 }
 
 /** Decrypted credential for one chat turn / one verify call. Request-scoped:
- *  never cache, never log, never put in a response. */
+ *  never cache, never log, never put in a response. THI-193 §3.4: an
+ *  OAuth credential resolves to the same shape with protocol "responses"
+ *  and the /v1/responses URL; `protocol` is optional so every existing
+ *  BYO construction (and its behavior) stays byte-identical. */
 export interface ResolvedLlmCredential {
   apiKey: string;
   model: string;
   completionsUrl: string;
+  /** Wire protocol this credential speaks; absent = "chat_completions". */
+  protocol?: "chat_completions" | "responses";
 }
 
 interface DbRow {

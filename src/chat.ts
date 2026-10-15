@@ -8,8 +8,8 @@ import { getCategory, getItem, createItem, listCategories, myItems, searchItems,
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import { logSecurityEvent } from "./security-events.js";
-import { logChatTurnUsage, toolNameSlug, type LlmCallUsage, type LlmUsage } from "./chat-usage.js";
-import { chatLimits, dailyTokenBudget, parseLlmUsage, fallbackUsageEstimate } from "./chat-limits.js";
+import { logChatTurnUsage, toolNameSlug, type LlmCallUsage } from "./chat-usage.js";
+import { chatLimits, dailyTokenBudget, parseLlmUsage, fallbackUsageEstimate, type LlmUsage as NormalizedUsage } from "./chat-limits.js";
 import crypto from "node:crypto";
 import { SESSION_SECRET } from "./auth.js";
 
@@ -261,9 +261,11 @@ interface LlmMessage {
   tool_call_id?: string;
 }
 
-/** THI-185: the API `usage` field is captured (not discarded) and surfaced
- *  with the model name so chatTurn can emit the per-turn telemetry line. */
-async function callLlm(messages: LlmMessage[]): Promise<{ message: LlmMessage; model: string; usage?: LlmUsage }> {
+/** THI-185 shape + THI-180 normalization: `usage` is parseLlmUsage-validated
+ *  (strict N1 semantics — both fields finite and non-negative, else undefined;
+ *  raw/malformed provider shapes never propagate). Callers apply the estimate
+ *  fallback when it is undefined; the telemetry line maps it to null fields. */
+async function callLlm(messages: LlmMessage[]): Promise<{ message: LlmMessage; model: string; usage?: NormalizedUsage }> {
   const url = process.env.LLM_API_URL ?? "https://api.openai.com/v1/chat/completions";
   const model = process.env.LLM_MODEL ?? "gpt-4o-mini";
   const res = await fetch(url, {
@@ -275,11 +277,11 @@ async function callLlm(messages: LlmMessage[]): Promise<{ message: LlmMessage; m
   if (!res.ok) {
     throw new Error(`LLM API ${res.status}: ${(await res.text()).slice(0, 300)}`);
   }
-  const json = (await res.json()) as { choices: Array<{ message: LlmMessage }>; usage?: LlmUsage };
+  const json = (await res.json()) as { choices: Array<{ message: LlmMessage }>; usage?: unknown };
   return {
     message: json.choices[0]?.message ?? { role: "assistant", content: "No response from model." },
     model,
-    usage: json.usage,
+    usage: parseLlmUsage(json.usage) ?? undefined,
   };
 }
 
@@ -548,6 +550,12 @@ export async function chatTurn(
   let tokensIn = 0;
   let tokensOut = 0;
   let source: "provider" | "estimate_fallback" = "provider";
+  // THI-189 BYO seam (Architect reconciliation contract, PR #93 comment):
+  // user-credential turns will skip the company budget entirely. Today every
+  // turn runs on the company credential — THI-189 replaces this constant
+  // with the per-turn credential resolution (credentialSource === "company")
+  // and the guards below keep their shape.
+  const usesCompanyBudget = true;
 
   let confirm: ChatConfirmCard | undefined;
   try {
@@ -555,7 +563,7 @@ export async function chatTurn(
       // THI-180 §3.2 checkpoint 2 — between rounds. In-flight turns each
       // finish their current round first (bounded per-request overshoot,
       // spec rev 2 N2), then stop with a friendly message + pending card.
-      if (round > 0 && dailyTokenBudget.isExhausted()) {
+      if (usesCompanyBudget && round > 0 && dailyTokenBudget.isExhausted()) {
         outcome = "budget_exhausted";
         return {
           text: CHAT_BUDGET_EXHAUSTED,
@@ -566,23 +574,24 @@ export async function chatTurn(
       llmCalls++;
       const { message: reply, model, usage } = await callLlm(messages);
       turnModel = model;
-      callUsage.push({ prompt_tokens: usage?.prompt_tokens ?? null, completion_tokens: usage?.completion_tokens ?? null });
+      callUsage.push({ prompt_tokens: usage?.promptTokens ?? null, completion_tokens: usage?.completionTokens ?? null });
       // THI-180 §3.2 accounting (single meter): a valid provider pair
       // charges actuals; anything else (absent/NaN/negative — N1) charges
       // the conservative estimate and flags the turn. A provider that
       // omits or corrupts usage can only ever charge the budget, never
       // credit it.
-      const counted = parseLlmUsage(usage);
-      if (counted) {
-        tokensIn += counted.promptTokens;
-        tokensOut += counted.completionTokens;
-        dailyTokenBudget.record(counted, 0);
-      } else {
-        source = "estimate_fallback";
-        const est = fallbackUsageEstimate(messages);
-        tokensIn += est.promptTokens;
-        tokensOut += est.completionTokens;
-        dailyTokenBudget.record(null, est.promptTokens + est.completionTokens);
+      if (usesCompanyBudget) {
+        if (usage) {
+          tokensIn += usage.promptTokens;
+          tokensOut += usage.completionTokens;
+          dailyTokenBudget.record(usage, 0);
+        } else {
+          source = "estimate_fallback";
+          const est = fallbackUsageEstimate(messages);
+          tokensIn += est.promptTokens;
+          tokensOut += est.completionTokens;
+          dailyTokenBudget.record(null, est.promptTokens + est.completionTokens);
+        }
       }
       messages.push(reply);
 

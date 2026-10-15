@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { describe, expect, it, beforeAll, afterAll, afterEach, vi } from "vitest";
+import { describe, expect, it, beforeAll, afterAll, afterEach, beforeEach, vi } from "vitest";
 import {
   CHAT_CONFIRM_TTL_SECONDS,
   chatTurn,
@@ -16,7 +16,6 @@ import {
   verifyChatConfirmToken,
   wrapToolResult,
 } from "../src/chat.js";
-import { dailyTokenBudget } from "../src/chat-limits.js";
 import type { SellerRow } from "../src/db.js";
 
 // THI-137 §1: a mockable seam over getItem so tests can simulate a FAILED
@@ -164,80 +163,234 @@ describe("confirm/decline turn handling (no LLM involved)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// THI-180 PR-B: LLM usage accounting, round bounds, mid-turn budget stop.
-// No DB needed — unknown tool names execute without touching the database.
+// Part 1.5 — pure: per-turn usage telemetry (THI-185, findings §7 F1)
 
-describe("usage accounting + budget gates (THI-180 §3.2/§3.3)", () => {
-  const UNKNOWN_TOOL = (id: string) => toolCallMsg(id, "no_such_tool", {});
+import { buildChatTurnUsageLine } from "../src/chat-usage.js";
 
-  it("accumulates provider usage across rounds and reports it once per turn", async () => {
-    const bodies = mockLlm(
-      [UNKNOWN_TOOL("c1"), FINAL],
-      [
-        { prompt_tokens: 100, completion_tokens: 50 },
-        { prompt_tokens: 300, completion_tokens: 70 },
+describe("buildChatTurnUsageLine (pure line builder)", () => {
+  const base = {
+    model: "gpt-4o-mini",
+    tier: null,
+    llmCalls: 2,
+    calls: [
+      { prompt_tokens: 100, completion_tokens: 20 },
+      { prompt_tokens: 50, completion_tokens: null },
+    ],
+    toolRounds: 1,
+    toolCalls: 1,
+    toolNames: ["search_items"],
+    toolArgErrors: 0,
+    durationMs: 1234,
+    outcome: "ok" as const,
+    sellerId: "seller-uuid",
+  };
+
+  it("sums reported tokens per kind and keeps the per-call pairs", () => {
+    const line = buildChatTurnUsageLine(base) as Record<string, unknown>;
+    expect(line.type).toBe("chat_turn_usage");
+    expect(line.prompt_tokens).toBe(150); // 100 + 50 (mixed null sums the reported)
+    expect(line.completion_tokens).toBe(20);
+    expect(line.calls).toEqual([
+      { prompt_tokens: 100, completion_tokens: 20 },
+      { prompt_tokens: 50, completion_tokens: null },
+    ]);
+    expect(line.llm_calls).toBe(2);
+    expect(line.tool_rounds).toBe(1);
+    expect(line.tool_names).toEqual(["search_items"]);
+    expect(line.outcome).toBe("ok");
+    expect(line.duration_ms).toBe(1234);
+    expect(line.sellerId).toBe("seller-uuid");
+  });
+
+  it("reports null sums when the provider sent no usage at all", () => {
+    const line = buildChatTurnUsageLine({
+      ...base,
+      calls: [
+        { prompt_tokens: null, completion_tokens: null },
+        { prompt_tokens: null, completion_tokens: null },
       ],
+    }) as Record<string, unknown>;
+    expect(line.prompt_tokens).toBeNull();
+    expect(line.completion_tokens).toBeNull();
+  });
+
+  it("carries only fixed-whitelist fields — no message content can ride along", () => {
+    const line = buildChatTurnUsageLine(base) as Record<string, unknown>;
+    expect(Object.keys(line).sort()).toEqual(
+      [
+        "calls",
+        "completion_tokens",
+        "duration_ms",
+        "llm_calls",
+        "model",
+        "outcome",
+        "prompt_tokens",
+        "sellerId",
+        "tier",
+        "tool_arg_errors",
+        "tool_calls",
+        "tool_names",
+        "tool_rounds",
+        "ts",
+        "type",
+      ].sort(),
     );
-    const out = await chatTurn([], "hello", null);
+  });
+});
+
+describe("chat turn usage telemetry via chatTurn (THI-185)", () => {
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    logSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  /** Lines emitted during the test, parsed from the console spy. */
+  function usageLines(): Array<Record<string, unknown>> {
+    return logSpy.mock.calls
+      .map((args) => String(args[0]))
+      .filter((s) => s.startsWith('{"ts":'))
+      .map((s) => JSON.parse(s))
+      .filter((o: Record<string, unknown>) => o.type === "chat_turn_usage");
+  }
+
+  /** Scripted LLM with OpenAI-style usage on each response. */
+  function mockLlmUsage(
+    script: unknown[],
+    usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
+  ) {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const step = Math.min(calls++, script.length - 1);
+        return new Response(JSON.stringify({ choices: [{ message: script[step] }], usage }), { status: 200 });
+      }),
+    );
+  }
+
+  it("emits exactly one line per LLM turn: tokens per call, rounds, tools, duration", async () => {
+    // One tool round with an unknown tool name: the executor's default
+    // branch returns an error result without touching the DB (no Postgres
+    // in this environment — the DB-backed suites above cover real tools).
+    mockLlmUsage(
+      [toolCallMsg("call_1", "bogus_tool", { x: 1 }), FINAL],
+      { prompt_tokens: 210, completion_tokens: 42, total_tokens: 252 },
+    );
+    const out = await chatTurn([], "list categories", null);
     expect(out.text).toBe("Understood.");
-    expect(out.usage).toEqual({ rounds: 2, tokensIn: 400, tokensOut: 120, source: "provider" });
-    expect(bodies).toHaveLength(2);
+
+    const lines = usageLines();
+    expect(lines.length).toBe(1);
+    const line = lines[0];
+    expect(line.outcome).toBe("ok");
+    expect(line.llm_calls).toBe(2);
+    expect(line.prompt_tokens).toBe(420); // 210 per call × 2 calls
+    expect(line.completion_tokens).toBe(84);
+    expect(line.calls).toEqual([
+      { prompt_tokens: 210, completion_tokens: 42 },
+      { prompt_tokens: 210, completion_tokens: 42 },
+    ]);
+    expect(line.tool_rounds).toBe(1);
+    expect(line.tool_calls).toBe(1);
+    expect(line.tool_names).toEqual(["bogus_tool"]);
+    expect(line.tool_arg_errors).toBe(0);
+    expect(line.tier).toBeNull();
+    expect(line.sellerId).toBeNull();
+    expect(typeof line.duration_ms).toBe("number");
+    expect(line.duration_ms).toBeGreaterThanOrEqual(0);
   });
 
-  it("falls back to the estimate when the provider omits usage (N1c)", async () => {
-    mockLlm([FINAL]); // responses carry no usage field at all
-    const out = await chatTurn([], "hello", null);
-    expect(out.usage?.rounds).toBe(1);
-    expect(out.usage?.tokensOut).toBe(1200); // per-call output cap
-    expect(out.usage?.tokensIn).toBeGreaterThan(0); // ceil(request chars / 4)
-    expect(out.usage?.source).toBe("estimate_fallback");
-  });
-
-  it("malformed usage (negative) is treated as missing, never credited (N1a)", async () => {
-    mockLlm([FINAL], [{ prompt_tokens: -100, completion_tokens: 5 }]);
-    const out = await chatTurn([], "hello", null);
-    // The estimate fallback applies; the negative prompt count is not credited.
-    expect(out.usage?.tokensOut).toBe(1200);
-    expect(out.usage?.tokensIn).toBeGreaterThan(0);
-    expect(out.usage?.source).toBe("estimate_fallback");
-  });
-
-  it("one estimated round flags the whole turn even if other rounds reported usage", async () => {
-    mockLlm(
-      [UNKNOWN_TOOL("c1"), FINAL],
-      [{ prompt_tokens: 100, completion_tokens: 50 }, { prompt_tokens: NaN, completion_tokens: NaN }],
+  it("reports null token sums when the provider omits usage entirely", async () => {
+    // No `usage` in the response body at all (the pre-THI-185 wire shape).
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: FINAL }] }), { status: 200 })),
     );
-    const out = await chatTurn([], "hello", null);
-    expect(out.usage?.rounds).toBe(2);
-    expect(out.usage?.source).toBe("estimate_fallback");
+    await chatTurn([], "hi", null);
+    const lines = usageLines();
+    expect(lines.length).toBe(1);
+    expect(lines[0].prompt_tokens).toBeNull();
+    expect(lines[0].completion_tokens).toBeNull();
+    expect(lines[0].llm_calls).toBe(1);
   });
 
-  it("honors CHAT_ROUNDS_PER_TURN: stops after the configured rounds", async () => {
-    const bodies = mockLlm([UNKNOWN_TOOL("c1")]); // every call wants a tool → clamped to the last script entry
-    const out = await chatTurn([], "hello", null);
-    expect(bodies).toHaveLength(6); // default CHAT_ROUNDS_PER_TURN
-    expect(out.usage?.rounds).toBe(6);
+  it("counts tool-arg errors: unparseable arguments and rejected update_listing args", async () => {
+    const toolMsg = {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        { id: "c1", type: "function", function: { name: "search_items", arguments: "{not json" } },
+        { id: "c2", type: "function", function: { name: "update_listing", arguments: JSON.stringify({ id: "00000000-0000-0000-0000-000000000001", price_cents: "1000" }) } },
+        { id: "c3", type: "function", function: { name: 'bad"name', arguments: "{}" } },
+      ],
+    };
+    const script = [toolMsg, FINAL];
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: script[Math.min(calls++, script.length - 1)] }] ,
+            usage: { prompt_tokens: 90, completion_tokens: 30, total_tokens: 120 },
+          }),
+          { status: 200 },
+        )),
+    );
+    await chatTurn([], "do things", null);
+    const lines = usageLines();
+    expect(lines.length).toBe(1);
+    expect(lines[0].tool_arg_errors).toBe(2); // parse failure + normalize rejection
+    expect(lines[0].tool_names).toEqual(["search_items", "update_listing", "bad_name"]); // slug rule
+    expect(lines[0].tool_calls).toBe(3);
+    expect(lines[0].tool_rounds).toBe(1);
+  });
+
+  it("marks round exhaustion as outcome max_rounds", async () => {
+    // The single scripted response is a tool-call message, so the loop runs all 6 rounds.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: toolCallMsg("c1", "bogus_tool", {}) }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          }),
+          { status: 200 },
+        )),
+    );
+    const out = await chatTurn([], "keep going", null);
     expect(out.text).toContain("too many steps");
+    const lines = usageLines();
+    expect(lines.length).toBe(1);
+    expect(lines[0].outcome).toBe("max_rounds");
+    expect(lines[0].llm_calls).toBe(6);
+    expect(lines[0].tool_rounds).toBe(6);
   });
 
-  it("stops between rounds when the daily budget trips, with the friendly message and usage", async () => {
-    // Leave room for exactly one more round, then exhaust it mid-turn.
-    dailyTokenBudget.record(null, 2_000_000 - 1);
-    const bodies = mockLlm(
-      [UNKNOWN_TOOL("c1"), FINAL],
-      [{ prompt_tokens: 100, completion_tokens: 50 }],
+  it("still emits a line (outcome error) when the LLM API fails mid-turn", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("boom", { status: 500 })),
     );
-    const out = await chatTurn([], "hello", null);
-    expect(bodies).toHaveLength(1); // round 0 ran; round 1 never started
-    expect(out.text).toBe("Sorry — the daily chat budget just ran out. Please try again tomorrow.");
-    expect(out.usage).toEqual({ rounds: 1, tokensIn: 100, tokensOut: 50, source: "provider" });
+    await expect(chatTurn([], "hello", null)).rejects.toThrow("LLM API 500");
+    const lines = usageLines();
+    expect(lines.length).toBe(1);
+    expect(lines[0].outcome).toBe("error");
+    expect(lines[0].llm_calls).toBe(1);
+    expect(lines[0].prompt_tokens).toBeNull(); // call never completed
+    expect(lines[0].tool_rounds).toBe(0);
   });
 
-  it("confirm/decline fast paths carry no usage (no LLM call, no usage line)", async () => {
-    const declined = await chatTurn([], "chat-decline whatever", null);
-    expect(declined.usage).toBeUndefined();
-    const confirmed = await chatTurn([], "chat-confirm chatconfirm:not:a:token.sig", null);
-    expect(confirmed.usage).toBeUndefined();
+  it("emits nothing for confirm/decline turns — no LLM call, no usage turn", async () => {
+    await chatTurn([], "chat-decline whatever", null);
+    await chatTurn([], "chat-confirm chatconfirm:not:a:token.sig", null);
+    expect(usageLines()).toEqual([]);
   });
 });
 
@@ -262,23 +415,15 @@ async function dbAvailable(): Promise<boolean> {
 const available = await dbAvailable();
 
 /** Scripted LLM: each fetch returns script[i] (clamped to the last entry) and
- * records every request body so tests can assert on the model's context.
- * usageScript (THI-180) rides along as the provider `usage` field — omitted
- * entirely when not passed, so existing scripts keep today's behavior. */
-function mockLlm(script: unknown[], usageScript?: unknown[]) {
+ * records every request body so tests can assert on the model's context. */
+function mockLlm(script: unknown[]) {
   const bodies: Array<{ messages: Array<{ role: string; content: string | null }> }> = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_url: string, init: RequestInit) => {
       bodies.push(JSON.parse(String(init.body)));
       const step = Math.min(bodies.length - 1, script.length - 1);
-      return new Response(
-        JSON.stringify({
-          choices: [{ message: script[step] }],
-          ...(usageScript ? { usage: usageScript[Math.min(step, usageScript.length - 1)] } : {}),
-        }),
-        { status: 200 },
-      );
+      return new Response(JSON.stringify({ choices: [{ message: script[step] }] }), { status: 200 });
     }),
   );
   return bodies;
@@ -290,8 +435,6 @@ afterEach(() => {
   // restore the real DB read so later tests are unaffected.
   vi.mocked(getItem).mockReset();
   vi.mocked(getItem).mockImplementation(realGetItem);
-  // THI-180: budget accounting is process-global — reset between tests.
-  dailyTokenBudget.reset();
 });
 
 function toolCallMsg(id: string, name: string, args: Record<string, unknown>): unknown {

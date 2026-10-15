@@ -8,7 +8,7 @@ import { getCategory, getItem, createItem, listCategories, myItems, searchItems,
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import { logSecurityEvent } from "./security-events.js";
-import { chatLimits, dailyTokenBudget, fallbackUsageEstimate, parseLlmUsage, type LlmUsage } from "./chat-limits.js";
+import { logChatTurnUsage, toolNameSlug, type LlmCallUsage, type LlmUsage } from "./chat-usage.js";
 import crypto from "node:crypto";
 import { SESSION_SECRET } from "./auth.js";
 
@@ -19,13 +19,6 @@ export interface ChatMessage {
 
 export function chatConfigured(): boolean {
   return Boolean(process.env.LLM_API_KEY);
-}
-
-/** The env-configured model id (same default as callLlm's request body).
- * THI-180 §3.3: the chat_usage log line's `model` is this env config string,
- * never request data. */
-export function chatModel(): string {
-  return process.env.LLM_MODEL ?? "gpt-4o-mini";
 }
 
 const SYSTEM_PROMPT = `You are the Thingery assistant — Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
@@ -267,27 +260,25 @@ interface LlmMessage {
   tool_call_id?: string;
 }
 
-async function callLlm(messages: LlmMessage[]): Promise<{ message: LlmMessage; usage: LlmUsage | null }> {
+/** THI-185: the API `usage` field is captured (not discarded) and surfaced
+ *  with the model name so chatTurn can emit the per-turn telemetry line. */
+async function callLlm(messages: LlmMessage[]): Promise<{ message: LlmMessage; model: string; usage?: LlmUsage }> {
   const url = process.env.LLM_API_URL ?? "https://api.openai.com/v1/chat/completions";
-  const model = chatModel();
+  const model = process.env.LLM_MODEL ?? "gpt-4o-mini";
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${process.env.LLM_API_KEY}` },
-    // THI-180 §3.3: max_tokens comes from the chat-limits config instead of
-    // the hardcoded 1200.
-    body: JSON.stringify({ model, messages, tools: TOOLS, max_tokens: chatLimits.maxTokensPerCall }),
+    body: JSON.stringify({ model, messages, tools: TOOLS, max_tokens: 1200 }),
     signal: AbortSignal.timeout(60_000),
   });
   if (!res.ok) {
     throw new Error(`LLM API ${res.status}: ${(await res.text()).slice(0, 300)}`);
   }
-  const json = (await res.json()) as { choices: Array<{ message: LlmMessage }>; usage?: unknown };
-  // THI-180 §3.3 / THI-182 N1a: parse the provider usage; missing or
-  // malformed usage comes back null and the caller charges the fallback —
-  // today this field was simply discarded.
+  const json = (await res.json()) as { choices: Array<{ message: LlmMessage }>; usage?: LlmUsage };
   return {
     message: json.choices[0]?.message ?? { role: "assistant", content: "No response from model." },
-    usage: parseLlmUsage(json.usage),
+    model,
+    usage: json.usage,
   };
 }
 
@@ -318,28 +309,7 @@ export interface ChatConfirmCard {
   summary: string;
 }
 
-export type ChatTurnResult = { text: string; confirm?: ChatConfirmCard; usage?: ChatTurnUsage };
-
-/** Where the turn's token numbers came from (spec THI-180 rev 2 / N1):
- * `provider` when every round reported usable provider usage;
- * `estimate_fallback` when any round was charged the estimate instead. */
-export type ChatUsageSource = "provider" | "estimate_fallback";
-
-/** Internal per-turn usage accounting (THI-180 §3.3): LLM calls made and
- * tokens in/out accumulated across rounds. Carried on the chatTurn result
- * for the chat_usage log line; routes.ts strips it before the client
- * response, so the client payload stays byte-identical. Confirm/decline
- * fast paths never call the LLM and carry no usage. */
-export interface ChatTurnUsage {
-  rounds: number;
-  tokensIn: number;
-  tokensOut: number;
-  source: ChatUsageSource;
-}
-
-/** THI-180 §3.2: mid-turn stop copy when the aggregate daily budget trips
- * between rounds (distinct from the pre-flight 429 copy in routes.ts). */
-const CHAT_BUDGET_EXHAUSTED = "Sorry — the daily chat budget just ran out. Please try again tomorrow.";
+export type ChatTurnResult = { text: string; confirm?: ChatConfirmCard };
 
 /** Pending-op tokens are valid for 15 minutes. */
 export const CHAT_CONFIRM_TTL_SECONDS = 15 * 60;
@@ -542,50 +512,56 @@ export async function chatTurn(
     { role: "user", content: userMessage },
   ];
 
+  // THI-185 (findings §7 F1): per-turn usage telemetry — one stdout JSON
+  // line at every LLM exit path (final answer, round exhaustion, error).
+  // Confirm/decline turns above never call the LLM, so they are not usage
+  // turns and log nothing. THI-180's per-user/daily budget hooks this same
+  // accumulation (budget check before callLlm, cumulative total appended to
+  // the line) — one token meter, not two.
+  const startedAt = Date.now();
+  const callUsage: LlmCallUsage[] = [];
+  const toolNames: string[] = [];
+  let turnModel = process.env.LLM_MODEL ?? "gpt-4o-mini";
+  let llmCalls = 0;
+  let toolRounds = 0;
+  let toolCalls = 0;
+  let toolArgErrors = 0;
+  let outcome: "ok" | "max_rounds" | "error" = "ok";
+
   let confirm: ChatConfirmCard | undefined;
-  let usage: ChatTurnUsage | undefined;
-  for (let round = 0; round < chatLimits.roundsPerTurn; round++) {
-    // THI-180 §3.2 checkpoint 2 (between rounds): once the aggregate daily
-    // budget is exhausted, stop instead of making the next call. Bounds the
-    // overshoot to ≤ one round per in-flight request (THI-182 N2); any
-    // pending confirmation card still ships to the user.
-    if (round > 0 && dailyTokenBudget.isExhausted()) {
-      return { text: CHAT_BUDGET_EXHAUSTED, ...(confirm ? { confirm } : {}), usage };
-    }
-    // THI-182 N1c: deterministic estimate of this request's size, charged
-    // only if the provider reports no usable usage.
-    const fallback = fallbackUsageEstimate(messages);
-    const { message: reply, usage: callUsage } = await callLlm(messages);
-    messages.push(reply);
-    usage ??= { rounds: 0, tokensIn: 0, tokensOut: 0, source: "provider" };
-    if (callUsage) {
-      usage.tokensIn += callUsage.promptTokens;
-      usage.tokensOut += callUsage.completionTokens;
-      dailyTokenBudget.record(callUsage, 0);
-    } else {
-      // Spec rev 2 N1: any estimated round flags the whole turn's numbers.
-      usage.source = "estimate_fallback";
-      usage.tokensIn += fallback.promptTokens;
-      usage.tokensOut += fallback.completionTokens;
-      dailyTokenBudget.record(null, fallback.promptTokens + fallback.completionTokens);
-    }
-    usage.rounds += 1;
+  try {
+    for (let round = 0; round < 6; round++) {
+      llmCalls++;
+      const { message: reply, model, usage } = await callLlm(messages);
+      turnModel = model;
+      callUsage.push({ prompt_tokens: usage?.prompt_tokens ?? null, completion_tokens: usage?.completion_tokens ?? null });
+      messages.push(reply);
 
-    if (!reply.tool_calls || reply.tool_calls.length === 0) {
-      return { text: reply.content ?? "", ...(confirm ? { confirm } : {}), usage };
-    }
+      if (!reply.tool_calls || reply.tool_calls.length === 0) {
+        return { text: reply.content ?? "", ...(confirm ? { confirm } : {}) };
+      }
 
-    for (const call of reply.tool_calls) {
-      let result: unknown;
-      try {
-        const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
-        // THI-126 must-fix: canonicalize update_listing args BEFORE the gate
+      toolRounds++;
+      toolCalls += reply.tool_calls.length;
+      for (const call of reply.tool_calls) {
+        toolNames.push(toolNameSlug(call.function.name));
+        let result: unknown;
+        try {
+          let args: Record<string, unknown>;
+          try {
+            args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+          } catch (e) {
+            toolArgErrors++;
+            throw e;
+          }
+          // THI-126 must-fix: canonicalize update_listing args BEFORE the gate
         // decision so the gate and the executor see identical types. A JSON
         // string price_cents ("1000") would otherwise skip the >20% gate and
         // Postgres would cast it to INTEGER — executing a destructive drop
         // with no confirmation card. Non-canonical values fail closed.
         const norm = call.function.name === "update_listing" ? normalizeUpdateArgs(args) : null;
         if (norm && !norm.ok) {
+          toolArgErrors++; // THI-185: model-arg rejection, not an execution error
           result = { error: norm.error };
         } else {
           const canonicalArgs = norm ? norm.args : args;
@@ -629,17 +605,39 @@ export async function chatTurn(
             result = await executeTool(call.function.name, canonicalArgs, seller);
           }
         }
-      } catch (e) {
-        result = { error: (e as Error).message };
+        } catch (e) {
+          result = { error: (e as Error).message };
+        }
+        // H5.1: delimiters — listing data never enters the model's context as
+        // bare, unattributed instructions.
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: wrapToolResult(call.function.name, result),
+        });
       }
-      // H5.1: delimiters — listing data never enters the model's context as
-      // bare, unattributed instructions.
-      messages.push({
-        role: "tool",
-        tool_call_id: call.id,
-        content: wrapToolResult(call.function.name, result),
+    }
+    outcome = "max_rounds";
+    return { text: "Sorry — that took too many steps. Could you simplify the request?", ...(confirm ? { confirm } : {}) };
+  } catch (e) {
+    outcome = "error";
+    throw e;
+  } finally {
+    // Only LLM turns are usage turns (llmCalls > 0 ⇔ callLlm was attempted).
+    if (llmCalls > 0) {
+      logChatTurnUsage({
+        model: turnModel,
+        tier: null, // cheap/strong split is THI-181 F4 / THI-180; null until then
+        llmCalls,
+        calls: callUsage,
+        toolRounds,
+        toolCalls,
+        toolNames,
+        toolArgErrors,
+        durationMs: Date.now() - startedAt,
+        outcome,
+        sellerId: seller?.id ?? null,
       });
     }
   }
-  return { text: "Sorry — that took too many steps. Could you simplify the request?", ...(confirm ? { confirm } : {}), usage };
 }

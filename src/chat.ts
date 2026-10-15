@@ -10,6 +10,7 @@ import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import { logSecurityEvent } from "./security-events.js";
 import { logChatTurnUsage, toolNameSlug, type LlmCallUsage } from "./chat-usage.js";
 import { chatLimits, dailyTokenBudget, parseLlmUsage, fallbackUsageEstimate, type LlmUsage as NormalizedUsage } from "./chat-limits.js";
+import type { ResolvedLlmCredential } from "./llm-credentials.js";
 import crypto from "node:crypto";
 import { SESSION_SECRET } from "./auth.js";
 
@@ -261,21 +262,37 @@ interface LlmMessage {
   tool_call_id?: string;
 }
 
+/** callLlm failure carrying the HTTP status, so chatTurn can distinguish
+ *  user-key auth rejections (401/402/403) for the friendly BYO error
+ *  (THI-197) without parsing message text. */
+class LlmApiError extends Error {
+  constructor(readonly status: number, body: string) {
+    super(`LLM API ${status}: ${body}`);
+  }
+}
+
 /** THI-185 shape + THI-180 normalization: `usage` is parseLlmUsage-validated
  *  (strict N1 semantics — both fields finite and non-negative, else undefined;
  *  raw/malformed provider shapes never propagate). Callers apply the estimate
- *  fallback when it is undefined; the telemetry line maps it to null fields. */
-async function callLlm(messages: LlmMessage[]): Promise<{ message: LlmMessage; model: string; usage?: NormalizedUsage }> {
-  const url = process.env.LLM_API_URL ?? "https://api.openai.com/v1/chat/completions";
-  const model = process.env.LLM_MODEL ?? "gpt-4o-mini";
+ *  fallback when it is undefined; the telemetry line maps it to null fields.
+ *  THI-197: a non-null `credential` (user key → company fallback resolved in
+ *  routes) overrides url/model/Bearer key; tools, max_tokens and the timeout
+ *  are identical regardless of key owner. */
+async function callLlm(
+  messages: LlmMessage[],
+  credential: ResolvedLlmCredential | null = null,
+): Promise<{ message: LlmMessage; model: string; usage?: NormalizedUsage }> {
+  const url = credential?.completionsUrl ?? process.env.LLM_API_URL ?? "https://api.openai.com/v1/chat/completions";
+  const model = credential?.model ?? process.env.LLM_MODEL ?? "gpt-4o-mini";
+  const apiKey = credential?.apiKey ?? process.env.LLM_API_KEY;
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${process.env.LLM_API_KEY}` },
+    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ model, messages, tools: TOOLS, max_tokens: chatLimits.maxTokensPerCall }),
     signal: AbortSignal.timeout(60_000),
   });
   if (!res.ok) {
-    throw new Error(`LLM API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    throw new LlmApiError(res.status, (await res.text()).slice(0, 300));
   }
   const json = (await res.json()) as { choices: Array<{ message: LlmMessage }>; usage?: unknown };
   return {
@@ -317,16 +334,26 @@ export type ChatTurnResult = { text: string; confirm?: ChatConfirmCard; usage?: 
 /** THI-180 §3.3: internal per-turn usage summary for the routes layer's
  * `chat_usage` security event (PR-C). `source` is "estimate_fallback" when
  * any round was charged the N1 estimate instead of provider-reported
- * numbers. Never sent to the client — routes strips it. */
+ * numbers. Never sent to the client — routes strips it. THI-197 adds the
+ *  actual resolved model and whose key paid, so user-key turns are
+ *  attributed without charging the company meter. */
 export interface ChatUsageSummary {
   rounds: number;
   tokensIn: number;
   tokensOut: number;
   source: "provider" | "estimate_fallback";
+  /** The model the turn actually ran on (credential ?? env), not env config. */
+  model: string;
+  credentialSource: "company" | "user";
 }
 
 /** THI-180 §3.2: mid-turn budget stop — friendly, no jargon, points at tomorrow. */
 const CHAT_BUDGET_EXHAUSTED = "Sorry — the daily chat budget just ran out. Please try again tomorrow.";
+
+/** THI-197: a user-key turn rejected by the provider (401/402/403). Fixed
+ *  string — no provider body, no key material (H4.2 sanitize posture). */
+const BYO_KEY_REJECTED =
+  "⚠️ Your saved model key was rejected by the provider — update or remove it under Account → Model settings to keep chatting.";
 
 /** Pending-op tokens are valid for 15 minutes. */
 export const CHAT_CONFIRM_TTL_SECONDS = 15 * 60;
@@ -505,6 +532,7 @@ export async function chatTurn(
   history: ChatMessage[],
   userMessage: string,
   seller: SellerRow | null,
+  credential: ResolvedLlmCredential | null = null,
 ): Promise<ChatTurnResult> {
   // Confirmation-card responses ride the message field with reserved
   // prefixes (no /api/chat request-shape change). Verification is
@@ -538,7 +566,9 @@ export async function chatTurn(
   const startedAt = Date.now();
   const callUsage: LlmCallUsage[] = [];
   const toolNames: string[] = [];
-  let turnModel = process.env.LLM_MODEL ?? "gpt-4o-mini";
+  // THI-197: the actual model this turn runs on — the credential's when a
+  // user key resolved, env config otherwise (kept in sync per call).
+  let turnModel = credential?.model ?? process.env.LLM_MODEL ?? "gpt-4o-mini";
   let llmCalls = 0;
   let toolRounds = 0;
   let toolCalls = 0;
@@ -550,12 +580,13 @@ export async function chatTurn(
   let tokensIn = 0;
   let tokensOut = 0;
   let source: "provider" | "estimate_fallback" = "provider";
-  // THI-189 BYO seam (Architect reconciliation contract, PR #93 comment):
-  // user-credential turns will skip the company budget entirely. Today every
-  // turn runs on the company credential — THI-189 replaces this constant
-  // with the per-turn credential resolution (credentialSource === "company")
-  // and the guards below keep their shape.
-  const usesCompanyBudget = true;
+  // THI-197 seam (replaces the THI-189 placeholder): user-credential
+  // turns skip the company budget entirely; the per-call safety rails
+  // (max_tokens, roundsPerTurn) and the route's rate limiters stay on ALL
+  // turns — only cost attribution differs.
+  const usesCompanyBudget = credential === null;
+  const credentialSource: "company" | "user" = usesCompanyBudget ? "company" : "user";
+  const usageSummary = () => ({ rounds: llmCalls, tokensIn, tokensOut, source, model: turnModel, credentialSource });
 
   let confirm: ChatConfirmCard | undefined;
   try {
@@ -568,35 +599,34 @@ export async function chatTurn(
         return {
           text: CHAT_BUDGET_EXHAUSTED,
           ...(confirm ? { confirm } : {}),
-          usage: { rounds: llmCalls, tokensIn, tokensOut, source },
+          usage: usageSummary(),
         };
       }
       llmCalls++;
-      const { message: reply, model, usage } = await callLlm(messages);
+      const { message: reply, model, usage } = await callLlm(messages, credential);
       turnModel = model;
       callUsage.push({ prompt_tokens: usage?.promptTokens ?? null, completion_tokens: usage?.completionTokens ?? null });
       // THI-180 §3.2 accounting (single meter): a valid provider pair
       // charges actuals; anything else (absent/NaN/negative — N1) charges
       // the conservative estimate and flags the turn. A provider that
       // omits or corrupts usage can only ever charge the budget, never
-      // credit it.
-      if (usesCompanyBudget) {
-        if (usage) {
-          tokensIn += usage.promptTokens;
-          tokensOut += usage.completionTokens;
-          dailyTokenBudget.record(usage, 0);
-        } else {
-          source = "estimate_fallback";
-          const est = fallbackUsageEstimate(messages);
-          tokensIn += est.promptTokens;
-          tokensOut += est.completionTokens;
-          dailyTokenBudget.record(null, est.promptTokens + est.completionTokens);
-        }
+      // credit it. THI-197: tokens always accumulate into the summary
+      // (attribution); the budget is charged on company turns only.
+      if (usage) {
+        tokensIn += usage.promptTokens;
+        tokensOut += usage.completionTokens;
+        if (usesCompanyBudget) dailyTokenBudget.record(usage, 0);
+      } else {
+        source = "estimate_fallback";
+        const est = fallbackUsageEstimate(messages);
+        tokensIn += est.promptTokens;
+        tokensOut += est.completionTokens;
+        if (usesCompanyBudget) dailyTokenBudget.record(null, est.promptTokens + est.completionTokens);
       }
       messages.push(reply);
 
       if (!reply.tool_calls || reply.tool_calls.length === 0) {
-        return { text: reply.content ?? "", ...(confirm ? { confirm } : {}), usage: { rounds: llmCalls, tokensIn, tokensOut, source } };
+        return { text: reply.content ?? "", ...(confirm ? { confirm } : {}), usage: usageSummary() };
       }
 
       toolRounds++;
@@ -679,10 +709,18 @@ export async function chatTurn(
     return {
       text: "Sorry — that took too many steps. Could you simplify the request?",
       ...(confirm ? { confirm } : {}),
-      usage: { rounds: llmCalls, tokensIn, tokensOut, source },
+      usage: usageSummary(),
     };
   } catch (e) {
     outcome = "error";
+    // THI-197: NO mid-turn fallback — a user-key turn whose provider
+    // rejects the key (401/402/403) must not silently switch to the company
+    // key (misattributes cost, overrides the user's explicit choice).
+    // Friendly, actionable, key-material-free text; the usage line below
+    // still emits with credential_source "user" (zero company attribution).
+    if (credential !== null && e instanceof LlmApiError && (e.status === 401 || e.status === 402 || e.status === 403)) {
+      return { text: BYO_KEY_REJECTED, usage: usageSummary() };
+    }
     throw e;
   } finally {
     // Only LLM turns are usage turns (llmCalls > 0 ⇔ callLlm was attempted).

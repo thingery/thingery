@@ -167,6 +167,7 @@ describe("confirm/decline turn handling (no LLM involved)", () => {
 
 import { buildChatTurnUsageLine } from "../src/chat-usage.js";
 import { dailyTokenBudget } from "../src/chat-limits.js";
+import type { ResolvedLlmCredential } from "../src/llm-credentials.js";
 
 describe("buildChatTurnUsageLine (pure line builder)", () => {
   const base = {
@@ -443,7 +444,7 @@ describe("THI-180 budget gates + usage summary on the single meter", () => {
     const bodies = scriptedLlm([UNKNOWN_TOOL("c1"), FINAL], { prompt_tokens: 100, completion_tokens: 50 });
     const out = await chatTurn([], "hello", null);
     expect(out.text).toBe("Understood.");
-    expect(out.usage).toEqual({ rounds: 2, tokensIn: 200, tokensOut: 100, source: "provider" });
+    expect(out.usage).toEqual({ rounds: 2, tokensIn: 200, tokensOut: 100, source: "provider", model: "gpt-4o-mini", credentialSource: "company" });
     expect(bodies).toHaveLength(2);
   });
 
@@ -478,7 +479,7 @@ describe("THI-180 budget gates + usage summary on the single meter", () => {
     const out = await chatTurn([], "hello", null);
     expect(bodies).toHaveLength(1); // round 0 ran; round 1 never started
     expect(out.text).toBe("Sorry — the daily chat budget just ran out. Please try again tomorrow.");
-    expect(out.usage).toEqual({ rounds: 1, tokensIn: 100, tokensOut: 50, source: "provider" });
+    expect(out.usage).toEqual({ rounds: 1, tokensIn: 100, tokensOut: 50, source: "provider", model: "gpt-4o-mini", credentialSource: "company" });
     const lines = usageLines();
     expect(lines).toHaveLength(1);
     expect(lines[0].outcome).toBe("budget_exhausted");
@@ -490,6 +491,119 @@ describe("THI-180 budget gates + usage summary on the single meter", () => {
     expect(declined.usage).toBeUndefined();
     const confirmed = await chatTurn([], "chat-confirm chatconfirm:not:a:token.sig", null);
     expect(confirmed.usage).toBeUndefined();
+  });
+});
+
+describe("THI-197 BYO credential turns (callLlm seam)", () => {
+  // Fixtures use byo_test_… strings so the pinned gitleaks scan can never
+  // match them (tests/llm-credentials.test.ts convention).
+  const CRED: ResolvedLlmCredential = {
+    apiKey: "byo_test_user_key_1",
+    model: "gpt-4.1",
+    completionsUrl: "https://byo-test.example.com/v1/chat/completions",
+  };
+
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    dailyTokenBudget.reset();
+  });
+  afterEach(() => {
+    logSpy.mockRestore();
+    vi.unstubAllGlobals();
+    dailyTokenBudget.reset();
+  });
+
+  const usageLines = () =>
+    logSpy.mock.calls
+      .map((args) => String(args[0]))
+      .filter((s) => s.startsWith('{"ts":'))
+      .map((s) => JSON.parse(s) as Record<string, unknown>)
+      .filter((o) => o.type === "chat_turn_usage");
+
+  /** Capturing LLM stub: records every request (url, auth header, body). */
+  function capturingLlm(respond: () => Response) {
+    const calls: Array<{ url: string; auth: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        calls.push({
+          url: String(url),
+          auth: String((init?.headers as Record<string, string> | undefined)?.authorization),
+          body: JSON.parse(String(init?.body)),
+        });
+        return respond();
+      }),
+    );
+    return calls;
+  }
+
+  it("user-key turn: hits completionsUrl with stored model + Bearer user key; budget uncharged; usage labels user + stored model", async () => {
+    const calls = capturingLlm(
+      () => new Response(JSON.stringify({ choices: [{ message: FINAL }], usage: { prompt_tokens: 80, completion_tokens: 20 } }), { status: 200 }),
+    );
+    const out = await chatTurn([], "hello", null, CRED);
+    expect(out.text).toBe("Understood.");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(CRED.completionsUrl);
+    expect(calls[0].auth).toBe(`Bearer ${CRED.apiKey}`);
+    expect(calls[0].body.model).toBe(CRED.model);
+    expect(dailyTokenBudget.used()).toBe(0); // company meter untouched
+    expect(out.usage).toEqual({ rounds: 1, tokensIn: 80, tokensOut: 20, source: "provider", model: CRED.model, credentialSource: "user" });
+  });
+
+  it("safety rails unchanged on user-key turns: max_tokens + tools stay in the request body", async () => {
+    const calls = capturingLlm(() => new Response(JSON.stringify({ choices: [{ message: FINAL }] }), { status: 200 }));
+    await chatTurn([], "hello", null, CRED);
+    expect(calls[0].body.max_tokens).toBe(1200); // CHAT_MAX_TOKENS_PER_CALL default
+    expect(Array.isArray(calls[0].body.tools)).toBe(true); // tool calling stays mandatory
+  });
+
+  it("provider omits usage on a user turn: estimate fills telemetry, budget still uncharged", async () => {
+    const calls = capturingLlm(() => new Response(JSON.stringify({ choices: [{ message: FINAL }] }), { status: 200 }));
+    const out = await chatTurn([], "hello", null, CRED);
+    expect(calls).toHaveLength(1);
+    expect(out.usage?.source).toBe("estimate_fallback");
+    expect(out.usage?.tokensIn).toBeGreaterThan(0); // estimate attributed to the user turn…
+    expect(out.usage?.tokensOut).toBe(1200);
+    expect(dailyTokenBudget.used()).toBe(0); // …but never charged to the company budget
+  });
+
+  it("user-key 401: friendly actionable text, exactly one call (no company fallback), error-outcome line still emitted", async () => {
+    const calls = capturingLlm(() => new Response("bad key", { status: 401 }));
+    const out = await chatTurn([], "hello", null, CRED);
+    expect(out.text).toContain("Your saved model key was rejected");
+    expect(out.text).toContain("Account → Model settings");
+    expect(calls).toHaveLength(1); // resolution-time fallback only — never mid-turn
+    expect(out.usage).toMatchObject({ rounds: 1, credentialSource: "user", model: CRED.model });
+    const lines = usageLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0].outcome).toBe("error");
+    expect(dailyTokenBudget.used()).toBe(0);
+  });
+
+  it("402/403 map to the same friendly error; a 500 still throws (no swallowing)", async () => {
+    for (const status of [402, 403]) {
+      const calls = capturingLlm(() => new Response("no", { status }));
+      const out = await chatTurn([], "hello", null, CRED);
+      expect(out.text).toContain("Your saved model key was rejected");
+      expect(calls).toHaveLength(1);
+    }
+    const calls = capturingLlm(() => new Response("boom", { status: 500 }));
+    await expect(chatTurn([], "hello", null, CRED)).rejects.toThrow("LLM API 500");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("company default unchanged: no credential argument ⇒ env url/model/key, budget charged, credentialSource company", async () => {
+    const calls = capturingLlm(
+      () => new Response(JSON.stringify({ choices: [{ message: FINAL }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200 }),
+    );
+    const out = await chatTurn([], "hello", null);
+    expect(calls[0].url).toBe("https://api.openai.com/v1/chat/completions"); // env default
+    expect(calls[0].auth).toBe("Bearer undefined"); // env unset in this suite — same as before THI-197
+    expect(out.usage).toMatchObject({ credentialSource: "company", model: "gpt-4o-mini" });
+    expect(dailyTokenBudget.used()).toBe(15); // charged
   });
 });
 

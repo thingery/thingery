@@ -52,19 +52,26 @@ export type SecurityEvent =
   | { type: "listing_write"; action: "create" | "update" | "delete"; outcome: "success" | "rejected" }
   | { type: "image_upload"; outcome: "success" | "rejected"; reason?: SecurityEventReason }
   /** THI-180 §3.3 (rev 2): one line per LLM-backed chat turn. Numbers and
-   *  slugs only — `model` is the env config string (never request data),
-   *  `usage_source` says whether the numbers are provider-reported or
-   *  estimate-charged, and no message content ever reaches the log (H4.2). */
+   *  slugs only — `model` is the resolved config string (credential ?? env,
+   *  never request data), `usage_source` says whether the numbers are
+   *  provider-reported or estimate-charged, and `credential_source` labels
+   *  whose key paid for the turn (THI-197). No message content ever
+   *  reaches the log (H4.2). */
   | {
       type: "chat_usage";
       model: string;
+      credential_source: "company" | "user";
       rounds: number;
       tokens_in: number;
       tokens_out: number;
       daily_total: number;
       budget: number;
       usage_source: "provider" | "estimate_fallback";
-    };
+    }
+  /** THI-197: a stored BYO credential failed to decrypt (tamper/corruption)
+   *  during /api/chat resolution. Slug only — never key material, ciphertext
+   *  or base_url; the turn falls back to the company key. */
+  | { type: "byo_credential_error"; route: SecurityEventRoute };
 
 export interface SecurityEventContext {
   sellerId?: string;
@@ -90,6 +97,7 @@ export function logSecurityEvent(event: SecurityEvent, ctx: SecurityEventContext
     ...(event.type === "chat_usage"
       ? {
           model: event.model,
+          credential_source: event.credential_source,
           rounds: event.rounds,
           tokens_in: event.tokens_in,
           tokens_out: event.tokens_out,

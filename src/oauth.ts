@@ -86,6 +86,73 @@ export interface ClientRegistration {
   client_uri: string | null;
 }
 
+// --- THI-220 (N1 finding of the THI-214 security review): reserved-brand
+// blocklist at registration + consent-page provenance. Directory-scale
+// phishing amplification: users are trained to click "Authorize ChatGPT", so
+// a third-party DCR client must never be able to claim a reserved brand name.
+
+/** Brand tokens no third-party DCR client may claim (matched on the
+ * normalized name, substring semantics — "ChatGPT Desktop" is as much a
+ * phishing vector as "ChatGPT" exact). */
+const RESERVED_CLIENT_NAME_BRANDS = [
+  "chatgpt",
+  "openai",
+  "claude",
+  "anthropic",
+  "gemini",
+  "google",
+  "copilot",
+  "microsoft",
+  "thingery",
+] as const;
+
+/** Invisible format/control characters NFKC does NOT decompose: zero-width
+ * spaces/joiners, bidi overrides, soft hyphen, word joiners. Injected into a
+ * name they visually vanish while defeating naive exact-match comparisons. */
+const ZERO_WIDTH_RE = /[\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]/g;
+
+/** Residual single-letter homoglyphs NFKC does not fold: Cyrillic and Greek
+ * lookalikes for Latin letters ("СhatGPT" with Cyrillic С). Defense in depth
+ * on top of NFKC; generic lookalike brand names stay out of scope (ADR 0002). */
+const CONFUSABLE_FOLD: Record<string, string> = {
+  "а": "a", "α": "a",
+  "с": "c", "ϲ": "c",
+  "е": "e", "ε": "e",
+  "һ": "h",
+  "і": "i", "ι": "i",
+  "ј": "j",
+  "κ": "k",
+  "ο": "o", "о": "o",
+  "р": "p", "ρ": "p",
+  "ѕ": "s",
+  "τ": "t",
+  "υ": "u",
+  "ν": "v",
+  "ԝ": "w",
+  "х": "x", "χ": "x",
+  "у": "y",
+  "ԛ": "q",
+};
+
+/** Normalizes a client_name for brand comparison (THI-220): NFKC folds
+ * fullwidth/math alphanumerics (ＣｈａｔＧＰＴ, 𝐂𝐡𝐚𝐭), zero-width/bidi
+ * controls are stripped, ALL whitespace removed (JS \s is Unicode-aware:
+ * covers "chat gpt", NBSP, thin spaces), lowercased, then Latin homoglyphs
+ * folded. Comparisons are substrings against RESERVED_CLIENT_NAME_BRANDS. */
+export function normalizeClientNameForBrandCompare(name: string): string {
+  return Array.from(name.normalize("NFKC").replace(ZERO_WIDTH_RE, "").replace(/\s/g, "").toLowerCase())
+    .map((ch) => CONFUSABLE_FOLD[ch] ?? ch)
+    .join("");
+}
+
+/** True when a client_name (after normalization) contains a reserved brand
+ * token — rejects exact matches, case/spacing/zero-width variants, and
+ * contains-matches like "My ChatGPT Wrapper". */
+export function isReservedClientName(name: string): boolean {
+  const normalized = normalizeClientNameForBrandCompare(name);
+  return RESERVED_CLIENT_NAME_BRANDS.some((brand) => normalized.includes(brand));
+}
+
 /** RFC 7591 registration payload validation (spec §2.4). Unknown fields ignored. */
 export function validateClientRegistration(body: unknown): ClientRegistration {
   if (typeof body !== "object" || body === null) {
@@ -112,6 +179,12 @@ export function validateClientRegistration(body: unknown): ClientRegistration {
   if (raw.client_name !== undefined) {
     if (typeof raw.client_name !== "string" || raw.client_name.length > MAX_CLIENT_NAME_LEN) {
       throw registrationError("invalid_client_metadata", `client_name must be a string of at most ${MAX_CLIENT_NAME_LEN} chars`);
+    }
+    if (isReservedClientName(raw.client_name)) {
+      throw registrationError(
+        "invalid_client_metadata",
+        "client_name matches a reserved brand name; choose a name that identifies your own application",
+      );
     }
     client_name = raw.client_name;
   }
@@ -507,12 +580,13 @@ function redirectWithParams(
 interface ClientRow {
   client_id: string;
   client_name: string | null;
+  client_uri: string | null;
   redirect_uris: string[];
 }
 
 async function clientById(clientId: string): Promise<ClientRow | null> {
   const { rows } = await pool.query<ClientRow>(
-    `SELECT client_id, client_name, redirect_uris FROM oauth_clients WHERE client_id = $1`,
+    `SELECT client_id, client_name, client_uri, redirect_uris FROM oauth_clients WHERE client_id = $1`,
     [clientId],
   );
   return rows[0] ?? null;
@@ -574,6 +648,7 @@ function checkAuthorizeParams(q: AuthorizeQuery, issuer: string): ParamCheck {
  */
 function consentPageHtml(opts: {
   clientName: string;
+  clientUri: string | null;
   accountLabel: string;
   query: Record<string, string | undefined>;
   csrf: string;
@@ -590,7 +665,7 @@ h1{font-size:1.35rem}button{padding:.6rem 1.2rem;font:inherit;border-radius:8px;
 .allow{background:#2563eb;color:#fff;border-color:#2563eb}.hint{font-size:.9rem;opacity:.8}</style></head>
 <body>
 <h1>Authorize ${htmlEscape(opts.clientName)}</h1>
-<p><strong>${htmlEscape(opts.clientName)}</strong> wants to connect to your Thingery account
+<p><strong>${htmlEscape(opts.clientName)}</strong>${opts.clientUri === null ? "" : ` (${htmlEscape(opts.clientUri)})`} wants to connect to your Thingery account
 <strong>${htmlEscape(opts.accountLabel)}</strong>.</p>
 <p>It will be able to read and manage your listings and orders, acting as you.</p>
 <form method="post" action="/oauth/authorize">
@@ -691,6 +766,7 @@ function mountAuthorize(app: Express): void {
     res.type("html").send(
       consentPageHtml({
         clientName: validated.client.client_name ?? validated.client.client_id,
+        clientUri: validated.client.client_uri,
         accountLabel: rows[0]?.email ?? seller.display_name,
         query: {
           client_id: q.client_id,

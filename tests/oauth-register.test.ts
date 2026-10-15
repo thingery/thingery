@@ -118,6 +118,26 @@ describe.skipIf(!available)("oauth http surface (discovery + DCR)", () => {
     }
   });
 
+  it("rejects reserved brand client names with invalid_client_metadata (THI-220 N1)", async () => {
+    const reservedNames = [
+      "ChatGPT", // exact
+      " chat gpt\u200b", // spacing + zero-width space
+      "My Claude Helper", // contains-match
+    ];
+    for (const client_name of reservedNames) {
+      const res = await fetch(`${baseUrl}/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ client_name, redirect_uris: ["https://reserved-test.example/cb"] }),
+      });
+      expect(res.status).toBe(400);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const doc = (await res.json()) as { error: string; error_description: string };
+      expect(doc.error).toBe("invalid_client_metadata");
+      expect(doc.error_description).toContain("reserved brand");
+    }
+  });
+
   it("F1 regression: client-injected XFF entries do not change the resolved IP", async () => {
     // With trust proxy 1, only the single trusted hop's appended entry counts;
     // leftmost (client-controlled) entries are ignored. Behind Caddy the real

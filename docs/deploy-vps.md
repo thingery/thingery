@@ -486,6 +486,38 @@ previous commit.
    already installed with `-mtime +7`, update the line above as an announced runbook change**
    (root crontab edit = prod change; DevOps executes, one line, `crontab -e` as root).
 
+### 5.2 Chat limits (THI-180): hourly turn limiters + daily token budget
+
+The `/chat` page is the only cost-bearing browser surface (each turn drives LLM calls).
+Since THI-180 it is bounded twice — both live in `.env` and apply on **container restart**:
+
+- **Hourly turn limiters** (per seller when logged in, per IP otherwise):
+  `CHAT_TURNS_HOURLY_AUTHED` (default 60) and `CHAT_TURNS_HOURLY_ANON` (default 10).
+  Hitting one returns a 429 with a friendly message and logs a `rate_limit` line
+  (`route:"/api/chat"`, attributed `sellerId` or `ip`).
+- **Process-wide daily LLM token budget**: `CHAT_DAILY_TOKEN_BUDGET` (default and
+  current prod value **2,000,000** tokens/day, UTC-day rollover). When exhausted,
+  `/api/chat` returns a 429 (`"Daily chat budget exhausted — please try again tomorrow."`);
+  in-flight turns finish their current round first (bounded overshoot).
+
+**Reading usage:** every LLM-backed turn logs two lines (stdout/container logs):
+`chat_turn_usage` (THI-185 telemetry — per-call token pairs, tool stats, outcome,
+duration) and `chat_usage` (THI-180 security event — `model`, `rounds`, `tokens_in`,
+`tokens_out`, `daily_total`, `budget`, `usage_source` with seller/ip attribution).
+`usage_source: "estimate_fallback"` means the provider omits/corrupts usage and the
+numbers are conservative estimates. To watch the budget:
+
+```bash
+docker logs thingery-app 2>&1 | grep '"type":"chat_usage"' | tail -5
+```
+
+**Tuning:** pick the budget from `chat_usage` evidence (sum `tokens_in`+`tokens_out`
+per day vs. provider billing). A restart is required for any change to apply, and
+**the budget is in-memory — a restart resets `daily_total` to zero** (UTC-day rollover
+otherwise). **Kill switch:** set `CHAT_DAILY_TOKEN_BUDGET=0` + restart to disable the
+aggregate cap without a deploy (hourly limiters still apply). Rollback of the whole
+feature = revert the PR; PR-A/B modules are inert without the routes wiring.
+
 ## 6. Scaling later
 
 - Bigger VPS: resize, reboot, done.

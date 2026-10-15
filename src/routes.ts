@@ -15,6 +15,7 @@ import {
   type SignupRow,
 } from "./auth.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
+import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import { addItemImage, MAX_IMAGE_BYTES } from "./images.js";
 import { asyncHandler } from "./oauth.js";
 import { RateLimiter } from "./rate-limit.js";
@@ -27,8 +28,8 @@ import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransf
 
 const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/logins per IP per hour
 const apiKeyRotateLimiter = new RateLimiter(10, 60 * 60_000); // 10 key rotations per seller per hour (THI-114)
-const chatAnonLimiter = new RateLimiter(10, 60 * 60_000); // 10 anonymous chats per IP per hour
-const chatAuthedLimiter = new RateLimiter(60, 60 * 60_000); // 60 logged-in chats per hour
+export const chatAnonLimiter = new RateLimiter(chatLimits.turnsHourlyAnon, 60 * 60_000); // anonymous chats per IP per hour (THI-180: env-configurable)
+export const chatAuthedLimiter = new RateLimiter(chatLimits.turnsHourlyAuthed, 60 * 60_000); // logged-in chats per hour (THI-180: env-configurable)
 export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin calls per IP per hour (F7)
 export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
 export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 image upload attempts per IP per hour (THI-140 / THI-123 obs 2)
@@ -257,6 +258,9 @@ api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
   const limiter = seller ? chatAuthedLimiter : chatAnonLimiter;
   const key = seller ? `seller:${seller.id}` : `ip:${clientIp(req)}`;
   if (!limiter.allow(key)) {
+    // THI-180 N3: chat 429s were the only ones without a rate_limit line
+    // (THI-144 convention) — attribution matches the limiter key.
+    logSecurityEvent({ type: "rate_limit", route: "/api/chat" }, seller ? { sellerId: seller.id } : { ip: clientIp(req) });
     res.status(429).json({
       error: seller
         ? "Chat limit reached for this hour."
@@ -270,13 +274,41 @@ api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
     });
     return;
   }
+  // THI-180 §3.2 checkpoint 1 — process-wide daily LLM token budget
+  // (pre-flight; the between-rounds checkpoint lives in chatTurn). Order per
+  // spec: turn limiter → configured → budget → zod parse. THI-189 seam: wrap
+  // in the credential-resolution check (company credential) when BYO keys
+  // land — user-key turns skip the company budget.
+  if (dailyTokenBudget.isExhausted()) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/chat" }, seller ? { sellerId: seller.id } : { ip: clientIp(req) });
+    res.status(429).json({ error: "Daily chat budget exhausted — please try again tomorrow." });
+    return;
+  }
   const parsed = chatSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Message required (max 4000 characters)." });
     return;
   }
-  const reply = await chatTurn(parsed.data.history as ChatMessage[], parsed.data.message, seller);
-  res.json({ reply });
+  const { usage, ...reply } = await chatTurn(parsed.data.history as ChatMessage[], parsed.data.message, seller);
+  if (usage) {
+    // One usage line per LLM-backed turn (numbers + env model + source slug
+    // only — no message content, H4.2). Confirm/decline fast paths emit none.
+    // THI-189 seam: user-credential turns return no usage → no line.
+    logSecurityEvent(
+      {
+        type: "chat_usage",
+        model: process.env.LLM_MODEL ?? "gpt-4o-mini", // env config string, never request data
+        rounds: usage.rounds,
+        tokens_in: usage.tokensIn,
+        tokens_out: usage.tokensOut,
+        daily_total: dailyTokenBudget.used(),
+        budget: chatLimits.dailyTokenBudget,
+        usage_source: usage.source,
+      },
+      seller ? { sellerId: seller.id } : { ip: clientIp(req) },
+    );
+  }
+  res.json({ reply }); // byte-identical to the pre-THI-180 shape — no usage key leaks
 }));
 
 // --- admin: dispute resolution (spec THI-3 §4.3, PR-9) ----------------------

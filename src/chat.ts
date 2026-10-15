@@ -11,6 +11,7 @@ import { logSecurityEvent } from "./security-events.js";
 import { logChatTurnUsage, toolNameSlug, type LlmCallUsage } from "./chat-usage.js";
 import { chatLimits, dailyTokenBudget, parseLlmUsage, fallbackUsageEstimate, type LlmUsage as NormalizedUsage } from "./chat-limits.js";
 import type { ResolvedLlmCredential } from "./llm-credentials.js";
+import { deleteChatgptConnection } from "./chatgpt-oauth.js";
 import crypto from "node:crypto";
 import { SESSION_SECRET } from "./auth.js";
 
@@ -263,11 +264,13 @@ interface LlmMessage {
 }
 
 /** callLlm failure carrying the HTTP status, so chatTurn can distinguish
- *  user-key auth rejections (401/402/403) for the friendly BYO error
- *  (THI-197) without parsing message text. */
+ *  user-credential auth rejections (401/402/403) for the friendly BYO error
+ *  (THI-197) without parsing message text. THI-193 §3.4: OAuth failures
+ *  also carry the provider `error.code` (subscription_sharing_* taxonomy)
+ *  so mid-stream failures classify identically to pre-stream HTTP ones. */
 class LlmApiError extends Error {
-  constructor(readonly status: number, body: string) {
-    super(`LLM API ${status}: ${body}`);
+  constructor(readonly status: number, body: string, readonly code?: string) {
+    super(`LLM API ${status}${code ? ` (${code})` : ""}: ${body}`);
   }
 }
 
@@ -282,6 +285,9 @@ async function callLlm(
   messages: LlmMessage[],
   credential: ResolvedLlmCredential | null = null,
 ): Promise<{ message: LlmMessage; model: string; usage?: NormalizedUsage }> {
+  // THI-193 §3.4: the credential selects the wire protocol. Absent protocol
+  // (every THI-189 BYO key) keeps the chat-completions path byte-identical.
+  if (credential?.protocol === "responses") return callLlmResponses(messages, credential);
   const url = credential?.completionsUrl ?? process.env.LLM_API_URL ?? "https://api.openai.com/v1/chat/completions";
   const model = credential?.model ?? process.env.LLM_MODEL ?? "gpt-4o-mini";
   const apiKey = credential?.apiKey ?? process.env.LLM_API_KEY;
@@ -299,6 +305,239 @@ async function callLlm(
     message: json.choices[0]?.message ?? { role: "assistant", content: "No response from model." },
     model,
     usage: parseLlmUsage(json.usage) ?? undefined,
+  };
+}
+
+// --- THI-193 §3.4: Responses adapter (ChatGPT plan-usage tokens) -------------
+
+/** One item of the Responses API `input` array (the subset the adapter
+ *  emits: chat messages, prior function calls, tool results). */
+type ResponsesInputItem =
+  | { role: "user" | "assistant"; content: string }
+  | { type: "function_call"; call_id: string; name: string; arguments: string }
+  | { type: "function_call_output"; call_id: string; output: string };
+
+/** Chat-completions message list → Responses `instructions` + `input`.
+ *  System content becomes top-level `instructions`; user/assistant stay
+ *  {role, content}; assistant tool_calls become {type:"function_call", …};
+ *  tool results become {type:"function_call_output", …} carrying the
+ *  existing wrapToolResult output unchanged (H5.1 delimiters on every
+ *  protocol). */
+function toResponsesInput(messages: LlmMessage[]): { instructions: string; input: ResponsesInputItem[] } {
+  const system: string[] = [];
+  const input: ResponsesInputItem[] = [];
+  for (const m of messages) {
+    if (m.role === "system") {
+      system.push(m.content ?? "");
+    } else if (m.role === "tool") {
+      input.push({ type: "function_call_output", call_id: m.tool_call_id ?? "", output: m.content ?? "" });
+    } else if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+      if (m.content) input.push({ role: "assistant", content: m.content });
+      for (const call of m.tool_calls) {
+        input.push({ type: "function_call", call_id: call.id, name: call.function.name, arguments: call.function.arguments });
+      }
+    } else {
+      input.push({ role: m.role, content: m.content ?? "" });
+    }
+  }
+  return { instructions: system.join("\n\n"), input };
+}
+
+/** §2 taxonomy: a mid-stream response.failed carries `error.code` but no
+ *  HTTP status — map the known sharing codes back to their HTTP status so
+ *  chatTurn's friendly-failure branches classify pre-stream and mid-stream
+ *  rejections identically (fixed slugs only, never provider text). */
+const SHARING_ERROR_STATUS: Readonly<Record<string, number>> = {
+  subscription_sharing_invalid_user: 401,
+  subscription_sharing_user_not_eligible: 403,
+  subscription_sharing_usage_limit_exceeded: 429,
+  subscription_sharing_usage_unavailable: 503,
+  subscription_sharing_unsupported_capability: 400,
+};
+
+/** Extracts `error.code` from a provider error body, if present. */
+function providerErrorCode(body: string): string | undefined {
+  try {
+    const code = (JSON.parse(body) as { error?: { code?: unknown } }).error?.code;
+    return typeof code === "string" ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** §3.4 usage mapping with THI-182 N1 semantics: anything other than a
+ *  finite non-negative {input_tokens, output_tokens} pair is MISSING (the
+ *  caller charges the deterministic estimate — garbage never credits). */
+function parseResponsesUsage(raw: unknown): NormalizedUsage | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const { input_tokens, output_tokens } = raw as Record<string, unknown>;
+  const ok = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+  return ok(input_tokens) && ok(output_tokens)
+    ? { promptTokens: input_tokens, completionTokens: output_tokens }
+    : undefined;
+}
+
+/** The one call per round on a ChatGPT plan token (THI-193 §3.4): POSTs the
+ *  mapped body to the pinned /v1/responses endpoint (store:false +
+ *  stream:true are REQUIRED for plan usage; max_output_tokens = the same
+ *  per-call cap), then runs the minimal SSE reader. Terminal ONLY on
+ *  response.completed; response.failed / response.incomplete are distinct
+ *  failures; a stream that ends without completion is a failure too. */
+async function callLlmResponses(
+  messages: LlmMessage[],
+  credential: ResolvedLlmCredential,
+): Promise<{ message: LlmMessage; model: string; usage?: NormalizedUsage }> {
+  const { instructions, input } = toResponsesInput(messages);
+  const res = await fetch(credential.completionsUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "text/event-stream", authorization: `Bearer ${credential.apiKey}` },
+    body: JSON.stringify({
+      model: credential.model,
+      instructions,
+      input,
+      tools: TOOLS.map((t) => ({
+        type: "function" as const,
+        name: t.function.name,
+        description: t.function.description,
+        parameters: t.function.parameters,
+      })),
+      store: false,
+      stream: true,
+      max_output_tokens: chatLimits.maxTokensPerCall,
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) {
+    const body = (await res.text()).slice(0, 300);
+    throw new LlmApiError(res.status, body, providerErrorCode(body));
+  }
+  if (!res.body) throw new LlmApiError(502, "responses stream had no body");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let carry = ""; // partial line across chunks
+  let pending: string[] = []; // data: lines of the event being read
+  let text = "";
+  const toolCalls: NonNullable<LlmMessage["tool_calls"]> = [];
+  let usage: NormalizedUsage | undefined;
+  let failure: LlmApiError | null = null;
+  let terminal = false;
+
+  /** response.completed's output list is authoritative — replace streamed
+   *  items with it (repairs missed output_item.done events, dedupes). */
+  const finalizeCalls = (output: unknown): void => {
+    if (!Array.isArray(output)) return;
+    const calls: NonNullable<LlmMessage["tool_calls"]> = [];
+    for (const item of output as Array<{ type?: unknown; call_id?: unknown; name?: unknown; arguments?: unknown }>) {
+      if (item?.type !== "function_call") continue;
+      calls.push({
+        id: typeof item.call_id === "string" ? item.call_id : "",
+        type: "function",
+        function: {
+          name: typeof item.name === "string" ? item.name : "",
+          arguments: typeof item.arguments === "string" ? item.arguments : "{}",
+        },
+      });
+    }
+    toolCalls.splice(0, toolCalls.length, ...calls);
+  };
+
+  const handleData = (data: string): void => {
+    if (data === "[DONE]") return;
+    let ev: Record<string, unknown>;
+    try {
+      ev = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      return; // malformed line — skipped, never terminal
+    }
+    switch (ev.type) {
+      case "response.output_text.delta":
+        if (typeof ev.delta === "string") text += ev.delta;
+        return;
+      case "response.output_item.done": {
+        const item = ev.item as { type?: unknown; call_id?: unknown; name?: unknown; arguments?: unknown } | undefined;
+        if (item?.type === "function_call") {
+          toolCalls.push({
+            id: typeof item.call_id === "string" ? item.call_id : "",
+            type: "function",
+            function: {
+              name: typeof item.name === "string" ? item.name : "",
+              arguments: typeof item.arguments === "string" ? item.arguments : "{}",
+            },
+          });
+        }
+        return;
+      }
+      case "response.completed": {
+        const response = ev.response as { usage?: unknown; output?: unknown } | undefined;
+        finalizeCalls(response?.output);
+        usage = parseResponsesUsage(response?.usage);
+        terminal = true;
+        return;
+      }
+      case "response.failed": {
+        const code = typeof (ev.response as { error?: { code?: unknown } } | undefined)?.error?.code === "string"
+          ? ((ev.response as { error: { code: string } }).error.code)
+          : undefined;
+        failure = new LlmApiError(code ? (SHARING_ERROR_STATUS[code] ?? 502) : 502, `response.failed${code ? ` ${code}` : ""}`, code);
+        terminal = true;
+        return;
+      }
+      case "response.incomplete": {
+        const reason = (ev.response as { incomplete_details?: { reason?: unknown } } | undefined)?.incomplete_details?.reason;
+        failure = new LlmApiError(502, `response.incomplete${typeof reason === "string" ? ` ${reason}` : ""}`, "response.incomplete");
+        terminal = true;
+        return;
+      }
+      default:
+        return; // events the minimal reader does not consume
+    }
+  };
+
+  const handleLine = (line: string): void => {
+    if (line === "") {
+      if (pending.length === 0) return;
+      const data = pending.join("\n");
+      pending = [];
+      handleData(data);
+    } else if (line.startsWith("data:")) {
+      const value = line.slice(5);
+      pending.push(value.startsWith(" ") ? value.slice(1) : value);
+    }
+  };
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (value) {
+        carry += decoder.decode(value, { stream: true });
+        const lines = carry.split(/\r?\n/);
+        carry = lines.pop() ?? "";
+        for (const line of lines) {
+          handleLine(line);
+          if (terminal) break;
+        }
+      }
+      if (terminal) break;
+      if (done) {
+        const tail = carry + decoder.decode();
+        carry = "";
+        for (const line of tail.split(/\r?\n/)) {
+          handleLine(line);
+          if (terminal) break;
+        }
+        if (!terminal && pending.length > 0) handleLine(""); // unterminated final event
+        break;
+      }
+    }
+  } finally {
+    void reader.cancel().catch(() => {});
+  }
+  if (failure) throw failure;
+  if (!terminal) throw new LlmApiError(502, "responses stream ended without response.completed");
+  return {
+    message: { role: "assistant", content: text, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}) },
+    model: credential.model,
+    usage,
   };
 }
 
@@ -345,6 +584,10 @@ export interface ChatUsageSummary {
   /** The model the turn actually ran on (credential ?? env), not env config. */
   model: string;
   credentialSource: "company" | "user";
+  /** THI-193 §3.5: which credential paid — company env key, the user's
+   *  pasted key, or the user's ChatGPT plan (OAuth). Surfaced additively in
+   *  the routes `chat_usage` security event. */
+  provider: "company" | "user_key" | "chatgpt_oauth";
 }
 
 /** THI-180 §3.2: mid-turn budget stop — friendly, no jargon, points at tomorrow. */
@@ -354,6 +597,17 @@ const CHAT_BUDGET_EXHAUSTED = "Sorry — the daily chat budget just ran out. Ple
  *  string — no provider body, no key material (H4.2 sanitize posture). */
 const BYO_KEY_REJECTED =
   "⚠️ Your saved model key was rejected by the provider — update or remove it under Account → Model settings to keep chatting.";
+
+/** THI-193 §3.4: fixed friendly strings for ChatGPT plan (OAuth) turns —
+ *  never provider bodies. Usage-limit (429) points at the plan's own usage
+ *  manager; invalid_user / terminal 401 invalidates the row (the turn
+ *  still fails — no silent company fallback) and asks for a reconnect. */
+const CHATGPT_PLAN_USAGE_LIMIT =
+  "⚠️ Your ChatGPT plan usage limit was reached — manage it in ChatGPT → Settings → Usage, or disconnect in Account settings.";
+const CHATGPT_RECONNECT =
+  "⚠️ Your ChatGPT connection is no longer valid — please reconnect it in Account settings to keep chatting on your plan.";
+const CHATGPT_PLAN_REJECTED =
+  "⚠️ Your ChatGPT plan couldn't be used for chat right now — check your plan status in ChatGPT → Settings → Usage, or disconnect in Account settings.";
 
 /** Pending-op tokens are valid for 15 minutes. */
 export const CHAT_CONFIRM_TTL_SECONDS = 15 * 60;
@@ -586,7 +840,11 @@ export async function chatTurn(
   // turns — only cost attribution differs.
   const usesCompanyBudget = credential === null;
   const credentialSource: "company" | "user" = usesCompanyBudget ? "company" : "user";
-  const usageSummary = () => ({ rounds: llmCalls, tokensIn, tokensOut, source, model: turnModel, credentialSource });
+  // THI-193 §3.5: additive provider label — which credential actually paid
+  // (OAuth turns are user-billed exactly like user-key turns).
+  const provider: "company" | "user_key" | "chatgpt_oauth" =
+    credential === null ? "company" : credential.protocol === "responses" ? "chatgpt_oauth" : "user_key";
+  const usageSummary = () => ({ rounds: llmCalls, tokensIn, tokensOut, source, model: turnModel, credentialSource, provider });
 
   let confirm: ChatConfirmCard | undefined;
   try {
@@ -713,13 +971,30 @@ export async function chatTurn(
     };
   } catch (e) {
     outcome = "error";
-    // THI-197: NO mid-turn fallback — a user-key turn whose provider
-    // rejects the key (401/402/403) must not silently switch to the company
-    // key (misattributes cost, overrides the user's explicit choice).
-    // Friendly, actionable, key-material-free text; the usage line below
-    // still emits with credential_source "user" (zero company attribution).
-    if (credential !== null && e instanceof LlmApiError && (e.status === 401 || e.status === 402 || e.status === 403)) {
-      return { text: BYO_KEY_REJECTED, usage: usageSummary() };
+    // THI-197 / THI-193 §3.4: NO mid-turn fallback — a user-credential turn
+    // whose provider rejects it fails the turn with a friendly, actionable,
+    // fixed string (never a provider body); it never silently re-runs on the
+    // company key (misattributes cost, overrides the user's choice). The
+    // usage line below still emits with zero company attribution.
+    if (credential !== null && e instanceof LlmApiError) {
+      if (credential.protocol === "responses") {
+        // ChatGPT plan turns: fixed plan-specific strings (§3.4).
+        if (e.code === "subscription_sharing_usage_limit_exceeded" || e.status === 429) {
+          return { text: CHATGPT_PLAN_USAGE_LIMIT, usage: usageSummary() };
+        }
+        if (e.code === "subscription_sharing_invalid_user" || e.status === 401) {
+          // Terminal: the connection is dead — invalidate the row (PR-1
+          // terminal path) so the NEXT turn falls through key → company;
+          // this turn still fails with the reconnect message.
+          if (seller) await deleteChatgptConnection(seller.id).catch(() => {});
+          return { text: CHATGPT_RECONNECT, usage: usageSummary() };
+        }
+        if (e.status === 402 || e.status === 403) {
+          return { text: CHATGPT_PLAN_REJECTED, usage: usageSummary() };
+        }
+      } else if (e.status === 401 || e.status === 402 || e.status === 403) {
+        return { text: BYO_KEY_REJECTED, usage: usageSummary() };
+      }
     }
     throw e;
   } finally {

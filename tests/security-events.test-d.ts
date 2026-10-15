@@ -21,7 +21,13 @@ import {
 describe("SecurityEvent route/reason literal unions (THI-133)", () => {
   it("route accepts only the fixed literals", () => {
     expectTypeOf<SecurityEventRoute>().toEqualTypeOf<
-      "/api/signup" | "/api/login" | "/mcp" | "/api/items/:id/images" | "/api/chat" | "/api/me/llm-credential"
+      | "/api/signup"
+      | "/api/login"
+      | "/mcp"
+      | "/api/items/:id/images"
+      | "/api/chat"
+      | "/api/me/llm-credential"
+      | "/api/me/chatgpt/connect" // THI-193 PR-2: connect rate-limit log line
     >();
     const routes: SecurityEventRoute[] = [
       "/api/signup",
@@ -30,6 +36,7 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       "/api/items/:id/images",
       "/api/chat",
       "/api/me/llm-credential",
+      "/api/me/chatgpt/connect",
     ];
     expectTypeOf(routes).toEqualTypeOf<SecurityEventRoute[]>();
   });

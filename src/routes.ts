@@ -17,6 +17,26 @@ import {
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import {
+  CHATGPT_PLAN_USAGE_SCOPE,
+  chatgptOauthEnabled,
+  deleteChatgptConnection,
+  getChatgptConnection,
+  getChatgptRefreshToken,
+  upsertChatgptConnection,
+} from "./chatgpt-oauth.js";
+import {
+  CHATGPT_TX_COOKIE,
+  buildChatgptConnect,
+  chatgptOauthRedirectUri,
+  chatgptTxCookieClearOptions,
+  chatgptTxCookieOptions,
+  consumeChatgptTx,
+  exchangeChatgptAuthorizationCode,
+  fetchChatgptDefaultModel,
+  revokeChatgptRefreshToken,
+  verifyChatgptIdToken,
+} from "./chatgpt-oauth-flow.js";
+import {
   byoMasterKeyConfigured,
   deleteLlmCredential,
   getLlmCredential,
@@ -46,6 +66,7 @@ export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin
 export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
 export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 image upload attempts per IP per hour (THI-140 / THI-123 obs 2)
 export const llmCredentialLimiter = new RateLimiter(10, 60 * 60_000); // 10 BYO credential writes per seller per hour (THI-189)
+export const chatgptConnectLimiter = new RateLimiter(10, 60 * 60_000); // 10 ChatGPT connect starts per seller per hour (THI-193 §3.2)
 
 function clientIp(req: Request): string {
   return req.ip ?? "unknown";
@@ -298,6 +319,186 @@ api.delete("/me/llm-credential", asyncHandler(async (req: Request, res: Response
   await deleteLlmCredential(seller.id);
   res.set("Cache-Control", "no-store");
   res.json({ ok: true });
+}));
+
+// --- Sign in with ChatGPT plan usage (spec THI-193 §3.2/§5, PR-2) -----------
+
+// Session-authenticated, flag-gated browser OAuth surface (connect →
+// callback → status/disconnect). Fail closed (§3.1): when
+// chatgptOauthEnabled() is off every route below is 404 — a disabled
+// surface is indistinguishable from an absent one (admin-route pattern),
+// and the connect route sets no cookie. Tokens never reach the browser in
+// any response, redirect URL or log line; provider failures surface as
+// fixed /login.html?chatgpt=<slug> redirects only (bounded sanitized
+// slugs). The flow mechanics live in src/chatgpt-oauth-flow.ts.
+
+function readChatgptTxCookie(req: Request): string | undefined {
+  const header = req.headers.cookie;
+  if (!header) return undefined;
+  for (const part of header.split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (k === CHATGPT_TX_COOKIE) return rest.join("=");
+  }
+  return undefined;
+}
+
+api.get("/me/chatgpt", asyncHandler(async (req: Request, res: Response) => {
+  if (!chatgptOauthEnabled()) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage your ChatGPT connection." });
+    return;
+  }
+  // Metadata only — getChatgptConnection never decrypts, so no token
+  // material can appear here (§3.2: no tokens, no scopes string).
+  const connection = await getChatgptConnection(seller.id);
+  res.set("Cache-Control", "no-store");
+  res.json({
+    enabled: true,
+    connected: connection !== null,
+    fingerprint: connection?.fingerprint ?? null,
+    model: connection?.model ?? null,
+    plan_usage: true,
+  });
+}));
+
+api.get("/me/chatgpt/connect", asyncHandler(async (req: Request, res: Response) => {
+  if (!chatgptOauthEnabled()) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to connect your ChatGPT account." });
+    return;
+  }
+  if (!chatgptConnectLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/chatgpt/connect" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many attempts — try again later." });
+    return;
+  }
+  // Same fail-closed posture as the BYO PUT: no master key, no feature —
+  // and the flow needs an exact redirect URI before it can start.
+  const clientId = envValue("CHATGPT_OAUTH_CLIENT_ID");
+  const redirectUri = chatgptOauthRedirectUri();
+  if (!byoMasterKeyConfigured() || !clientId || !redirectUri) {
+    res.status(503).json({ error: "ChatGPT sign-in is not configured on this server." });
+    return;
+  }
+  const { url, cookie } = buildChatgptConnect(redirectUri, clientId);
+  res.cookie(CHATGPT_TX_COOKIE, cookie, chatgptTxCookieOptions());
+  res.redirect(302, url);
+}));
+
+api.get("/me/chatgpt/callback", asyncHandler(async (req: Request, res: Response) => {
+  if (!chatgptOauthEnabled()) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to connect your ChatGPT account." });
+    return;
+  }
+  // Every outcome below clears the tx cookie (§3.2) and ends in a redirect
+  // with a fixed slug — never provider text, never tokens.
+  const fail = (slug: "error" | "declined" | "plan_not_enabled") => {
+    res.clearCookie(CHATGPT_TX_COOKIE, chatgptTxCookieClearOptions());
+    res.redirect(302, `/login.html?chatgpt=${slug}`);
+  };
+  // Consume the tx ONCE, server-side (signature/expiry/single-use checked
+  // and burned in one step) — then bind the callback to it via the state
+  // echo. A missing/expired/reused cookie or a mismatched state never
+  // reaches the exchange.
+  const tx = consumeChatgptTx(readChatgptTxCookie(req));
+  const q = req.query as Record<string, unknown>;
+  const state = typeof q.state === "string" ? q.state : "";
+  if (!tx || state !== tx.state) {
+    fail("error");
+    return;
+  }
+  if (q.error === "access_denied") {
+    fail("declined");
+    return;
+  }
+  const code = typeof q.code === "string" ? q.code : "";
+  const clientId = envValue("CHATGPT_OAUTH_CLIENT_ID");
+  const redirectUri = chatgptOauthRedirectUri();
+  if (code.length === 0 || code.length > 512 || !clientId || !redirectUri || !byoMasterKeyConfigured()) {
+    fail("error");
+    return;
+  }
+  const exchange = await exchangeChatgptAuthorizationCode({ code, redirectUri, clientId, verifier: tx.verifier });
+  if (!exchange) {
+    fail("error");
+    return;
+  }
+  // §2: a valid ID token alone does not authorize plan usage — verify the
+  // token (iss/aud/exp/iat/nonce/sub via jose + remote JWKS), then gate on
+  // the granted scopes before anything is stored.
+  const sub = await verifyChatgptIdToken(exchange.idToken, tx.nonce, clientId);
+  if (!sub) {
+    fail("error");
+    return;
+  }
+  if (!exchange.scopes.split(/\s+/).includes(CHATGPT_PLAN_USAGE_SCOPE)) {
+    fail("plan_not_enabled");
+    return;
+  }
+  const model = await fetchChatgptDefaultModel(exchange.accessToken);
+  if (!model) {
+    fail("error");
+    return;
+  }
+  await upsertChatgptConnection(
+    seller.id,
+    {
+      accessToken: exchange.accessToken,
+      refreshToken: exchange.refreshToken,
+      idToken: exchange.idToken,
+      scopes: exchange.scopes,
+      accessExpiresAt: exchange.accessExpiresAt,
+      earliestRefreshAt: exchange.earliestRefreshAt,
+      sub,
+    },
+    model,
+  );
+  res.clearCookie(CHATGPT_TX_COOKIE, chatgptTxCookieClearOptions());
+  res.redirect(302, "/login.html?chatgpt=connected");
+}));
+
+api.delete("/me/chatgpt", asyncHandler(async (req: Request, res: Response) => {
+  if (!chatgptOauthEnabled()) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage your ChatGPT connection." });
+    return;
+  }
+  // Best-effort revocation FIRST (§3.2): the row is deleted either way — a
+  // stored-but-revoked pair is worthless. An unreadable bundle (master key
+  // rotated/lost, tamper) or an unconfirmed revoke still deletes and flags
+  // revocation_unconfirmed so the UI can tell the seller to also remove the
+  // app in ChatGPT settings. No row ⇒ no revoke attempt, no flag.
+  let revocationUnconfirmed = false;
+  try {
+    const refreshToken = await getChatgptRefreshToken(seller.id);
+    if (refreshToken) {
+      const clientId = envValue("CHATGPT_OAUTH_CLIENT_ID");
+      revocationUnconfirmed = !clientId || !(await revokeChatgptRefreshToken(refreshToken, clientId));
+    }
+  } catch {
+    revocationUnconfirmed = true;
+  }
+  await deleteChatgptConnection(seller.id);
+  res.clearCookie(CHATGPT_TX_COOKIE, chatgptTxCookieClearOptions());
+  res.set("Cache-Control", "no-store");
+  res.json({ ok: true, ...(revocationUnconfirmed ? { revocation_unconfirmed: true } : {}) });
 }));
 
 // --- item images (browser upload) -------------------------------------------

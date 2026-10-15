@@ -166,6 +166,7 @@ describe("confirm/decline turn handling (no LLM involved)", () => {
 // Part 1.5 — pure: per-turn usage telemetry (THI-185, findings §7 F1)
 
 import { buildChatTurnUsageLine } from "../src/chat-usage.js";
+import { dailyTokenBudget } from "../src/chat-limits.js";
 
 describe("buildChatTurnUsageLine (pure line builder)", () => {
   const base = {
@@ -183,6 +184,7 @@ describe("buildChatTurnUsageLine (pure line builder)", () => {
     durationMs: 1234,
     outcome: "ok" as const,
     sellerId: "seller-uuid",
+    dailyTotal: 570, // THI-180 single-meter contract
   };
 
   it("sums reported tokens per kind and keeps the per-call pairs", () => {
@@ -200,6 +202,7 @@ describe("buildChatTurnUsageLine (pure line builder)", () => {
     expect(line.outcome).toBe("ok");
     expect(line.duration_ms).toBe(1234);
     expect(line.sellerId).toBe("seller-uuid");
+    expect(line.daily_total).toBe(570); // THI-180
   });
 
   it("reports null sums when the provider sent no usage at all", () => {
@@ -220,6 +223,7 @@ describe("buildChatTurnUsageLine (pure line builder)", () => {
       [
         "calls",
         "completion_tokens",
+        "daily_total",
         "duration_ms",
         "llm_calls",
         "model",
@@ -395,6 +399,101 @@ describe("chat turn usage telemetry via chatTurn (THI-185)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// THI-180 (PR-B, on top of the THI-185 single meter): budget checkpoints,
+// config bounds, and the per-turn usage summary consumed by the routes
+// layer's chat_usage security event. No DB — unknown tool names execute
+// without touching the database.
+
+describe("THI-180 budget gates + usage summary on the single meter", () => {
+  const UNKNOWN_TOOL = (id: string) => toolCallMsg(id, "no_such_tool", {});
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    logSpy.mockRestore();
+  });
+
+  /** chat_turn_usage lines emitted during the test, parsed from the spy. */
+  const usageLines = () =>
+    logSpy.mock.calls
+      .map((args) => String(args[0]))
+      .filter((s) => s.startsWith('{"ts":'))
+      .map((s) => JSON.parse(s) as Record<string, unknown>)
+      .filter((o) => o.type === "chat_turn_usage");
+
+  /** Fetch counter + per-response usage control. */
+  function scriptedLlm(script: unknown[], usage: unknown) {
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(String(init.body)));
+        const step = Math.min(bodies.length - 1, script.length - 1);
+        const body: Record<string, unknown> = { choices: [{ message: script[step] }] };
+        if (usage !== undefined) body.usage = Array.isArray(usage) ? usage[Math.min(step, usage.length - 1)] : usage;
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    return bodies;
+  }
+
+  it("accumulates validated provider usage into the summary (source provider)", async () => {
+    const bodies = scriptedLlm([UNKNOWN_TOOL("c1"), FINAL], { prompt_tokens: 100, completion_tokens: 50 });
+    const out = await chatTurn([], "hello", null);
+    expect(out.text).toBe("Understood.");
+    expect(out.usage).toEqual({ rounds: 2, tokensIn: 200, tokensOut: 100, source: "provider" });
+    expect(bodies).toHaveLength(2);
+  });
+
+  it("estimates and flags when the provider omits usage (N1c)", async () => {
+    scriptedLlm([FINAL], undefined); // no usage key on the wire at all
+    const out = await chatTurn([], "hello", null);
+    expect(out.usage?.source).toBe("estimate_fallback");
+    expect(out.usage?.tokensOut).toBe(1200); // per-call output cap (env default)
+    expect(out.usage?.tokensIn).toBeGreaterThan(0); // ceil(request chars / 4)
+  });
+
+  it("malformed usage (negative) is never credited — estimate fallback applies (N1a)", async () => {
+    scriptedLlm([FINAL], { prompt_tokens: -100, completion_tokens: 5 });
+    const out = await chatTurn([], "hello", null);
+    expect(out.usage?.source).toBe("estimate_fallback");
+    expect(out.usage?.tokensOut).toBe(1200);
+    expect(out.usage?.tokensIn).toBeGreaterThan(0); // the -100 is not credited
+  });
+
+  it("honors CHAT_ROUNDS_PER_TURN: 6 calls max, then the friendly bound message", async () => {
+    const bodies = scriptedLlm([UNKNOWN_TOOL("c1")], { prompt_tokens: 10, completion_tokens: 5 });
+    const out = await chatTurn([], "hello", null);
+    expect(bodies).toHaveLength(6); // default CHAT_ROUNDS_PER_TURN
+    expect(out.usage?.rounds).toBe(6);
+    expect(out.text).toContain("too many steps");
+  });
+
+  it("stops between rounds when the daily budget trips: friendly message, usage kept, telemetry outcome", async () => {
+    // Leave room for exactly one more round, then exhaust it mid-turn.
+    dailyTokenBudget.record(null, 2_000_000 - 1);
+    const bodies = scriptedLlm([UNKNOWN_TOOL("c1"), FINAL], { prompt_tokens: 100, completion_tokens: 50 });
+    const out = await chatTurn([], "hello", null);
+    expect(bodies).toHaveLength(1); // round 0 ran; round 1 never started
+    expect(out.text).toBe("Sorry — the daily chat budget just ran out. Please try again tomorrow.");
+    expect(out.usage).toEqual({ rounds: 1, tokensIn: 100, tokensOut: 50, source: "provider" });
+    const lines = usageLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0].outcome).toBe("budget_exhausted");
+    expect(lines[0].daily_total).toBe(2_000_149); // 1,999,999 + this round's 150
+  });
+
+  it("confirm/decline fast paths carry no usage summary", async () => {
+    const declined = await chatTurn([], "chat-decline whatever", null);
+    expect(declined.usage).toBeUndefined();
+    const confirmed = await chatTurn([], "chat-confirm chatconfirm:not:a:token.sig", null);
+    expect(confirmed.usage).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Part 2 — DB-backed: the gate, execution, and the injection fixture
 
 async function dbAvailable(): Promise<boolean> {
@@ -435,6 +534,8 @@ afterEach(() => {
   // restore the real DB read so later tests are unaffected.
   vi.mocked(getItem).mockReset();
   vi.mocked(getItem).mockImplementation(realGetItem);
+  // THI-180: the budget is process-global — reset between tests.
+  dailyTokenBudget.reset();
 });
 
 function toolCallMsg(id: string, name: string, args: Record<string, unknown>): unknown {

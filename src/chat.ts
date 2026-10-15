@@ -9,6 +9,7 @@ import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import { logSecurityEvent } from "./security-events.js";
 import { logChatTurnUsage, toolNameSlug, type LlmCallUsage, type LlmUsage } from "./chat-usage.js";
+import { chatLimits, dailyTokenBudget, parseLlmUsage, fallbackUsageEstimate } from "./chat-limits.js";
 import crypto from "node:crypto";
 import { SESSION_SECRET } from "./auth.js";
 
@@ -268,7 +269,7 @@ async function callLlm(messages: LlmMessage[]): Promise<{ message: LlmMessage; m
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${process.env.LLM_API_KEY}` },
-    body: JSON.stringify({ model, messages, tools: TOOLS, max_tokens: 1200 }),
+    body: JSON.stringify({ model, messages, tools: TOOLS, max_tokens: chatLimits.maxTokensPerCall }),
     signal: AbortSignal.timeout(60_000),
   });
   if (!res.ok) {
@@ -309,7 +310,21 @@ export interface ChatConfirmCard {
   summary: string;
 }
 
-export type ChatTurnResult = { text: string; confirm?: ChatConfirmCard };
+export type ChatTurnResult = { text: string; confirm?: ChatConfirmCard; usage?: ChatUsageSummary };
+
+/** THI-180 §3.3: internal per-turn usage summary for the routes layer's
+ * `chat_usage` security event (PR-C). `source` is "estimate_fallback" when
+ * any round was charged the N1 estimate instead of provider-reported
+ * numbers. Never sent to the client — routes strips it. */
+export interface ChatUsageSummary {
+  rounds: number;
+  tokensIn: number;
+  tokensOut: number;
+  source: "provider" | "estimate_fallback";
+}
+
+/** THI-180 §3.2: mid-turn budget stop — friendly, no jargon, points at tomorrow. */
+const CHAT_BUDGET_EXHAUSTED = "Sorry — the daily chat budget just ran out. Please try again tomorrow.";
 
 /** Pending-op tokens are valid for 15 minutes. */
 export const CHAT_CONFIRM_TTL_SECONDS = 15 * 60;
@@ -526,19 +541,53 @@ export async function chatTurn(
   let toolRounds = 0;
   let toolCalls = 0;
   let toolArgErrors = 0;
-  let outcome: "ok" | "max_rounds" | "error" = "ok";
+  let outcome: "ok" | "max_rounds" | "budget_exhausted" | "error" = "ok";
+  // THI-180 §3.3: validated token totals for the budget + the security
+  // event. Provider-reported raw values stay in callUsage (telemetry above);
+  // these only ever count parseLlmUsage-validated pairs or N1 estimates.
+  let tokensIn = 0;
+  let tokensOut = 0;
+  let source: "provider" | "estimate_fallback" = "provider";
 
   let confirm: ChatConfirmCard | undefined;
   try {
-    for (let round = 0; round < 6; round++) {
+    for (let round = 0; round < chatLimits.roundsPerTurn; round++) {
+      // THI-180 §3.2 checkpoint 2 — between rounds. In-flight turns each
+      // finish their current round first (bounded per-request overshoot,
+      // spec rev 2 N2), then stop with a friendly message + pending card.
+      if (round > 0 && dailyTokenBudget.isExhausted()) {
+        outcome = "budget_exhausted";
+        return {
+          text: CHAT_BUDGET_EXHAUSTED,
+          ...(confirm ? { confirm } : {}),
+          usage: { rounds: llmCalls, tokensIn, tokensOut, source },
+        };
+      }
       llmCalls++;
       const { message: reply, model, usage } = await callLlm(messages);
       turnModel = model;
       callUsage.push({ prompt_tokens: usage?.prompt_tokens ?? null, completion_tokens: usage?.completion_tokens ?? null });
+      // THI-180 §3.2 accounting (single meter): a valid provider pair
+      // charges actuals; anything else (absent/NaN/negative — N1) charges
+      // the conservative estimate and flags the turn. A provider that
+      // omits or corrupts usage can only ever charge the budget, never
+      // credit it.
+      const counted = parseLlmUsage(usage);
+      if (counted) {
+        tokensIn += counted.promptTokens;
+        tokensOut += counted.completionTokens;
+        dailyTokenBudget.record(counted, 0);
+      } else {
+        source = "estimate_fallback";
+        const est = fallbackUsageEstimate(messages);
+        tokensIn += est.promptTokens;
+        tokensOut += est.completionTokens;
+        dailyTokenBudget.record(null, est.promptTokens + est.completionTokens);
+      }
       messages.push(reply);
 
       if (!reply.tool_calls || reply.tool_calls.length === 0) {
-        return { text: reply.content ?? "", ...(confirm ? { confirm } : {}) };
+        return { text: reply.content ?? "", ...(confirm ? { confirm } : {}), usage: { rounds: llmCalls, tokensIn, tokensOut, source } };
       }
 
       toolRounds++;
@@ -618,7 +667,11 @@ export async function chatTurn(
       }
     }
     outcome = "max_rounds";
-    return { text: "Sorry — that took too many steps. Could you simplify the request?", ...(confirm ? { confirm } : {}) };
+    return {
+      text: "Sorry — that took too many steps. Could you simplify the request?",
+      ...(confirm ? { confirm } : {}),
+      usage: { rounds: llmCalls, tokensIn, tokensOut, source },
+    };
   } catch (e) {
     outcome = "error";
     throw e;
@@ -637,6 +690,7 @@ export async function chatTurn(
         durationMs: Date.now() - startedAt,
         outcome,
         sellerId: seller?.id ?? null,
+        dailyTotal: dailyTokenBudget.used(), // THI-180 single-meter contract
       });
     }
   }

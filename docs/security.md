@@ -501,6 +501,40 @@ anyone can run it anytime.
   yet — security reports arriving publicly should be triaged by the CEO for
   confidential handling.
 
+## 8a. BYO LLM credential store — operator runbook (THI-186 Phase 1)
+
+**What is stored:** per-seller API keys in `llm_credentials`, AES-256-GCM encrypted
+under the dedicated `LLM_CREDENTIALS_MASTER_KEY` (never the session secret, never a
+provider key; never logged, never returned to the browser — GET returns only label /
+model / base URL / created-at). Keys are bound to `seller_id:api_key` as AAD, so a row
+cannot be re-attached to another account. The master key is a 64-hex (32-byte) value;
+if it is unset or malformed the feature fails closed (PUT 503, resolution silently
+falls back to the company key).
+
+**Enable BYO (per VPS):** generate `openssl rand -hex 32` → `LLM_CREDENTIALS_MASTER_KEY`
+in the VPS `.env` → `docker compose up -d app`. No schema step is needed at enable time
+(`llm_credentials` already migrated). Optionally `LLM_BYO_ALLOWED_MODELS` narrows the
+tool-calling model gate.
+
+**Rotate the master key (suspected compromise of `.env` or backups):**
+1. Generate the new key and keep both values hand-side.
+2. `sudo docker compose exec -T postgres psql -U thingery thingery -c
+   "SELECT seller_id FROM llm_credentials"` — this is the affected-seller list.
+3. Stop the app container, set the new `LLM_CREDENTIALS_MASTER_KEY`, start it: existing
+   rows now fail auth-tag verification (tamper path), so resolution throws → falls back
+to the company key. That is safe but silent for users.
+4. Ask the affected sellers to re-enter their key (DELETE + PUT via the account page;
+the old rows can simply be dropped: `DELETE FROM llm_credentials` — sellers re-add).
+5. Log an incident note in the issue thread; no ciphertext or key material in it.
+
+**Suspected leak of one seller's key:** the seller rotates at the provider, then deletes
+and re-adds the credential on the account page. No operator action required (we never
+see plaintext; there is no admin read path).
+
+**`LLM_BYO_ALLOW_LOCAL_ENDPOINTS`:** dev/troubleshooting only; on prod leave unset — with
+it unset, plain-http/localhost/loopback and private-IP literal endpoints (including
+cloud-metadata addresses) are rejected at save and verify time.
+
 ## 9. Keeping this document honest
 
 Review triggers: any PR touching `src/auth.ts`, `src/rate-limit.ts`, `src/routes.ts`,

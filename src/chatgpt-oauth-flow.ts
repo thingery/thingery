@@ -315,9 +315,11 @@ export async function verifyChatgptIdToken(idToken: string, expectedNonce: strin
 // --- default model + revocation ----------------------------------------------
 
 /** §3.2 step 4: fetch the account catalog once; the pinned
- *  CHATGPT_OAUTH_DEFAULT_MODEL wins when set, else the first
- *  visibility=="list" entry's slug. Null (catalog unusable / no list entry)
- *  ⇒ the connect fails — never store a row without a usable model. */
+ *  CHATGPT_OAUTH_DEFAULT_MODEL wins when set AND present in the account's
+ *  list-visible models (THI-210 N1: a pinned slug the plan lacks would 400
+ *  every OAuth turn), else the first visibility=="list" entry's slug. Null
+ *  (catalog unusable / no list entry) ⇒ the connect fails — never store a
+ *  row without a usable model. */
 export async function fetchChatgptDefaultModel(accessToken: string): Promise<string | null> {
   let res: Response;
   try {
@@ -336,14 +338,16 @@ export async function fetchChatgptDefaultModel(accessToken: string): Promise<str
     return null;
   }
   if (!Array.isArray(json.data)) return null;
-  const pinned = envValue("CHATGPT_OAUTH_DEFAULT_MODEL");
-  if (pinned) return pinned;
+  const listSlugs: string[] = [];
   for (const entry of json.data) {
-    if (!entry || typeof entry !== "object" || (entry as { visibility?: unknown }).visibility !== "list") continue;
+    if (!entry || typeof entry !== "object") continue;
+    if ((entry as { visibility?: unknown }).visibility !== "list") continue;
     const slug = (entry as { slug?: unknown }).slug;
-    if (typeof slug === "string" && slug.length > 0 && slug.length <= 100) return slug;
+    if (typeof slug === "string" && slug.length > 0 && slug.length <= 100) listSlugs.push(slug);
   }
-  return null;
+  const pinned = envValue("CHATGPT_OAUTH_DEFAULT_MODEL");
+  if (pinned !== undefined && listSlugs.includes(pinned)) return pinned;
+  return listSlugs[0] ?? null;
 }
 
 /** §3.2 disconnect: best-effort RFC 7009 revocation — 1 try + 2 bounded

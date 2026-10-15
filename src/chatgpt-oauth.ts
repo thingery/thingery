@@ -171,6 +171,16 @@ export async function deleteChatgptConnection(sellerId: string): Promise<void> {
   await pool.query(`DELETE FROM llm_credentials WHERE seller_id = $1 AND kind = 'chatgpt_oauth'`, [sellerId]);
 }
 
+/** Loads ONLY the refresh token, for the disconnect route's best-effort
+ *  revocation (spec §3.2 PR-2). null = no connection. Throws on tamper /
+ *  unreadable bundle (incl. unset master key) — the caller deletes the row
+ *  anyway and reports the revocation as unconfirmed. */
+export async function getChatgptRefreshToken(sellerId: string): Promise<string | null> {
+  const row = await loadRow(sellerId);
+  if (!row) return null;
+  return parseBundle(decryptSecret(sellerId, CHATGPT_OAUTH_KIND, row.ciphertext)).refreshToken;
+}
+
 // --- refresh (§3.3): single-flight, compare-and-swap, terminal-error kill ---
 
 /** Bounds + token-strips provider error text (an echoing endpoint must never

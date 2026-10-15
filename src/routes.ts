@@ -15,6 +15,16 @@ import {
   type SignupRow,
 } from "./auth.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
+import {
+  byoMasterKeyConfigured,
+  deleteLlmCredential,
+  getLlmCredential,
+  modelAllowedForByo,
+  normalizeBaseUrl,
+  upsertLlmCredential,
+  verifyLlmCredential,
+  type VerifyLlmCredentialResult,
+} from "./llm-credentials.js";
 import { addItemImage, MAX_IMAGE_BYTES } from "./images.js";
 import { asyncHandler } from "./oauth.js";
 import { RateLimiter } from "./rate-limit.js";
@@ -32,6 +42,7 @@ const chatAuthedLimiter = new RateLimiter(60, 60 * 60_000); // 60 logged-in chat
 export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin calls per IP per hour (F7)
 export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
 export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 image upload attempts per IP per hour (THI-140 / THI-123 obs 2)
+export const llmCredentialLimiter = new RateLimiter(10, 60 * 60_000); // 10 BYO credential writes per seller per hour (THI-189)
 
 function clientIp(req: Request): string {
   return req.ip ?? "unknown";
@@ -175,6 +186,115 @@ api.post("/me/api-key", asyncHandler(async (req: Request, res: Response) => {
   );
   res.set("Cache-Control", "no-store"); // show-once: never cache the plaintext key
   res.json({ api_key: rotated.apiKey });
+}));
+
+// --- bring-your-own LLM credential (spec THI-186 Phase 1 / THI-189) ----------
+
+// Session-auth-only surface for the seller's own OpenAI-compatible chat key.
+// The plaintext key appears exactly once — in the PUT body — and never in any
+// response, log line, or cache (no-store on all three routes). Every write
+// passes the verify probe FIRST (spec §2: a failed verify never touches the
+// DB), so a stored credential is always one a 1-token call with tools already
+// accepted.
+const llmCredentialPutSchema = z.object({
+  api_key: z.string().min(20).max(400),
+  model: z.string().min(1).max(100),
+  base_url: z.string().max(500).optional(),
+  label: z.string().max(80).optional(),
+});
+
+/** User-facing text for a failed verify probe. The probe's message is already
+ *  sanitized in src/llm-credentials.ts (key material stripped, bounded);
+ *  this only prefixes phrasing. */
+function llmVerifyErrorText(v: VerifyLlmCredentialResult & { ok: false }): string {
+  switch (v.reason) {
+    case "unauthorized":
+      return `The endpoint rejected this API key (${v.message}).`;
+    case "model_rejected":
+      return `The endpoint rejected this model (${v.message}).`;
+    case "bad_endpoint":
+      return `The endpoint did not accept the request (${v.message}).`;
+    case "timeout":
+      return "The endpoint timed out — try again.";
+    default:
+      return `Could not verify the key against the endpoint (${v.message}).`;
+  }
+}
+
+api.get("/me/llm-credential", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage your chat model." });
+    return;
+  }
+  // Metadata only — the stored key material can never appear here (the
+  // store never returns ciphertext, and decryption never runs on GET).
+  const credential = await getLlmCredential(seller.id);
+  res.set("Cache-Control", "no-store");
+  res.json({ byo_enabled: byoMasterKeyConfigured(), credential });
+}));
+
+api.put("/me/llm-credential", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage your chat model." });
+    return;
+  }
+  if (!llmCredentialLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/llm-credential" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many changes — try again later." });
+    return;
+  }
+  // Fail closed the same way the store does: no master key, no feature.
+  if (!byoMasterKeyConfigured()) {
+    res.status(503).json({ error: "This server does not accept custom model keys." });
+    return;
+  }
+  const parsed = llmCredentialPutSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Need api_key (20–400 chars), model (1–100), optional base_url and label." });
+    return;
+  }
+  const { api_key, model, base_url, label } = parsed.data;
+  // Tool-calling gate (spec §4): chat needs tools, so only tool-capable
+  // models may be stored. The model string is the seller's own input echoed
+  // back to them only, never logged.
+  if (!modelAllowedForByo(model)) {
+    res.status(400).json({ error: `Model "${model}" is not on this server's list of tool-calling models.` });
+    return;
+  }
+  const completionsUrl = normalizeBaseUrl(base_url);
+  if (!completionsUrl) {
+    res.status(400).json({ error: "base_url must be an https URL of an OpenAI-compatible endpoint (or omitted)." });
+    return;
+  }
+  // Verify-before-write: a key the endpoint rejects (or an endpoint without
+  // tool support) is never stored. Errors carry sanitized provider text only.
+  const verify = await verifyLlmCredential({ apiKey: api_key, completionsUrl, model });
+  if (!verify.ok) {
+    res.status(400).json({ error: llmVerifyErrorText(verify) });
+    return;
+  }
+  const credential = await upsertLlmCredential(seller.id, {
+    label: label?.trim() ?? "",
+    model,
+    baseUrl: base_url?.trim() ? base_url.trim() : null,
+    apiKey: api_key,
+  });
+  res.set("Cache-Control", "no-store");
+  res.json({ credential });
+}));
+
+api.delete("/me/llm-credential", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage your chat model." });
+    return;
+  }
+  // Works even with no master key (users can always remove what they stored).
+  await deleteLlmCredential(seller.id);
+  res.set("Cache-Control", "no-store");
+  res.json({ ok: true });
 }));
 
 // --- item images (browser upload) -------------------------------------------

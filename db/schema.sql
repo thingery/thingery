@@ -339,3 +339,30 @@ CREATE TABLE IF NOT EXISTS seller_upload_quota (
   bytes     BIGINT NOT NULL DEFAULT 0,
   PRIMARY KEY (seller_id, day)
 );
+
+-- ---------------------------------------------------------------------------
+-- Bring-your-own LLM credentials (spec THI-186 Phase 1 / THI-189 §1).
+-- Unlike thg_ seller keys (hash-only, THI-114), the server must PRESENT these
+-- secrets to an LLM provider — so they are stored encrypted at rest with
+-- AES-256-GCM under a dedicated master key env var (LLM_CREDENTIALS_MASTER_KEY,
+-- 32 bytes hex; src/llm-credentials.ts). Ciphertext format 'v1.<base64url(iv|tag|ct)>'
+-- with AAD = sellerId:kind so a row swapped between sellers fails GCM auth.
+-- key_fingerprint: first 12 hex of HMAC-SHA256(master, key) — display only,
+-- never reversible, never a lookup key. kind='api_key' in Phase 1; OAuth
+-- access/refresh tokens (THI-187) extend the same table via new kinds —
+-- the CHECK is widened then, never narrowed. Exactly one live api_key
+-- credential per seller (partial unique index; rotate = upsert-replace).
+CREATE TABLE IF NOT EXISTS llm_credentials (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  seller_id       UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+  kind            TEXT NOT NULL DEFAULT 'api_key' CHECK (kind IN ('api_key')),
+  label           TEXT NOT NULL DEFAULT '',
+  base_url        TEXT,
+  model           TEXT NOT NULL,
+  ciphertext      TEXT NOT NULL,
+  key_fingerprint TEXT NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS llm_credentials_seller_api_key_idx
+  ON llm_credentials (seller_id) WHERE kind = 'api_key';

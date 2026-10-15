@@ -24,8 +24,15 @@ tags = ["secret", "thingery"]
 # credential — but the generic-api-key rule flags it, and because CI scans all
 # refs, one branch carrying it fails the gitleaks job for every open PR.
 # Scoped to this exact string so any other occurrence still fails the scan.
+#
+# False positive (2026-10-15): tests/llm-credentials.test.ts feeds the BYO
+# verify-probe functions with fixture keys ("byo_test_key_…", e.g.
+# byo_test_key_verify_ok — 3.7 Shannon entropy trips generic-api-key).
+# The whole fixture namespace is allowlisted: no real provider key starts
+# with byo_test_, and the store tests assert those exact strings round-trip.
 [allowlist]
 description = "Known test fixtures (fake credentials used by tests)"
 regexes = [
   '''definitely-wrong-hunter2''',
+  '''byo_test_[a-z0-9_]+''',
 ]

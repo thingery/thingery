@@ -42,6 +42,12 @@ services:
       LLM_API_URL: ${LLM_API_URL:-https://api.openai.com/v1/chat/completions}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      # Bring-your-own LLM keys (spec THI-186 Phase 1 / THI-189): dedicated
+      # AES-256-GCM master key for stored seller credentials (openssl rand
+      # -hex 32). Unset → BYO disabled server-wide (fail closed). Lives only
+      # in the VPS .env, never in this repo.
+      LLM_CREDENTIALS_MASTER_KEY: ${LLM_CREDENTIALS_MASTER_KEY:-}
+      LLM_BYO_ALLOWED_MODELS: ${LLM_BYO_ALLOWED_MODELS:-}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}

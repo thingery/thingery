@@ -104,11 +104,13 @@ pre-trusted. Mitigations in code today (`src/oauth.ts`, `src/oauth-sweep.ts`):
 - The consent screen itself is the human gate (ADR 0002): the grant is disclosed in
   plain words — read and manage your listings and orders, acting as you.
 
-Hardening landing in THI-220: reject reserved names (`ChatGPT`, `OpenAI`, `Claude`,
-`Thingery`, …) at registration, and display the stored `client_uri` on the consent page
-as provenance so a spoofed name can't also spoof its origin. Residual risk after that
-fix: generic lookalike names ("ChatGPT Assistant Pro") — inherent to every
-open-registration authorization server; the consent screen stays the gate.
+Shipped with THI-220 (PR #109): registration rejects reserved brand names — `ChatGPT`,
+`OpenAI`, `Claude`, `Anthropic`, `Gemini`, `Google`, `Copilot`, `Microsoft`, `Thingery` —
+matched as normalized substrings with invisible-format-character folding (`src/oauth.ts`
+`RESERVED_CLIENT_NAME_BRANDS`), and the consent page displays the stored `client_uri`
+as provenance so a spoofed name can't also spoof its origin. Residual risk: generic
+lookalike names ("AI Shopping Assistant") — inherent to every open-registration
+authorization server; the consent screen stays the gate.
 
 **Refresh tokens rotate-or-die — a deliberate support-surface tradeoff.** Refresh tokens
 are one-time-use and rotate on every exchange; any replay of a rotated token — including

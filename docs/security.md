@@ -119,14 +119,21 @@ deanonymize buyers who open item pages — host control is accepted residual ris
 external image URLs). *Lens: API4:2023, input validation, least
 privilege.*
 
-**Key leakage.** API keys are stored **plaintext** in `sellers.api_key` (the schema's own
+**Key leakage.** ~~API keys are stored **plaintext** in `sellers.api_key` (the schema's own
 comment says "store hashed in production"), returned by `/api/me` on every page load of
 the account page, included in login/signup responses, and readable by every `SELECT` in
-`src/auth.ts`. Nightly backups (`docs/deploy-vps.md` §4) are unencrypted `pg_dump`s of
-all keys, password hashes, and emails sitting 14 days in `/var/backups` on the same VPS.
-A backup or DB read is a full compromise of every seller. There is also no key rotation
-or regeneration flow, and no way to revoke a session (see H2). *Lens: Cryptographic
-Failures (A02:2021), secrets management.*
+`src/auth.ts`. A backup or DB read is a full compromise of every seller. There is also
+no key rotation or regeneration flow, and no way to revoke a session (see H2).~~
+(Fixed in two phases — PR #67 / THI-114 expand: `api_key_hash` column, hash-only
+lookup, show-once key at signup/regeneration, `POST /api/me/api-key` rotation, epoch
+bump session revocation; PR #91 / THI-158 contract: the `sellers.api_key` column is
+dropped from the schema with a guarded hash-before-drop backfill, so a database read
+no longer exposes any key material and a lost key can never be recovered from the DB.
+Keys are now handed out exactly once — at signup and at regeneration; `/api/me` and
+login responses carry no key. *Nightly backups are age-encrypted since THI-116*
+(§4); pre-2026-10-15 backups still contain the old plaintext column until the 14-day
+retention window retires them — see the restore-drill warning in
+`docs/deploy-vps.md`.) *Lens: Cryptographic Failures (A02:2021), secrets management.*
 
 ### 3.2 STRIDE — MCP endpoint and API surface
 
@@ -304,8 +311,14 @@ worst-case damage, "Exploitability" is how practical the attack is today.
      fast hash is appropriate; no salt needed for random tokens). Show-once semantics at
      creation + a "regenerate key" endpoint that revokes the old key.~~ **Done — shipped
      with PR #67 / THI-114** (expand phase: `api_key_hash` + backfill, hash-first dual-read,
-     show-once key, `POST /api/me/api-key`; dropping the legacy plaintext column is a
-     separate contract PR after release + one clean nightly backup). Key revocation on
+     show-once key, `POST /api/me/api-key`; **the contract phase then shipped with PR #91 /
+     THI-158**: `db/schema.sql` drops `sellers.api_key` via a guarded hash-before-drop
+     backfill — pre-expand databases migrate with zero keys invalidated (Security review
+     R1; regression-tested in `tests/api-key-contract.test.ts`) — the dual-read plaintext
+     fallback is gone, and login no longer returns the key (THI-125 verdict: show-once is
+     signup + regenerate only). The drop's deploy gate was a verified clean encrypted
+     nightly backup (2026-10-15 03:00 UTC, THI-158); post-drop rollback is
+     restore-from-backup). Key revocation on
      rotate is atomic — the old key fails lookup the moment the UPDATE commits. The paired
      session revocation (the rotate bumps `sellers.session_epoch`) is **eventual, not
      zero-grace**: `sellerFromSession` reads the epoch at SELECT time, so a bump committing

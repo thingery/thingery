@@ -274,6 +274,18 @@ so production cannot be touched. Decryption happens **on the operator's machine*
 (private key from the password manager); plaintext SQL streams over SSH straight
 into the scratch container and is never written to the VPS disk.
 
+> **Pre-2026-10-15 backups contain plaintext API keys (THI-158).** The
+> `sellers.api_key` column (plaintext keys) was dropped from the schema on
+> 2026-10-15; the first nightly backup taken after the drop is
+> `thingery-2026-10-15.sql.gz.age`. Any restore from an **older** backup puts
+> plaintext keys back into the restored database — the scratch container from a
+> drill of an old backup therefore holds every seller's key, and such a restored
+> database must never be exposed or promoted to production. Drills should use
+> post-drop backups whenever one exists; restoring an older backup is allowed
+> only with that same care (delete the scratch container immediately after,
+> exactly as step 7 requires). This warning retires with the 14-day retention
+> window (last plaintext-keyed backup expires 2026-10-29).
+
 1. On the VPS: pick the latest backup and record its sha256:
 
    ```bash

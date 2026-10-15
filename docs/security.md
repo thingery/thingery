@@ -78,6 +78,49 @@ Boundary-by-boundary:
    replay protection (timestamp window), and put webhooks behind their own rate limit.
    No webhook endpoint may trust source-IP allowlisting alone.
 
+## 2a. ChatGPT-directory trust boundary — OAuth clients at scale
+
+Listing Thingery in the ChatGPT connector directory adds a new actor class on boundary 4:
+**directory-scale OAuth clients** — ChatGPT itself and every MCP client that learns the
+flow. Two properties of that boundary deserve their own threat modeling.
+
+**Open dynamic client registration is a standing attack surface.** Anyone can
+`POST /oauth/register` (RFC 7591) and get a working `client_id` — no pre-approval
+(`src/oauth.ts`). The threat class this buys is *authorization-request phishing*: an
+attacker registers a client with `client_name: "ChatGPT"` (the name is attacker-chosen),
+sends a victim an `/oauth/authorize?client_id=…` link, and the consent page renders the
+spoofed name as trusted-looking text. The attacker holds the PKCE verifier, so one click
+on Allow mints a live token with the full `mcp` scope — complete account agency over
+that user's listings and orders. Directory scale amplifies the class: users are being
+trained to expect an "Authorize ChatGPT" screen, so a lookalike screen arrives
+pre-trusted. Mitigations in code today (`src/oauth.ts`, `src/oauth-sweep.ts`):
+
+- DCR is rate-limited (10 registrations/hour/IP), so bulk registration is expensive.
+- Registrations no one ever authorizes are swept after 7 days (`oauth-sweep.ts` rule 4) —
+  an unused phishing client has a short shelf life.
+- The consent page renders `client_name` as escaped text only (no HTML injection from
+  registration metadata), and redirect URIs are matched strictly against the
+  registration.
+- The consent screen itself is the human gate (ADR 0002): the grant is disclosed in
+  plain words — read and manage your listings and orders, acting as you.
+
+Hardening landing in THI-220: reject reserved names (`ChatGPT`, `OpenAI`, `Claude`,
+`Thingery`, …) at registration, and display the stored `client_uri` on the consent page
+as provenance so a spoofed name can't also spoof its origin. Residual risk after that
+fix: generic lookalike names ("ChatGPT Assistant Pro") — inherent to every
+open-registration authorization server; the consent screen stays the gate.
+
+**Refresh tokens rotate-or-die — a deliberate support-surface tradeoff.** Refresh tokens
+are one-time-use and rotate on every exchange; any replay of a rotated token — including
+a wrong-client presentation — revokes the entire grant family (`src/oauth.ts` refresh
+replay handling). This is the OAuth 2.1 BCP position and the correct containment for a
+stolen refresh token. The tradeoff: at directory scale, a third-party client quirk (a
+retry after a lost response, or a crash between receive-and-persist inside the client's
+session store) is indistinguishable from theft and permanently disconnects a legitimate
+user. We accept that tradeoff; `refresh_replay` security events are the support signal
+to watch. Optional future hardening if disconnect complaints spike: a short (~30 s)
+grace window for just-rotated tokens instead of an instant family kill.
+
 ## 3. Threat model
 
 ### 3.1 Named risks

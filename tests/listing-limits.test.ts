@@ -89,7 +89,7 @@ describe.skipIf(!available)("createItem velocity caps (DB)", () => {
    *  by parallel test files. */
   async function seedSeller(email: string): Promise<SellerRow> {
     const { rows } = await client.query<SellerRow>(
-      `INSERT INTO sellers (api_key, display_name, email)
+      `INSERT INTO sellers (api_key_hash, display_name, email)
        VALUES ($1, $2, $3) RETURNING id, display_name`,
       [`thg_thi113_${email}`, email, email],
     );
@@ -206,7 +206,7 @@ describe.skipIf(!available)("listing limit error surfaces (DB)", () => {
 
   async function sellerAtCap(email: string): Promise<SellerRow> {
     const { rows } = await client.query<SellerRow>(
-      `INSERT INTO sellers (api_key, display_name, email)
+      `INSERT INTO sellers (api_key_hash, display_name, email)
        VALUES ($1, $2, $3) RETURNING id, display_name`,
       [`thg_thi113_${email}`, email, email],
     );

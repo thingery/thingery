@@ -258,7 +258,7 @@ describe.skipIf(!available)("image re-encode pipeline (THI-156 rev 2)", () => {
     n += 1;
     const tag = `thi156-${n}`;
     const seller = await db.query(
-      "INSERT INTO sellers (api_key, display_name, email) VALUES ($1, $2, $3) RETURNING id",
+      "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1, $2, $3) RETURNING id",
       [`thg_${tag}`, tag, `${tag}@t.dev`],
     );
     const item = await db.query(

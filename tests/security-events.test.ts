@@ -221,7 +221,7 @@ describe("call sites emit their events (THI-112)", () => {
 // log listing_write/create/rejected before createItem ever runs.
 
 describe("create-time validation rejects emit listing_write/create/rejected (THI-133)", () => {
-  const seller: SellerRow = { id: "seller-create-rej", api_key: "thg_test", display_name: "Tester" };
+  const seller: SellerRow = { id: "seller-create-rej", display_name: "Tester" };
   const sneakersRow = {
     name: "sneakers",
     description: "",

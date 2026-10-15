@@ -1,8 +1,12 @@
-// THI-114 expand-phase regression tests (security doc §6 H2.1): sha256
-// hash-at-rest round-trip, plaintext fallback for un-migrated rows, the
-// schema backfill, show-once key semantics on /api/*, and the regenerate
-// endpoint (rotation revokes the old key atomically). Requires Postgres;
-// skips otherwise.
+// THI-114 (expand) + THI-158 (contract) regression tests (security doc §6
+// H2.1): sha256 hash-only round-trip (the expand-phase plaintext fallback is
+// gone with the column), the contract drop of sellers.api_key, show-once key
+// semantics on /api/* (signup/regenerate — THI-125 verdict: login no longer
+// returns the key), and the regenerate endpoint (rotation revokes the old
+// key atomically). Requires Postgres; skips otherwise.
+//
+// The pre-expand → contract migration itself is covered by
+// tests/api-key-contract.test.ts on a throwaway schema.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import express from "express";
@@ -47,7 +51,7 @@ function sessionCookieFrom(res: Response): string {
   return part!.trim().split(";")[0];
 }
 
-describe.skipIf(!available)("API key hash at rest (THI-114)", () => {
+describe.skipIf(!available)("API key hash at rest (THI-114 + THI-158)", () => {
   let db: pg.Client;
   const runTag = crypto.randomBytes(4).toString("hex");
 
@@ -60,28 +64,23 @@ describe.skipIf(!available)("API key hash at rest (THI-114)", () => {
     await db.end();
   });
 
-  it("backfills api_key_hash for existing plaintext rows (expand migration)", async () => {
-    // A pre-THI-114 row: plaintext set, hash absent.
-    const key = `thg_backfill_${runTag}`;
-    const { rows } = await db.query<{ id: string }>(
-      `INSERT INTO sellers (api_key, display_name) VALUES ($1, $2) RETURNING id`,
-      [key, "Backfill Test"],
-    );
-    // Re-applying db/schema.sql (idempotent) must run the backfill line.
+  it("drops sellers.api_key — steady-state schema re-apply (THI-158 contract)", async () => {
+    // Re-applying db/schema.sql on the shared test database (idempotent, the
+    // same thing scripts/migrate.ts runs) must migrate it to the contract
+    // state: plaintext column gone, hash column the only key storage.
     await pool.query(readFileSync(schemaPath, "utf8"));
-    const after = await db.query<{ api_key_hash: string | null }>(
-      `SELECT api_key_hash FROM sellers WHERE id = $1`,
-      [rows[0].id],
+    const cols = await db.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'sellers' AND column_name LIKE 'api_key%'`,
     );
-    // The Postgres-side digest must equal the Node-side lookup hash.
-    expect(after.rows[0].api_key_hash).toBe(apiKeyHash(key));
+    expect(cols.rows.map((r) => r.column_name).sort()).toEqual(["api_key_hash"]);
   });
 
-  it("resolves a migrated key by hash (round-trip) and rejects a wrong key", async () => {
+  it("resolves a key by hash (round-trip) and rejects a wrong key", async () => {
     const key = `thg_hashed_${runTag}`;
     await db.query(
-      `INSERT INTO sellers (api_key, api_key_hash, display_name) VALUES ($1, $2, $3)`,
-      [key, apiKeyHash(key), "Hashed Test"],
+      `INSERT INTO sellers (api_key_hash, display_name) VALUES ($1, $2)`,
+      [apiKeyHash(key), "Hashed Test"],
     );
     const seller = await sellerFromApiKey(key);
     expect(seller?.display_name).toBe("Hashed Test");
@@ -89,14 +88,17 @@ describe.skipIf(!available)("API key hash at rest (THI-114)", () => {
     expect(await sellerFromApiKey(`thg_wrong_${runTag}`)).toBeNull();
   });
 
-  it("falls back to plaintext for un-migrated rows (dual-read window)", async () => {
-    const key = `thg_legacy_${runTag}`;
-    await db.query(
-      `INSERT INTO sellers (api_key, display_name) VALUES ($1, $2)`,
-      [key, "Legacy Test"],
+  it("has no plaintext fallback — hash-only lookup (contract)", async () => {
+    // The expand-phase dual-read window is closed: a key whose hash isn't
+    // stored can never authenticate, because there is no plaintext column
+    // left to fall back to.
+    const key = `thg_nofallback_${runTag}`;
+    expect(await sellerFromApiKey(key)).toBeNull();
+    const cols = await db.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'sellers' AND column_name = 'api_key'`,
     );
-    const seller = await sellerFromApiKey(key);
-    expect(seller?.display_name).toBe("Legacy Test");
+    expect(cols.rows).toEqual([]);
   });
 
   describe("HTTP surface", () => {
@@ -185,16 +187,19 @@ describe.skipIf(!available)("API key hash at rest (THI-114)", () => {
       expect(((await fresh.json()) as { seller: { name: string } }).seller?.name).toBe("Key Tester");
     });
 
-    it("login still returns the key (show-once moment #2)", async () => {
+    it("login no longer returns the key (THI-125 verdict / THI-158 contract)", async () => {
       const login = await fetch(`${base}/api/login`, {
         method: "POST",
         headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.52" },
         body: JSON.stringify({ email, password: "password123" }),
       });
       expect(login.status).toBe(200);
-      const body = (await login.json()) as { seller: { api_key: string } };
-      expect(body.seller.api_key).toMatch(/^thg_/);
-      expect(await sellerFromApiKey(body.seller.api_key)).not.toBeNull();
+      // Login authenticates and returns name+email only — the key is show-once
+      // (signup/regenerate), and the plaintext column it used to be read from
+      // no longer exists.
+      const body = (await login.json()) as { seller: { name?: string; email?: string; api_key?: string } };
+      expect(body.seller).toEqual({ name: "Key Tester", email });
+      expect(body.seller).not.toHaveProperty("api_key");
     });
 
     it("rotation is rate-limited per seller", async () => {

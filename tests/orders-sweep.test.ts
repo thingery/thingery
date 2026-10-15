@@ -102,7 +102,7 @@ describe.skipIf(!available)("deadline sweeps (DB)", () => {
     const s = `sws${n}`;
     const b = `swb${n}`;
     await db.query(
-      "INSERT INTO sellers (api_key, display_name, email) VALUES ($1, $2, $3), ($4, $5, $6)",
+      "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1, $2, $3), ($4, $5, $6)",
       [`thg_${s}`, s, `${s}@t.dev`, `thg_${b}`, b, `${b}@t.dev`],
     );
     const item = await db.query(

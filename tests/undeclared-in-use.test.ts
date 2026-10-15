@@ -68,7 +68,7 @@ describe.skipIf(!available)("describe_category undeclared_in_use (DB)", () => {
       "TRUNCATE order_events, webhook_events, orders, items, sellers RESTART IDENTITY CASCADE",
     );
     await client.query(
-      `INSERT INTO sellers (api_key, display_name, email) VALUES
+      `INSERT INTO sellers (api_key_hash, display_name, email) VALUES
         ('thg_88_a', 'dc-a', 'dc-a@t.dev'),
         ('thg_88_b', 'dc-b', 'dc-b@t.dev')`,
     );
@@ -108,7 +108,7 @@ describe.skipIf(!available)("describe_category undeclared_in_use (DB)", () => {
     await seed("dc-b@t.dev", "thi88clean", { size_eu: 45, colorway: "blue" });
 
     ({ rows: [sellerA] } = await client.query<SellerRow>(
-      "SELECT id, api_key, display_name FROM sellers WHERE email = 'dc-a@t.dev'",
+      "SELECT id, display_name FROM sellers WHERE email = 'dc-a@t.dev'",
     ));
 
     registerTools(

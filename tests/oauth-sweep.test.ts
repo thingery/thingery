@@ -37,7 +37,7 @@ describe.skipIf(!available)("oauth retention sweeps (§4.5)", () => {
     await db.connect();
 
     const seller = await db.query<{ id: string }>(
-      `INSERT INTO sellers (api_key, display_name) VALUES ($1, $2) RETURNING id`,
+      `INSERT INTO sellers (api_key_hash, display_name) VALUES ($1, $2) RETURNING id`,
       [`thg_sweep_${runTag}`, "Sweep Tester"],
     );
     sellerId = seller.rows[0].id;

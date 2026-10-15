@@ -41,7 +41,7 @@ describe.skipIf(!available)("session epoch revocation (THI-115)", () => {
     // Tolerate a local DB that hasn't re-run db/schema.sql yet.
     await db.query(`ALTER TABLE sellers ADD COLUMN IF NOT EXISTS session_epoch INT NOT NULL DEFAULT 0`);
     const { rows } = await db.query<{ id: string }>(
-      `INSERT INTO sellers (api_key, display_name) VALUES ($1, $2) RETURNING id`,
+      `INSERT INTO sellers (api_key_hash, display_name) VALUES ($1, $2) RETURNING id`,
       [`thg_${crypto.randomBytes(24).toString("base64url")}`, "thi115-epoch-test"],
     );
     sellerId = rows[0].id;

@@ -226,8 +226,8 @@ function expectAllToolMessagesWrapped(bodies: Array<{ messages: Array<{ role: st
 
 describe.skipIf(!available)("chat confirmation gate (DB)", () => {
   let client: pg.Client;
-  const sellerA = { id: "11111111-1111-1111-1111-111111111111", api_key: "thg_chat_a", display_name: "chat-a" } as SellerRow;
-  const sellerB = { id: "22222222-2222-2222-2222-222222222222", api_key: "thg_chat_b", display_name: "chat-b" } as SellerRow;
+  const sellerA = { id: "11111111-1111-1111-1111-111111111111", display_name: "chat-a" } as SellerRow;
+  const sellerB = { id: "22222222-2222-2222-2222-222222222222", display_name: "chat-b" } as SellerRow;
 
   async function statusOf(id: string): Promise<{ status: string; price_cents: number; title: string }> {
     const { rows } = await client.query("SELECT status, price_cents, title FROM items WHERE id = $1", [id]);
@@ -242,7 +242,7 @@ describe.skipIf(!available)("chat confirmation gate (DB)", () => {
     await client.query(readFileSync(schemaPath, "utf8"));
     await client.query("TRUNCATE order_events, webhook_events, orders, items, sellers RESTART IDENTITY CASCADE");
     await client.query(
-      `INSERT INTO sellers (id, api_key, display_name, email) VALUES
+      `INSERT INTO sellers (id, api_key_hash, display_name, email) VALUES
         ('11111111-1111-1111-1111-111111111111', 'thg_chat_a', 'chat-a', 'chat-a@t.dev'),
         ('22222222-2222-2222-2222-222222222222', 'thg_chat_b', 'chat-b', 'chat-b@t.dev')`,
     );

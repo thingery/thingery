@@ -57,7 +57,7 @@ describe.skipIf(!available)("oauth token + revoke endpoints (HTTP)", () => {
 
     const runTag = crypto.randomBytes(4).toString("hex");
     const seller = await db.query<{ id: string }>(
-      `INSERT INTO sellers (api_key, display_name, email, password_hash)
+      `INSERT INTO sellers (api_key_hash, display_name, email, password_hash)
        VALUES ($1, $2, $3, $4) RETURNING id`,
       [`thg_test_${runTag}`, "Token Tester", `token-test-${runTag}@example.com`, "x"],
     );

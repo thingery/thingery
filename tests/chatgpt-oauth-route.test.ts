@@ -352,6 +352,22 @@ describe.skipIf(!available)("Sign in with ChatGPT OAuth routes (DB + HTTP + stub
     }
   });
 
+  it("CHATGPT_OAUTH_DEFAULT_MODEL absent from the catalog falls back to the first list entry (THI-210 N1)", async () => {
+    const { sellerId, cookie } = await seed();
+    process.env.CHATGPT_OAUTH_DEFAULT_MODEL = "chatgpt_test_model_not_in_catalog";
+    try {
+      const { cb, tx } = await startFlow(cookie);
+      expect(await callback(cb, cookie, tx)).toBe("/login.html?chatgpt=connected");
+      const stored = await db.query<{ model: string }>(
+        "SELECT model FROM llm_credentials WHERE seller_id = $1 AND kind = 'chatgpt_oauth'",
+        [sellerId],
+      );
+      expect(stored.rows[0].model).toBe(STUB_DEFAULT_MODEL);
+    } finally {
+      delete process.env.CHATGPT_OAUTH_DEFAULT_MODEL;
+    }
+  });
+
   it("redirect_uri defaults to PUBLIC_BASE_URL when the explicit env is unset", async () => {
     const { cookie } = await seed();
     const had = process.env.CHATGPT_OAUTH_REDIRECT_URI;

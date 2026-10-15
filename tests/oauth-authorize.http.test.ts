@@ -89,9 +89,9 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     cookie = `${SESSION_COOKIE}=${encodeURIComponent(signSession(sellerId))}`;
 
     await db.query(
-      `INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ($1, $2, $3)
-       ON CONFLICT (client_id) DO UPDATE SET client_name = EXCLUDED.client_name, redirect_uris = EXCLUDED.redirect_uris`,
-      ["thgc_authtest", "Test Inspector", [REDIRECT_URI]],
+      `INSERT INTO oauth_clients (client_id, client_name, client_uri, redirect_uris) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (client_id) DO UPDATE SET client_name = EXCLUDED.client_name, client_uri = EXCLUDED.client_uri, redirect_uris = EXCLUDED.redirect_uris`,
+      ["thgc_authtest", "Test Inspector", "https://inspector.example.com", [REDIRECT_URI]],
     );
     await db.query(
       `INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES ($1, $2, $3)
@@ -136,6 +136,21 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     expect(form.client_id).toBe("thgc_authtest");
     expect(form.csrf).toBeTruthy();
     expect(form.nonce).toBeTruthy();
+  });
+
+  it("renders the stored client_uri as provenance next to client_name — text only, never a link (THI-220 N1)", async () => {
+    const res = await fetch(`${baseUrl}${authorizeUrl()}`, { headers: { cookie } });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // Provenance line: escaped text beside the application name.
+    expect(html).toContain("<strong>Test Inspector</strong> (https://inspector.example.com)");
+    // Spec §5 row 8: client_uri is stored as data and never rendered as a link.
+    expect(html).not.toMatch(/<a[^>]*inspector\.example\.com/);
+    // Clients registered without a client_uri render no provenance parenthesis.
+    const noUri = await fetch(`${baseUrl}${authorizeUrl({ client_id: "thgc_xss" })}`, { headers: { cookie } });
+    const noUriHtml = await noUri.text();
+    expect(noUriHtml).toContain("&lt;/script&gt;</strong> wants to connect"); // name flows straight into the sentence
+    expect(noUriHtml).not.toContain("inspector.example.com");
   });
 
   it("HTML-escapes attacker-supplied client names (DCR text)", async () => {

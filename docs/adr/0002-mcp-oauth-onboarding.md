@@ -83,4 +83,8 @@ no new dependencies):
 - Multi-instance horizontal scale, if ever needed, can add JWT access tokens additively
   (refresh stays DB-backed); nothing in this decision precludes it.
 - Open DCR accepts spam registrations; the 7-day never-authorized sweep and the consent
-  screen bound the cost (residual risk documented in spec §5).
+  screen bound the cost (residual risk documented in spec §5). The THI-214 N1 follow-up
+  (THI-220) added a reserved-brand name blocklist at registration (normalized substring
+  match: case/whitespace/zero-width/homoglyph fold) and renders the stored `client_uri`
+  on the consent page as provenance — escaped text, never a link. Generic lookalike
+  brand names remain a documented residual risk: the consent screen is the gate.

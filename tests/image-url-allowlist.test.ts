@@ -18,6 +18,7 @@ import type { Server } from "node:http";
 import crypto from "node:crypto";
 import pg from "pg";
 import { z } from "zod";
+import { apiKeyHash } from "../src/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerTools } from "../src/tools.js";
@@ -172,14 +173,14 @@ describe.skipIf(!available)("/mcp body limits for add_item_image (HTTP)", () => 
     await db.connect();
     apiKey = `thg_thi111_${crypto.randomBytes(4).toString("hex")}`;
     await db.query(
-      `INSERT INTO sellers (api_key, display_name, email, password_hash)
+      `INSERT INTO sellers (api_key_hash, display_name, email, password_hash)
        VALUES ($1, $2, $3, 'x')`,
-      [apiKey, "THI-111 Body Cap", `thi111-${Date.now()}@example.com`],
+      [apiKeyHash(apiKey), "THI-111 Body Cap", `thi111-${Date.now()}@example.com`],
     );
   });
 
   afterAll(async () => {
-    await db.query(`DELETE FROM sellers WHERE api_key = $1`, [apiKey]);
+    await db.query(`DELETE FROM sellers WHERE api_key_hash = $1`, [apiKeyHash(apiKey)]);
     await db.end();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });

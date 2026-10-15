@@ -109,69 +109,81 @@ same transaction once per item id — no `WHERE title ILIKE` shortcuts on the `U
 ## 3. Disable a seller without deleting their data
 
 Two credentials can bring a seller back: their `thg_...` API key, and — for sellers who
-signed up with email + password — their account login, which also **displays the current
-API key** on the account page (`GET /api/me`). **Rotating the key alone only disables
-key-only sellers**: an account holder simply logs in again and reads the fresh key, so
-for them the password must be scrambled in the same transaction. The single `UPDATE`
-below does both and is safe for key-only sellers too (a scrambled password on a seller
-with no email can never match anything).
+signed up with email + password — their account login, which can **regenerate a fresh
+key** on the account page (`POST /api/me/api-key`, THI-114). **Rotating the key alone
+only disables key-only sellers**: an account holder simply logs in again and regenerates
+a key, so for them the password must be scrambled in the same transaction. The single
+`UPDATE` below does both and is safe for key-only sellers too (a scrambled password on
+a seller with no email can never match anything).
 
 What this disables: the seller's API key **and** their password, immediately — no data
 is deleted and existing listings stay searchable (take them down individually with
-step 2 if needed). What it does **not** do: kill an already-active browser session —
-see [Residual risk: live sessions](#residual-risk-live-sessions) below.
+step 2 if needed). Since THI-115 the same `UPDATE` bumps `sellers.session_epoch`, so
+already-active browser sessions die with it too (the same revocation the app's own
+key-regeneration endpoint applies) — see [Residual risk: live
+sessions](#residual-risk-live-sessions) below.
 
-First find the seller and copy their `id` (keys are masked on purpose — never print
-full `thg_...` values to a terminal that may be shared, screenshotted, or in scrollback):
+First find the seller and copy their `id`. Keys are stored **only as sha256 hashes**
+(`sellers.api_key_hash`, THI-114/THI-158 — the plaintext column no longer exists), so
+what you see is a non-secret fingerprint, never a usable credential; never paste full
+`thg_...` values into a terminal that may be shared, screenshotted, or in scrollback:
 
 ```sql
 SELECT id, display_name, email,
        password_hash IS NOT NULL AS has_account,
-       left(api_key, 12) || '…' AS api_key_prefix
+       left(api_key_hash, 8) || '…' AS key_fingerprint,
+       session_epoch
   FROM sellers
  WHERE display_name ILIKE '%<name fragment>%' OR email ILIKE '%<email fragment>%';
 ```
 
 Then disable their credentials (core Postgres functions only — works on any Postgres 13+;
 the `disabled:` password value fails `verifyPassword` for every password, so login is
-denied):
+denied; the key is rotated to the hash of a random value nobody knows):
 
 ```sql
 BEGIN;
-SELECT id, display_name, password_hash IS NOT NULL AS has_account
+SELECT id, display_name, password_hash IS NOT NULL AS has_account,
+       left(api_key_hash, 8) || '…' AS key_fingerprint, session_epoch
   FROM sellers WHERE id = '<seller-uuid>';
 UPDATE sellers
-   SET api_key = 'thg_rotated_' || replace(gen_random_uuid()::text, '-', '')
-                      || replace(gen_random_uuid()::text, '-', ''),
-       password_hash = 'disabled:' || replace(gen_random_uuid()::text, '-', '')
+   SET api_key_hash = encode(sha256(convert_to(
+         replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', ''),
+         'utf8')), 'hex'),
+       password_hash = 'disabled:' || replace(gen_random_uuid()::text, '-', ''),
+       session_epoch = session_epoch + 1
  WHERE id = '<seller-uuid>';
 SELECT id, display_name,
-       api_key LIKE 'thg_rotated_%' AS key_rotated,
-       password_hash LIKE 'disabled:%' AS password_disabled
+       left(api_key_hash, 8) || '…' AS key_fingerprint,
+       password_hash LIKE 'disabled:%' AS password_disabled,
+       session_epoch
   FROM sellers WHERE id = '<seller-uuid>';
 COMMIT;
 ```
 
-`key_rotated | t` and `password_disabled | t` mean success. The new `thg_rotated_...`
-value is random and known to no one (including you — and you do not need it). There is
-no key-recovery flow (that is [H2](security.md#h2--secrets-at-rest-hash-api-keys-encrypt-backups-wire-prod-secrets-properly)
-work); for a legitimate seller locked out by mistake, the answer is a new account, not
-an un-rotation.
+A **different key fingerprint** than the pre-`UPDATE` select, `password_disabled | t`,
+and `session_epoch` incremented by one mean success. The rotated hash is the sha256 of
+a random value known to no one (including you — and you do not need it). Keys are
+show-once by design (signup / regenerate only, THI-125), and there is no operator-side
+key-recovery flow; for a legitimate seller locked out by mistake, the answer is a new
+account, not an un-rotation.
 
-If your database has the `pgcrypto` extension, `encode(gen_random_bytes(24), 'hex')` is
-an equivalent source of randomness for the key — but remember `gen_random_bytes()` is
-**pgcrypto-only**, not a core function even on Postgres 18 — and keep the
-`password_hash` scramble exactly as above.
+The rotation preimage and the password scramble both use `gen_random_uuid()` because
+it is a core function on every supported Postgres. If your database has the `pgcrypto`
+extension, `encode(gen_random_bytes(24), 'hex')` is an equivalent source of randomness —
+but `gen_random_bytes()` is **pgcrypto-only**, not a core function even on Postgres 18.
 
 ### Residual risk: live sessions
 
-Sessions are stateless HMAC cookies carrying only the seller id, with a 30-day
-lifetime and no per-seller revocation (that is H4/H2 work). A seller with an
-**already logged-in** browser keeps write access after this procedure — image upload
-and chat — and `/api/me` will show them the *new* rotated key. If a live session must
-die now, the only lever today is rotating `SESSION_SECRET` in the VPS `.env` and
-restarting the app, which logs **everyone** out — a leadership call during an
-incident, not a default.
+Session cookies are HMACs over the seller id **and** their `session_epoch` (THI-115).
+The `UPDATE` above bumps the epoch, so every outstanding cookie — including a browser
+logged in right now — fails verification on its next request; the seller cannot read
+the new key, and `/api/me` never returns keys at all (THI-114). The one narrow race
+that remains: a request that already passed the epoch check in-flight when the `UPDATE`
+commits completes on the old epoch (THI-122 finding 2, one-request-wide, approved).
+If a session must die mid-request at any cost, the only stronger lever is rotating
+`SESSION_SECRET` in the VPS `.env` and restarting the app, which logs **everyone** out —
+a leadership call during an incident, not a default.
 
 Verify after the change: an MCP call with the old key returns `unauthorized`, a login
 attempt with the old password fails, and `search_items` still returns their listings.
@@ -199,13 +211,17 @@ account-holder path was exercised for real. Sequence and results:
 - evidence snapshot + restore check into a scratch database (1 seller / 3 items);
 - takedown transaction: `search_items` 3 → 2, `get_item` → `not_found`, row preserved;
 - disable procedure: old password login → 401, old MCP key → `unauthorized`,
-  listings count unchanged, and a pre-existing browser session still valid and shown
-  the *new* rotated key via `/api/me` — the residual risk documented above, observed
-  exactly as described.
+  listings count unchanged, and a pre-existing browser session rejected after the
+  `session_epoch` bump — observed exactly as described.
 
 The transcripts are in the PR that added this file.
 
-Re-test after any schema change to `items.status`, `sellers.api_key`, or the auth lookup
+Re-tested 2026-10-15 against the THI-158 contract schema (hash-only `sellers`:
+`api_key_hash` with no plaintext column): the disable transaction rotates the key
+fingerprint, disables the password, and bumps the epoch exactly as documented above,
+and the old key no longer matches any hash — the procedure is the one now in this file.
+
+Re-test after any schema change to `items.status`, `sellers.api_key_hash`, or the auth lookup
 in `src/auth.ts` (`docs drift` rule: this runbook must describe the code that is actually
 deployed). Rehearse locally with:
 

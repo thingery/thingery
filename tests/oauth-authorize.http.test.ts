@@ -81,7 +81,7 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     await db.connect();
 
     const seller = await db.query<{ id: string }>(
-      `INSERT INTO sellers (api_key, display_name, email, password_hash)
+      `INSERT INTO sellers (api_key_hash, display_name, email, password_hash)
        VALUES ($1, $2, $3, $4) RETURNING id`,
       [`thg_test_${runTag}`, "Authorize Tester", email, "x"],
     );

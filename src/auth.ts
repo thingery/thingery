@@ -14,29 +14,24 @@ export function apiKeyHash(key: string): string {
 }
 
 export async function createSeller(displayName: string, apiKey: string): Promise<SellerRow> {
+  // THI-158 contract: hash-only insert — the plaintext column is gone.
   const { rows } = await pool.query<SellerRow>(
-    `INSERT INTO sellers (api_key, api_key_hash, display_name) VALUES ($1, $2, $3) RETURNING id, display_name`,
-    [apiKey, apiKeyHash(apiKey), displayName],
+    `INSERT INTO sellers (api_key_hash, display_name) VALUES ($1, $2) RETURNING id, display_name`,
+    [apiKeyHash(apiKey), displayName],
   );
   return rows[0];
 }
 
-/** Resolves a seller by API key (THI-114 hash-first dual read). */
+/** Resolves a seller by API key — hash-only lookup (THI-114 expand, THI-158
+ * contract). The expand-phase plaintext fallback was removed together with
+ * the column: a key that has no hash match never authenticates. */
 export async function sellerFromApiKey(key: string): Promise<SellerRow | null> {
   if (!key.startsWith("thg_")) return null;
   const { rows } = await pool.query<SellerRow>(
     `SELECT id, display_name FROM sellers WHERE api_key_hash = $1`,
     [apiKeyHash(key)],
   );
-  if (rows[0]) return rows[0];
-  // Expand-phase fallback (THI-114): a row created between deploy and the
-  // backfill running carries no hash yet — authenticate it by plaintext for
-  // the migration window only. Migrated rows (hash set) never match here.
-  const legacy = await pool.query<SellerRow>(
-    `SELECT id, display_name FROM sellers WHERE api_key = $1 AND api_key_hash IS NULL`,
-    [key],
-  );
-  return legacy.rows[0] ?? null;
+  return rows[0] ?? null;
 }
 
 /**
@@ -309,59 +304,63 @@ export function sessionCookieOptions() {
 
 export interface AccountRow extends SellerRow {
   email: string;
-  /** THI-114 show-once: only signup/login responses ever reveal the key;
-   * AccountRow is the one internal type that still carries it. */
-  api_key: string;
   password_hash: string | null;
   /** Sign-in must mint cookies at the seller's live epoch (spec THI-115 §3). */
   session_epoch: number;
 }
 
+/** Signup result: the account row plus the freshly generated key — the one
+ * show-once moment where the plaintext exists (in memory, never in the DB;
+ * THI-114 + THI-158 contract). */
+export type SignupRow = AccountRow & { api_key: string };
+
 export async function createAccount(
   email: string,
   password: string,
   displayName: string,
-): Promise<AccountRow> {
-  // THI-114: the key is generated here and handed back from this variable —
-  // the row itself never selects plaintext back out of the database.
+): Promise<SignupRow> {
+  // THI-114/THI-158: the key is generated here and handed back exactly once
+  // from this variable — the database stores only its hash.
   const apiKey = newApiKey();
   const { rows } = await pool.query<SellerRow & { email: string; session_epoch: number }>(
-    `INSERT INTO sellers (api_key, api_key_hash, display_name, email, password_hash)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO sellers (api_key_hash, display_name, email, password_hash)
+     VALUES ($1, $2, $3, $4)
      RETURNING id, display_name, email, session_epoch`,
-    [apiKey, apiKeyHash(apiKey), displayName, email, hashPassword(password)],
+    [apiKeyHash(apiKey), displayName, email, hashPassword(password)],
   );
   return { ...rows[0], api_key: apiKey, password_hash: null };
 }
 
-/** Login path. THI-114: keeps reading the plaintext column deliberately —
- * the login response is one of the two show-once moments for the key. */
+/** Login path. THI-158 contract: hash-only schema — login no longer returns
+ * the key (THI-125 verdict; show-once is signup + regenerate only), so this
+ * row never carries or needs the credential. */
 export async function accountByEmail(email: string): Promise<AccountRow | null> {
   const { rows } = await pool.query<AccountRow>(
-    `SELECT id, api_key, display_name, email, password_hash, session_epoch FROM sellers WHERE email = $1`,
+    `SELECT id, display_name, email, password_hash, session_epoch FROM sellers WHERE email = $1`,
     [email],
   );
   return rows[0] ?? null;
 }
 
 /** Rotates a seller's API key (THI-114) and revokes every outstanding
- * session cookie (THI-115 §3): one atomic UPDATE replaces the hash and the
- * legacy plaintext column together — the old key stops authenticating the
- * instant the row commits — and bumps `session_epoch`, which invalidates all
- * cookies signed at earlier epochs. The regenerate endpoint immediately
- * re-signs the acting session at the returned epoch, so the seller rotating
- * their own key stays logged in while every other session is revoked.
- * Returns the new key (show-once) plus the epoch it was signed at. */
+ * session cookie (THI-115 §3): one atomic UPDATE replaces the hash and bumps
+ * `session_epoch`, which invalidates all cookies signed at earlier epochs —
+ * the old key stops authenticating the instant the row commits. The
+ * regenerate endpoint immediately re-signs the acting session at the
+ * returned epoch, so the seller rotating their own key stays logged in while
+ * every other session is revoked. Returns the new key (show-once) plus the
+ * epoch it was signed at. THI-158: hash-only — there is no plaintext column
+ * to rotate anymore. */
 export async function regenerateApiKey(
   sellerId: string,
 ): Promise<{ apiKey: string; sessionEpoch: number } | null> {
   const apiKey = newApiKey();
   const { rows } = await pool.query<{ session_epoch: number }>(
     `UPDATE sellers
-       SET api_key = $2, api_key_hash = $3, session_epoch = session_epoch + 1
+       SET api_key_hash = $2, session_epoch = session_epoch + 1
      WHERE id = $1
      RETURNING session_epoch`,
-    [sellerId, apiKey, apiKeyHash(apiKey)],
+    [sellerId, apiKeyHash(apiKey)],
   );
   return rows[0] ? { apiKey, sessionEpoch: rows[0].session_epoch } : null;
 }

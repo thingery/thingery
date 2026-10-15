@@ -12,7 +12,7 @@ import {
   signSession,
   verifyPassword,
   SESSION_COOKIE,
-  type AccountRow,
+  type SignupRow,
 } from "./auth.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { addItemImage, MAX_IMAGE_BYTES } from "./images.js";
@@ -76,7 +76,7 @@ api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
   // signups can both pass the pre-check above; the insert loser hits the
   // sellers email unique constraint (pg 23505) and gets the same 409 body
   // as the pre-check. Any other fault rethrows — generic 500, no detail.
-  let account: AccountRow;
+  let account: SignupRow;
   try {
     account = await createAccount(email, parsed.data.password, parsed.data.name ?? email.split("@")[0]);
   } catch (err) {
@@ -121,7 +121,11 @@ api.post("/login", asyncHandler(async (req: Request, res: Response) => {
   // regeneration), a cookie signed at a stale epoch would fail verification
   // immediately — so login always reads the seller's current epoch.
   res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
-  res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
+  // THI-125 verdict / THI-158 contract: login no longer returns the API key —
+  // the key is show-once (signup + regenerate only), and the plaintext column
+  // it used to be read from no longer exists. website/account.js renders the
+  // masked key hint + regenerate path when the field is absent.
+  res.json({ seller: { name: account.display_name, email: account.email } });
 }));
 
 api.post("/logout", (_req: Request, res: Response) => {
@@ -137,13 +141,13 @@ api.get("/me", asyncHandler(async (req: Request, res: Response) => {
     res.json({ seller: null });
     return;
   }
-  // THI-114: no api_key here — the key is show-once (signup/login/regenerate).
+  // THI-114: no api_key here — the key is show-once (signup/regenerate).
   res.json({ seller: { name: seller.display_name } });
 }));
 
 // THI-114 (security doc §6 H2): rotate the seller API key. Session-auth only;
 // the new key is returned exactly once and the old one dies atomically with
-// the UPDATE (both the hash and the legacy plaintext column are replaced).
+// the UPDATE (hash replaced; THI-158 contract — there is no plaintext column).
 // The same UPDATE bumps sellers.session_epoch (THI-114 spec item 3), revoking
 // every outstanding session cookie — the response re-signs the acting session
 // at the new epoch so the seller rotating their own key stays logged in while

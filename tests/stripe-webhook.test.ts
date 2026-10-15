@@ -109,7 +109,7 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     n += 1;
     const s = `ws${n}`, b = `wb${n}`;
     await db.query(
-      "INSERT INTO sellers (api_key, display_name, email) VALUES ($1,$2,$3), ($4,$5,$6)",
+      "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1,$2,$3), ($4,$5,$6)",
       [`thg_${s}`, s, `${s}@t.dev`, `thg_${b}`, b, `${b}@t.dev`],
     );
     const ids = await db.query<{ s: string; b: string }>(

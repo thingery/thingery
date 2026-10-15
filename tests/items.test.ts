@@ -75,7 +75,7 @@ describe.skipIf(!available)("undeclaredKeyUsage (DB)", () => {
     );
     // Three sellers (a, b, c) — enough to cross the 2-seller threshold.
     await client.query(
-      `INSERT INTO sellers (api_key, display_name, email) VALUES
+      `INSERT INTO sellers (api_key_hash, display_name, email) VALUES
         ('thg_uk_a', 'uk-a', 'uk-a@t.dev'),
         ('thg_uk_b', 'uk-b', 'uk-b@t.dev'),
         ('thg_uk_c', 'uk-c', 'uk-c@t.dev')`,

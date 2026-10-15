@@ -86,7 +86,7 @@ describe.skipIf(!available)("get_payout_setup (DB)", () => {
 
   beforeAll(async () => {
     await client.query(
-      "INSERT INTO sellers (api_key, display_name, email) VALUES ('thg_p1', 'p1', 'p1@t.dev')",
+      "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ('thg_p1', 'p1', 'p1@t.dev')",
     );
     sellerId = (await client.query<{ id: string }>("SELECT id FROM sellers WHERE email = 'p1@t.dev'")).rows[0].id;
     registerTools(
@@ -95,7 +95,7 @@ describe.skipIf(!available)("get_payout_setup (DB)", () => {
           registered.set(name, { config, handler });
         },
       } as never,
-      { seller: { id: sellerId, api_key: "thg_p1", display_name: "p1" } },
+      { seller: { id: sellerId, display_name: "p1" } },
     );
   });
 

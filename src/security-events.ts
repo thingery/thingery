@@ -17,8 +17,15 @@
 
 /** Fixed route slugs for rate_limit events (THI-133; "/api/items/:id/images"
  *  added by THI-144 for the upload-route limiters' 429s; "/api/chat" added
- *  by THI-180 for the chat turn limiters + daily-budget pre-flight 429s). */
-export type SecurityEventRoute = "/api/signup" | "/api/login" | "/mcp" | "/api/items/:id/images" | "/api/chat";
+ *  by THI-180 for the chat turn limiters + daily-budget pre-flight 429s;
+ *  "/api/me/llm-credential" added by THI-189 for the BYO credential-route limiter). */
+export type SecurityEventRoute =
+  | "/api/signup"
+  | "/api/login"
+  | "/mcp"
+  | "/api/items/:id/images"
+  | "/api/chat"
+  | "/api/me/llm-credential";
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a

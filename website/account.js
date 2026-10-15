@@ -29,6 +29,7 @@ function showDone(seller) {
   $("auth").hidden = true;
   $("done").hidden = false;
   $("welcome").textContent = `Logged in as ${seller.name}`;
+  loadByo();
 
   const mcpUrl = `${location.origin}/mcp`;
   $("mcp-url").textContent = mcpUrl;
@@ -110,6 +111,94 @@ $("logout").onclick = async (e) => {
   e.preventDefault();
   await fetch("/api/logout", { method: "POST" });
   location.reload();
+};
+
+// --- bring-your-own LLM key (spec THI-186 Phase 1 / THI-189) ---------------
+// GET returns metadata only (label, model, base URL, fingerprint) — the key
+// itself never comes back to the browser after the save round-trip.
+
+function byoForm(show) {
+  $("byo-form").hidden = !show;
+  if (show) $("byo-key").focus();
+}
+
+function renderByo(data) {
+  if (!data.byo_enabled) {
+    $("byo-status").textContent = "Not available on this server — the assistant runs on Thingery's key.";
+    byoForm(false);
+    return;
+  }
+  if (data.credential) {
+    const c = data.credential;
+    const where = c.base_url ? ` · ${c.base_url}` : "";
+    $("byo-status").textContent =
+      `Using your key: ${c.label || "saved key"} · ${c.model}${where} (fingerprint ${c.key_fingerprint}).`;
+    $("byo-remove").hidden = false;
+    byoForm(true); // stays open for rotate; key field starts empty
+    $("byo-model").value = c.model;
+    $("byo-base").value = c.base_url || "";
+    $("byo-label").value = c.label || "";
+  } else {
+    $("byo-status").textContent = "Not set — the assistant runs on Thingery's key.";
+    $("byo-remove").hidden = true;
+    byoForm(true);
+  }
+}
+
+async function loadByo() {
+  try {
+    const res = await fetch("/api/me/llm-credential");
+    if (!res.ok) return; // 401 mid-session etc. — leave the section blank
+    renderByo(await res.json());
+  } catch {
+    /* offline: leave blank */
+  }
+}
+
+$("byo-form").onsubmit = async (e) => {
+  e.preventDefault();
+  $("byo-error").textContent = "";
+  $("byo-save").disabled = true;
+  $("byo-save").textContent = "Verifying…";
+  try {
+    const res = await fetch("/api/me/llm-credential", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        api_key: $("byo-key").value.trim(),
+        model: $("byo-model").value.trim(),
+        base_url: $("byo-base").value.trim() || undefined,
+        label: $("byo-label").value.trim() || undefined,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      $("byo-error").textContent = data.error || "Could not save the key.";
+      return;
+    }
+    $("byo-key").value = ""; // never keep the plaintext in the form
+    renderByo({ byo_enabled: true, credential: data.credential });
+  } finally {
+    $("byo-save").disabled = false;
+    $("byo-save").textContent = "Save & verify";
+  }
+};
+
+$("byo-remove").onclick = async () => {
+  $("byo-error").textContent = "";
+  $("byo-remove").disabled = true;
+  try {
+    const res = await fetch("/api/me/llm-credential", { method: "DELETE" });
+    if (res.ok) {
+      $("byo-key").value = "";
+      renderByo({ byo_enabled: true, credential: null });
+    } else {
+      const data = await res.json().catch(() => ({}));
+      $("byo-error").textContent = data.error || "Could not remove the key.";
+    }
+  } finally {
+    $("byo-remove").disabled = false;
+  }
 };
 
 checkSession();

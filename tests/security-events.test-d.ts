@@ -20,9 +20,16 @@ import {
 describe("SecurityEvent route/reason literal unions (THI-133)", () => {
   it("route accepts only the fixed literals", () => {
     expectTypeOf<SecurityEventRoute>().toEqualTypeOf<
-      "/api/signup" | "/api/login" | "/mcp" | "/api/items/:id/images" | "/api/chat"
+      "/api/signup" | "/api/login" | "/mcp" | "/api/items/:id/images" | "/api/chat" | "/api/me/llm-credential"
     >();
-    const routes: SecurityEventRoute[] = ["/api/signup", "/api/login", "/mcp", "/api/items/:id/images", "/api/chat"];
+    const routes: SecurityEventRoute[] = [
+      "/api/signup",
+      "/api/login",
+      "/mcp",
+      "/api/items/:id/images",
+      "/api/chat",
+      "/api/me/llm-credential",
+    ];
     expectTypeOf(routes).toEqualTypeOf<SecurityEventRoute[]>();
   });
 

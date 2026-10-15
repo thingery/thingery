@@ -94,6 +94,20 @@ describe.skipIf(!available)("db schema", () => {
         "consumed_at",
         "created_at",
       ],
+      // THI-189 §data-model: the BYO LLM credential store lands with the
+      // normative Phase-1 columns.
+      llm_credentials: [
+        "id",
+        "seller_id",
+        "kind",
+        "label",
+        "base_url",
+        "model",
+        "ciphertext",
+        "key_fingerprint",
+        "created_at",
+        "updated_at",
+      ],
     };
     for (const [table, columns] of Object.entries(expected)) {
       const { rows } = await client.query<{ column_name: string }>(

@@ -48,6 +48,8 @@ services:
       # in the VPS .env, never in this repo.
       LLM_CREDENTIALS_MASTER_KEY: ${LLM_CREDENTIALS_MASTER_KEY:-}
       LLM_BYO_ALLOWED_MODELS: ${LLM_BYO_ALLOWED_MODELS:-}
+      # G1: opt-in for local/loopback endpoints (dev). Off in prod by default.
+      LLM_BYO_ALLOW_LOCAL_ENDPOINTS: ${LLM_BYO_ALLOW_LOCAL_ENDPOINTS:-}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}

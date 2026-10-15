@@ -190,11 +190,42 @@ describe("base URL normalization (spec §3)", () => {
     expect(normalizeBaseUrl("  ")).toBe(DEFAULT_BYO_COMPLETIONS_URL);
   });
 
-  it("rejects non-https except for local dev hosts", () => {
+  it("rejects non-https except for local dev hosts, and only when G1's flag is set", () => {
+    // Default (flag off): no http, no loopback, no private ranges.
     expect(normalizeBaseUrl("http://api.example.com/v1")).toBeNull();
+    expect(normalizeBaseUrl("http://localhost:8080/v1")).toBeNull();
+    expect(normalizeBaseUrl("http://127.0.0.1:11434/v1")).toBeNull();
     expect(normalizeBaseUrl("ftp://api.example.com/v1")).toBeNull();
-    expect(normalizeBaseUrl("http://localhost:8080/v1")).toBe("http://localhost:8080/v1/chat/completions");
-    expect(normalizeBaseUrl("http://127.0.0.1:11434/v1")).toBe("http://127.0.0.1:11434/v1/chat/completions");
+    // Flag on (dev): localhost and loopback http endpoints work again.
+    process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS = "1";
+    try {
+      expect(normalizeBaseUrl("http://localhost:8080/v1")).toBe("http://localhost:8080/v1/chat/completions");
+      expect(normalizeBaseUrl("http://127.0.0.1:11434/v1")).toBe("http://127.0.0.1:11434/v1/chat/completions");
+    } finally {
+      delete process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS;
+    }
+  });
+
+  it("rejects private-IP literal endpoints regardless of scheme (G1)", () => {
+    for (const bad of [
+      "https://10.0.0.5/v1",
+      "https://192.168.1.10/v1",
+      "https://172.16.0.1/v1",
+      "https://172.31.255.255/v1",
+      "https://169.254.169.254/latest/meta-data", // cloud metadata literal
+    ]) {
+      expect(normalizeBaseUrl(bad), bad).toBeNull();
+    }
+    // DNS-rebinding-style hostnames (e.g. 10-0-0-5.nip.io) are NOT literals —
+    // documented residual risk, intentionally out of scope for this check.
+    expect(normalizeBaseUrl("https://10-0-0-5.nip.io/v1")).toContain("https://10-0-0-5.nip.io/v1/chat/completions");
+    // With the local-endpoints flag (dev), private literals are allowed again.
+    process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS = "1";
+    try {
+      expect(normalizeBaseUrl("https://10.0.0.5/v1")).toBe("https://10.0.0.5/v1/chat/completions");
+    } finally {
+      delete process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS;
+    }
   });
 
   it("rejects garbage", () => {
@@ -294,6 +325,38 @@ describe("verify probe (spec §3): 1-token call with tools attached", () => {
       model: "gpt-4o-mini",
     });
     expect(result).toEqual({ ok: false, reason: "timeout", message: "endpoint timed out" });
+  });
+
+  it("bounds the provider error body at 64 KB (G2): oversized declared body is not buffered", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("x", { status: 400, headers: { "content-length": String(10 * 1024 * 1024) } })),
+    );
+    const result = await verifyLlmCredential({
+      apiKey: "byo_test_key_verify_g2",
+      completionsUrl: DEFAULT_BYO_COMPLETIONS_URL,
+      model: "gpt-4o-mini",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("bad_endpoint");
+      expect(result.message).toBe("provider_error"); // fixed slug — no body was read
+    }
+  });
+
+  it("bounds the provider error body at 64 KB (G2): oversized streamed body is cancelled", async () => {
+    const huge = "A".repeat(200 * 1024); // no content-length; exceeds bound mid-stream
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(huge, { status: 400 })),
+    );
+    const result = await verifyLlmCredential({
+      apiKey: "byo_test_key_verify_g2b",
+      completionsUrl: DEFAULT_BYO_COMPLETIONS_URL,
+      model: "gpt-4o-mini",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toBe("provider_error");
   });
 });
 

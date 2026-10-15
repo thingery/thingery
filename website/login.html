@@ -79,6 +79,20 @@
     <div class="key" id="apikey"></div>
     <p class="error" id="key-error"></p>
     <p><button type="button" id="regen">Regenerate key</button> · <a href="/apps">Connected applications</a> · <a href="#" id="logout">Log out</a></p>
+
+    <!-- Bring-your-own LLM key (spec THI-186 Phase 1 / THI-189): the chat
+         assistant can run on the seller's own OpenAI-compatible key. -->
+    <h2 style="font-size:1.05rem">Use your own model <small>(for the chat assistant)</small></h2>
+    <p style="font-size:.9rem;opacity:.85">Store an OpenAI-compatible API key and the assistant chats on your key instead of Thingery's. The key is encrypted at rest and verified once before saving — it is never shown again.</p>
+    <p id="byo-status" style="font-size:.9rem"></p>
+    <form id="byo-form" hidden>
+      <label>API key <input type="password" id="byo-key" autocomplete="off" placeholder="sk-…" required></label>
+      <label>Model <small>(tool-calling, e.g. gpt-4o-mini)</small> <input type="text" id="byo-model" placeholder="gpt-4o-mini" required></label>
+      <label>Base URL <small>(optional, any OpenAI-compatible endpoint)</small> <input type="url" id="byo-base" placeholder="https://api.openai.com/v1"></label>
+      <label>Label <small>(optional)</small> <input type="text" id="byo-label" placeholder="My OpenAI key"></label>
+      <p class="error" id="byo-error"></p>
+      <p><button type="submit" id="byo-save">Save &amp; verify</button> <button type="button" id="byo-remove" hidden>Remove</button></p>
+    </form>
   </section>
 
   <script type="module" src="/account.js"></script>

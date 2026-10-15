@@ -16,6 +16,7 @@ import {
   verifyChatConfirmToken,
   wrapToolResult,
 } from "../src/chat.js";
+import { dailyTokenBudget } from "../src/chat-limits.js";
 import type { SellerRow } from "../src/db.js";
 
 // THI-137 §1: a mockable seam over getItem so tests can simulate a FAILED
@@ -163,6 +164,84 @@ describe("confirm/decline turn handling (no LLM involved)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// THI-180 PR-B: LLM usage accounting, round bounds, mid-turn budget stop.
+// No DB needed — unknown tool names execute without touching the database.
+
+describe("usage accounting + budget gates (THI-180 §3.2/§3.3)", () => {
+  const UNKNOWN_TOOL = (id: string) => toolCallMsg(id, "no_such_tool", {});
+
+  it("accumulates provider usage across rounds and reports it once per turn", async () => {
+    const bodies = mockLlm(
+      [UNKNOWN_TOOL("c1"), FINAL],
+      [
+        { prompt_tokens: 100, completion_tokens: 50 },
+        { prompt_tokens: 300, completion_tokens: 70 },
+      ],
+    );
+    const out = await chatTurn([], "hello", null);
+    expect(out.text).toBe("Understood.");
+    expect(out.usage).toEqual({ rounds: 2, tokensIn: 400, tokensOut: 120, source: "provider" });
+    expect(bodies).toHaveLength(2);
+  });
+
+  it("falls back to the estimate when the provider omits usage (N1c)", async () => {
+    mockLlm([FINAL]); // responses carry no usage field at all
+    const out = await chatTurn([], "hello", null);
+    expect(out.usage?.rounds).toBe(1);
+    expect(out.usage?.tokensOut).toBe(1200); // per-call output cap
+    expect(out.usage?.tokensIn).toBeGreaterThan(0); // ceil(request chars / 4)
+    expect(out.usage?.source).toBe("estimate_fallback");
+  });
+
+  it("malformed usage (negative) is treated as missing, never credited (N1a)", async () => {
+    mockLlm([FINAL], [{ prompt_tokens: -100, completion_tokens: 5 }]);
+    const out = await chatTurn([], "hello", null);
+    // The estimate fallback applies; the negative prompt count is not credited.
+    expect(out.usage?.tokensOut).toBe(1200);
+    expect(out.usage?.tokensIn).toBeGreaterThan(0);
+    expect(out.usage?.source).toBe("estimate_fallback");
+  });
+
+  it("one estimated round flags the whole turn even if other rounds reported usage", async () => {
+    mockLlm(
+      [UNKNOWN_TOOL("c1"), FINAL],
+      [{ prompt_tokens: 100, completion_tokens: 50 }, { prompt_tokens: NaN, completion_tokens: NaN }],
+    );
+    const out = await chatTurn([], "hello", null);
+    expect(out.usage?.rounds).toBe(2);
+    expect(out.usage?.source).toBe("estimate_fallback");
+  });
+
+  it("honors CHAT_ROUNDS_PER_TURN: stops after the configured rounds", async () => {
+    const bodies = mockLlm([UNKNOWN_TOOL("c1")]); // every call wants a tool → clamped to the last script entry
+    const out = await chatTurn([], "hello", null);
+    expect(bodies).toHaveLength(6); // default CHAT_ROUNDS_PER_TURN
+    expect(out.usage?.rounds).toBe(6);
+    expect(out.text).toContain("too many steps");
+  });
+
+  it("stops between rounds when the daily budget trips, with the friendly message and usage", async () => {
+    // Leave room for exactly one more round, then exhaust it mid-turn.
+    dailyTokenBudget.record(null, 2_000_000 - 1);
+    const bodies = mockLlm(
+      [UNKNOWN_TOOL("c1"), FINAL],
+      [{ prompt_tokens: 100, completion_tokens: 50 }],
+    );
+    const out = await chatTurn([], "hello", null);
+    expect(bodies).toHaveLength(1); // round 0 ran; round 1 never started
+    expect(out.text).toBe("Sorry — the daily chat budget just ran out. Please try again tomorrow.");
+    expect(out.usage).toEqual({ rounds: 1, tokensIn: 100, tokensOut: 50, source: "provider" });
+  });
+
+  it("confirm/decline fast paths carry no usage (no LLM call, no usage line)", async () => {
+    const declined = await chatTurn([], "chat-decline whatever", null);
+    expect(declined.usage).toBeUndefined();
+    const confirmed = await chatTurn([], "chat-confirm chatconfirm:not:a:token.sig", null);
+    expect(confirmed.usage).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Part 2 — DB-backed: the gate, execution, and the injection fixture
 
 async function dbAvailable(): Promise<boolean> {
@@ -183,15 +262,23 @@ async function dbAvailable(): Promise<boolean> {
 const available = await dbAvailable();
 
 /** Scripted LLM: each fetch returns script[i] (clamped to the last entry) and
- * records every request body so tests can assert on the model's context. */
-function mockLlm(script: unknown[]) {
+ * records every request body so tests can assert on the model's context.
+ * usageScript (THI-180) rides along as the provider `usage` field — omitted
+ * entirely when not passed, so existing scripts keep today's behavior. */
+function mockLlm(script: unknown[], usageScript?: unknown[]) {
   const bodies: Array<{ messages: Array<{ role: string; content: string | null }> }> = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_url: string, init: RequestInit) => {
       bodies.push(JSON.parse(String(init.body)));
       const step = Math.min(bodies.length - 1, script.length - 1);
-      return new Response(JSON.stringify({ choices: [{ message: script[step] }] }), { status: 200 });
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: script[step] }],
+          ...(usageScript ? { usage: usageScript[Math.min(step, usageScript.length - 1)] } : {}),
+        }),
+        { status: 200 },
+      );
     }),
   );
   return bodies;
@@ -203,6 +290,8 @@ afterEach(() => {
   // restore the real DB read so later tests are unaffected.
   vi.mocked(getItem).mockReset();
   vi.mocked(getItem).mockImplementation(realGetItem);
+  // THI-180: budget accounting is process-global — reset between tests.
+  dailyTokenBudget.reset();
 });
 
 function toolCallMsg(id: string, name: string, args: Record<string, unknown>): unknown {

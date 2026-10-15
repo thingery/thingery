@@ -8,6 +8,7 @@ import { getCategory, getItem, createItem, listCategories, myItems, searchItems,
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import { logSecurityEvent } from "./security-events.js";
+import { chatLimits, dailyTokenBudget, fallbackUsageEstimate, parseLlmUsage, type LlmUsage } from "./chat-limits.js";
 import crypto from "node:crypto";
 import { SESSION_SECRET } from "./auth.js";
 
@@ -18,6 +19,13 @@ export interface ChatMessage {
 
 export function chatConfigured(): boolean {
   return Boolean(process.env.LLM_API_KEY);
+}
+
+/** The env-configured model id (same default as callLlm's request body).
+ * THI-180 §3.3: the chat_usage log line's `model` is this env config string,
+ * never request data. */
+export function chatModel(): string {
+  return process.env.LLM_MODEL ?? "gpt-4o-mini";
 }
 
 const SYSTEM_PROMPT = `You are the Thingery assistant — Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
@@ -259,20 +267,28 @@ interface LlmMessage {
   tool_call_id?: string;
 }
 
-async function callLlm(messages: LlmMessage[]): Promise<LlmMessage> {
+async function callLlm(messages: LlmMessage[]): Promise<{ message: LlmMessage; usage: LlmUsage | null }> {
   const url = process.env.LLM_API_URL ?? "https://api.openai.com/v1/chat/completions";
-  const model = process.env.LLM_MODEL ?? "gpt-4o-mini";
+  const model = chatModel();
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${process.env.LLM_API_KEY}` },
-    body: JSON.stringify({ model, messages, tools: TOOLS, max_tokens: 1200 }),
+    // THI-180 §3.3: max_tokens comes from the chat-limits config instead of
+    // the hardcoded 1200.
+    body: JSON.stringify({ model, messages, tools: TOOLS, max_tokens: chatLimits.maxTokensPerCall }),
     signal: AbortSignal.timeout(60_000),
   });
   if (!res.ok) {
     throw new Error(`LLM API ${res.status}: ${(await res.text()).slice(0, 300)}`);
   }
-  const json = (await res.json()) as { choices: Array<{ message: LlmMessage }> };
-  return json.choices[0]?.message ?? { role: "assistant", content: "No response from model." };
+  const json = (await res.json()) as { choices: Array<{ message: LlmMessage }>; usage?: unknown };
+  // THI-180 §3.3 / THI-182 N1a: parse the provider usage; missing or
+  // malformed usage comes back null and the caller charges the fallback —
+  // today this field was simply discarded.
+  return {
+    message: json.choices[0]?.message ?? { role: "assistant", content: "No response from model." },
+    usage: parseLlmUsage(json.usage),
+  };
 }
 
 // --- security: tool-result delimiters (docs/security.md §6 H5, fix 1) --------
@@ -302,7 +318,28 @@ export interface ChatConfirmCard {
   summary: string;
 }
 
-export type ChatTurnResult = { text: string; confirm?: ChatConfirmCard };
+export type ChatTurnResult = { text: string; confirm?: ChatConfirmCard; usage?: ChatTurnUsage };
+
+/** Where the turn's token numbers came from (spec THI-180 rev 2 / N1):
+ * `provider` when every round reported usable provider usage;
+ * `estimate_fallback` when any round was charged the estimate instead. */
+export type ChatUsageSource = "provider" | "estimate_fallback";
+
+/** Internal per-turn usage accounting (THI-180 §3.3): LLM calls made and
+ * tokens in/out accumulated across rounds. Carried on the chatTurn result
+ * for the chat_usage log line; routes.ts strips it before the client
+ * response, so the client payload stays byte-identical. Confirm/decline
+ * fast paths never call the LLM and carry no usage. */
+export interface ChatTurnUsage {
+  rounds: number;
+  tokensIn: number;
+  tokensOut: number;
+  source: ChatUsageSource;
+}
+
+/** THI-180 §3.2: mid-turn stop copy when the aggregate daily budget trips
+ * between rounds (distinct from the pre-flight 429 copy in routes.ts). */
+const CHAT_BUDGET_EXHAUSTED = "Sorry — the daily chat budget just ran out. Please try again tomorrow.";
 
 /** Pending-op tokens are valid for 15 minutes. */
 export const CHAT_CONFIRM_TTL_SECONDS = 15 * 60;
@@ -506,12 +543,36 @@ export async function chatTurn(
   ];
 
   let confirm: ChatConfirmCard | undefined;
-  for (let round = 0; round < 6; round++) {
-    const reply = await callLlm(messages);
+  let usage: ChatTurnUsage | undefined;
+  for (let round = 0; round < chatLimits.roundsPerTurn; round++) {
+    // THI-180 §3.2 checkpoint 2 (between rounds): once the aggregate daily
+    // budget is exhausted, stop instead of making the next call. Bounds the
+    // overshoot to ≤ one round per in-flight request (THI-182 N2); any
+    // pending confirmation card still ships to the user.
+    if (round > 0 && dailyTokenBudget.isExhausted()) {
+      return { text: CHAT_BUDGET_EXHAUSTED, ...(confirm ? { confirm } : {}), usage };
+    }
+    // THI-182 N1c: deterministic estimate of this request's size, charged
+    // only if the provider reports no usable usage.
+    const fallback = fallbackUsageEstimate(messages);
+    const { message: reply, usage: callUsage } = await callLlm(messages);
     messages.push(reply);
+    usage ??= { rounds: 0, tokensIn: 0, tokensOut: 0, source: "provider" };
+    if (callUsage) {
+      usage.tokensIn += callUsage.promptTokens;
+      usage.tokensOut += callUsage.completionTokens;
+      dailyTokenBudget.record(callUsage, 0);
+    } else {
+      // Spec rev 2 N1: any estimated round flags the whole turn's numbers.
+      usage.source = "estimate_fallback";
+      usage.tokensIn += fallback.promptTokens;
+      usage.tokensOut += fallback.completionTokens;
+      dailyTokenBudget.record(null, fallback.promptTokens + fallback.completionTokens);
+    }
+    usage.rounds += 1;
 
     if (!reply.tool_calls || reply.tool_calls.length === 0) {
-      return { text: reply.content ?? "", ...(confirm ? { confirm } : {}) };
+      return { text: reply.content ?? "", ...(confirm ? { confirm } : {}), usage };
     }
 
     for (const call of reply.tool_calls) {
@@ -580,5 +641,5 @@ export async function chatTurn(
       });
     }
   }
-  return { text: "Sorry — that took too many steps. Could you simplify the request?", ...(confirm ? { confirm } : {}) };
+  return { text: "Sorry — that took too many steps. Could you simplify the request?", ...(confirm ? { confirm } : {}), usage };
 }

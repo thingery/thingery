@@ -16,8 +16,9 @@
 // change reviewers see. Pinned by tests/security-events.test-d.ts.
 
 /** Fixed route slugs for rate_limit events (THI-133; "/api/items/:id/images"
- *  added by THI-144 for the upload-route limiters' 429s). */
-export type SecurityEventRoute = "/api/signup" | "/api/login" | "/mcp" | "/api/items/:id/images";
+ *  added by THI-144 for the upload-route limiters' 429s; "/api/chat" added
+ *  by THI-180 for the chat turn limiters + daily-budget pre-flight 429s). */
+export type SecurityEventRoute = "/api/signup" | "/api/login" | "/mcp" | "/api/items/:id/images" | "/api/chat";
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a
@@ -42,7 +43,21 @@ export type SecurityEvent =
   | { type: "login"; outcome: "success" | "failure" }
   | { type: "rate_limit"; route: SecurityEventRoute }
   | { type: "listing_write"; action: "create" | "update" | "delete"; outcome: "success" | "rejected" }
-  | { type: "image_upload"; outcome: "success" | "rejected"; reason?: SecurityEventReason };
+  | { type: "image_upload"; outcome: "success" | "rejected"; reason?: SecurityEventReason }
+  /** THI-180 §3.3 (rev 2): one line per LLM-backed chat turn. Numbers and
+   *  slugs only — `model` is the env config string (never request data),
+   *  `usage_source` says whether the numbers are provider-reported or
+   *  estimate-charged, and no message content ever reaches the log (H4.2). */
+  | {
+      type: "chat_usage";
+      model: string;
+      rounds: number;
+      tokens_in: number;
+      tokens_out: number;
+      daily_total: number;
+      budget: number;
+      usage_source: "provider" | "estimate_fallback";
+    };
 
 export interface SecurityEventContext {
   sellerId?: string;
@@ -65,6 +80,17 @@ export function logSecurityEvent(event: SecurityEvent, ctx: SecurityEventContext
     ...("action" in event ? { action: event.action } : {}),
     ...("route" in event ? { route: event.route } : {}),
     ...(event.type === "image_upload" && event.reason !== undefined ? { reason: event.reason } : {}),
+    ...(event.type === "chat_usage"
+      ? {
+          model: event.model,
+          rounds: event.rounds,
+          tokens_in: event.tokens_in,
+          tokens_out: event.tokens_out,
+          daily_total: event.daily_total,
+          budget: event.budget,
+          usage_source: event.usage_source,
+        }
+      : {}),
     sellerId: ctx.sellerId ?? null,
     ip: ctx.ip ?? null,
   };

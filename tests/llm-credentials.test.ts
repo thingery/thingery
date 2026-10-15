@@ -5,8 +5,11 @@
 // as tests/schema.test.ts): upsert/rotate/delete, one-row-per-seller,
 // cascade on seller delete, runtime gate fallback.
 //
-// No real-format provider keys anywhere: fixtures use byo_test_… strings so
-// the pinned gitleaks scan can never flag them.
+// Fixtures use byo_test_… strings so no real provider key format is matched;
+// NOTE (gitleaks, THI-191 N1): prefix alone does NOT defeat the
+// generic-api-key rule — entropy is the trigger (byo_test_key_verify_ok
+// crossed 3.5). The two flagged fixtures are allowlisted as exact strings in
+// .gitleaks.toml; everything else must stay under the entropy floor.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -389,6 +392,21 @@ describe.skipIf(!available)("BYO credential store (DB, spec §1–§2)", () => {
       apiKey: "byo_test_key_store_3",
     });
     expect((await resolveLlmCredential(sellerId))?.completionsUrl).toBe(DEFAULT_BYO_COMPLETIONS_URL);
+  });
+
+  it("resolves to null (never throws) with a stored row when the master key is unset (N2)", async () => {
+    await upsertLlmCredential(sellerId, {
+      label: "",
+      model: "gpt-4o-mini",
+      baseUrl: null,
+      apiKey: "byo_test_key_n2",
+    });
+    clearMasterKey();
+    try {
+      expect(await resolveLlmCredential(sellerId)).toBeNull(); // silent company fallback, no exception
+    } finally {
+      setMasterKey();
+    }
   });
 
   it("falls back (null) at runtime when the stored model left the allow-gate", async () => {

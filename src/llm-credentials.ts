@@ -269,11 +269,16 @@ export async function getLlmCredential(sellerId: string): Promise<LlmCredentialR
 }
 
 /** Loads + decrypts the seller's credential (spec §6 resolution order).
- *  Returns null when none is stored or the master key is unavailable
- *  (fail closed → company key). Throws only on tamper/corruption — callers
- *  treat that as "fall back to company key" after logging a security event
- *  slug (no ciphertext in the log). */
+ *  Returns null when none is stored, when the master key is unavailable
+ *  (N2, fail closed → company key — never an exception), or when the stored
+ *  row no longer passes the URL/model gates. Throws only on tamper/corruption
+ *  — callers treat that as "fall back to company key" after logging a
+ *  security event slug (no ciphertext in the log). */
 export async function resolveLlmCredential(sellerId: string): Promise<ResolvedLlmCredential | null> {
+  // N2 (Security review THI-191): honor the documented null contract — with
+  // no master key the feature is disabled, so callers silently fall back to
+  // the company credential instead of distinguishing an exception.
+  if (!byoMasterKeyConfigured()) return null;
   const { rows } = await pool.query<DbRow>(
     `SELECT ${SELECT_COLUMNS} FROM llm_credentials WHERE seller_id = $1 AND kind = 'api_key'`,
     [sellerId],

@@ -397,9 +397,12 @@ age -d -i thingery-backup-key.age.txt thingery-images-$(date +%F).tar.gz.age \
 
 Deploys are automated via the `deploy.yml` workflow (on push to `main`, plus a manual
 `workflow_dispatch` trigger for no-op/re-deploys) once you set the
-repo variables/secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, and `DEPLOY_ENABLED=true`.
+repo variables `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_ENABLED=true`, and the
+`DEPLOY_SSH_KEY` secret in the protected `production` environment (§5.0).
 `DEPLOY_ENABLED` is the arm switch: while it is unset the job skips on every push, and
-deploys fall back to the manual equivalent below. The workflow applies `db/schema.sql`
+deploys fall back to the manual equivalent below. The workflow itself only opens the
+SSH session — the deploy steps execute server-side via the forced-command wrapper
+`/usr/local/bin/thingery-deploy.sh` (§5.0). It applies `db/schema.sql`
 (idempotent) **before** rebuilding — expand-phase
 migrations are additive, so the running containers ignore them while the new code may
 require the new columns; applying first avoids a window where authenticated traffic hits
@@ -424,10 +427,23 @@ curl -s https://thingery.dev/healthz   # {"ok":true,...,"version":"…","commit"
 If `commit` reports `"unknown"`, the deploy skipped the build args — rebuild with the
 exports above. The site footer shows the same version + short commit.
 
-### 5.0 Automated deploy credentials (one-time, THI-223)
+### 5.0 Automated deploy credentials (one-time, THI-223; hardened per THI-224)
 
 The trust path is GitHub Actions → SSH → `deploy@<VPS_IP>`, restricted to the documented
-deploy steps. Setup:
+deploy steps by two server/repository-side controls:
+
+- **Forced command (THI-224 F3):** the deploy key's `authorized_keys` line forces
+  `/usr/local/bin/thingery-deploy.sh` — a root-owned server-side script containing
+  exactly the documented deploy steps. GitHub controls *when* deploys run; the server
+  controls *what* a deploy can do. The workflow's inline script is just an explanatory
+  echo; a stolen key (or a maliciously edited workflow file) still can only trigger the
+  documented deploy.
+- **Environment-scoped secret (THI-224 F1):** `DEPLOY_SSH_KEY` lives only in the
+  protected `production` GitHub environment whose deployment-branch policy allows
+  `main` only, so a `workflow_dispatch` from an unreviewed feature ref cannot resolve
+  the key (the job fails at environment resolution, server-side enforced).
+
+Setup:
 
 1. **VPS: dedicated deploy user.** The automated key must never land on the operator
    account — it has passwordless sudo, and an automated credential must not be
@@ -440,27 +456,69 @@ deploy steps. Setup:
    sudo chown -R deploy:deploy /opt/thingery            # app tree owner
    ```
 
-2. **Operator machine: dedicated keypair** (never a personal key). Upload the private
-   key straight to the GitHub secret and destroy the local copy — the secret is the
-   only place the private key needs to live (rotation = fresh keypair, never reuse):
+2. **VPS: the deploy wrapper** (canonical deploy steps, root-owned so only the
+   operator can change them):
+
+   ```bash
+   sudo install -o root -g root -m 0755 thingery-deploy.sh /usr/local/bin/thingery-deploy.sh
+   ```
+
+   Contents — the same steps as the manual equivalent in §5, ending with a
+   `thingery-deploy: done at $GIT_COMMIT` marker (the workflow log shows this output,
+   proving the wrapper ran):
+
+   ```bash
+   #!/bin/bash
+   set -euo pipefail
+   cd /opt/thingery
+   git pull --ff-only
+   docker compose -f docker-compose.prod.yml exec -T db \
+     psql -U thingery -d thingery -v ON_ERROR_STOP=1 < db/schema.sql
+   export GIT_COMMIT=$(git rev-parse HEAD)
+   export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   docker compose -f docker-compose.prod.yml up -d --build
+   docker image prune -f
+   echo "thingery-deploy: done at $GIT_COMMIT"
+   ```
+
+3. **Operator machine: dedicated keypair** (never a personal key). The private key
+   goes straight into the `production` environment secret and the local copy is
+   destroyed — the secret is the only place the private key needs to live (rotation =
+   fresh keypair, never reuse):
 
    ```bash
    ssh-keygen -t ed25519 -f thingery_deploy -N '' -C 'thingery-deploy-github-actions'
-   gh secret set DEPLOY_SSH_KEY -R thingery/thingery < thingery_deploy && rm thingery_deploy
+   gh secret set DEPLOY_SSH_KEY --env production -R thingery/thingery < thingery_deploy \
+     && rm thingery_deploy
    ```
 
-3. **VPS: install the public key with `restrict`** — disables PTY, agent/X11/port
-   forwarding and user-rc; exec-channel only, which is exactly what `appleboy/ssh-action`
-   uses. Verified in prod: exec works, `ssh -tt` is refused (`PTY allocation request
-   failed`).
+   Create the protected environment first (one-time; repo admin):
 
    ```bash
-   echo "restrict $(cat thingery_deploy.pub)" | sudo tee -a /home/deploy/.ssh/authorized_keys
+   curl -X PUT -H "Authorization: Bearer $(gh auth token)" \
+     https://api.github.com/repos/thingery/thingery/environments/production \
+     -d '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
+   curl -X POST -H "Authorization: Bearer $(gh auth token)" \
+     https://api.github.com/repos/thingery/thingery/environments/production/deployment-branch-policies \
+     -d '{"name":"main"}'
+   ```
+
+4. **VPS: install the public key with `restrict` + the forced command** — `restrict`
+   disables PTY, agent/X11/port forwarding and user-rc; exec-channel only, which is
+   exactly what `appleboy/ssh-action` uses. Verified in prod: exec works and runs the
+   wrapper; `ssh -tt` is refused (`PTY allocation request failed`).
+
+   ```bash
+   echo "restrict,command=\"/usr/local/bin/thingery-deploy.sh\" $(cat thingery_deploy.pub)" \
+     | sudo tee /home/deploy/.ssh/authorized_keys
    sudo chown deploy:deploy /home/deploy/.ssh/authorized_keys
    sudo chmod 600 /home/deploy/.ssh/authorized_keys
    ```
 
-4. **Repo variables** (set `DEPLOY_ENABLED` last — it arms the workflow):
+   ⚠️ From this moment **any use of this key performs a deploy** — never use it for
+   ad-hoc SSH; it exists only inside the GitHub environment secret.
+
+5. **Repo variables** (set `DEPLOY_ENABLED` last — it arms the workflow):
 
    ```bash
    gh variable set DEPLOY_HOST -R thingery/thingery --body <VPS_IP>  # public via DNS anyway
@@ -468,33 +526,48 @@ deploy steps. Setup:
    gh variable set DEPLOY_ENABLED -R thingery/thingery --body true
    ```
 
-   Smoke-test the key exactly as the workflow uses it (exec channel, no TTY):
+Design notes (Security review THI-224 — conditional approval, F1–F5 applied):
 
-   ```bash
-   ssh -i thingery_deploy -o IdentitiesOnly=yes -o RequestTTY=no deploy@<VPS_IP> \
-     'cd /opt/thingery && git rev-parse HEAD && docker compose -f docker-compose.prod.yml ps'
-   ```
-
-Design notes (recorded for the THI-223 Security review):
-
-- **No `from=` restriction:** GitHub-hosted runners egress from the large, changing
-  Azure ranges published at `api.github.com/meta` (hundreds of CIDRs) — maintaining
-  that list in `authorized_keys` is a liability, not a control.
+- **No `from=` restriction** (confirmed): GitHub-hosted runners egress from the large,
+  changing Azure ranges published at `api.github.com/meta` (hundreds of CIDRs) —
+  maintaining that list in `authorized_keys` is a liability, not a control.
+- **Forced command required** (overriding the earlier inline-script trade-off): with
+  zero required reviews on `main`, an inline workflow script would be unreviewed
+  arbitrary-exec-as-`deploy`; the wrapper bounds even a stolen key to the documented
+  steps.
 - **Docker group is host-root equivalent** (any member can `docker run -v /`). That is
   inherent to compose-based deploys; the mitigations are the dedicated non-sudo user,
-  the `restrict`-ed key, and the fast revocation below.
-- Net capability of the credential: run the documented deploy steps against
-  `/opt/thingery`. It cannot sudo, allocate a PTY, or forward ports.
+  the forced-command wrapper, the environment-scoped secret, and fast revocation.
+- Also shipped with THI-224: `appleboy/ssh-action` SHA-pinned to
+  `823bd89e131d8d508129f9443cad5855e9ba96f0` (v1.2.4), `permissions: contents: read`,
+  and a `deploy` concurrency group that never cancels mid-run.
 
-**Rotating the deploy key.** Generate a new keypair (step 2), append the new
-`restrict`-prefixed public key (step 3), `gh secret set DEPLOY_SSH_KEY` again, confirm
-with a `workflow_dispatch` deploy, then delete the old `authorized_keys` line.
+**Regression checks (run after setup, and after any authorized_keys/environment
+change):**
 
-**Revoking.** Delete the `restrict ssh-ed25519 … thingery-deploy-github-actions` line
-from `/home/deploy/.ssh/authorized_keys` — the trust path dies immediately; running
+- **F1 (secret unreachable from unreviewed refs):** with `DEPLOY_ENABLED=true`,
+  `gh workflow run deploy.yml --ref <feature-branch>` → the job must fail at
+  environment resolution (`production` is restricted to `main`) and no deploy steps
+  may run (VPS `git -C /opt/thingery rev-parse HEAD` unchanged).
+- **F3 (forced command active):** the deploy job log must show the *wrapper's* output
+  (`thingery-deploy: done at <sha>`), never the client-sent script's — proving the
+  server overrides whatever the workflow sends. (The private key never leaves the
+  GitHub secret, so there is no manual `ssh … 'id'` variant of this check; the
+  dispatch log is the evidence.)
+
+**Rotating the deploy key.** Generate a new keypair (step 3), replace the
+`authorized_keys` line (step 4), `gh secret set DEPLOY_SSH_KEY --env production`
+again, confirm with a `workflow_dispatch` deploy from `main`. During staging of THI-223
+the key was rotated exactly this way (old fingerprint
+`SHA256:wqn4Utx2Ut/PaZysOAfZwOgJ1MwlzNGfIgH5NOKsrn0` → current
+`SHA256:MiisD8QGoWO6P9FB8vZdAn9kglpDj/uVEUi4ab7rY8E`).
+
+**Revoking.** Delete the `restrict,command=… ssh-ed25519 … thingery-deploy-github-actions`
+line from `/home/deploy/.ssh/authorized_keys` — the trust path dies immediately; running
 services are unaffected, only future deploys stop. Optionally also
-`gh variable delete DEPLOY_ENABLED` (workflow skips) and `gh secret delete
-DEPLOY_SSH_KEY` (removes the private key from GitHub).
+`gh variable delete DEPLOY_ENABLED` (workflow skips) and
+`gh secret delete DEPLOY_SSH_KEY --env production` (removes the private key from
+GitHub).
 
 ### Upgrade notes (breaking deploys)
 

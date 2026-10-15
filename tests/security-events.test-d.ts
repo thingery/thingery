@@ -12,6 +12,7 @@
 import { describe, expectTypeOf, it } from "vitest";
 import {
   logSecurityEvent,
+  type ChatgptOauthErrorReason,
   type SecurityEvent,
   type SecurityEventReason,
   type SecurityEventRoute,
@@ -68,6 +69,29 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
     // @ts-expect-error /api/logout is not in the route union — adding a route is a reviewed type change
     const event: SecurityEvent = { type: "rate_limit", route: "/api/logout" };
     expectTypeOf(event).toBeObject();
+  });
+});
+
+describe("chatgpt_oauth_error reason union (THI-193 §3.3)", () => {
+  it("accepts only the fixed terminal-refresh slugs", () => {
+    expectTypeOf<ChatgptOauthErrorReason>().toEqualTypeOf<
+      "invalid_grant" | "token_expired" | "refresh_token_invalidated" | "refresh_token_reused" | "invalid_client"
+    >();
+    const reasons: ChatgptOauthErrorReason[] = [
+      "invalid_grant",
+      "token_expired",
+      "refresh_token_invalidated",
+      "refresh_token_reused",
+      "invalid_client",
+    ];
+    expectTypeOf(reasons).toEqualTypeOf<ChatgptOauthErrorReason[]>();
+  });
+
+  it("a dynamic (provider-echoed) string is a compile error for reason", () => {
+    // Provider error text must never flow into the log — only fixed slugs.
+    const dynamic: string = "invalid_grant"; // value is irrelevant; type is string
+    // @ts-expect-error chatgpt_oauth_error.reason is a literal union — dynamic strings must not typecheck
+    logSecurityEvent({ type: "chatgpt_oauth_error", reason: dynamic });
   });
 });
 

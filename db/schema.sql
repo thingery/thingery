@@ -366,3 +366,20 @@ CREATE TABLE IF NOT EXISTS llm_credentials (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS llm_credentials_seller_api_key_idx
   ON llm_credentials (seller_id) WHERE kind = 'api_key';
+
+-- THI-193 expand step (tech-spec §4, rev fa3288ff): widen the kind CHECK so
+-- the same table carries "Sign in with ChatGPT" OAuth bundles
+-- (kind='chatgpt_oauth', src/chatgpt-oauth.ts). Metadata-only widening —
+-- every existing api_key row and every kind='api_key' filter in old code is
+-- unaffected. Idempotent replay: the constraint always exists by this point
+-- (inline CHECK in the CREATE above on fresh databases, a previous apply on
+-- existing ones), so DROP+ADD re-runs cleanly. access_expires_at/oauth_sub
+-- are NULL for api_key rows (no backfill); the partial unique index keeps
+-- exactly one chatgpt_oauth row per seller, same pattern as the api_key one.
+ALTER TABLE llm_credentials DROP CONSTRAINT llm_credentials_kind_check;
+ALTER TABLE llm_credentials ADD CONSTRAINT llm_credentials_kind_check
+  CHECK (kind IN ('api_key', 'chatgpt_oauth'));
+ALTER TABLE llm_credentials ADD COLUMN IF NOT EXISTS access_expires_at TIMESTAMPTZ;
+ALTER TABLE llm_credentials ADD COLUMN IF NOT EXISTS oauth_sub TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS llm_credentials_seller_chatgpt_oauth_idx
+  ON llm_credentials (seller_id) WHERE kind = 'chatgpt_oauth';

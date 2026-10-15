@@ -45,6 +45,19 @@ export type SecurityEventReason =
   | "reencode_failed"
   | "output_too_large";
 
+/** Fixed terminal refresh-error slugs for chatgpt_oauth_error events
+ *  (THI-193 §2 error taxonomy / §3.3): any of these means the stored OAuth
+ *  bundle is unusable and the row is deleted — resolution falls back to
+ *  user-key → company and the UI shows "reconnect". Kept a separate union
+ *  from SecurityEventReason so an image_upload event can never carry one of
+ *  these slugs (and vice versa). */
+export type ChatgptOauthErrorReason =
+  | "invalid_grant"
+  | "token_expired"
+  | "refresh_token_invalidated"
+  | "refresh_token_reused"
+  | "invalid_client";
+
 export type SecurityEvent =
   | { type: "signup"; outcome: "success" }
   | { type: "login"; outcome: "success" | "failure" }
@@ -71,7 +84,11 @@ export type SecurityEvent =
   /** THI-197: a stored BYO credential failed to decrypt (tamper/corruption)
    *  during /api/chat resolution. Slug only — never key material, ciphertext
    *  or base_url; the turn falls back to the company key. */
-  | { type: "byo_credential_error"; route: SecurityEventRoute };
+  | { type: "byo_credential_error"; route: SecurityEventRoute }
+  /** THI-193 §3.3: a stored ChatGPT OAuth connection hit a TERMINAL refresh
+   *  error and the row was deleted. `reason` is a fixed slug (never provider
+   * text, never token material). */
+  | { type: "chatgpt_oauth_error"; reason: ChatgptOauthErrorReason };
 
 export interface SecurityEventContext {
   sellerId?: string;
@@ -94,6 +111,7 @@ export function logSecurityEvent(event: SecurityEvent, ctx: SecurityEventContext
     ...("action" in event ? { action: event.action } : {}),
     ...("route" in event ? { route: event.route } : {}),
     ...(event.type === "image_upload" && event.reason !== undefined ? { reason: event.reason } : {}),
+    ...(event.type === "chatgpt_oauth_error" ? { reason: event.reason } : {}),
     ...(event.type === "chat_usage"
       ? {
           model: event.model,

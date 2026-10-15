@@ -94,8 +94,9 @@ describe.skipIf(!available)("db schema", () => {
         "consumed_at",
         "created_at",
       ],
-      // THI-189 §data-model: the BYO LLM credential store lands with the
-      // normative Phase-1 columns.
+      // THI-189 §data-model + THI-193 §4 expand: the BYO LLM credential
+      // store columns; access_expires_at/oauth_sub land with the OAuth
+      // bundle kind (NULL for api_key rows).
       llm_credentials: [
         "id",
         "seller_id",
@@ -105,6 +106,8 @@ describe.skipIf(!available)("db schema", () => {
         "model",
         "ciphertext",
         "key_fingerprint",
+        "access_expires_at",
+        "oauth_sub",
         "created_at",
         "updated_at",
       ],
@@ -125,6 +128,46 @@ describe.skipIf(!available)("db schema", () => {
       client.query(`INSERT INTO oauth_tokens (grant_id, kind, token_hash, expires_at)
                     VALUES (gen_random_uuid(), 'macaroon', 'x', now())`),
     ).rejects.toThrow();
+  });
+
+  // THI-193 §4 expand step (rev fa3288ff): the kind CHECK is widened to
+  // chatgpt_oauth, the two OAuth metadata columns exist, and exactly one
+  // chatgpt_oauth row per seller is enforced (partial unique index).
+  it("widens the llm_credentials kind CHECK to chatgpt_oauth (THI-193)", async () => {
+    const seller = await client.query<{ id: string }>(
+      `INSERT INTO sellers (api_key_hash, display_name) VALUES ($1, $2) RETURNING id`,
+      [`thg_schema_cg_${Date.now()}`, "schema-chatgpt"],
+    );
+    const sellerId = seller.rows[0].id;
+    // Widened kind accepted (with the normative OAuth columns set)…
+    await client.query(
+      `INSERT INTO llm_credentials (seller_id, kind, label, model, ciphertext, key_fingerprint, access_expires_at, oauth_sub)
+       VALUES ($1, 'chatgpt_oauth', 'ChatGPT plan', 'gpt-5.1', 'v1.stub', '000000000000', now(), 'auth0|chatgpt_test_sub')`,
+      [sellerId],
+    );
+    // …anything else still rejected.
+    await expect(
+      client.query(
+        `INSERT INTO llm_credentials (seller_id, kind, label, model, ciphertext, key_fingerprint)
+         VALUES ($1, 'oauth_access', '', 'gpt-5.1', 'v1.stub', '000000000000')`,
+        [sellerId],
+      ),
+    ).rejects.toThrow();
+    // One chatgpt_oauth row per seller: a second insert conflicts.
+    await expect(
+      client.query(
+        `INSERT INTO llm_credentials (seller_id, kind, label, model, ciphertext, key_fingerprint)
+         VALUES ($1, 'chatgpt_oauth', 'ChatGPT plan', 'gpt-5.1', 'v1.stub2', '000000000001')`,
+        [sellerId],
+      ),
+    ).rejects.toThrow();
+    // api_key rows still coexist (separate partial index).
+    await client.query(
+      `INSERT INTO llm_credentials (seller_id, kind, label, model, ciphertext, key_fingerprint)
+       VALUES ($1, 'api_key', '', 'gpt-4o-mini', 'v1.stub3', '000000000002')`,
+      [sellerId],
+    );
+    await client.query(`DELETE FROM sellers WHERE id = $1`, [sellerId]);
   });
 
   it("cascades seller deletion through grants and tokens", async () => {

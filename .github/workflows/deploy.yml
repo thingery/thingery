@@ -6,6 +6,7 @@ name: Deploy to VPS
 on:
   push:
     branches: [main]
+  workflow_dispatch: {} # manual no-op/re-deploy (THI-223); same job + guards as push
 
 jobs:
   deploy:

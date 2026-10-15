@@ -395,13 +395,18 @@ age -d -i thingery-backup-key.age.txt thingery-images-$(date +%F).tar.gz.age \
 
 ## 5. Updating
 
-Deploys are automated via the `deploy.yml` workflow (on push to `main`) once you set the
+Deploys are automated via the `deploy.yml` workflow (on push to `main`, plus a manual
+`workflow_dispatch` trigger for no-op/re-deploys) once you set the
 repo variables/secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, and `DEPLOY_ENABLED=true`.
-The workflow applies `db/schema.sql` (idempotent) **before** rebuilding — expand-phase
+`DEPLOY_ENABLED` is the arm switch: while it is unset the job skips on every push, and
+deploys fall back to the manual equivalent below. The workflow applies `db/schema.sql`
+(idempotent) **before** rebuilding — expand-phase
 migrations are additive, so the running containers ignore them while the new code may
 require the new columns; applying first avoids a window where authenticated traffic hits
 `column ... does not exist` errors. It also exports `GIT_COMMIT`/`BUILD_TIME` before
-building, so `/healthz` reports the deployed commit. Manual equivalent:
+building, so `/healthz` reports the deployed commit. Manual equivalent (run as the
+`deploy` user — it owns `/opt/thingery` — e.g. `sudo -u deploy bash -c '…'` over the
+operator SSH session):
 
 ```bash
 cd /opt/thingery && git pull && \
@@ -418,6 +423,78 @@ curl -s https://thingery.dev/healthz   # {"ok":true,...,"version":"…","commit"
 ```
 If `commit` reports `"unknown"`, the deploy skipped the build args — rebuild with the
 exports above. The site footer shows the same version + short commit.
+
+### 5.0 Automated deploy credentials (one-time, THI-223)
+
+The trust path is GitHub Actions → SSH → `deploy@<VPS_IP>`, restricted to the documented
+deploy steps. Setup:
+
+1. **VPS: dedicated deploy user.** The automated key must never land on the operator
+   account — it has passwordless sudo, and an automated credential must not be
+   passwordless root.
+
+   ```bash
+   ssh thingery-vps
+   sudo adduser --disabled-password --gecos '' deploy   # no sudo, no other keys
+   sudo usermod -aG docker deploy                       # just enough to run compose
+   sudo chown -R deploy:deploy /opt/thingery            # app tree owner
+   ```
+
+2. **Operator machine: dedicated keypair** (never a personal key). Upload the private
+   key straight to the GitHub secret and destroy the local copy — the secret is the
+   only place the private key needs to live (rotation = fresh keypair, never reuse):
+
+   ```bash
+   ssh-keygen -t ed25519 -f thingery_deploy -N '' -C 'thingery-deploy-github-actions'
+   gh secret set DEPLOY_SSH_KEY -R thingery/thingery < thingery_deploy && rm thingery_deploy
+   ```
+
+3. **VPS: install the public key with `restrict`** — disables PTY, agent/X11/port
+   forwarding and user-rc; exec-channel only, which is exactly what `appleboy/ssh-action`
+   uses. Verified in prod: exec works, `ssh -tt` is refused (`PTY allocation request
+   failed`).
+
+   ```bash
+   echo "restrict $(cat thingery_deploy.pub)" | sudo tee -a /home/deploy/.ssh/authorized_keys
+   sudo chown deploy:deploy /home/deploy/.ssh/authorized_keys
+   sudo chmod 600 /home/deploy/.ssh/authorized_keys
+   ```
+
+4. **Repo variables** (set `DEPLOY_ENABLED` last — it arms the workflow):
+
+   ```bash
+   gh variable set DEPLOY_HOST -R thingery/thingery --body <VPS_IP>  # public via DNS anyway
+   gh variable set DEPLOY_USER -R thingery/thingery --body deploy
+   gh variable set DEPLOY_ENABLED -R thingery/thingery --body true
+   ```
+
+   Smoke-test the key exactly as the workflow uses it (exec channel, no TTY):
+
+   ```bash
+   ssh -i thingery_deploy -o IdentitiesOnly=yes -o RequestTTY=no deploy@<VPS_IP> \
+     'cd /opt/thingery && git rev-parse HEAD && docker compose -f docker-compose.prod.yml ps'
+   ```
+
+Design notes (recorded for the THI-223 Security review):
+
+- **No `from=` restriction:** GitHub-hosted runners egress from the large, changing
+  Azure ranges published at `api.github.com/meta` (hundreds of CIDRs) — maintaining
+  that list in `authorized_keys` is a liability, not a control.
+- **Docker group is host-root equivalent** (any member can `docker run -v /`). That is
+  inherent to compose-based deploys; the mitigations are the dedicated non-sudo user,
+  the `restrict`-ed key, and the fast revocation below.
+- Net capability of the credential: run the documented deploy steps against
+  `/opt/thingery`. It cannot sudo, allocate a PTY, or forward ports.
+
+**Rotating the deploy key.** Generate a new keypair (step 2), append the new
+`restrict`-prefixed public key (step 3), `gh secret set DEPLOY_SSH_KEY` again, confirm
+with a `workflow_dispatch` deploy, then delete the old `authorized_keys` line.
+
+**Revoking.** Delete the `restrict ssh-ed25519 … thingery-deploy-github-actions` line
+from `/home/deploy/.ssh/authorized_keys` — the trust path dies immediately; running
+services are unaffected, only future deploys stop. Optionally also
+`gh variable delete DEPLOY_ENABLED` (workflow skips) and `gh secret delete
+DEPLOY_SSH_KEY` (removes the private key from GitHub).
 
 ### Upgrade notes (breaking deploys)
 

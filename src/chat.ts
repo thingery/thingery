@@ -8,6 +8,7 @@ import { getCategory, getItem, createItem, listCategories, myItems, searchItems,
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import { logSecurityEvent } from "./security-events.js";
+import { logChatTurnUsage, toolNameSlug, type LlmCallUsage, type LlmUsage } from "./chat-usage.js";
 import crypto from "node:crypto";
 import { SESSION_SECRET } from "./auth.js";
 
@@ -259,7 +260,9 @@ interface LlmMessage {
   tool_call_id?: string;
 }
 
-async function callLlm(messages: LlmMessage[]): Promise<LlmMessage> {
+/** THI-185: the API `usage` field is captured (not discarded) and surfaced
+ *  with the model name so chatTurn can emit the per-turn telemetry line. */
+async function callLlm(messages: LlmMessage[]): Promise<{ message: LlmMessage; model: string; usage?: LlmUsage }> {
   const url = process.env.LLM_API_URL ?? "https://api.openai.com/v1/chat/completions";
   const model = process.env.LLM_MODEL ?? "gpt-4o-mini";
   const res = await fetch(url, {
@@ -271,8 +274,12 @@ async function callLlm(messages: LlmMessage[]): Promise<LlmMessage> {
   if (!res.ok) {
     throw new Error(`LLM API ${res.status}: ${(await res.text()).slice(0, 300)}`);
   }
-  const json = (await res.json()) as { choices: Array<{ message: LlmMessage }> };
-  return json.choices[0]?.message ?? { role: "assistant", content: "No response from model." };
+  const json = (await res.json()) as { choices: Array<{ message: LlmMessage }>; usage?: LlmUsage };
+  return {
+    message: json.choices[0]?.message ?? { role: "assistant", content: "No response from model." },
+    model,
+    usage: json.usage,
+  };
 }
 
 // --- security: tool-result delimiters (docs/security.md §6 H5, fix 1) --------
@@ -505,26 +512,56 @@ export async function chatTurn(
     { role: "user", content: userMessage },
   ];
 
+  // THI-185 (findings §7 F1): per-turn usage telemetry — one stdout JSON
+  // line at every LLM exit path (final answer, round exhaustion, error).
+  // Confirm/decline turns above never call the LLM, so they are not usage
+  // turns and log nothing. THI-180's per-user/daily budget hooks this same
+  // accumulation (budget check before callLlm, cumulative total appended to
+  // the line) — one token meter, not two.
+  const startedAt = Date.now();
+  const callUsage: LlmCallUsage[] = [];
+  const toolNames: string[] = [];
+  let turnModel = process.env.LLM_MODEL ?? "gpt-4o-mini";
+  let llmCalls = 0;
+  let toolRounds = 0;
+  let toolCalls = 0;
+  let toolArgErrors = 0;
+  let outcome: "ok" | "max_rounds" | "error" = "ok";
+
   let confirm: ChatConfirmCard | undefined;
-  for (let round = 0; round < 6; round++) {
-    const reply = await callLlm(messages);
-    messages.push(reply);
+  try {
+    for (let round = 0; round < 6; round++) {
+      llmCalls++;
+      const { message: reply, model, usage } = await callLlm(messages);
+      turnModel = model;
+      callUsage.push({ prompt_tokens: usage?.prompt_tokens ?? null, completion_tokens: usage?.completion_tokens ?? null });
+      messages.push(reply);
 
-    if (!reply.tool_calls || reply.tool_calls.length === 0) {
-      return { text: reply.content ?? "", ...(confirm ? { confirm } : {}) };
-    }
+      if (!reply.tool_calls || reply.tool_calls.length === 0) {
+        return { text: reply.content ?? "", ...(confirm ? { confirm } : {}) };
+      }
 
-    for (const call of reply.tool_calls) {
-      let result: unknown;
-      try {
-        const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
-        // THI-126 must-fix: canonicalize update_listing args BEFORE the gate
+      toolRounds++;
+      toolCalls += reply.tool_calls.length;
+      for (const call of reply.tool_calls) {
+        toolNames.push(toolNameSlug(call.function.name));
+        let result: unknown;
+        try {
+          let args: Record<string, unknown>;
+          try {
+            args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+          } catch (e) {
+            toolArgErrors++;
+            throw e;
+          }
+          // THI-126 must-fix: canonicalize update_listing args BEFORE the gate
         // decision so the gate and the executor see identical types. A JSON
         // string price_cents ("1000") would otherwise skip the >20% gate and
         // Postgres would cast it to INTEGER — executing a destructive drop
         // with no confirmation card. Non-canonical values fail closed.
         const norm = call.function.name === "update_listing" ? normalizeUpdateArgs(args) : null;
         if (norm && !norm.ok) {
+          toolArgErrors++; // THI-185: model-arg rejection, not an execution error
           result = { error: norm.error };
         } else {
           const canonicalArgs = norm ? norm.args : args;
@@ -568,17 +605,39 @@ export async function chatTurn(
             result = await executeTool(call.function.name, canonicalArgs, seller);
           }
         }
-      } catch (e) {
-        result = { error: (e as Error).message };
+        } catch (e) {
+          result = { error: (e as Error).message };
+        }
+        // H5.1: delimiters — listing data never enters the model's context as
+        // bare, unattributed instructions.
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: wrapToolResult(call.function.name, result),
+        });
       }
-      // H5.1: delimiters — listing data never enters the model's context as
-      // bare, unattributed instructions.
-      messages.push({
-        role: "tool",
-        tool_call_id: call.id,
-        content: wrapToolResult(call.function.name, result),
+    }
+    outcome = "max_rounds";
+    return { text: "Sorry — that took too many steps. Could you simplify the request?", ...(confirm ? { confirm } : {}) };
+  } catch (e) {
+    outcome = "error";
+    throw e;
+  } finally {
+    // Only LLM turns are usage turns (llmCalls > 0 ⇔ callLlm was attempted).
+    if (llmCalls > 0) {
+      logChatTurnUsage({
+        model: turnModel,
+        tier: null, // cheap/strong split is THI-181 F4 / THI-180; null until then
+        llmCalls,
+        calls: callUsage,
+        toolRounds,
+        toolCalls,
+        toolNames,
+        toolArgErrors,
+        durationMs: Date.now() - startedAt,
+        outcome,
+        sellerId: seller?.id ?? null,
       });
     }
   }
-  return { text: "Sorry — that took too many steps. Could you simplify the request?", ...(confirm ? { confirm } : {}) };
 }

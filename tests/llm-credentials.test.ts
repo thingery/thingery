@@ -5,8 +5,13 @@
 // as tests/schema.test.ts): upsert/rotate/delete, one-row-per-seller,
 // cascade on seller delete, runtime gate fallback.
 //
-// No real-format provider keys anywhere: fixtures use byo_test_… strings so
-// the pinned gitleaks scan can never flag them.
+// Fixtures use byo_test_… strings so no real provider key format is matched;
+// NOTE (gitleaks, THI-191 N1): prefix alone does NOT defeat the
+// generic-api-key rule — entropy is the trigger (byo_test_key_verify_401/404
+// crossed 3.5; the G2 fixtures later did the same). The fixtures that
+// crossed the floor are allowlisted as exact strings in .gitleaks.toml;
+// new fixtures must stay under it (or be added there as exact strings
+// when CI says so).
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -187,11 +192,42 @@ describe("base URL normalization (spec §3)", () => {
     expect(normalizeBaseUrl("  ")).toBe(DEFAULT_BYO_COMPLETIONS_URL);
   });
 
-  it("rejects non-https except for local dev hosts", () => {
+  it("rejects non-https except for local dev hosts, and only when G1's flag is set", () => {
+    // Default (flag off): no http, no loopback, no private ranges.
     expect(normalizeBaseUrl("http://api.example.com/v1")).toBeNull();
+    expect(normalizeBaseUrl("http://localhost:8080/v1")).toBeNull();
+    expect(normalizeBaseUrl("http://127.0.0.1:11434/v1")).toBeNull();
     expect(normalizeBaseUrl("ftp://api.example.com/v1")).toBeNull();
-    expect(normalizeBaseUrl("http://localhost:8080/v1")).toBe("http://localhost:8080/v1/chat/completions");
-    expect(normalizeBaseUrl("http://127.0.0.1:11434/v1")).toBe("http://127.0.0.1:11434/v1/chat/completions");
+    // Flag on (dev): localhost and loopback http endpoints work again.
+    process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS = "1";
+    try {
+      expect(normalizeBaseUrl("http://localhost:8080/v1")).toBe("http://localhost:8080/v1/chat/completions");
+      expect(normalizeBaseUrl("http://127.0.0.1:11434/v1")).toBe("http://127.0.0.1:11434/v1/chat/completions");
+    } finally {
+      delete process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS;
+    }
+  });
+
+  it("rejects private-IP literal endpoints regardless of scheme (G1)", () => {
+    for (const bad of [
+      "https://10.0.0.5/v1",
+      "https://192.168.1.10/v1",
+      "https://172.16.0.1/v1",
+      "https://172.31.255.255/v1",
+      "https://169.254.169.254/latest/meta-data", // cloud metadata literal
+    ]) {
+      expect(normalizeBaseUrl(bad), bad).toBeNull();
+    }
+    // DNS-rebinding-style hostnames (e.g. 10-0-0-5.nip.io) are NOT literals —
+    // documented residual risk, intentionally out of scope for this check.
+    expect(normalizeBaseUrl("https://10-0-0-5.nip.io/v1")).toContain("https://10-0-0-5.nip.io/v1/chat/completions");
+    // With the local-endpoints flag (dev), private literals are allowed again.
+    process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS = "1";
+    try {
+      expect(normalizeBaseUrl("https://10.0.0.5/v1")).toBe("https://10.0.0.5/v1/chat/completions");
+    } finally {
+      delete process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS;
+    }
   });
 
   it("rejects garbage", () => {
@@ -292,6 +328,38 @@ describe("verify probe (spec §3): 1-token call with tools attached", () => {
     });
     expect(result).toEqual({ ok: false, reason: "timeout", message: "endpoint timed out" });
   });
+
+  it("bounds the provider error body at 64 KB (G2): oversized declared body is not buffered", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("x", { status: 400, headers: { "content-length": String(10 * 1024 * 1024) } })),
+    );
+    const result = await verifyLlmCredential({
+      apiKey: "byo_test_key_verify_g2",
+      completionsUrl: DEFAULT_BYO_COMPLETIONS_URL,
+      model: "gpt-4o-mini",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("bad_endpoint");
+      expect(result.message).toBe("provider_error"); // fixed slug — no body was read
+    }
+  });
+
+  it("bounds the provider error body at 64 KB (G2): oversized streamed body is cancelled", async () => {
+    const huge = "A".repeat(200 * 1024); // no content-length; exceeds bound mid-stream
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(huge, { status: 400 })),
+    );
+    const result = await verifyLlmCredential({
+      apiKey: "byo_test_key_verify_g2b",
+      completionsUrl: DEFAULT_BYO_COMPLETIONS_URL,
+      model: "gpt-4o-mini",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toBe("provider_error");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -389,6 +457,42 @@ describe.skipIf(!available)("BYO credential store (DB, spec §1–§2)", () => {
       apiKey: "byo_test_key_store_3",
     });
     expect((await resolveLlmCredential(sellerId))?.completionsUrl).toBe(DEFAULT_BYO_COMPLETIONS_URL);
+  });
+
+  it("resolves to null (never throws) with a stored row when the master key is unset (N2)", async () => {
+    await upsertLlmCredential(sellerId, {
+      label: "",
+      model: "gpt-4o-mini",
+      baseUrl: null,
+      apiKey: "byo_test_key_n2",
+    });
+    clearMasterKey();
+    try {
+      expect(await resolveLlmCredential(sellerId)).toBeNull(); // silent company fallback, no exception
+    } finally {
+      setMasterKey();
+    }
+  });
+
+  it("rejects IPv4-mapped-IPv6 and `::` literals regardless of scheme (G1 R1, THI-194 PoC)", () => {
+    for (const bad of [
+      "https://[::ffff:169.254.169.254]/v1", // mapped cloud-metadata
+      "https://[::ffff:127.0.0.1]/v1", // mapped loopback
+      "https://[::]/v1", // unspecified
+      "https://[::1]/v1", // loopback
+    ]) {
+      expect(normalizeBaseUrl(bad), bad).toBeNull();
+    }
+    // Public v6 and hostnames unaffected
+    expect(normalizeBaseUrl("https://[2600:1f18:6a4:cd03::1]/v1")).toContain("2600:");
+    // localhost by name is loopback — gated too (flag-off), https notwithstanding
+    expect(normalizeBaseUrl("https://localhost:8443/v1")).toBeNull();
+    process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS = "1";
+    try {
+      expect(normalizeBaseUrl("https://localhost:8443/v1")).toBe("https://localhost:8443/v1/chat/completions");
+    } finally {
+      delete process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS;
+    }
   });
 
   it("falls back (null) at runtime when the stored model left the allow-gate", async () => {

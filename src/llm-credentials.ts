@@ -128,11 +128,38 @@ export function modelAllowedForByo(model: string): boolean {
 
 export const DEFAULT_BYO_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
 
+/** G1 (Security review THI-191, R1 per THI-194): private/loopback IPv4 and
+ *  IPv6 literals — rejected as BYO endpoints unless local endpoints are
+ *  explicitly enabled (an internal-scanner primitive otherwise). The IPv6
+ *  pattern anchors on a leading `::`, which covers `::`, `::1`, and the
+ *  IPv4-mapped `::ffff:a.b.c.d` forms that otherwise bypass the check
+ *  (THI-194 PoC); public v6 addresses (e.g. 2600:…) do not start with `::`.
+ *  Literal check only; DNS rebinding to a private IP is a documented
+ *  residual, not covered here. */
+const PRIVATE_IP_V4 =
+  /^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+const PRIVATE_IP_V6 = /^\[?(::|f[cd][0-9a-f]{2}:|fe[89ab][0-9a-f]:)/i;
+
+function isPrivateHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "");
+  return host === "localhost" || PRIVATE_IP_V4.test(host) || PRIVATE_IP_V6.test(host);
+}
+
+/** G1: local endpoints (plain http / localhost / loopback IPs) are opt-in —
+ *  `LLM_BYO_ALLOW_LOCAL_ENDPOINTS=1` (dev/self-host troubleshooting); off in
+ *  prod by default so the verify probe and chat turns never target them. */
+export function localEndpointsAllowed(): boolean {
+  const v = process.env.LLM_BYO_ALLOW_LOCAL_ENDPOINTS;
+  return v === "1" || v?.toLowerCase() === "true";
+}
+
 /**
  * Normalizes a user-supplied endpoint. Accepts a full `…/chat/completions`
  * URL (used as-is) or a base such as `https://api.openai.com/v1` (append
- * `/chat/completions`). https only, except http for localhost/127.0.0.1/[::1]
- * (local dev endpoints). Returns null when invalid.
+ * `/chat/completions`). https only, except plain http for localhost/
+ * 127.0.0.1/[::1] when LLM_BYO_ALLOW_LOCAL_ENDPOINTS is set (G1). Private-IP
+ * literals (v4, v6 incl. `::`/loopback/ULA/mapped forms) and the name
+ * `localhost` itself are rejected regardless of scheme unless that flag is
  */
 export function normalizeBaseUrl(input: string | undefined | null): string | null {
   const trimmed = (input ?? "").trim();
@@ -142,8 +169,14 @@ export function normalizeBaseUrl(input: string | undefined | null): string | nul
   } catch {
     return null;
   }
-  const isLocal = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1";
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLocal)) return null;
+  const isLocal =
+    url.hostname === "localhost" ||
+    url.hostname === "127.0.0.1" ||
+    url.hostname === "[::1]" ||
+    url.hostname === "::1" ||
+    /^127\./.test(url.hostname);
+  if (isPrivateHost(url.hostname) && !localEndpointsAllowed()) return null;
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLocal && localEndpointsAllowed())) return null;
   let full: URL;
   try {
     full = url.pathname.endsWith("/chat/completions")
@@ -190,6 +223,39 @@ function sanitizeProviderMessage(message: string, apiKey: string): string {
   return safe.length > 0 ? safe : "provider_error";
 }
 
+/** G2 (Security review THI-191): the 10s timeout bounds time, not bytes — a
+ *  hostile endpoint can stream an unbounded error body into app memory. Read
+ *  at most 64 KB of it (honoring content-length when declared) and cancel the
+ *  stream past that; null ⇒ oversized, callers use a fixed slug. */
+const MAX_VERIFY_BODY_BYTES = 64 * 1024;
+
+async function readBoundedBody(res: Response): Promise<string | null> {
+  const declared = Number(res.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > MAX_VERIFY_BODY_BYTES) return null;
+  if (!res.body) return res.text();
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > MAX_VERIFY_BODY_BYTES) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
+
 /** One-token test call against the user's endpoint+key+model. 200 ⇒ usable.
  *  401/403 ⇒ bad key; 404 / model_not_found ⇒ model rejected; timeouts and
  *  fetch-level failures are bad_endpoint/timeout. Never returns key material. */
@@ -207,10 +273,12 @@ export async function verifyLlmCredential(input: VerifyLlmCredentialInput): Prom
       signal: AbortSignal.timeout(10_000),
     });
     if (res.ok) return { ok: true };
-    const text = await res.text();
+    // G2: bounded read — an oversized body becomes a fixed slug, never a
+    // buffer; sanitized text only otherwise.
+    const text = (await readBoundedBody(res)) ?? "";
     const message = sanitizeProviderMessage(text, input.apiKey);
     if (res.status === 401 || res.status === 403) return { ok: false, reason: "unauthorized", message };
-    if (res.status === 404 || /model/i.test(text) && /not.*(found|exist)|does not exist|unknown model/i.test(text)) {
+    if (res.status === 404 || (/model/i.test(text) && /not.*(found|exist)|does not exist|unknown model/i.test(text))) {
       return { ok: false, reason: "model_rejected", message };
     }
     return { ok: false, reason: "bad_endpoint", message };
@@ -269,11 +337,16 @@ export async function getLlmCredential(sellerId: string): Promise<LlmCredentialR
 }
 
 /** Loads + decrypts the seller's credential (spec §6 resolution order).
- *  Returns null when none is stored or the master key is unavailable
- *  (fail closed → company key). Throws only on tamper/corruption — callers
- *  treat that as "fall back to company key" after logging a security event
- *  slug (no ciphertext in the log). */
+ *  Returns null when none is stored, when the master key is unavailable
+ *  (N2, fail closed → company key — never an exception), or when the stored
+ *  row no longer passes the URL/model gates. Throws only on tamper/corruption
+ *  — callers treat that as "fall back to company key" after logging a
+ *  security event slug (no ciphertext in the log). */
 export async function resolveLlmCredential(sellerId: string): Promise<ResolvedLlmCredential | null> {
+  // N2 (Security review THI-191): honor the documented null contract — with
+  // no master key the feature is disabled, so callers silently fall back to
+  // the company credential instead of distinguishing an exception.
+  if (!byoMasterKeyConfigured()) return null;
   const { rows } = await pool.query<DbRow>(
     `SELECT ${SELECT_COLUMNS} FROM llm_credentials WHERE seller_id = $1 AND kind = 'api_key'`,
     [sellerId],

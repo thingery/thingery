@@ -110,27 +110,34 @@ describe("chat.js account link (gh#8)", () => {
     await new Promise((r) => setTimeout(r, 0)); // let the fetch chain settle
 
     const accountLink = byId.get("account-link")!;
-    expect(accountLink.children.length).toBe(4);
+    // THI-186 Phase 1: logged-in users also get a "use your own model" link
+    // before the account link — same inert-text construction.
+    expect(accountLink.children.length).toBe(6);
 
-    const [lead, name, separator, link] = accountLink.children;
+    const [lead, name, separator, byoLink, separator2, link] = accountLink.children;
     // Fails against the old code, which set .innerHTML as a string and
     // left no child nodes (and would have parsed the payload as HTML).
     expect(lead).toBe("Logged in as ");
     expect(name).toBe(HOSTILE_NAME); // hostile payload survives verbatim as text
     expect(separator).toBe(" · ");
+    expect(byoLink).toBeInstanceOf(FakeElement);
+    expect((byoLink as FakeElement).tag).toBe("a");
+    expect((byoLink as FakeElement).href).toBe("/login.html");
+    expect((byoLink as FakeElement).textContent).toBe("use your own model");
+    expect(separator2).toBe(" · ");
     expect(link).toBeInstanceOf(FakeElement);
     expect((link as FakeElement).tag).toBe("a");
     expect((link as FakeElement).href).toBe("/login.html");
     expect((link as FakeElement).textContent).toBe("account");
 
-    // Only the anchor is an element; everything else is a text node, so
+    // Only the anchors are elements; everything else is a text node, so
     // the display name can never introduce markup.
     const elements = accountLink.children.filter((c) => c instanceof FakeElement);
-    expect(elements).toEqual([link]);
+    expect(elements).toEqual([byoLink, link]);
 
     const rendered = accountLink.children
       .map((c) => (c instanceof FakeElement ? c.textContent : c))
       .join("");
-    expect(rendered).toBe(`Logged in as ${HOSTILE_NAME} · account`);
+    expect(rendered).toBe(`Logged in as ${HOSTILE_NAME} · use your own model · account`);
   });
 });

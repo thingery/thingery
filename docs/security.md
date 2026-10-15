@@ -153,7 +153,7 @@ retention window retires them — see the restore-drill warning in
 | API1 | Broken Object Level Authorization | ✅ protected | `updateItem`/`myItems`/`addItemImage` all scope by `seller_id`; `get_item` is public-by-design, IDs are UUIDs (no enumeration). |
 | API2 | Broken Authentication | ⚠️ gaps | High-entropy keys + scrypt + `timingSafeEqual` are solid. Gaps: no email verification, keys never expire/rotate, sessions non-revocable, signup 409 enumeration. → H2, H4 |
 | API3 | Broken Object Property Level Authorization | ⚠️ by design | `attributes` is deliberately free-form (`src/attributes.ts`); undeclared keys pass through. Documented tradeoff — revisit if attributes ever drive pricing/shipping logic. |
-| API4 | Unrestricted Resource Consumption | ❌ | Broken IP attribution (H1), uncapped uploads (H3), cost-bearing external calls per listing/chat. Rate limits *exist* on paper for `/mcp`, auth, chat. |
+| API4 | Unrestricted Resource Consumption | 🟡 | Broken IP attribution (H1), uncapped uploads (H3), cost-bearing external calls per listing/chat. Rate limits *exist* on paper for `/mcp`, auth, chat; chat cost is now hard-capped by the THI-180 daily token budget (residuals: restart resets, estimate-fallback under-count on non-usage-reporting providers — see §3.4). |
 | API5 | Function Level Authorization | ✅ | Every write tool requires seller; public tools are read-only by construction. |
 | API6 | Sensitive Business Flows | ❌ | Signup and listing-creation flows have no abuse controls beyond (broken) IP limits. → H4 |
 | API7 | Server Side Request Forgery | ✅ today | The server never fetches URLs from user input (images are stored, not fetched; embed/LLM URLs come from env). **Future risk:** if we ever proxy/fetch external image URLs or add webhooks, SSRF controls (allowlist, no internal ranges) are mandatory. |
@@ -178,8 +178,13 @@ Thingery's users are agents, and its content is machine-consumed. Three flows ma
 2. **Excessive agency (LLM06-ish).** The chat agent can publish and mutate listings
    without a confirmation step. For listings this is a product choice, not a bug — but
    destructive ops (`status: "deleted"`) should require an explicit user confirmation
-   turn, and the tool surface should stay minimal. The 6-round loop bound and 12 KB
-   tool-result truncation are good existing mitigations.
+   turn, and the tool surface should stay minimal. The env-configurable loop bound
+   (`CHAT_ROUNDS_PER_TURN`, default 6) and 12 KB tool-result truncation are good
+   existing mitigations; since THI-180 the aggregate cost is also capped by the daily
+   token budget (see §4 — residual: the in-memory budget resets on restart, and on a
+   provider that reports no usage the conservative estimate-fallback can under-count
+   real spend, degrading the cap toward a call-count bound; per-IP/seller hourly
+   limiters cap per-actor fan-out — operator configuration, not attacker-controlled).
 3. **Output handling (LLM02-ish).** Chat replies and tool results are rendered with
    `textContent` in `website/chat.html` (safe) and escaped in `web-pages.ts` (safe).
    One sink uses `innerHTML` with `data.seller.name` (the user's own display name —
@@ -202,7 +207,13 @@ phishing concerns — threat-model them before building, not after.
   cookies verified in constant time; 192-bit API keys.
 - Zod validation on every MCP tool input and browser API route (type/length/range).
 - Rate limiters: `/mcp` 120/min per key, 30/min per IP; signup+login 10/h per IP; chat
-  10/h anon / 60/h authed. Body caps: 8 MiB `/mcp` (gate, THI-11 §2.10c; the SDK's
+  turn limiters are env-configurable since THI-180 (`CHAT_TURNS_HOURLY_AUTHED`/`_ANON`,
+  defaults 60/h per seller and 10/h per IP) plus a process-wide **daily LLM token budget**
+  (`CHAT_DAILY_TOKEN_BUDGET`, default 2M tokens/day, `0` = disabled; UTC-day rollover,
+  **in-memory — resets on restart**). Every chat 429 logs a `rate_limit` line; every
+  LLM-backed turn logs a `chat_turn_usage` telemetry line (THI-185) and a `chat_usage`
+  security event (THI-180: token counts + env model + usage_source slug, no message
+  content). Body caps: 8 MiB `/mcp` (gate, THI-11 §2.10c; the SDK's
   4 MiB default is bypassed by the pre-parsed body), 256 KB `/api` JSON,
   5 MB uploads.
 - Upload allowlist by media type, generated filenames (no traversal), owner check, images

@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Account — Thingery</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link rel="icon" href="/assets/favicon.ico" sizes="48x48">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <meta property="og:title" content="Account — Thingery">
@@ -21,7 +22,9 @@
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.6;
     }
     h1 { font-size: 1.5rem; }
-    h1 img { height: 30px; width: auto; vertical-align: middle; }
+    h1 .logo { display: inline-flex; align-items: center; gap: .5rem;
+      font-weight: 750; text-decoration: none; color: inherit; }
+    h1 .logo .logo-mark { display: block; height: 26px; width: auto; }
     input { width: 100%; padding: .6rem .7rem; margin: .25rem 0 1rem; font: inherit;
       border-radius: 8px; border: 1px solid rgba(127,127,127,.5); background: transparent; color: inherit; }
     button { padding: .6rem 1.2rem; font: inherit; border-radius: 8px; cursor: pointer;
@@ -51,7 +54,7 @@
   </style>
 </head>
 <body>
-  <h1><a href="/"><img src="/assets/logo-header.png" alt="Thingery" width="161" height="30"></a> — account</h1>
+  <h1><a class="logo" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="28" height="26">Thingery</a> — account</h1>
   <nav aria-label="Site" style="font-size:.9rem;opacity:.85;margin:-.8rem 0 1.4rem"><a href="/browse">Browse</a> · <a href="/chat.html">Chat</a></nav>
 
   <!-- Callback banner for the ChatGPT OAuth round-trip (spec THI-193 §3.2/

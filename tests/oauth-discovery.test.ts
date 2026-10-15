@@ -69,12 +69,12 @@ describe("client registration payload validation", () => {
   it("normalizes stored URIs and keeps name/uri as data", () => {
     const reg = validateClientRegistration({
       redirect_uris: ["http://LOCALHOST:6274/cb"],
-      client_name: "Claude Desktop",
+      client_name: "Desktop Sync", // THI-220: fixtures must not use reserved brand names
       client_uri: "https://claude.ai",
       unknown_field: "ignored (forward-compatible)",
     });
     expect(reg.redirect_uris).toEqual(["http://localhost:6274/cb"]);
-    expect(reg.client_name).toBe("Claude Desktop");
+    expect(reg.client_name).toBe("Desktop Sync");
     expect(reg.client_uri).toBe("https://claude.ai");
   });
 

@@ -212,8 +212,14 @@ phishing concerns — threat-model them before building, not after.
   (`CHAT_DAILY_TOKEN_BUDGET`, default 2M tokens/day, `0` = disabled; UTC-day rollover,
   **in-memory — resets on restart**). Every chat 429 logs a `rate_limit` line; every
   LLM-backed turn logs a `chat_turn_usage` telemetry line (THI-185) and a `chat_usage`
-  security event (THI-180: token counts + env model + usage_source slug, no message
-  content). Body caps: 8 MiB `/mcp` (gate, THI-11 §2.10c; the SDK's
+  security event (THI-180: token counts + `usage_source` slug, no message content;
+  THI-197: `model` is the **resolved** model — the stored credential's model when a
+  BYO key paid for the turn, else the env config — and a `credential_source:
+  "company" | "user"` slug labels whose key paid, while `daily_total`/`budget` keep
+  reporting the company meter). A stored BYO credential that fails to decrypt during
+  `/api/chat` resolution logs a `byo_credential_error` slug (route + sellerId only —
+  never key material, ciphertext, or base_url) and the turn fails closed to the
+  company key. Body caps: 8 MiB `/mcp` (gate, THI-11 §2.10c; the SDK's
   4 MiB default is bypassed by the pre-parsed body), 256 KB `/api` JSON,
   5 MB uploads.
 - Upload allowlist by media type, generated filenames (no traversal), owner check, images
@@ -532,8 +538,9 @@ tool-calling model gate.
 2. `sudo docker compose exec -T postgres psql -U thingery thingery -c
    "SELECT seller_id FROM llm_credentials"` — this is the affected-seller list.
 3. Stop the app container, set the new `LLM_CREDENTIALS_MASTER_KEY`, start it: existing
-   rows now fail auth-tag verification (tamper path), so resolution throws → falls back
-to the company key. That is safe but silent for users.
+   rows now fail auth-tag verification (tamper path), so resolution fails and each
+   affected turn logs a `byo_credential_error` slug (expected noise during rotation,
+   THI-197) before falling back to the company key. That is safe but silent for users.
 4. Ask the affected sellers to re-enter their key (DELETE + PUT via the account page;
 the old rows can simply be dropped: `DELETE FROM llm_credentials` — sellers re-add).
 5. Log an incident note in the issue thread; no ciphertext or key material in it.

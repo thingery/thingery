@@ -10,6 +10,12 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # THI-226: NPM_TOKEN lives only in the protected `npm` environment
+    # (deployment-branch policy: TAG-typed rule `v*` only — branch-typed rules
+    # do not cover tag refs, and tag refs need a tag-typed rule to be allowed
+    # at all). Unreviewed refs (branches, non-v* tags, stray workflow_dispatch)
+    # cannot resolve the token: the job is blocked before any step runs.
+    environment: npm
     permissions:
       id-token: write # OIDC for the MCP registry
       contents: read

@@ -19,7 +19,14 @@ import { mountApiRoutes } from "../src/routes.js";
 import { mcpRoutes } from "../src/mcp-gate.js";
 import { RateLimiter } from "../src/rate-limit.js";
 import { logSecurityEvent, type SecurityEvent, type SecurityEventContext } from "../src/security-events.js";
-import { createItem, updateItem } from "../src/items.js";
+import {
+  createItem,
+  updateItem,
+  ListingLimitError,
+  MAX_ACTIVE_LISTINGS_PER_SELLER,
+  MAX_LISTING_CREATES_PER_SELLER_PER_DAY,
+} from "../src/items.js";
+import * as embed from "../src/embed.js";
 import { addItemImage } from "../src/images.js";
 import { registerTools } from "../src/tools.js";
 import { executeTool } from "../src/chat.js";
@@ -226,6 +233,56 @@ describe("call sites emit their events (THI-112)", () => {
     expect(events(spy)[2]).toMatchObject({ type: "listing_write", action: "update", outcome: "rejected", sellerId: "seller-upd" });
   });
 
+  it("listing create over a cap (THI-233 N1): ListingLimitError rejection logs listing_write/create/rejected", async () => {
+    const spy = spyLog();
+    const rejected = (sellerId: string) => ({
+      ts: expect.any(String),
+      type: "listing_write",
+      action: "create",
+      outcome: "rejected",
+      sellerId,
+      ip: null,
+    });
+    // Velocity cap: creates_24h at the boundary (>= rejects), active 0 so
+    // only the first cap fires. COUNT strings, as Postgres returns them.
+    vi.spyOn(pool, "query").mockResolvedValueOnce({
+      rows: [{ creates_24h: String(MAX_LISTING_CREATES_PER_SELLER_PER_DAY), active: "0" }],
+    } as never);
+    await expect(
+      createItem({
+        seller_id: "seller-cap-vel",
+        title: "Vintage sneakers",
+        description: "over the velocity cap",
+        category: "sneakers",
+        condition: "good",
+        price_cents: 12500,
+        currency: "EUR",
+        shipping_tier: "locker",
+        images: [],
+      }),
+    ).rejects.toBeInstanceOf(ListingLimitError);
+    expect(events(spy)).toEqual([rejected("seller-cap-vel")]);
+
+    // Active cap: same rejection shape from the other branch (velocity 0).
+    vi.spyOn(pool, "query").mockResolvedValueOnce({
+      rows: [{ creates_24h: "0", active: String(MAX_ACTIVE_LISTINGS_PER_SELLER) }],
+    } as never);
+    await expect(
+      createItem({
+        seller_id: "seller-cap-act",
+        title: "Vintage sneakers",
+        description: "over the active cap",
+        category: "sneakers",
+        condition: "good",
+        price_cents: 12500,
+        currency: "EUR",
+        shipping_tier: "locker",
+        images: [],
+      }),
+    ).rejects.toThrow(/200 active/);
+    expect(events(spy)).toEqual([rejected("seller-cap-vel"), rejected("seller-cap-act")]);
+  });
+
   it("upload reject: unsupported media type logs image_upload/rejected with a slug reason (no media type echoed)", async () => {
     const spy = spyLog();
     const result = await addItemImage("seller-img", "item-1", Buffer.alloc(4), "application/octet-stream");
@@ -257,6 +314,48 @@ describe("call sites emit their events (THI-112)", () => {
       delete process.env.UPLOADS_DIR;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THI-233 N2 — cap ordering: the COUNT rejection must run BEFORE the
+// embeddings call (docs/security.md §6 H4 cost-DoS fix: every create costs
+// an embeddings-API request, so rejecting after embedding still pays the
+// abuser's bill). An embedText spy pins that ordering — moving the COUNT
+// check below embedText fails this test in CI.
+
+describe("cap rejection skips the embeddings call (THI-233 N2)", () => {
+  const overCapInput = () => ({
+    seller_id: "seller-cap-order",
+    title: "Vintage sneakers",
+    description: "cost-DoS ordering pin",
+    category: "sneakers",
+    condition: "good" as const,
+    price_cents: 12500,
+    currency: "EUR",
+    shipping_tier: "locker",
+    images: [],
+  });
+
+  it("createItem rejects over the cap without ever calling embedText", async () => {
+    const embedSpy = vi.spyOn(embed, "embedText");
+    vi.spyOn(pool, "query").mockResolvedValue({
+      rows: [{ creates_24h: String(MAX_LISTING_CREATES_PER_SELLER_PER_DAY), active: "0" }],
+    } as never);
+    await expect(createItem(overCapInput())).rejects.toBeInstanceOf(ListingLimitError);
+    expect(embedSpy).not.toHaveBeenCalled();
+  });
+
+  it("control: the same spy records exactly one embedText call on an allowed create", async () => {
+    // Proves the assertion above pins ordering, not a dead spy: under the
+    // cap, createItem reaches the embeddings call exactly once.
+    const embedSpy = vi.spyOn(embed, "embedText").mockResolvedValue([0.1, 0.2]);
+    vi.spyOn(pool, "query")
+      .mockResolvedValueOnce({ rows: [{ creates_24h: "0", active: "0" }] } as never)
+      .mockResolvedValueOnce({ rows: [{ id: "item-cap-order-ok", status: "active" }] } as never);
+    const item = await createItem(overCapInput());
+    expect(item.id).toBe("item-cap-order-ok");
+    expect(embedSpy).toHaveBeenCalledTimes(1);
   });
 });
 

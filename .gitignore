@@ -10,3 +10,4 @@ secret/
 *.pem
 *_private_key*
 *.key
+\*.zip

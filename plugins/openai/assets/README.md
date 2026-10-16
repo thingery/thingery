@@ -1,9 +1,8 @@
 # assets/
 
-Icon files for the OpenAI plugin manifest. **Pending [THI-217]** (board
-approval gate): this directory is empty until the approved icon assets land.
-
-Expected files (referenced by `../plugin.json`):
+Board-approved icon set (THI-217, Set A, confirmed 2026-10-16), referenced by
+`../plugin.json`. Regenerate with the `make-thingery-icons.py` work product on
+THI-217.
 
 | File            | Manifest field                          | Rules                              |
 | --------------- | --------------------------------------- | ---------------------------------- |

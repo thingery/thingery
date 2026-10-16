@@ -28,12 +28,14 @@ const Ajv2020 = require("ajv/dist/2020").default;
 
 const hard = [];
 const pending = [];
+const warn = [];
 const ok = [];
 
 const pendingRe = /\bPENDING\((THI-216|THI-217|gap|board)\)/;
 
 function fail(msg) { hard.push(msg); }
 function pend(msg) { pending.push(msg); }
+function warnFn(msg) { warn.push(msg); }
 function pass(msg) { ok.push(msg); }
 
 /** Recursively collect strings containing a PENDING marker. */
@@ -195,7 +197,9 @@ if (plugin) {
     else pass("review.test_cases.negative: exactly 3 cases");
     neg.forEach((c, i) => { for (const f of ["description", "prompt"]) if (!c[f]) fail(`negative[${i}].${f}: missing`); });
 
-    if (rev.demo_recording_url === undefined) fail("review.demo_recording_url: missing (required for MCP review)");
+    // Optional in the ZIP, required for MCP review before submitting — the
+    // walkthrough URL is entered in the dashboard's Review details if absent.
+    if (rev.demo_recording_url === undefined) warnFn("review.demo_recording_url: absent from ZIP — enter the video walkthrough URL in Review details before submitting (required for MCP review)");
     else checkHttpsUrl(rev.demo_recording_url, "review.demo_recording_url", 2048);
 
     if (typeof rev.commerce !== "boolean") fail("review.commerce: must be boolean");
@@ -238,6 +242,10 @@ ok.forEach((m) => console.log(`  ✓ ${m}`));
 if (pending.length) {
   console.log(`\nPENDING BLOCKED INPUTS (${pending.length}) — expected until THI-216/THI-217 resolve; gaps tracked on THI-218`);
   pending.forEach((m) => console.log(`  ⏳ ${m}`));
+}
+if (warn.length) {
+  console.log(`\nPRE-SUBMISSION WARNINGS (${warn.length}) — ZIP is valid; complete in the dashboard before submitting`);
+  warn.forEach((m) => console.log(`  ⚠ ${m}`));
 }
 if (hard.length) {
   console.log(`\nHARD FAILURES (${hard.length})`);

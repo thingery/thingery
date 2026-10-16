@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "thingery",
   "version": "1.0.0",
-  "description": "PENDING(THI-217): directory description for Thingery — search a marketplace of physical items, view item details, create and manage your own listings, and order items with Stripe Checkout via secure per-user sign-in.",
+  "description": "Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods. Search a marketplace of real, physical items, open full listing details, and manage your own listings and orders via secure per-user sign-in.",
   "author": {
     "name": "Thingery",
     "url": "https://thingery.dev"
@@ -15,10 +15,10 @@
     "com.openai": {
       "interface": {
         "displayName": "Thingery",
-        "shortDescription": "PENDING(THI-217): one-line tagline, max 30 chars",
-        "longDescription": "PENDING(THI-217): approved directory copy (opening paragraph).\n\nThingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods. Search active listings by category, price, condition and attributes; view full item details; and, after signing in with your Thingery account (OAuth per-user authorization), create and manage your own listings and order items.\n\nHow it treats your data: listings are public by design — anyone, including anonymous search, can see them. Signed-in access is scoped to your own account: the plugin only ever manages your listings and your orders. Personal data involved in a purchase is your email and shipping address, used solely to fulfil the order.\n\nPayments: ordering an item returns a Stripe Checkout URL — payment completes on Stripe's hosted page, never in chat. No tool moves money directly; release_funds only advances an order's state after delivery, and refunds are issued through Stripe.",
+        "shortDescription": "Open marketplace for AI agents",
+        "longDescription": "Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.\n\nUse it to search a marketplace of real, physical items — by keyword, category, price, condition, or any item attribute — and to open any listing for its full details and photos. Sellers can create and manage their own listings: publish an item with photos, edit details and prices, and mark items reserved or sold.\n\nSign-in is per-user and secure: you connect Thingery with your own account, so agents only ever see and manage the listings and orders that belong to you. Thingery is open source, self-hostable, and free for buyers and sellers.",
         "developerName": "Thingery",
-        "category": "PENDING(board): Shopping",
+        "category": "Shopping",
         "capabilities": [
           "Search items by category, price, condition and attributes",
           "View item details",
@@ -27,17 +27,20 @@
           "Track orders, shipments and disputes"
         ],
         "websiteURL": "https://thingery.dev",
-        "supportURL": "PENDING(gap): https://thingery.dev/support — page does not exist yet; board to confirm URL (or GitHub issues)",
-        "privacyPolicyURL": "PENDING(THI-216): https://thingery.dev/privacy",
-        "termsOfServiceURL": "PENDING(gap): https://thingery.dev/terms — page does not exist yet; not covered by THI-216",
+        "supportURL": "https://github.com/thingery/thingery/issues",
+        "privacyPolicyURL": "https://thingery.dev/privacy",
+        "termsOfServiceURL": "https://thingery.dev/terms",
         "defaultPrompt": [
           "Search for sneakers in size 43",
           "List what I'm currently selling",
           "Help me sell my coffee machine"
         ],
-        "brandColor": "PENDING(THI-217)",
+        "brandColor": "#0f7b6c",
+        "brandColorDark": "#2dd4bf",
         "composerIcon": "./assets/icon.png",
-        "logo": "./assets/logo.png"
+        "composerIconDark": "./assets/icon-dark.png",
+        "logo": "./assets/logo.png",
+        "logoDark": "./assets/logo-dark.png"
       },
       "review": {
         "test_cases": {
@@ -88,7 +91,6 @@
             }
           ]
         },
-        "demo_recording_url": "PENDING(gap): video walkthrough not produced yet — required for MCP review",
         "commerce": true,
         "commerce_description": "Thingery is a marketplace for physical goods. Ordering an item creates an order and returns a Stripe Checkout URL; the buyer completes payment on Stripe's hosted page, and card details are never exchanged in chat. No plugin tool moves money directly: release_funds only advances an order's state after delivery, and refunds are issued through Stripe. Listings are public by design; the personal data involved in a purchase is the buyer's email and shipping address, used solely to fulfil the order."
       },

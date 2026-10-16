@@ -460,7 +460,13 @@ worst-case damage, "Exploitability" is how practical the attack is today.
   exploit; also cost DoS on the embeddings API per listing). **Exploitability: High**
   (free accounts, trivial automation — contingent on H1 for the IP-throttling part).
 - **Fix (pragmatic 90%):**
-  1. Per-seller listing velocity limit (e.g. 50 active listings / 100 creates per day).
+  1. ~~Per-seller listing velocity limit (e.g. 50 active listings / 100 creates per day).~~
+     **Done — shipped with PR #62 / THI-113** (verdict in THI-231 confirmed the numbers).
+     Shipped at **100 creates/day, 200 active**: `MAX_LISTING_CREATES_PER_SELLER_PER_DAY` /
+     `MAX_ACTIVE_LISTINGS_PER_SELLER` in `src/items.ts`, enforced in `createItem` *before*
+     the embeddings call so an over-cap create never pays the embedding bill; the rejection
+     is `ListingLimitError` → MCP code `rate_limited`, logged as a rejected `listing_write`
+     security event. Fixes 3–4 below remain open.
   2. Security event logging as structured JSON lines (signup, login success/failure,
      rate-limit rejections, listing create/update/delete, image upload) — never logging
      secrets or full payloads. Ship to stdout; Caddy/Docker capture is enough for now.

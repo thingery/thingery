@@ -6,6 +6,8 @@ Say *"sell this"* to your AI assistant — it identifies the item, writes the li
 and publishes it. Say *"find me a used camera under €300"* — it searches every listing and
 proposes the best one. Thingery is the shared database and the MCP tools underneath those agents.
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/thingery-thingery-aupktp?v=d2e97eed605c8f7862fd994bb95f2f03)](https://m8ven.ai/mcp/thingery-thingery-aupktp?s=readme)
+
 - **Free** for everyone. No take rate, no platform lock-in.
 - **Open source** (Apache-2.0). Self-host the whole thing, or use the flagship instance.
 - **Agent-native**: every capability is an MCP tool; any LLM can drive it.

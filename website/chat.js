@@ -2,12 +2,95 @@
 const $ = (id) => document.getElementById(id);
 const history = [];
 
+// THI-278: assistant replies reveal letter-by-letter (typewriter) unless the
+// user prefers reduced motion, in which case the full text lands instantly.
+// The probe is guarded so this file still executes under the DOM-shim unit
+// test (website-security.test.ts), which has no window/matchMedia.
+const reducedMotion = () =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// Stick-to-bottom autoscroll: follow the newest message only while the user
+// sits near the bottom, so a long reveal never yanks someone who scrolled up
+// to re-read — and resumes following once they come back down.
+const nearBottom = (el) => el.scrollHeight - el.scrollTop - el.clientHeight <= 48;
+const followIfNear = () => {
+  const el = $("log");
+  if (nearBottom(el)) el.scrollTop = el.scrollHeight;
+};
+
+// Messages live inside a centered column (#log is the scroll container);
+// appending + pinning to bottom is one helper so every message type behaves
+// the same (THI-278 polish).
+const appendMsg = (el) => {
+  // Fall back to #log itself if a cached pre-THI-278 chat.html (no #col)
+  // is still in a user's tab: messages land uncentered but everything works.
+  ($("col") || $("log")).appendChild(el);
+  $("log").scrollTop = $("log").scrollHeight;
+};
+
 function add(role, text) {
   const div = document.createElement("div");
   div.className = `msg ${role}`;
   div.textContent = text;
-  $("log").appendChild(div);
-  $("log").scrollTop = $("log").scrollHeight;
+  appendMsg(div);
+}
+
+// Thinking indicator shown while the turn runs (THI-278 polish). Returns the
+// element so send() can remove it when the reply lands.
+function addTyping() {
+  const div = document.createElement("div");
+  div.className = "msg bot typing";
+  const dots = document.createElement("span");
+  dots.className = "dots";
+  dots.setAttribute("role", "status");
+  dots.setAttribute("aria-label", "Assistant is thinking");
+  dots.textContent = "···";
+  div.appendChild(dots);
+  appendMsg(div);
+  return div;
+}
+
+// Assistant message with progressive letter-by-letter reveal. The rate is
+// scaled to the message length (short replies feel brisk, long ones never
+// crawl), the full text rides along visually-hidden for screen readers while
+// the visible span catches up, and on completion the bubble collapses to a
+// plain text node — so the final text is a single selectable/copyable run.
+function addBot(text) {
+  const div = document.createElement("div");
+  div.className = "msg bot";
+  if (reducedMotion() || !text) {
+    div.textContent = text;
+    appendMsg(div);
+    return;
+  }
+  const sr = document.createElement("span");
+  sr.className = "sr-only";
+  sr.textContent = text;
+  const shown = document.createElement("span");
+  shown.className = "reveal";
+  shown.setAttribute("aria-hidden", "true");
+  div.append(sr, shown);
+  div.classList.add("revealing");
+  appendMsg(div);
+
+  const duration = Math.min(2400, Math.max(500, text.length * 14)); // ms
+  const start = Date.now();
+  const step = () => {
+    const chars = Math.min(text.length, Math.ceil((text.length * (Date.now() - start)) / duration));
+    shown.textContent = text.slice(0, chars);
+    followIfNear();
+    if (chars < text.length) {
+      requestAnimationFrame(step);
+      return;
+    }
+    // Done: replace everything with the plain final text.
+    div.classList.remove("revealing");
+    div.textContent = text;
+    followIfNear();
+  };
+  requestAnimationFrame(step);
 }
 
 fetch("/api/me").then(r => r.json()).then(data => {
@@ -67,8 +150,7 @@ function addConfirmCard(confirm) {
   };
   actions.append(yes, no);
   card.append(q, actions);
-  $("log").appendChild(card);
-  $("log").scrollTop = $("log").scrollHeight;
+  appendMsg(card);
 }
 
 // message: what goes to the server (may carry a confirmation token);
@@ -76,6 +158,7 @@ function addConfirmCard(confirm) {
 async function send(message, displayText) {
   add("user", displayText);
   $("send").disabled = true;
+  const typing = addTyping();
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
@@ -84,17 +167,23 @@ async function send(message, displayText) {
     });
     const data = await res.json();
     // The reply is either a plain string (old shape) or { text, confirm? }.
+    // Only real reply text gets the typewriter treatment — errors and
+    // fallbacks land instantly so the user is never left waiting on them.
     let reply;
+    let streamed = false;
     if (!res.ok) reply = `⚠️ ${data.error || "Something went wrong."}`;
-    else if (typeof data.reply === "string") reply = data.reply;
-    else if (data.reply && typeof data.reply.text === "string" && data.reply.text.trim()) reply = data.reply.text;
+    else if (typeof data.reply === "string" && data.reply) { reply = data.reply; streamed = true; }
+    else if (data.reply && typeof data.reply.text === "string" && data.reply.text.trim()) { reply = data.reply.text; streamed = true; }
     else reply = "(no reply)";
-    add("bot", reply);
+    typing.remove();
+    if (streamed) addBot(reply);
+    else add("bot", reply);
     history.push({ role: "user", content: displayText }, { role: "assistant", content: reply });
     if (res.ok && data.reply && typeof data.reply === "object" && data.reply.confirm) {
       addConfirmCard(data.reply.confirm);
     }
   } catch (err) {
+    typing.remove();
     add("bot", "⚠️ Network error — please try again.");
   } finally {
     $("send").disabled = false;

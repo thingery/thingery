@@ -383,13 +383,42 @@ describe("chat turn usage telemetry via chatTurn (THI-185)", () => {
       "fetch",
       vi.fn(async () => new Response("boom", { status: 500 })),
     );
-    await expect(chatTurn([], "hello", null)).rejects.toThrow("LLM API 500");
+    // THI-276: company-turn provider 5xx degrades to the fixed unavailable
+    // string — never the generic "Something went wrong" 500 banner.
+    const out = await chatTurn([], "hello", null);
+    expect(out.text).toBe("Sorry — the assistant is temporarily unavailable. Please try again in a moment.");
     const lines = usageLines();
     expect(lines.length).toBe(1);
     expect(lines[0].outcome).toBe("error");
     expect(lines[0].llm_calls).toBe(1);
     expect(lines[0].prompt_tokens).toBeNull(); // call never completed
     expect(lines[0].tool_rounds).toBe(0);
+  });
+
+  it("THI-276: company-turn provider 429 (quota/balance, e.g. z.ai 1113) degrades to the capacity string", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: { code: "1113", message: "Insufficient balance" } }), { status: 429 })),
+    );
+    const out = await chatTurn([], "I want to buy shoes", null);
+    expect(out.text).toBe("Sorry — the assistant is at capacity right now. Please try again in a little while.");
+    expect(out.usage?.provider).toBe("company");
+    expect(usageLines()[0].outcome).toBe("error");
+  });
+
+  it("THI-276: company-key config-class 4xx (bad key) still throws — the 500 stays the loud operator signal", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("unauthorized", { status: 401 })),
+    );
+    await expect(chatTurn([], "hello", null)).rejects.toThrow("LLM API 401");
+    expect(usageLines()[0].outcome).toBe("error");
+  });
+
+  it("THI-276: non-HTTP failures (fetch-level network error) still throw — genuine bugs stay loud", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
+    await expect(chatTurn([], "hello", null)).rejects.toThrow("fetch failed");
+    expect(usageLines()[0].outcome).toBe("error");
   });
 
   it("emits nothing for confirm/decline turns — no LLM call, no usage turn", async () => {

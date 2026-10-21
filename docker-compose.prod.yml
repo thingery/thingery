@@ -50,6 +50,15 @@ services:
       LLM_BYO_ALLOWED_MODELS: ${LLM_BYO_ALLOWED_MODELS:-}
       # G1: opt-in for local/loopback endpoints (dev). Off in prod by default.
       LLM_BYO_ALLOW_LOCAL_ENDPOINTS: ${LLM_BYO_ALLOW_LOCAL_ENDPOINTS:-}
+      # Sign in with ChatGPT (spec THI-193 / THI-211): feature flag + client id
+      # gate it (empty/unset ⇒ off: /api/me/chatgpt routes 404, no UI).
+      # REDIRECT_URI default derives from PUBLIC_BASE_URL; values live only in
+      # the VPS .env, never in this repo.
+      CHATGPT_OAUTH_ENABLED: ${CHATGPT_OAUTH_ENABLED:-}
+      CHATGPT_OAUTH_CLIENT_ID: ${CHATGPT_OAUTH_CLIENT_ID:-}
+      CHATGPT_OAUTH_CLIENT_SECRET: ${CHATGPT_OAUTH_CLIENT_SECRET:-}
+      CHATGPT_OAUTH_REDIRECT_URI: ${CHATGPT_OAUTH_REDIRECT_URI:-}
+      CHATGPT_OAUTH_DEFAULT_MODEL: ${CHATGPT_OAUTH_DEFAULT_MODEL:-}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}

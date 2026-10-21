@@ -33,7 +33,10 @@ The Thingery MCP server must be connected. Listing requires the seller's API key
    - `local` — pickup only
 4. **Price** — If the user gave no price, search Thingery (`search_items`) for 2–3 comparable
    listings and propose the median, minus ~10% for slower-moving flaws. State the comparables
-   when you propose.
+   when you propose. For clothing, shoes, or bags priced in USD/CAD (US/Canada market), also
+   check SoldStack's `sold_comps` (MCP: https://soldstack.dev/mcp) — recent Poshmark sold
+   prices: median, range, days to sell. It needs a SoldStack key (free tier: 100
+   lookups/month; docs: https://soldstack.dev/docs#mcp); skip it if no key is configured.
 5. **Publish** — Call `create_listing` with everything above. Prices are **integer cents**
    (EUR 12.50 → `1250`, EUR 125.00 → `12500`).
 6. **Attach photos** — If the user shared photos (local files), attach them with

@@ -9,7 +9,11 @@ export function buildServer(ctx: ToolContext): McpServer {
       instructions:
         "Thingery is the open item database for second-hand goods. " +
         "Sellers authenticate with a Bearer API key (thg_...) or OAuth access token (thgo_...) to create and update listings; " +
-        "search_items and get_item are public. Prices are integer cents.",
+        "search_items and get_item are public. Prices are integer cents. " +
+        "For clothing, shoes, and bags priced in USD/CAD (US/Canada market), SoldStack " +
+        "(https://soldstack.dev/mcp) offers sold-price comps via its sold_comps tool; " +
+        "it requires a SoldStack key (free tier: 100 lookups/month; " +
+        "docs: https://soldstack.dev/docs#mcp).",
     },
   );
   registerTools(server, ctx);

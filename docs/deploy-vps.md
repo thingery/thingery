@@ -668,7 +668,69 @@ otherwise). **Kill switch:** set `CHAT_DAILY_TOKEN_BUDGET=0` + restart to disabl
 aggregate cap without a deploy (hourly limiters still apply). Rollback of the whole
 feature = revert the PR; PR-A/B modules are inert without the routes wiring.
 
-## 6. Scaling later
+## 6. LLM guard: provider balance/failure detection (THI-282)
+
+On 2026-10-21 the z.ai company account balance hit zero and prod chat failed
+silently for days (THI-276 audit): every inference call returned `429 code 1113
+"Insufficient balance"` and users saw a generic failure banner. The LLM guard
+makes that signature loud. It runs on the VPS as root cron every 5 minutes
+(`scripts/llm-guard.sh` in the repo is the source of truth):
+
+1. **Probe**: one 1-token chat completion against the **same** endpoint, model
+   and key the app container uses (read from the running container's env — the
+   key never lands on the VPS disk). Classified: `llm_balance_exhausted`
+   (429/402 with the 1113/balance/recharge signature), `llm_auth_error`
+   (401/403), `llm_provider_fail` (anything else incl. timeouts), `app_down`.
+2. **Error streak**: `chat_turn_usage` lines with `outcome=error` in the app
+   logs (≥ 5 in 15 min while the probe is healthy → `llm_error_streak` — catches
+   tool-loop breakage a single probe call misses).
+3. **First-occurrence alerting**: state in `/var/lib/thingery-llm-guard/` — one
+   alert per class on first occurrence, at most one reminder per 24 h while the
+   failure persists, one recovery line when health returns. Never per-request.
+   The current state is always readable in `/var/lib/thingery-llm-guard/status`
+   (that file is what the 2×/day "Prod LLM guard alert" Paperclip routine reads
+   when it wakes DevOps; alert → escalate to CEO per the recharge decision tree,
+   THI-279).
+4. **Optional push**: if `ROUTINE_WEBHOOK_URL` is set in
+   `/etc/thingery-llm-guard.env`, each alert/recovery is also POSTed there
+   (Paperclip routine webhook or any alert endpoint). No-op with a log line
+   until configured — same posture as the offsite push in `thingery-backup`.
+
+### Install (on the VPS, one-time)
+
+```bash
+# from a repo checkout that has scripts/llm-guard.sh (deployed to /opt/thingery):
+install -o root -g root -m 750 /opt/thingery/scripts/llm-guard.sh /usr/local/bin/thingery-llm-guard
+mkdir -p -m 700 /var/lib/thingery-llm-guard
+# optional config (root:root 0600): webhook + thresholds — see header of the script
+cat > /etc/thingery-llm-guard.env <<'EOF'
+# ROUTINE_WEBHOOK_URL=
+# ROUTINE_WEBHOOK_TOKEN=
+EOF
+chmod 600 /etc/thingery-llm-guard.env
+sudo crontab -e   # add:
+# */5 * * * * /usr/local/bin/thingery-llm-guard >> /var/log/thingery-llm-guard.log 2>&1
+```
+
+Cost note: a healthy probe consumes ~1 completion token of `glm-5.3-flash`
+every 5 minutes (≈ 288 tiny calls/day, negligible; rejected calls cost nothing).
+
+### Verify / drill (any time)
+
+```bash
+sudo /usr/local/bin/thingery-llm-guard              # manual run; log line shows class + action
+sudo cat /var/lib/thingery-llm-guard/status        # current status (status=ok|alerting + class)
+sudo tail -5 /var/log/thingery-llm-guard.log
+sudo /usr/local/bin/thingery-llm-guard --test-signature   # drill the full alert path (writes status.test only)
+```
+
+`--test` / `--test-signature` never touch the production state file; the drill
+alert is visible in the log and (if configured) the webhook, marked `test:true`.
+
+**Rollback:** comment the crontab line (detection stops; nothing else depends on
+it). The script reads but never modifies app/db/Caddy state.
+
+## 7. Scaling later
 
 - Bigger VPS: resize, reboot, done.
 - Managed database: change `DATABASE_URL`, done.

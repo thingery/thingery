@@ -66,6 +66,11 @@
     .demo .you { color: var(--muted); }
     .demo .you b { color: inherit; }
     .demo .reply { margin-top: .5rem; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1rem;
+      margin: 2.2rem auto 0; max-width: 40rem; text-align: center; }
+    .stat { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: .9rem 1rem; }
+    .stat .num { display: block; font-size: 1.6rem; font-weight: 750; letter-spacing: -.02em; }
+    .stat .lbl { color: var(--muted); font-size: .9rem; }
     .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; padding: 2.5rem 0; }
     .step { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 1.2rem 1.3rem; }
     .step .n { font-weight: 750; color: var(--accent); }
@@ -116,6 +121,12 @@
       <div class="you"><b>You:</b> “Sell my Diplomat fountain pen, Marrakesh brown, good condition, 120&nbsp;euros.”</div>
       <div class="reply"><b>Your assistant:</b> “Listed ✓ <a class="inline" href="/browse">thingery.dev/item/83bd7e90</a> — Diplomat Excellence A2, EUR 120.00, condition: good, ships as a locker parcel. Want me to tweak the price?”</div>
     </div>
+  </div>
+
+  <div class="stats" id="platform-stats" hidden aria-label="Platform usage">
+    <div class="stat"><span class="num" id="stat-items">–</span><span class="lbl">items listed</span></div>
+    <div class="stat"><span class="num" id="stat-agents">–</span><span class="lbl">agents connected</span></div>
+    <div class="stat"><span class="num" id="stat-users">–</span><span class="lbl">users</span></div>
   </div>
 
   <div class="steps">
@@ -172,6 +183,7 @@
   </div>
 
   <script src="/legacy-item-redirect.js"></script>
+  <script src="/stats.js" defer></script>
   <script src="/build-info.js" defer></script>
 </body>
 </html>

@@ -188,6 +188,30 @@ a leadership call during an incident, not a default.
 Verify after the change: an MCP call with the old key returns `unauthorized`, a login
 attempt with the old password fails, and `search_items` still returns their listings.
 
+## 4. Ops fixtures: delete them in the same run that created them
+
+Every internal fixture (smoke tests, e2e walkthroughs, spot-checks) is immediately
+public: it appears in `/browse` and `search_items` results like any listing — there is
+no "internal" flag. Fixtures have leaked twice this way (THI-136's
+DevOps Smoke Test Gizmo stayed active on thingery.dev from 10-15 until the THI-306
+audit caught it on 10-23; THI-166's spot-check leaked too).
+
+The rule: **a fixture is deleted in the same run that created it.** Before the run
+ends, take it down with [step 2](#2-take-down-a-listing) — or via the app's own
+delete path (`update_listing` → `status: deleted`; same semantics, that is exactly
+what step 2 does). "I'll clean it up tomorrow" is how fixtures leak.
+
+**Naming (canonical fixture allowlist).** A fixture's title or description must match
+the THI-306 detection-playbook H1 regex, so automated screening recognizes it as
+internal even if it does leak:
+
+```text
+demo listing|for review(er)?s?|openai|\bTHI-\d+\b|test item|smoke|spot-check|fixture|safe to delete|disposable
+```
+
+Embed the creating ticket id in the title or description: `DevOps Smoke Test Gizmo
+(THI-136)` is the model citizen for naming — and the cautionary tale for cleanup.
+
 ## What never to do
 
 - **Never `DELETE FROM items` or `DELETE FROM sellers`.** Hard-delete destroys evidence
@@ -195,6 +219,7 @@ attempt with the old password fails, and `search_items` still returns their list
 - **Never run an `UPDATE` without `WHERE id = '<exact uuid>'`** — no title matches, no
   email matches, nothing fuzzy on the write path.
 - **Never moderate without a snapshot** taken in step 1, first.
+- **Never end a run with its fixture still active** — see [step 4](#4-ops-fixtures-delete-them-in-the-same-run-that-created-them).
 - **Never rotate or paste real `thg_...` keys into issues, chats, or PRs.** If you need to
   reference one in a report, the seller UUID is enough.
 

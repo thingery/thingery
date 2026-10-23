@@ -79,6 +79,13 @@ services:
     volumes:
       # Uploaded item images survive redeploys
       - uploads:/app/uploads
+    # THI-312: keep stdout/stderr (security events, startup) on disk across
+    # container restarts, bounded by rotation. See docs/deploy-vps.md §7.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Internal only; Caddy terminates TLS and proxies to it.
     expose:
       - "3000"
@@ -95,6 +102,13 @@ services:
       - caddy_config:/config
     depends_on:
       - app
+    # THI-312: the Caddy access log (Caddyfile `log`) goes to stderr; keep it
+    # on disk across container restarts, bounded by rotation (docs/deploy-vps.md §7).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   thingery_pgdata:

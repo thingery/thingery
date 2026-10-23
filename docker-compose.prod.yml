@@ -59,6 +59,10 @@ services:
       CHATGPT_OAUTH_CLIENT_SECRET: ${CHATGPT_OAUTH_CLIENT_SECRET:-}
       CHATGPT_OAUTH_REDIRECT_URI: ${CHATGPT_OAUTH_REDIRECT_URI:-}
       CHATGPT_OAUTH_DEFAULT_MODEL: ${CHATGPT_OAUTH_DEFAULT_MODEL:-}
+      # OpenAI plugin directory domain verification (THI-296 AC1):
+      # GET /.well-known/openai-apps-challenge serves this exact token
+      # (503 while unset). Value lives only in the VPS .env.
+      OPENAI_APPS_CHALLENGE_TOKEN: ${OPENAI_APPS_CHALLENGE_TOKEN:-}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}

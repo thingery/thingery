@@ -11,6 +11,7 @@ import { startOauthSweepTimer } from "./oauth-sweep.js";
 import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
 import { mountApiRoutes } from "./routes.js";
+import { mountOpenaiAppsChallenge } from "./openai-apps-challenge.js";
 import { stripeWebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
 import { logConfigBootReport, orderFlowConfig } from "./config.js";
@@ -96,6 +97,11 @@ function runHttp(): void {
   // /api router + its app-level terminal JSON error middleware (spec THI-58
   // PR-1): mount position unchanged, right where the router sat before.
   mountApiRoutes(app);
+
+  // OpenAI plugin directory domain verification (THI-296 AC1): bare-token
+  // route, 503 while the env token is unset. See src/openai-apps-challenge.ts
+  // for the behavior + security notes.
+  mountOpenaiAppsChallenge(app);
 
   // THI-54: /healthz has its own try/catch (DB fault → 503), but every
   // async handler on the app is wrapped uniformly — the wrapper is a no-op

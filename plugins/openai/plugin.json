@@ -92,7 +92,8 @@
           ]
         },
         "commerce": true,
-        "commerce_description": "Thingery is a marketplace for physical goods. Ordering an item creates an order and returns a Stripe Checkout URL; the buyer completes payment on Stripe's hosted page, and card details are never exchanged in chat. No plugin tool moves money directly: release_funds only advances an order's state after delivery, and refunds are issued through Stripe. Listings are public by design; the personal data involved in a purchase is the buyer's email and shipping address, used solely to fulfil the order."
+        "commerce_description": "Thingery is a marketplace for physical goods. Ordering an item creates an order and returns a Stripe Checkout URL; the buyer completes payment on Stripe's hosted page, and card details are never exchanged in chat. No plugin tool moves money directly: release_funds only advances an order's state after delivery, and refunds are issued through Stripe. Listings are public by design; the personal data involved in a purchase is the buyer's email and shipping address, used solely to fulfil the order.",
+        "demo_recording_url": "https://thingery.dev/demos/openai-plugin-walkthrough.mp4"
       },
       "publication": {
         "release_notes": "Initial submission of the Thingery MCP connector: public search and item details, per-user OAuth sign-in for creating and managing listings, and the order flow with Stripe Checkout payment URLs."

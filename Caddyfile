@@ -3,6 +3,10 @@
 # ACME HTTP-01 challenge on port 80 to be reachable).
 thingery.dev {
 	encode zstd gzip
+	# THI-312: access log — one JSON line per request (client IP, method,
+	# path, status, UA) to stderr, captured by Docker's json-file driver
+	# with rotation (docker-compose.prod.yml). See docs/deploy-vps.md §7.
+	log
 	reverse_proxy app:3000
 }
 

@@ -730,7 +730,29 @@ alert is visible in the log and (if configured) the webhook, marked `test:true`.
 **Rollback:** comment the crontab line (detection stops; nothing else depends on
 it). The script reads but never modifies app/db/Caddy state.
 
-## 7. Scaling later
+## 7. Logs: Caddy access log + container output
+
+THI-312: every container's stdout/stderr goes to Docker's `json-file` driver with
+rotation (`max-size: 10m`, `max-file: 3` per service — `docker-compose.prod.yml`),
+and the Caddyfile has an access-log directive (`log` in the `thingery.dev` site
+block), so each request logs client IP, method, path, status, and User-Agent as one
+JSON line.
+
+- **Read them:**
+  `docker compose -f docker-compose.prod.yml logs caddy` (access log) and
+  `... logs app` (startup + security events). `-f` follows, `--since 1h` limits.
+- **Survives restarts:** a `docker compose restart`, a crash, or a VPS reboot keeps
+  the same container and its log file (`restart: unless-stopped` reuses the
+  container). A *recreate* (deploy or compose/config change) starts a fresh log
+  file — the nightly DB backups remain the durable record of state; these logs are
+  for operational debugging, not an audit trail.
+- **Bounded disk:** at most 3 × 10 MB per service — no disk-fill risk on the small
+  VPS disk.
+- **Confidentiality:** access lines contain client IPs and user agents — operator
+  data, not public data. Do not paste raw access logs into public issues; strip IPs
+  first.
+
+## 8. Scaling later
 
 - Bigger VPS: resize, reboot, done.
 - Managed database: change `DATABASE_URL`, done.

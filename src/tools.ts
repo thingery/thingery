@@ -209,7 +209,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
             "image URLs must be http(s) — javascript:, data:, file: and other schemes are rejected",
           ),
         ).max(12).default([]).describe("Image URLs (http/https only, max 2048 chars each)"),
-        attributes: z.record(z.union([z.string(), z.number(), z.boolean()])).default({})
+        attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({})
           .describe("Category-specific fields, e.g. {\"size_eu\": 43, \"colorway\": \"white/grey\"}"),
       },
     },
@@ -295,7 +295,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         max_price_cents: z.number().int().min(0).optional(),
         currency: z.string().length(3).default("EUR"),
         shipping_tier: z.enum(SHIPPING_TIERS).optional(),
-        attributes: z.record(z.union([z.string(), z.number(), z.boolean()])).optional()
+        attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
           .describe("Exact-match attribute filter, e.g. {\"size_eu\": 43} — matches any attribute key, declared or not"),
         limit: z.number().int().min(1).max(50).default(10),
       },
@@ -394,7 +394,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         price_cents: z.number().int().min(0).optional(),
         title: z.string().min(3).max(200).optional(),
         description: z.string().max(5000).optional(),
-        attributes: z.record(z.union([z.string(), z.number(), z.boolean()])).optional()
+        attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
           .describe("Replaces the whole attributes object (read-modify-write)"),
       },
     },

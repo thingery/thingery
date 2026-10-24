@@ -1,24 +1,47 @@
 name: Publish to npm and MCP Registry
 
-# Triggers on version tags (v0.1.0, ...):
-#   1. tests + build, then npm publish (requires the NPM_TOKEN secret)
-#   2. publishes server.json to the official MCP registry via GitHub OIDC (no secrets)
+# Triggers:
+#   - version tags (v0.1.0, ...): full checks, then
+#     1. npm publish (requires the NPM_TOKEN secret)
+#     2. server.json to the official MCP registry via GitHub OIDC (no secrets)
+#   - workflow_dispatch: same checks but publishes nothing by default
+#     (dry_run=true). Use it to rehearse a release without touching npm or
+#     the registry, e.g. after changing this workflow (THI-335).
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: full checks (incl. DB-backed tests + npm pack) but no publishing"
+        type: boolean
+        default: true
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # THI-226: NPM_TOKEN lives only in the protected `npm` environment
-    # (deployment-branch policy: TAG-typed rule `v*` only — branch-typed rules
-    # do not cover tag refs, and tag refs need a tag-typed rule to be allowed
-    # at all). Unreviewed refs (branches, non-v* tags, stray workflow_dispatch)
-    # cannot resolve the token: the job is blocked before any step runs.
-    environment: npm
     permissions:
       id-token: write # OIDC for the MCP registry
       contents: read
+    # Same Postgres service + DATABASE_URL + pre-test migration as ci.yml
+    # `verify` (THI-335): without it, ~half the suite silently skips via
+    # describe.skipIf(!dbAvailable) and the release gate tests less than CI.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: thingery
+          POSTGRES_PASSWORD: thingery
+          POSTGRES_DB: thingery_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U thingery"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://thingery:thingery@localhost:5432/thingery_test
     steps:
       - uses: actions/checkout@v4
 
@@ -33,41 +56,51 @@ jobs:
 
       - run: npm run build
 
+      # Apply schema before tests (parity with ci.yml): DB-backed test files
+      # run in parallel workers and must not race each other for table
+      # creation (42P01).
+      - run: npx tsx scripts/migrate.ts
+
       - run: npm test
 
+      # dry_run=true (manual dispatch): stop after the full check suite.
+      # Exercises packaging without publishing anything.
+      - name: Pack check (dry run, no publish)
+        if: ${{ inputs.dry_run == true }}
+        run: npm publish --dry-run --access public
+
+      - name: Dry run complete
+        if: ${{ inputs.dry_run == true }}
+        run: echo "Dry run complete — full suite passed and package packed; nothing was published."
+
       - name: Publish package to npm
+        if: ${{ inputs.dry_run != true }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ -z "$NODE_AUTH_TOKEN" ]; then echo "::error::NPM_TOKEN secret is empty"; exit 1; fi
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
-          VERSION=${GITHUB_REF#refs/tags/v}
-          if ! npm publish --access public; then
-            # Idempotent re-run (THI-334): a re-pushed tag whose version is
-            # already on npm must not block the registry publish. Only the
-            # "already published" case is tolerated; any other failure fails.
-            if [ "$(npm view thingery@${VERSION} version 2>/dev/null)" = "${VERSION}" ]; then
-              echo "::notice::thingery@${VERSION} already on npm — treating publish as done"
-            else
-              echo "::error::npm publish failed and thingery@${VERSION} not found on the registry"
-              exit 1
-            fi
-          fi
+          npm publish --access public
 
       - name: Wait for npm propagation
+        if: ${{ inputs.dry_run != true }}
         run: sleep 90
 
       - name: Install mcp-publisher
+        if: ${{ inputs.dry_run != true }}
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
 
       - name: Authenticate to MCP Registry (OIDC)
+        if: ${{ inputs.dry_run != true }}
         run: ./mcp-publisher login github-oidc
 
       - name: Set version in server.json
+        if: ${{ inputs.dry_run != true }}
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
           jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp && mv server.tmp server.json
 
       - name: Publish server to MCP Registry
+        if: ${{ inputs.dry_run != true }}
         run: ./mcp-publisher publish

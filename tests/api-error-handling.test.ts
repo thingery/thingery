@@ -288,6 +288,13 @@ describe("/api surface fails as generic JSON on backend faults (THI-58)", () => 
     // a JSON body can carry arrays (or any non-string) directly. On main an
     // array email reaches email.toLowerCase() → TypeError → generic 500.
     // Guards must treat non-strings as absent credentials (fail-closed 401).
+    //
+    // The array-password case keeps a *valid* email, so the handler reaches
+    // accountByEmail() → pool.query. This file's contract is "No database
+    // required" (the publish workflow runs `npm test` without a Postgres
+    // service), so answer the lookup with empty rows: this test is about the
+    // type guards, and "unknown email" must 401 regardless of the DB's reachability.
+    vi.spyOn(pool, "query").mockResolvedValue({ rows: [] });
     await withServer(async (base) => {
       const unhandled = await captureUnhandled(async () => {
         const arrayEmail = await fetch(`${base()}/api/login`, {

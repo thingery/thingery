@@ -167,6 +167,12 @@ curl -s http://localhost:3000/mcp \
 
 Responses come back as Server-Sent Events; the JSON-RPC result is on the `data:` line.
 
+### Use an agent framework (LangChain, LlamaIndex, Composio)
+
+Framework toolkits reach the same `/mcp` endpoint over streamable HTTP — copy-paste
+quickstarts with verified end-to-end tool calls live in
+[examples/integrations/](examples/integrations/).
+
 ## Configuration
 
 Copy `.env.example` to `.env`. Key variables:

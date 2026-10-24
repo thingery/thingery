@@ -21,7 +21,7 @@
       "identifier": "thingery",
       "version": "0.1.2",
       "transport": {
-        "type": "http",
+        "type": "streamable-http",
         "url": "https://thingery.dev/mcp"
       }
     }

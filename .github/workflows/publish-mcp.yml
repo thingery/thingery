@@ -41,7 +41,18 @@ jobs:
         run: |
           if [ -z "$NODE_AUTH_TOKEN" ]; then echo "::error::NPM_TOKEN secret is empty"; exit 1; fi
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
-          npm publish --access public
+          VERSION=${GITHUB_REF#refs/tags/v}
+          if ! npm publish --access public; then
+            # Idempotent re-run (THI-334): a re-pushed tag whose version is
+            # already on npm must not block the registry publish. Only the
+            # "already published" case is tolerated; any other failure fails.
+            if [ "$(npm view thingery@${VERSION} version 2>/dev/null)" = "${VERSION}" ]; then
+              echo "::notice::thingery@${VERSION} already on npm — treating publish as done"
+            else
+              echo "::error::npm publish failed and thingery@${VERSION} not found on the registry"
+              exit 1
+            fi
+          fi
 
       - name: Wait for npm propagation
         run: sleep 90

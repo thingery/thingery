@@ -1,0 +1,12 @@
+{
+  "name": "thingery-langchain-example",
+  "private": true,
+  "type": "module",
+  "description": "Thingery MCP + LangChain.js quickstart — see README.md",
+  "scripts": {
+    "start": "node example.mjs"
+  },
+  "dependencies": {
+    "@langchain/mcp-adapters": "^2.0.1"
+  }
+}

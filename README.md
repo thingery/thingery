@@ -127,8 +127,9 @@ public read tools is always available. Design note: the decision record for the 
 
 ### Run locally over stdio (`npx`)
 
-Self-host without any web server — the package runs as a local stdio MCP server against your
-own Postgres, spawnable by Claude Desktop and similar clients:
+Self-host without any web server — the package is [`thingery` on npm](https://www.npmjs.com/package/thingery)
+and runs as a local stdio MCP server against your own Postgres, spawnable by Claude Desktop and
+similar clients:
 
 ```json
 {

@@ -50,7 +50,7 @@ done
 
 # --- 1. Capture analytics lines from the app container ----------------------
 RAW_LINES=$(docker compose -f "$COMPOSE_FILE" logs --no-log-prefix --since "${HOURS}h" app 2>/dev/null \
-  | jq -Rr 'fromjson? // empty' | jq -c 'select(.type == "tool_call" or .type == "tool_result")' || true)
+  | jq -Rr 'fromjson? // empty' | jq -c 'select(.type == "tool_call" or .type == "tool_result" or .type == "page_view")' || true)
 
 LOG_METRICS=$(printf '%s\n' "$RAW_LINES" | jq -s '
   # ISO ts (with millis) -> epoch seconds
@@ -80,6 +80,25 @@ LOG_METRICS=$(printf '%s\n' "$RAW_LINES" | jq -s '
       first_photo_publishes: ([$r[] | select(.tool == "add_item_image" and .ok == true and .visible == true)] | length)
     }')
 
+# --- 1b. Sharing attribution (THI-396 page_view lines) -----------------------
+# Origin of public item-page visits: direct / internal / external referrer,
+# utm-tagged views, and share-attributable = human views with an external
+# referrer or utm params. Unfurl-bot hits (card renderers) are counted but
+# excluded from human/attributable views — they are share *evidence*, not visits.
+SHARING_METRICS=$(printf '%s\n' "$RAW_LINES" | jq -s '
+  (map(select(.type == "page_view"))) as $v
+  | ($v | map(select(.bot != true))) as $h
+  | {
+      item_views: ($v | length),
+      item_views_human: ($h | length),
+      unfurl_bot_views: (($v | length) - ($h | length)),
+      human_by_origin: ($h | group_by(.origin) | map({key: .[0].origin, value: length}) | from_entries),
+      top_ref_hosts: ([$h[] | select(.refHost != null) | .refHost]
+        | group_by(.) | map({host: .[0], views: length}) | sort_by(-.views) | .[0:5]),
+      utm_tagged_views: ([$h[] | select(.utm != null)] | length),
+      share_attributable_views: ([$h[] | select(.origin == "external" or .utm != null)] | length)
+    }')
+
 # --- 2. SQL truth for the listing funnel + liquidity strip ------------------
 SQL_METRICS=$(docker compose -f "$COMPOSE_FILE" exec -T db psql -X -U "${POSTGRES_USER:-thingery}" -d "${POSTGRES_DB:-thingery}" \
   -t -A -F'	' -c "
@@ -107,6 +126,7 @@ jq -n \
   --argjson hours "$HOURS" \
   --argjson ctr_window "$CTR_WINDOW" \
   --argjson log "$LOG_METRICS" \
+  --argjson sharing "$SHARING_METRICS" \
   --argjson sql_created "${SQL_CREATED:-0}" --argjson sql_published "${SQL_PUBLISHED:-0}" \
   --argjson sql_pending "${SQL_PENDING:-0}" --argjson live_items "${LIVE_ITEMS:-0}" \
   --argjson new_sellers "${NEW_SELLERS:-0}" --argjson sellers_total "${SELLERS_TOTAL:-0}" \
@@ -130,10 +150,12 @@ jq -n \
        log_created_visible: $log.listing_created_visible, log_first_photo_publishes: $log.first_photo_publishes,
        sql_created: $sql_created, sql_published: $sql_published, sql_pending_photo: $sql_pending },
      liquidity: { live_items: $live_items, new_sellers: $new_sellers, sellers_total: $sellers_total },
+     sharing: $sharing,
      npm_downloads_1d: $npm }' > "$SNAP"
 
 echo "== Thingery daily metrics (window: last ${HOURS}h, saved to $SNAP) =="
 jq -r '"activation:      callers with >=1 OK call: \(.activation.activated_callers)  | anon useful calls: \(.activation.anon_useful_calls)  | calls: \(.activation.calls_total) (\(.activation.calls_completed_ok) OK)",
        "search:          \(.search.searches) searches, \(.search.with_results) with results (\(.search.success_pct // "n/a")% success), \(.search.click_through) with follow-up get_item (\(.search.ctr_pct // "n/a")% CTR, 10-min window)",
        "listing funnel:  attempts \(.listings.log_attempts) -> created \(.listings.log_created) -> visible at create \(.listings.log_created_visible) | SQL truth: created \(.listings.sql_created), published \(.listings.sql_published), pending photo \(.listings.sql_pending_photo)",
-       "liquidity:       live items \(.liquidity.live_items) | new sellers \(.liquidity.new_sellers) | npm dl (1d) \(.npm_downloads_1d // "n/a")"' "$SNAP"
+       "liquidity:       live items \(.liquidity.live_items) | new sellers \(.liquidity.new_sellers) | npm dl (1d) \(.npm_downloads_1d // "n/a")",
+       "sharing:         \(.sharing.item_views) item views (\(.sharing.item_views_human) human, \(.sharing.unfurl_bot_views) unfurl bots) | origins \(.sharing.human_by_origin.direct // 0) direct / \(.sharing.human_by_origin.internal // 0) internal / \(.sharing.human_by_origin.external // 0) external | \(.sharing.share_attributable_views) share-attributable | top referrers: \(.sharing.top_ref_hosts | if length > 0 then map("\(.host) x\(.views)") | join(", ") else "none" end)"' "$SNAP"

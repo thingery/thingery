@@ -2,9 +2,9 @@
 
 Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
 
-This note says what is **verified** about Thingery's security today and — just as important — what is **not**. We would rather over-disclose limitations than let a reader assume a guarantee we have not made. It accompanies [`SECURITY.md`](../SECURITY.md) (how to report issues) and [`docs/security.md`](security.md) (the internal threat model and hardening backlog).
+This note says what is **verified** about Thingery's security today and — just as important — what is **not**. We would rather over-disclose limitations than let a reader assume a guarantee we have not made. It accompanies [`SECURITY.md`](../SECURITY.md) (how to report issues) and [`docs/security.md`](security.md) (the threat model and hardening backlog).
 
-_Last reviewed: 2026-10-27 (Day 12 of our launch sprint), against the then-current `main` and the production deployment at [thingery.dev](https://thingery.dev)._
+_Last reviewed: 2026-10-27, against the then-current `main` and the production deployment at [thingery.dev](https://thingery.dev)._
 
 ## Architecture in brief
 
@@ -20,7 +20,7 @@ These were checked directly against the code on `main` and the live service — 
 
 **Abuse controls.** Per-surface rate limits: 120 req/min per authenticated seller and 30 req/min per anonymous IP on `/mcp`; 10 signups+logins/hour per IP; upload endpoints gated pre-authentication; per-account caps on listing velocity and stored buyer intents. Rate-limit trips are logged as security events.
 
-**Operational integrity.** Nightly backups are encrypted client-side (age, public key pinned in the deployment doc) with an atomic-rename and size-floor check; the restore procedure is documented end-to-end and drilled monthly (history in [`docs/deploy-vps.md`](deploy-vps.md) §4). Secret scanning (gitleaks) and `npm audit` run in CI on every pull request.
+**Operational integrity.** Nightly backups are encrypted client-side with the [`age`](https://age-encryption.org) tool (public key pinned in the deployment doc) and verified by atomic-rename and size-floor checks. The restore procedure is documented end-to-end and drilled on a monthly cadence — most recently 2026-10-14 (history in [`docs/deploy-vps.md`](deploy-vps.md) §4). Secret scanning (gitleaks) and `npm audit` run in CI on every pull request.
 
 **Supply chain & inspectability.** The npm package ships no dev files or secrets in the tarball; production audits report **0 known vulnerabilities**. Independent tool scanners can inspect the full MCP surface without credentials: `tools/list` responds anonymously, and both OAuth discovery endpoints (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`) publish accurate metadata. Security headers (CSP, HSTS, `X-Content-Type-Options`, `Referrer-Policy`) are set on all responses.
 
@@ -42,4 +42,4 @@ Please report privately — see [`SECURITY.md`](../SECURITY.md). GitHub **privat
 
 ## Self-hosting
 
-Self-hosters inherit everything above that is code, and everything in [`docs/security.md`](security.md) §8 that is configuration: set `SESSION_SECRET`, keep the admin route disabled unless needed, run behind TLS, and follow the backup procedure in [`docs/deploy-vps.md`](deploy-vps.md) §4.
+Self-hosters inherit everything above that is code, and everything in [`docs/security.md`](security.md) §4 that is configuration: set `SESSION_SECRET`, keep the admin route disabled unless needed, run behind TLS, and follow the backup procedure in [`docs/deploy-vps.md`](deploy-vps.md) §4.

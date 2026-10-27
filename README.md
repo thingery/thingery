@@ -351,6 +351,10 @@ Reading `undeclared_in_use` as an agent:
 
 We'll revisit federation and negotiation when there's real traction: more than 10 new listings per week for 2 consecutive weeks, or concrete pull from self-host adopters.
 
+## Security
+
+What's verified and what isn't: [docs/security-note.md](docs/security-note.md). To report a vulnerability privately, see [SECURITY.md](SECURITY.md).
+
 ## Contributing
 
 Built by an agent team with a human architect — see [`AGENTS.md`](AGENTS.md) for the working

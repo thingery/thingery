@@ -4,7 +4,7 @@
 // (MAX_MATCHES_PER_LISTING / MAX_NEW_MATCHES_PER_BUYER_PER_DAY), PR 4 the
 // match reads. Mirrors src/items.ts conventions throughout.
 
-import { pool } from "./db.js";
+import { pool, type ItemRow } from "./db.js";
 import { embedText } from "./embed.js";
 import { logSecurityEvent } from "./security-events.js";
 import type { Attributes } from "./attributes.js";
@@ -207,4 +207,82 @@ export async function deleteIntent(intentId: string, buyerId: string): Promise<b
   );
   logIntentWrite("delete", rows[0] ? "success" : "rejected", buyerId);
   return rows.length > 0;
+}
+
+/**
+ * Match evaluation at publish (spec THI-360 §3.2/§6, PR 3 of 5): one bounded,
+ * idempotent, replay-safe INSERT…SELECT that records a match for every
+ * intent whose search would have returned this item — minus muted intents,
+ * the seller's own intents, and buyers already over the daily new-match cap.
+ * Called only from the two publish transitions (createItem / addItemImage),
+ * always wrapped so alerting can never fail the publish.
+ *
+ * Parity with searchItems is exact by construction (N2 gate): the text leg is
+ * the same two branches — intent without an embedding (embeddings
+ * unconfigured) matches keyword-only; intent WITH an embedding requires the
+ * item to have one too, then matches on ILIKE or cosine over the 0.15 floor.
+ * Under-notifies, never over-notifies (spec §3.2's accepted asymmetry).
+ *
+ * `esc` below escapes `\` then `%`/`_` inside bi.q IN SQL — tighter than
+ * searchItems' JS escape (Security N4). Do NOT port searchItems' escape here;
+ * backporting is OQ7, an independent ticket.
+ *
+ * The per-buyer daily guard is approximate within one statement (N1): a buyer
+ * with k simultaneously matching intents can overshoot by ≤ k−1 (≤ 24) — the
+ * documented pragmatic-90% posture, same as THI-110/113.
+ *
+ * Returns the number of matches inserted (0 when nothing matched or
+ * everything was a duplicate/over-cap). `score` = cosine similarity, or 0
+ * when either side has no embedding.
+ */
+export async function evaluateListingForIntents(item: ItemRow): Promise<number> {
+  const { rows } = await pool.query(
+    `WITH capped AS (
+       SELECT bi.id, bi.buyer_id,
+              COALESCE(1 - (bi.embedding <=> $10::vector), 0) AS score
+       FROM buyer_intents bi
+       CROSS JOIN LATERAL (
+         SELECT '%' || replace(replace(replace(bi.q, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%' AS pat
+       ) e
+       WHERE bi.muted = false
+         AND bi.buyer_id <> $1
+         AND (bi.category IS NULL OR bi.category = $2)
+         AND (bi.condition IS NULL OR bi.condition = $3)
+         AND (bi.shipping_tier IS NULL OR bi.shipping_tier = $4)
+         AND bi.currency = $5
+         AND (bi.min_price_cents IS NULL OR bi.min_price_cents <= $6)
+         AND (bi.max_price_cents IS NULL OR bi.max_price_cents >= $6)
+         AND (bi.attributes = '{}'::jsonb OR $7::jsonb @> bi.attributes)
+         AND (bi.q IS NULL
+              OR (bi.embedding IS NULL AND ($8 ILIKE e.pat OR $9 ILIKE e.pat))
+              OR (bi.embedding IS NOT NULL AND $10::vector IS NOT NULL
+                  AND ($8 ILIKE e.pat OR $9 ILIKE e.pat
+                       OR 1 - (bi.embedding <=> $10::vector) > 0.15)))
+         AND (SELECT count(*) FROM intent_matches m
+              WHERE m.buyer_id = bi.buyer_id
+                AND m.created_at > now() - interval '24 hours') < $11
+       ORDER BY 1 - (bi.embedding <=> $10::vector) DESC NULLS LAST
+       LIMIT $12
+     )
+     INSERT INTO intent_matches (intent_id, buyer_id, item_id, score)
+     SELECT id, buyer_id, $13, score FROM capped
+     ON CONFLICT (intent_id, item_id) DO NOTHING
+     RETURNING intent_id`,
+    [
+      item.seller_id,
+      item.category,
+      item.condition,
+      item.shipping_tier,
+      item.currency,
+      item.price_cents,
+      JSON.stringify(item.attributes ?? {}),
+      item.title,
+      item.description,
+      item.embedding ?? null,
+      MAX_NEW_MATCHES_PER_BUYER_PER_DAY,
+      MAX_MATCHES_PER_LISTING,
+      item.id,
+    ],
+  );
+  return rows.length;
 }

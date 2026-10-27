@@ -1,5 +1,6 @@
 import { pool, type ItemRow } from "./db.js";
 import { embedText, itemEmbeddingText } from "./embed.js";
+import { evaluateListingForIntents } from "./intents.js";
 import { logSecurityEvent } from "./security-events.js";
 import {
   attributeShapeErrors,
@@ -118,6 +119,22 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
   // THI-112 (H4.2): successful listing create — seller id only, never the
   // title/description (no-payload rule in docs/security.md §6).
   logSecurityEvent({ type: "listing_write", action: "create", outcome: "success" }, { sellerId: input.seller_id });
+
+  // THI-360 §6, publish transition 1 of 2 (PR 3): a create that is already
+  // feed-visible (photo attached at create — THI-308 photo-gated visibility)
+  // fans out to buyer intents. Alerting must never fail the publish: errors
+  // are caught and logged here; the log line carries counts only, never
+  // listing or intent payload.
+  if (visibleInFeeds(rows[0])) {
+    try {
+      const inserted = await evaluateListingForIntents(rows[0]);
+      if (inserted > 0) {
+        console.log(JSON.stringify({ type: "intent_fanout", count: inserted }));
+      }
+    } catch (err) {
+      console.error("buyer-intent evaluation failed (publish unaffected)", err instanceof Error ? err.message : err);
+    }
+  }
   return rows[0];
 }
 

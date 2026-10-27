@@ -33,6 +33,9 @@ export interface ItemRow {
    *  Derived visibility: hidden from feeds while true and images is empty. */
   photo_required: boolean;
   created_at: Date;
+  /** Column on items, present in RETURNING * / SELECT i.*; pg hands the
+   *  vector back as its string form. Absent when not queried. */
+  embedding?: string | null;
   /** Joined from sellers (getItem/searchItems); absent when not queried. */
   seller_payout_ready?: boolean;
 }

@@ -29,6 +29,9 @@ export interface ItemRow {
   images: string[];
   attributes: Record<string, unknown>;
   status: string;
+  /** THI-308: new listings default true — pending until the first photo.
+   *  Derived visibility: hidden from feeds while true and images is empty. */
+  photo_required: boolean;
   created_at: Date;
   /** Joined from sellers (getItem/searchItems); absent when not queried. */
   seller_payout_ready?: boolean;

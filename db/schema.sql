@@ -383,3 +383,16 @@ ALTER TABLE llm_credentials ADD COLUMN IF NOT EXISTS access_expires_at TIMESTAMP
 ALTER TABLE llm_credentials ADD COLUMN IF NOT EXISTS oauth_sub TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS llm_credentials_seller_chatgpt_oauth_idx
   ON llm_credentials (seller_id) WHERE kind = 'chatgpt_oauth';
+
+-- THI-308 (spec rev 2): photo-gated publishing. New listings default to
+-- photo_required = true — they stay pending (hidden from feeds, see the
+-- derived visibility predicate in src/items.ts) until the first photo lands.
+-- One-time grandfather: every pre-deploy row is backfilled to false so
+-- existing zero-photo listings stay live. Expand-only; re-run safe (this file
+-- re-executes on every db:migrate — the backfill is NULL-guarded, so later
+-- applies are no-ops). Applied as one multi-statement query, i.e. a single
+-- implicit transaction: no maintenance window (THI-314 verified).
+ALTER TABLE items ADD COLUMN IF NOT EXISTS photo_required BOOLEAN;
+UPDATE items SET photo_required = false WHERE photo_required IS NULL;  -- grandfather all pre-existing rows
+ALTER TABLE items ALTER COLUMN photo_required SET NOT NULL;
+ALTER TABLE items ALTER COLUMN photo_required SET DEFAULT true;

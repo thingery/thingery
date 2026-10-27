@@ -87,11 +87,13 @@ describe.skipIf(!available)("describe_category undeclared_in_use (DB)", () => {
     );
 
     let n = 0;
+    // One image per item keeps it feed-visible under the THI-308 photo gate —
+    // these tests target key-surfacing, not visibility.
     const seed = async (sellerEmail: string, category: string, attrs: Record<string, unknown>) => {
       n += 1;
       await client.query(
-        `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, attributes, status)
-         SELECT id, $1, 1000, 100, $2, $3::jsonb, 'active' FROM sellers WHERE email = $4`,
+        `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, images, attributes, status)
+         SELECT id, $1, 1000, 100, $2, ARRAY['https://img.example.com/dc-seed.jpg'], $3::jsonb, 'active' FROM sellers WHERE email = $4`,
         [`DC item ${n}`, category, JSON.stringify(attrs), sellerEmail],
       );
     };

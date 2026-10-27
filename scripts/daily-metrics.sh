@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
 done
 
 # --- 1. Capture analytics lines from the app container ----------------------
-RAW_LINES=$(docker compose -f "$COMPOSE_FILE" logs --since "${HOURS}h" app 2>/dev/null \
+RAW_LINES=$(docker compose -f "$COMPOSE_FILE" logs --no-log-prefix --since "${HOURS}h" app 2>/dev/null \
   | jq -Rr 'fromjson? // empty' | jq -c 'select(.type == "tool_call" or .type == "tool_result")' || true)
 
 LOG_METRICS=$(printf '%s\n' "$RAW_LINES" | jq -s '

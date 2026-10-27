@@ -184,12 +184,10 @@ def draw_title(t):
     def col(c, a):  # fade-in
         return tuple(int(v * (0.4 + 0.6 * a)) for v in c)
     d.text((W//2, 300), "thingery.dev", font=F_TITLE, fill=col(FG, fade), anchor="mm")
-    d.text((W//2, 380), "a marketplace an AI agent can run end to end",
+    d.text((W//2, 380), "the open item database and MCP server for AI agents",
            font=F_SUB, fill=col(CYAN, fade * min(1, max(0, (t - 0.8) / 0.6))), anchor="mm")
-    d.text((W//2, 430), "agent lists a photo'd item  →  separate buyer finds it  →  public page",
+    d.text((W//2, 430), "…to list, find, and trade second-hand goods — live production, every step a scriptable MCP call",
            font=font(22), fill=col(DIM, fade * min(1, max(0, (t - 1.4) / 0.6))), anchor="mm")
-    d.text((W//2, 490), "recorded against live production — every step is a scriptable MCP call",
-           font=font(20), fill=col(GOLD, fade * min(1, max(0, (t - 2.0) / 0.6))), anchor="mm")
     return img
 
 def draw_endcard(t):
@@ -201,9 +199,9 @@ def draw_endcard(t):
            fill=GOLD, anchor="mm")
     d.text((W//2, 400), "the listing the agent just made — open it now",
            font=font(22), fill=DIM, anchor="mm")
-    d.text((W//2, 470), "same flow self-hosted:  npx thingery-mcp   ·   MCP: thingery.dev/mcp",
+    d.text((W//2, 470), "same flow self-hosted:  npx thingery   ·   MCP: thingery.dev/mcp",
            font=font(22), fill=CYAN, anchor="mm")
-    d.text((W//2, 520), "github.com/thingery/thingery  —  demo-e2e.sh (MIT)",
+    d.text((W//2, 520), "github.com/thingery/thingery  —  Apache-2.0  ·  demo-e2e.sh",
            font=font(20), fill=DIM, anchor="mm")
     return img
 

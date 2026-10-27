@@ -115,6 +115,12 @@ describe("item page photo step (THI-308 PR 3)", () => {
     expect(html).toContain("multiple");
     expect(html).toContain("Listings with photos get far more views.");
     expect(html).toContain('data-max-images="12"'); // existing cap
+    // THI-308 PR 4: the current images array is seeded into the panel
+    // (JSON, attribute-escaped) so photos.js can rebuild interactive
+    // thumbnails — × delete, drag-to-reorder, cover badge — with no fetch.
+    expect(html).toContain('data-images="[]"'); // pending item: empty array
+    const live = await renderWith(item, owner); // photos present
+    expect(live).toContain(`data-images="[${item.images.map((s) => `&quot;${s}&quot;`).join(",")}]"`);
     expect(html).toContain('src="/imaging.js"');
     expect(html).toContain('src="/photos.js"');
     // CSP script-src 'self': every script is an external static file (the

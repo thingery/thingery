@@ -29,6 +29,7 @@
 // (counts only, one small JSON file per day); raw lines rotate away with the
 // container logs and are not backed up offsite.
 
+import type { Request } from "express";
 import type { ToolContext } from "./tools.js";
 
 /** Minimal shape of a tool-handler result (the `ok`/`err` helpers in tools.ts). */
@@ -136,4 +137,128 @@ export function withToolResultLogging(server: RegisterToolTarget, ctx: ToolConte
       });
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// THI-396 (sprint D9 sharing loop): visit-origin capture on public item pages.
+//
+// Canonical listing URLs are deliberately query-string-free (SEO + unfurl
+// stability, PR #166), so utm_* params and the Referer header are the ONLY
+// signals of where a visit came from — and they exist solely at request time.
+// itemPage (src/web-pages.ts) therefore emits ONE structured `page_view` line
+// per successful render, with the origin classified server-side here. The
+// line is consumed by scripts/daily-metrics.sh (THI-394 dashboards) exactly
+// like tool_result lines: same stdout JSON-line discipline, no new table, no
+// new infrastructure.
+//
+// Privacy contract (documented in docs/metrics.md):
+//   - Referer: HOST ONLY, lowercased. The full Referer URL (paths, query
+//     strings) is never logged — third-party referrer URLs can carry user
+//     paths and identifiers.
+//   - utm_* values: logged only when they match a conservative clamped charset
+//     (see UTM_VALUE); anything else is dropped, never logged raw.
+//   - itemId: the PUBLIC listing UUID. Per-listing attribution is the point of
+//     this line; item pages are public and the UUID identifies no person. This
+//     is a documented exception to the tool_result rule (which never logs item
+//     ids) — tool arguments remain unlogged there.
+//   - owner: whether the viewer is the listing's own seller, so self-views can
+//     be excluded from share metrics. No seller UUID is logged for views.
+//   - bot: fixed-substring unfurler/crawler classification of User-Agent.
+//     Card-unfurl fetches (facebookexternalhit, twitterbot, …) are themselves
+//     evidence a link was shared, but must not count as human visits.
+
+/** Visit origin classified from the Referer header: no/blocked referrer →
+ *  `direct`; referrer on our own host (request host or PUBLIC_BASE_URL) →
+ *  `internal`; any other referrer host → `external` (the sharing platform). */
+export type VisitOrigin = "direct" | "internal" | "external";
+
+export interface VisitOriginInfo {
+  origin: VisitOrigin;
+  /** External referrer host (lowercased); present only when origin === "external". */
+  refHost: string | null;
+  /** Sanitized utm_* params present on the request URL; null when none survive validation. */
+  utm: Partial<Record<"source" | "medium" | "campaign" | "content" | "term", string>> | null;
+  /** Heuristic unfurler/crawler classification of the User-Agent. */
+  bot: boolean;
+}
+
+const UTM_KEYS = ["source", "medium", "campaign", "content", "term"] as const;
+/** Conservative, log-safe utm charset: alnum first, then a small punctuation
+ *  set, ≤ 64 chars. Campaign names outside it are dropped, not sanitized. */
+const UTM_VALUE = /^[A-Za-z0-9][A-Za-z0-9 ._:-]{0,63}$/;
+/** Fixed lowercase substrings that identify unfurlers/crawlers. Deliberately
+ *  short and NOT including in-app browser markers (e.g. "WhatsApp") — those
+ *  carry the app name in real human UAs. */
+const BOT_UA_SUBSTRINGS: readonly string[] = [
+  "bot", "crawl", "spider", "slurp", "headless", "lighthouse",
+  "facebookexternalhit", "linkedinbot", "preview", "fetcher", "pingdom", "uptime",
+];
+
+/** Classify where a public item-page visit came from, at request time.
+ *  Pure function over headers/query — safe to unit-test without a server. */
+export function classifyVisitOrigin(req: Request): VisitOriginInfo {
+  // Own host = request Host header (sans port) plus PUBLIC_BASE_URL's host
+  // when set, so self-hosted deployments classify their own domain internal.
+  const ownHosts = new Set<string>();
+  // Defensive access: a malformed/absent headers or query object must never
+  // break a page render — analytics is strictly best-effort.
+  const hostHeader = (req.headers?.host ?? "").split(":")[0]?.toLowerCase();
+  if (hostHeader) ownHosts.add(hostHeader);
+  try {
+    const publicHost = new URL(process.env.PUBLIC_BASE_URL ?? "").hostname.toLowerCase();
+    if (publicHost) ownHosts.add(publicHost);
+  } catch {
+    // PUBLIC_BASE_URL unset/invalid — the Host header is enough.
+  }
+
+  let origin: VisitOrigin = "direct";
+  let refHost: string | null = null;
+  const referer = req.headers?.referer;
+  if (typeof referer === "string" && referer) {
+    try {
+      const host = new URL(referer).hostname.toLowerCase();
+      if (host) {
+        origin = ownHosts.has(host) ? "internal" : "external";
+        refHost = origin === "external" ? host : null;
+      }
+    } catch {
+      // Unparseable Referer — treat as absent rather than guessing.
+    }
+  }
+
+  const utm: NonNullable<VisitOriginInfo["utm"]> = {};
+  let haveUtm = false;
+  for (const key of UTM_KEYS) {
+    const raw = req.query?.[`utm_${key}`];
+    if (typeof raw === "string" && UTM_VALUE.test(raw)) {
+      utm[key] = raw;
+      haveUtm = true;
+    }
+  }
+
+  const ua = typeof req.headers?.["user-agent"] === "string" ? (req.headers["user-agent"] as string).toLowerCase() : "";
+  const bot = BOT_UA_SUBSTRINGS.some((s) => ua.includes(s));
+
+  return { origin, refHost, utm: haveUtm ? utm : null, bot };
+}
+
+/** Emit one `page_view` line for a successful public item-page render.
+ *  Self-contained: an analytics failure must never break a page render. */
+export function logPageView(view: { itemId: string; owner: boolean } & VisitOriginInfo): void {
+  try {
+    const line: Record<string, unknown> = {
+      ts: new Date().toISOString(),
+      type: "page_view",
+      page: "item",
+      itemId: view.itemId,
+      owner: view.owner === true,
+      origin: view.origin,
+      bot: view.bot === true,
+    };
+    if (view.refHost) line.refHost = view.refHost;
+    if (view.utm) line.utm = view.utm;
+    console.log(JSON.stringify(line));
+  } catch {
+    // Swallow: analytics lines are best-effort by design.
+  }
 }

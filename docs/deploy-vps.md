@@ -340,7 +340,10 @@ into the scratch container and is never written to the VPS disk.
      psql -U thingery -d thingery -v ON_ERROR_STOP=1 -q')
    ```
 
-6. Verify the restored data. Row counts must match the live DB; run a joined query
+6. Verify the restored data. Row counts must match the snapshot taken in the
+   nightly backup (on a quiet DB that equals live; on an active DB live keeps
+drifting after the snapshot — count the dump's own rows and compare, using live
+as the reference point); run a joined query
    and check the pgvector extension so you know the data is usable, not just present:
 
    ```bash
@@ -382,7 +385,13 @@ plaintext twin: `docker exec $(docker ps -qf name=thingery-db) pg_dump -U thinge
 Drill history: 2026-10-12 end-to-end against a plaintext nightly (3.3 KB, 0.24 s,
 counts matched); 2026-10-14 first end-to-end drill of the encrypted pipeline
 (7.7 KB `.age`, decrypt + restore 2.1 s, counts matched, pgvector OK, images
-tarball decrypts and lists). Re-run monthly — a backup that has never been
+tarball decrypts and lists); 2026-10-27 first post-API-key-drop drill (THI-403):
+`thingery-2026-10-27.sql.gz.age` (17 KB, sha256 `ddd0e173…902e`), decrypt +
+restore 0.83 s with ON_ERROR_STOP clean, restored 37 sellers / 21 items /
+14 categories — equal to the snapshot's own row counts verified inside the dump
+(live had drifted since the 03:00 snapshot to 22/28/14: smoke-test seller
+deletions + new items), pgvector 0.8.7 OK, images tarball decrypts and lists
+(12 entries). Re-run monthly — a backup that has never been
 restored is not a backup.
 
 The images backup (`thingery-images-*.tar.gz.age`) can be spot-checked on the
@@ -822,7 +831,8 @@ writes `metrics/daily-YYYY-MM-DD.json` (counts only, no PII). Snapshots are the
 durable record because container logs rotate (§7).
 
 Install once from the repo checkout at `/opt/thingery` (the script runs in
-place; it needs no copy in `/usr/local/bin`):
+place; it needs no copy in `/usr/local/bin`). Dependency: `jq`
+(`sudo apt-get install -y jq` — installed on the VPS 2026-10-27):
 
 ```bash
 sudo tee /etc/cron.d/thingery-daily-metrics >/dev/null <<'CRON'

@@ -108,7 +108,7 @@ describe("TOOL_NAMES drift check (registration capture)", () => {
       },
       { seller: null },
     );
-    expect(registered.size).toBe(16);
+    expect(registered.size).toBe(20); // +4 intent tools (THI-360 PR 2)
     expect([...TOOL_NAMES].sort()).toEqual([...registered].sort());
   });
 });

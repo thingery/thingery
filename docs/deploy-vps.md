@@ -340,7 +340,10 @@ into the scratch container and is never written to the VPS disk.
      psql -U thingery -d thingery -v ON_ERROR_STOP=1 -q')
    ```
 
-6. Verify the restored data. Row counts must match the live DB; run a joined query
+6. Verify the restored data. Row counts must match the snapshot taken in the
+   nightly backup (on a quiet DB that equals live; on an active DB live keeps
+drifting after the snapshot — count the dump's own rows and compare, using live
+as the reference point); run a joined query
    and check the pgvector extension so you know the data is usable, not just present:
 
    ```bash
@@ -382,7 +385,13 @@ plaintext twin: `docker exec $(docker ps -qf name=thingery-db) pg_dump -U thinge
 Drill history: 2026-10-12 end-to-end against a plaintext nightly (3.3 KB, 0.24 s,
 counts matched); 2026-10-14 first end-to-end drill of the encrypted pipeline
 (7.7 KB `.age`, decrypt + restore 2.1 s, counts matched, pgvector OK, images
-tarball decrypts and lists). Re-run monthly — a backup that has never been
+tarball decrypts and lists); 2026-10-27 first post-API-key-drop drill (THI-403):
+`thingery-2026-10-27.sql.gz.age` (17 KB, sha256 `ddd0e173…902e`), decrypt +
+restore 0.83 s with ON_ERROR_STOP clean, restored 37 sellers / 21 items /
+14 categories — equal to the snapshot's own row counts verified inside the dump
+(live had drifted since the 03:00 snapshot to 22/28/14: smoke-test seller
+deletions + new items), pgvector 0.8.7 OK, images tarball decrypts and lists
+(12 entries). Re-run monthly — a backup that has never been
 restored is not a backup.
 
 The images backup (`thingery-images-*.tar.gz.age`) can be spot-checked on the
@@ -812,6 +821,39 @@ alert is visible in the log and (if configured) the webhook, marked `test:true`.
 
 **Rollback:** comment the crontab line (detection stops; nothing else depends on
 it). The script reads but never modifies app/db/Caddy state.
+
+## 6b. Daily sprint metrics snapshot (THI-394)
+
+`scripts/daily-metrics.sh` (source of truth; see `docs/metrics.md`) aggregates
+the sprint's three numbers — activation, search success, listing funnel — from
+app-container analytics lines + read-only SQL, prints a 4-line summary, and
+writes `metrics/daily-YYYY-MM-DD.json` (counts only, no PII). Snapshots are the
+durable record because container logs rotate (§7).
+
+Install once from the repo checkout at `/opt/thingery` (the script runs in
+place; it needs no copy in `/usr/local/bin`). Dependency: `jq`
+(`sudo apt-get install -y jq` — installed on the VPS 2026-10-27):
+
+```bash
+sudo tee /etc/cron.d/thingery-daily-metrics >/dev/null <<'CRON'
+# THI-394: daily sprint metrics snapshot (00:10 UTC). Read-only; writes /opt/thingery/metrics/.
+10 0 * * * deploy cd /opt/thingery && scripts/daily-metrics.sh >> /var/log/thingery-daily-metrics.log 2>&1
+CRON
+sudo chmod 644 /etc/cron.d/thingery-daily-metrics
+sudo touch /var/log/thingery-daily-metrics.log && sudo chown deploy:deploy /var/log/thingery-daily-metrics.log
+```
+
+(`deploy` owns `/opt/thingery` and is in the `docker` group — same posture as
+the deploy flow in §5.)
+
+**Verify:** `scripts/daily-metrics.sh` from `/opt/thingery` (expect a summary
+block + a file under `metrics/`), then `tail -1 /var/log/thingery-daily-metrics.log`
+the next day. Read any snapshot with
+`cat /opt/thingery/metrics/daily-*.json | jq .`
+
+**Rollback:** `sudo rm /etc/cron.d/thingery-daily-metrics` — collection stops;
+existing snapshots stay. The script only reads containers/DB and writes under
+`metrics/`; it never mutates app or Caddy state.
 
 ## 7. Logs: Caddy access log + container output
 

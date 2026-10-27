@@ -2,7 +2,8 @@ import { z } from "zod";
 import type { ItemRow, SellerRow } from "./db.js";
 import { CONDITIONS, SHIPPING_TIERS, STATUSES } from "./db.js";
 import { getCategory, getItem, createItem, listCategories, ListingLimitError, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
-import { validateAttributes, AttributeValidationError, type Attributes } from "./attributes.js";
+import { validateAttributes, AttributeValidationError, attributeShapeErrors, type Attributes } from "./attributes.js";
+import { saveIntent, listIntents, updateIntentMute, deleteIntent, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
 import { addItemImageBase64 } from "./images.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
@@ -38,6 +39,13 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   "confirm_receipt",
   "open_dispute",
   "release_funds",
+  // Buyer-alert intent tools (THI-360 PR 2, spec rev 2): per-account
+  // data — the 401-challenge set covers them so anonymous hosts get the
+  // method-aware onboarding challenge instead of a tool-level refusal.
+  "save_intent",
+  "my_intents",
+  "update_intent",
+  "delete_intent",
 ]);
 
 // H5.3 provenance marker (docs/security.md §6 H5, fix 3; spec THI-109): the
@@ -98,6 +106,29 @@ function orderToPublic(order: Parameters<typeof getOrderView>[0] extends never ?
   return {
     ...rest,
     total_price_cents: order.price_cents + order.shipping_price_cents,
+  };
+}
+
+/** THI-360 PR 2 (spec rev 2): buyer-intent payload for tool output — id,
+ *  q, filters, muted (+ unread_matches on list reads), created_at. Never
+ *  the embedding vector or buyer_id; unset filters are omitted so agents
+ *  see only the criteria they saved. */
+function intentToPublic(intent: Pick<IntentRow, "id" | "q" | "category" | "condition" | "min_price_cents" | "max_price_cents" | "currency" | "shipping_tier" | "attributes" | "muted" | "created_at"> & Partial<Pick<IntentRow, "unread_matches">>) {
+  return {
+    id: intent.id,
+    ...(intent.q !== null ? { q: intent.q } : {}),
+    filters: {
+      ...(intent.category !== null ? { category: intent.category } : {}),
+      ...(intent.condition !== null ? { condition: intent.condition } : {}),
+      ...(intent.min_price_cents !== null ? { min_price_cents: intent.min_price_cents } : {}),
+      ...(intent.max_price_cents !== null ? { max_price_cents: intent.max_price_cents } : {}),
+      currency: intent.currency,
+      ...(intent.shipping_tier !== null ? { shipping_tier: intent.shipping_tier } : {}),
+      ...(intent.attributes && Object.keys(intent.attributes).length > 0 ? { attributes: intent.attributes } : {}),
+    },
+    muted: intent.muted,
+    ...(intent.unread_matches !== undefined ? { unread_matches: intent.unread_matches } : {}),
+    created_at: intent.created_at,
   };
 }
 
@@ -843,6 +874,201 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
       } catch (e) {
         if (e instanceof OrderFlowError) return err(e.message, e.code);
         return err(`release_funds failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  // -----------------------------------------------------------------------
+  // Buyer alerts (THI-360, spec rev 2) — intent tools 1–4 of 5 (my_matches
+  // lands in PR 4). Additive only; no existing tool signature changes. All
+  // four carry per-account data → PROTECTED_TOOLS (401-challenge set) plus
+  // the tool-level requireSeller() guard as defense in depth. Writes go
+  // through src/intents.ts only, so caps-before-embeddings (R1) and
+  // intent_write events (R5) are the module's, never bypassed here.
+
+  server.registerTool(
+    "save_intent",
+    {
+      title: "Save search intent (buyer alert)",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "Save what the user is looking for as a buyer alert: a free-text query and/or " +
+        "structured filters (category, condition, price range, shipping tier, attributes). " +
+        "When a new matching listing publishes, it appears in the my_matches tool — check that " +
+        "at the start of each session. Requires seller authentication (Bearer API key). " +
+        "Max 25 stored intents; 50 saves per day.",
+      inputSchema: {
+        q: z.string().min(3).max(400).optional().describe("Free-text query, e.g. 'running shoes size 43' (trimmed at save)"),
+        category: z.string().min(2).max(40).optional().describe("Category slug; see describe_category"),
+        condition: z.enum(CONDITIONS).optional(),
+        min_price_cents: z.number().int().min(0).optional(),
+        max_price_cents: z.number().int().min(0).optional(),
+        currency: z.string().length(3).default("EUR"),
+        shipping_tier: z.enum(SHIPPING_TIERS).optional(),
+        attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
+          .describe("Exact-match attribute filter, e.g. {\"size_eu\": 43}"),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      // N3 (spec rev 2): trim at the edge; a whitespace-only q is no q.
+      const q = typeof args.q === "string" && args.q.trim().length > 0 ? args.q.trim() : undefined;
+      const filters = {
+        category: (args.category as string | undefined)?.toLowerCase(),
+        condition: args.condition as string | undefined,
+        min_price_cents: args.min_price_cents as number | undefined,
+        max_price_cents: args.max_price_cents as number | undefined,
+        currency: ((args.currency as string) ?? "EUR").toUpperCase(),
+        shipping_tier: args.shipping_tier as string | undefined,
+        attributes: (args.attributes as Attributes | undefined) ?? {},
+      };
+      const hasFilter =
+        filters.category !== undefined || filters.condition !== undefined ||
+        filters.min_price_cents !== undefined || filters.max_price_cents !== undefined ||
+        filters.shipping_tier !== undefined || Object.keys(filters.attributes).length > 0;
+      if (!q && !hasFilter) {
+        // R5: validation rejection at the tool layer — the module is never
+        // reached, so the event is logged here (sellerId only, no payload).
+        logSecurityEvent({ type: "intent_write", action: "save", outcome: "rejected" }, { sellerId: seller.id });
+        return err(
+          "Provide a query (q) and/or at least one filter (category, condition, min/max_price_cents, shipping_tier, attributes).",
+          "invalid_request",
+        );
+      }
+      if (filters.category !== undefined) {
+        // Same category check (incl. the available-list error) as create_listing.
+        const categoryRow = await getCategory(filters.category);
+        if (!categoryRow) {
+          logSecurityEvent({ type: "intent_write", action: "save", outcome: "rejected" }, { sellerId: seller.id });
+          const available = (await listCategories()).map((c) => c.name).join(", ");
+          return err(`Unknown category '${filters.category}'. Available: ${available}`, "unknown_category");
+        }
+      }
+      // Same attribute shape caps as listings (key/value length, entry count).
+      const attributeErrors = attributeShapeErrors(filters.attributes);
+      if (attributeErrors.length > 0) {
+        logSecurityEvent({ type: "intent_write", action: "save", outcome: "rejected" }, { sellerId: seller.id });
+        return err(`Invalid attributes: ${attributeErrors.join("; ")}`, "invalid_attributes");
+      }
+      try {
+        // Caps, quota and the one embeddings call (R1: caps reject BEFORE
+        // embedText) live in saveIntent — never duplicated here.
+        // IntentLimitError → rate_limited; IntentValidationError → invalid_intent.
+        const intent = await saveIntent(seller.id, { q, ...filters });
+        return ok({
+          saved: true,
+          intent: intentToPublic(intent),
+          note:
+            "Saved. When a new listing matching this intent publishes, it appears in my_matches " +
+            "(check it at session start). update_intent can mute future matches; delete_intent " +
+            "removes the intent and its matches. To change criteria, delete and re-save.",
+        });
+      } catch (e) {
+        if (e instanceof IntentLimitError || e instanceof IntentValidationError) {
+          return err(describeError(e), e.code);
+        }
+        return err(`save_intent failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "my_intents",
+    {
+      title: "My saved search intents",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      description:
+        "List the caller's saved buyer alerts (search intents), newest first, each with its " +
+        "unread match count and muted state. Requires seller authentication (Bearer API key).",
+      inputSchema: {},
+    },
+    async () => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const intents = await listIntents(seller.id);
+        return ok({ count: intents.length, intents: intents.map(intentToPublic) });
+      } catch (e) {
+        return err(`my_intents failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_intent",
+    {
+      title: "Mute or unmute a saved intent",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "Mute (or unmute) one of the caller's saved buyer alerts. Muting stops future match " +
+        "notifications; matches already created stay readable via my_matches. Requires seller " +
+        "authentication (Bearer API key).",
+      inputSchema: {
+        intent_id: z.string().uuid(),
+        muted: z.boolean().describe("true = stop future matches; false = resume"),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        // Missing and non-owned intents are indistinguishable by design
+        // (PR-1 null mapping) — both surface as not_found. The rejected
+        // intent_write event is logged inside the module (R5).
+        const intent = await updateIntentMute(args.intent_id as string, seller.id, args.muted as boolean);
+        if (!intent) return err("Intent not found", "not_found");
+        return ok({
+          intent: intentToPublic(intent),
+          note: args.muted
+            ? "Muted: this intent receives no future matches. Matches already created stay readable via my_matches."
+            : "Unmuted: future matches will appear in my_matches again.",
+        });
+      } catch (e) {
+        return err(`update_intent failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "delete_intent",
+    {
+      title: "Delete a saved intent",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "Delete one of the caller's saved buyer alerts and its match records. Requires " +
+        "seller authentication (Bearer API key).",
+      inputSchema: { intent_id: z.string().uuid() },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const deleted = await deleteIntent(args.intent_id as string, seller.id);
+        if (!deleted) return err("Intent not found", "not_found");
+        return ok({ deleted: true });
+      } catch (e) {
+        return err(`delete_intent failed: ${describeError(e)}`);
       }
     },
   );

@@ -38,8 +38,12 @@ class FakeElement {
   dataset: Record<string, string> = {};
   /** THI-308 PR 3 shim extension: event wiring is addEventListener-based —
    *  record registrations so tests can prove listeners exist without any
-   *  inline handler attributes. */
+   *  inline handler attributes. PR 4 adds parentNode/insertBefore/draggable
+   *  for the delete + drag-to-reorder thumbnail wiring. */
   listeners: Array<[string, unknown]> = [];
+  draggable = false;
+  title = "";
+  parentNode: FakeElement | null = null;
   classList = {
     add: (c: string) => {},
     remove: (c: string) => {},
@@ -52,7 +56,15 @@ class FakeElement {
     this.listeners.push([event, handler]);
   }
   appendChild<T>(node: T): T {
+    (node as FakeElement).parentNode = this;
     this.children.push(node as FakeElement | string);
+    return node;
+  }
+  insertBefore<T>(node: T, ref: FakeElement | string): T {
+    const i = this.children.indexOf(ref);
+    if (i === -1) this.children.push(node as FakeElement | string);
+    else this.children.splice(i, 0, node as FakeElement | string);
+    (node as FakeElement).parentNode = this;
     return node;
   }
   append(...nodes: (FakeElement | string)[]) {
@@ -232,5 +244,132 @@ describe("photos.js / imaging.js (THI-308 PR 3: CSP-safe capture UI)", () => {
     expect(() => new Function("document", "window", readScript("photos.js"))(document, {})).not.toThrow();
     expect(document.listeners).toEqual([]); // no paste listener without the panel
     expect(byId.size).toBe(0);
+  });
+});
+
+describe("photos.js delete + reorder wiring (THI-308 PR 4)", () => {
+  const readScript = () => readFileSync(`${websiteDir}/photos.js`, "utf8");
+
+  const STORED_A = "/img/items/itm-1-aaa.jpg";
+  const STORED_B = "/img/items/itm-1-bbb.jpg";
+  const EXTERNAL = "https://cdn.example.com/pics/a.jpg";
+
+  /** Owner-panel DOM shim matching src/web-pages.ts, with the PR-4
+   *  data-images seed and a recording fetch mock. */
+  function managerDom(images: string[], confirmResult = true) {
+    const byId = new Map<string, FakeElement>();
+    const el = (id: string) => {
+      if (!byId.has(id)) byId.set(id, new FakeElement("div"));
+      return byId.get(id)!;
+    };
+    const zone = el("photo-zone");
+    zone.dataset = { itemId: "itm-1", imageCount: String(images.length), maxImages: "12", images: JSON.stringify(images) };
+    // A live listing renders no pending banner — model the absent element so
+    // photos.js starts with banner = null (the shim auto-creates otherwise).
+    byId.set("pending-banner", null as unknown as FakeElement);
+    // The zone lives inside the owner panel — the recreated banner is
+    // inserted before it (same position as the server-rendered one).
+    const panel = new FakeElement("div");
+    panel.appendChild(zone);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const respond: Array<{ ok: boolean; body: unknown }> = [];
+    const fetchMock = (url: string, init?: RequestInit) => {
+      calls.push({ url, init: init ?? {} });
+      const next = respond.shift() ?? { ok: true, body: {} };
+      return Promise.resolve({
+        ok: next.ok,
+        json: async () => next.body,
+      });
+    };
+    const document = {
+      getElementById: el,
+      createElement: (tag: string) => new FakeElement(tag),
+      listeners: [] as Array<[string, unknown]>,
+      addEventListener(event: string, handler: unknown) {
+        this.listeners.push([event, handler]);
+      },
+    };
+    const win = { ThingeryImaging: null, confirm: () => confirmResult };
+    new Function("document", "window", "fetch", readScript())(document, win, fetchMock);
+    const settle = () => new Promise((r) => setTimeout(r, 0));
+    return { byId, el, zone, calls, respond, settle };
+  }
+
+  const thumbs = (strip: FakeElement) => strip.children.filter((c) => c instanceof FakeElement) as FakeElement[];
+  const thumbDel = (t: FakeElement) =>
+    t.children.find((c) => c instanceof FakeElement && c.tag === "button") as FakeElement;
+  const thumbImg = (t: FakeElement) => t.children.find((c) => c instanceof FakeElement && c.tag === "img") as FakeElement;
+  const fire = (el: FakeElement, event: string, arg?: unknown) =>
+    (el.listeners.find(([e]) => e === event)?.[1] as (a?: unknown) => void)(arg);
+
+  it("rebuilds the strip from data-images: cover badge on the first, × delete + drag wiring on every thumb", () => {
+    const { el } = managerDom([STORED_A, STORED_B]);
+    const strip = el("photo-strip");
+    expect(thumbs(strip)).toHaveLength(2);
+    const [first, second] = thumbs(strip);
+    expect(first.draggable).toBe(true);
+    expect(first.listeners.map(([e]) => e)).toEqual(expect.arrayContaining(["dragstart", "dragover", "drop", "dragend"]));
+    // Cover badge only on index 0; every thumb gets a × button + image.
+    expect(first.children.some((c) => c instanceof FakeElement && c.className === "cover-badge")).toBe(true);
+    expect(second.children.some((c) => c instanceof FakeElement && c.className === "cover-badge")).toBe(false);
+    expect(thumbDel(first).textContent).toBe("×");
+    expect(thumbDel(second).textContent).toBe("×");
+    expect(thumbImg(first).src).toBe(STORED_A);
+  });
+
+  it("warns before deleting the last photo and aborts when the seller declines", async () => {
+    const { el, calls } = managerDom([STORED_A], false); // confirm → decline
+    fire(thumbDel(thumbs(el("photo-strip"))[0]), "click");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toHaveLength(0); // no request without confirmation
+  });
+
+  it("deletes by stored filename, re-renders from the server array, and deletes external members by full URL", async () => {
+    const m = managerDom([STORED_A, EXTERNAL]);
+    m.respond.push({ ok: true, body: { images: [EXTERNAL], visible: true } });
+    fire(thumbDel(thumbs(m.el("photo-strip"))[0]), "click");
+    await m.settle();
+    expect(m.calls[0].url).toBe(`/api/items/itm-1/images/${encodeURIComponent("itm-1-aaa.jpg")}`);
+    expect(m.calls[0].init.method).toBe("DELETE");
+    expect(thumbs(m.el("photo-strip"))).toHaveLength(1);
+    expect(thumbImg(thumbs(m.el("photo-strip"))[0]).src).toBe(EXTERNAL);
+
+    // External-URL member: the whole URL is the reference, encoded — and no
+    // filename can be smuggled past the server gate this way.
+    m.respond.push({ ok: true, body: { images: [], visible: false, warning: "hidden" } });
+    fire(thumbDel(thumbs(m.el("photo-strip"))[0]), "click");
+    await m.settle();
+    expect(m.calls[1].url).toBe(`/api/items/itm-1/images/${encodeURIComponent(EXTERNAL)}`);
+    // Last photo gone on a photo_required listing → pending banner returns,
+    // inserted before the zone (same position as the server-rendered one).
+    const banner = m.zone.parentNode?.children[0] as FakeElement;
+    expect(banner.id).toBe("pending-banner");
+    expect(banner.textContent).toContain("hidden from search");
+    expect(m.zone.parentNode?.children[1]).toBe(m.zone);
+  });
+
+  it("drag-to-reorder PUTs the new order and renders the server's array back", async () => {
+    const m = managerDom([STORED_A, STORED_B, EXTERNAL]);
+    const strip = m.el("photo-strip");
+    fire(thumbs(strip)[0], "dragstart");
+    fire(thumbs(strip)[2], "drop", { preventDefault() {} });
+    await m.settle();
+    expect(m.calls[0].url).toBe("/api/items/itm-1/images/order");
+    expect(m.calls[0].init.method).toBe("PUT");
+    expect(JSON.parse((m.calls[0].init.body as string) ?? "{}")).toEqual({
+      images: [STORED_B, EXTERNAL, STORED_A],
+    });
+    expect(thumbImg(thumbs(strip)[0]).src).toBe(STORED_B); // optimistic order kept
+  });
+
+  it("reverts to the server's current set on a 409 conflict", async () => {
+    const m = managerDom([STORED_A, STORED_B]);
+    const strip = m.el("photo-strip");
+    m.respond.push({ ok: false, body: { error: "Photos changed since the page loaded — showing the current set.", images: [STORED_B, STORED_A] } });
+    fire(thumbs(strip)[0], "dragstart");
+    fire(thumbs(strip)[1], "drop", { preventDefault() {} });
+    await m.settle();
+    const after = thumbs(strip).map((t) => thumbImg(t).src);
+    expect(after).toEqual([STORED_B, STORED_A]); // server order, not the optimistic one
   });
 });

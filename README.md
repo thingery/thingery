@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="website/assets/logo-mark.svg" width="112" alt="Thingery logo" />
+</p>
+
 # Thingery
 
 > **Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.**

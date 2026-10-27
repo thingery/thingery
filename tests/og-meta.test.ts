@@ -33,6 +33,29 @@ describe("ogMetaHtml", () => {
     expect(html).not.toContain("og:image");
   });
 
+  it("renders og:image:alt alongside og:image (THI-396)", () => {
+    const html = ogMetaHtml({
+      image: "https://thingery.dev/img/items/abc.jpg",
+      imageAlt: "Sony A6400 body + kit lens",
+    });
+    expect(html).toContain('<meta property="og:image:alt" content="Sony A6400 body + kit lens">');
+  });
+
+  it("renders a canonical link when set, and none otherwise (THI-396)", () => {
+    const html = ogMetaHtml({
+      title: "Sony A6400",
+      url: "https://thingery.dev/item/abc-123",
+      canonical: "https://thingery.dev/item/abc-123",
+    });
+    expect(html).toContain('<link rel="canonical" href="https://thingery.dev/item/abc-123">');
+    expect(ogMetaHtml({ title: "just a title" })).not.toContain("canonical");
+  });
+
+  it("HTML-escapes canonical href like any attribute", () => {
+    const html = ogMetaHtml({ canonical: 'https://x.test/a"onload="alert(1)' });
+    expect(html).toContain('<link rel="canonical" href="https://x.test/a&quot;onload=&quot;alert(1)">');
+  });
+
   it("HTML-escapes tag values", () => {
     const html = ogMetaHtml({ title: '<script>"&\'', twitterCard: "summary" });
     expect(html).toContain('<meta property="og:title" content="&lt;script&gt;&quot;&amp;&#39;">');

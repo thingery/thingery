@@ -191,6 +191,19 @@ async function send(message, displayText) {
   }
 }
 
+// THI-396: ?q= deep link — the item page's "Ask Thingery's assistant"
+// button opens /chat.html?q=<prefilled question about the listing>.
+// Prefill + focus only (no autosend): a share click must never spend a
+// chat turn — the visitor presses Send.
+if (typeof location !== "undefined" && typeof URLSearchParams === "function") {
+  const prefill = new URLSearchParams(location.search).get("q");
+  const input = $("message");
+  if (prefill && input) {
+    input.value = prefill.slice(0, 500);
+    input.focus();
+  }
+}
+
 $("chat-form").onsubmit = async (e) => {
   e.preventDefault();
   const text = $("message").value.trim();

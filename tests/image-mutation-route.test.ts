@@ -174,7 +174,7 @@ describe.skipIf(!available)("item image mutation routes (DB + HTTP)", () => {
   });
 
   it("removes an exact member of the seller's own item and unlinks the stored file", async () => {
-    const { itemId, cookie, stored } = await seed([]);
+    const { itemId, cookie } = await seed([]);
     const member = await storedFile(itemId);
     await db.query("UPDATE items SET images = $2 WHERE id = $1", [itemId, [member]]);
     const res = await del(itemId, member.slice("/img/items/".length), cookie);
@@ -371,7 +371,7 @@ describe.skipIf(!available)("item image mutation routes (DB + HTTP)", () => {
   // --- limiter bucket isolation (F6) ----------------------------------------
 
   it("mutation churn 429s without consuming the upload quota", async () => {
-    const { sellerId, itemId, cookie, stored } = await seed([]);
+    const { sellerId, itemId, cookie } = await seed([]);
     const member = await storedFile(itemId);
     await db.query("UPDATE items SET images = $2 WHERE id = $1", [itemId, [member]]);
     for (let i = 0; i < 60; i++) {
@@ -386,7 +386,7 @@ describe.skipIf(!available)("item image mutation routes (DB + HTTP)", () => {
   });
 
   it("an exhausted upload quota does not block mutations", async () => {
-    const { sellerId, itemId, cookie, stored } = await seed([]);
+    const { sellerId, itemId, cookie } = await seed([]);
     const member = await storedFile(itemId);
     await db.query("UPDATE items SET images = $2 WHERE id = $1", [itemId, [member]]);
     for (let i = 0; i < 30; i++) {

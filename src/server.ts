@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { withToolResultLogging } from "./analytics.js";
 import { registerTools, type ToolContext } from "./tools.js";
 import { VERSION } from "./version.js";
 
@@ -16,6 +17,9 @@ export function buildServer(ctx: ToolContext): McpServer {
         "docs: https://soldstack.dev/docs#mcp).",
     },
   );
-  registerTools(server, ctx);
+  // THI-394: register through the analytics proxy so every executed tool call
+  // emits one outcome-aware `tool_result` line (see src/analytics.ts). The
+  // proxy is structural — tools.ts and its signatures are untouched.
+  registerTools(withToolResultLogging(server, ctx), ctx);
   return server;
 }

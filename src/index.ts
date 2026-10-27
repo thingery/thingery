@@ -18,7 +18,6 @@ import { carrierWebhookRouter } from "./webhooks-carrier.js";
 import { logConfigBootReport, orderFlowConfig } from "./config.js";
 import { startSweepScheduler } from "./orders-sweep.js";
 import { statsHandler } from "./stats.js";
-import { homeSearchHandler } from "./home-search.js";
 import { browsePage, itemPage, orderReturnPage, payoutSetupReturnPage, websiteErrorMiddleware } from "./web-pages.js";
 import { uploadsDir } from "./images.js";
 import { securityHeaders } from "./security-headers.js";
@@ -131,12 +130,6 @@ function runHttp(): void {
   // app root like /healthz, outside the protected src/routes.ts router.
   // TTL-cached aggregate counts; see src/stats.ts for the definitions.
   app.get("/stats.json", asyncHandler(statsHandler));
-
-  // THI-389: homepage "Try it right now" demo — read-only JSON search over
-  // the same feed choke point as /browse (searchItems). Website asset, not
-  // an API surface change — mounted at the app root like /stats.json,
-  // outside the protected src/routes.ts router. See src/home-search.ts.
-  app.get("/search.json", asyncHandler(homeSearchHandler));
 
   app.get("/item/:id", asyncHandler(itemPage));
   app.get("/browse", asyncHandler(browsePage));

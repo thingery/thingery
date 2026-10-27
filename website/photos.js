@@ -224,7 +224,7 @@
     renderStrip();
   }
 
-  function showInGallery(url) {
+  function showInGallery() {
     renderGallery(); // full re-render from the array state
   }
 
@@ -269,7 +269,7 @@
       ui.state.textContent = "done";
       ui.row.remove();
       renderStrip();
-      showInGallery(url);
+      showInGallery();
       removePendingBanner(); // first photo published the listing
       syncInputs();
     } catch (err) {

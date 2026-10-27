@@ -126,8 +126,9 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         openWorldHint: false,
       },
       description:
-        "Discover a category's declared attribute fields (e.g. sneakers want size_eu, " +
-        "colorway...). Declared fields are validated by create_listing; listings may also carry " +
+        "List the marketplace's categories for second-hand items, or discover one " +
+        "category's declared attribute fields (e.g. sneakers want size_eu, colorway...). " +
+        "Declared fields are validated by create_listing; listings may also carry " +
         "undeclared attribute keys, and search attribute filters match any key. When undeclared " +
         "keys are actually in use in a category, they're listed in undeclared_in_use with " +
         "item/seller counts — search hints, not validated fields. " +
@@ -186,7 +187,8 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         openWorldHint: false,
       },
       description:
-        "Create a listing for a second-hand item. Requires seller authentication (Bearer API key). " +
+        "Sell a used item: create a second-hand listing in this marketplace. " +
+        "Requires seller authentication (Bearer API key). " +
         "Prices are in integer cents (EUR 12.50 = 1250). Category-specific fields go in `attributes` " +
         "(call describe_category first to see what's declared — undeclared keys are allowed " +
         "and searchable). Generates the item's embedding for semantic search. " +
@@ -304,7 +306,8 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         openWorldHint: false,
       },
       description:
-        "Search active second-hand listings. Public (no API key needed). " +
+        "Find used and second-hand items for sale: search the marketplace's active listings " +
+        "(free text works, e.g. 'used e-bike'). Public (no API key needed). " +
         "Hybrid: semantic similarity when embeddings are configured, keyword fallback otherwise. " +
         CONTENT_PROVENANCE_NOTE,
       inputSchema: {
@@ -354,7 +357,8 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         idempotentHint: true,
         openWorldHint: false,
       },
-      description: "Fetch a single listing by its item id. Public. " + CONTENT_PROVENANCE_NOTE,
+      description: "Fetch one second-hand listing's full details (price, condition, attributes, " +
+        "images) by its item id. Public. " + CONTENT_PROVENANCE_NOTE,
       inputSchema: { id: z.string().uuid() },
     },
     async (args: Record<string, unknown>) => {
@@ -381,7 +385,8 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         idempotentHint: true,
         openWorldHint: false,
       },
-      description: "List the authenticated seller's own listings. Requires API key.",
+      description: "List your own second-hand listings (the authenticated seller's items for sale). " +
+        "Requires API key.",
       inputSchema: {
         status: z.enum(STATUSES).optional(),
         limit: z.number().int().min(1).max(100).default(50),
@@ -406,8 +411,8 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         openWorldHint: false,
       },
       description:
-        "Update one of your own listings: change status (active/reserved/sold/deleted), " +
-        "adjust price, or edit title/description. Requires API key.",
+        "Update one of your own listings: mark it reserved or sold (or delist it), adjust the " +
+        "asking price, or edit title/description. Requires API key.",
       inputSchema: {
         id: z.string().uuid(),
         status: z.enum(STATUSES).optional(),
@@ -454,7 +459,9 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         openWorldHint: false,
       },
       description:
-        "Attach a photo to one of your listings. Pass the image as base64 (a data-URL prefix is " +
+        "Attach a photo to one of your listings — the first photo publishes a pending listing " +
+        "(listings stay hidden from search until they have one). " +
+        "Pass the image as base64 (a data-URL prefix is " +
         "accepted — e.g. what you get when the user shares a photo in this conversation). " +
         "Max 5 MB decoded — a full-size image fits: ~6.7 MB as base64+JSON, under the 8 MiB " +
         "/mcp request cap. jpeg, png, webp or gif. " +
@@ -501,7 +508,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         openWorldHint: false,
       },
       description:
-        "Get this seller's payout setup for the order flow: a Stripe Express onboarding URL " +
+        "Get set up to receive payouts when your items sell: returns a Stripe Express onboarding URL " +
         "when payments are enabled for this Thingery deployment, plus current onboarding status. " +
         "Onboarding is optional — items stay buyable as off-platform orders without it — but " +
         "platform payment (Stripe Checkout with buyer protection) requires it. Requires seller auth.",
@@ -551,7 +558,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         openWorldHint: false,
       },
       description:
-        "Order an item. Default payment_mode is 'stripe' (Checkout URL returned) when the " +
+        "Buy an item: place an order on a second-hand listing. Default payment_mode is 'stripe' (Checkout URL returned) when the " +
         "deployment has payments AND the seller finished payout onboarding; otherwise " +
         "'off_platform' — you and the seller settle payment yourselves (check get_item's " +
         "payment_available first). Shippable items need a shipping_address; local-pickup " +
@@ -604,7 +611,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         idempotentHint: true,
         openWorldHint: false,
       },
-      description: "Fetch one of your orders (as buyer or seller): status, price breakdown, " +
+      description: "Fetch one of your buy/sell orders (as buyer or seller): status, price breakdown, " +
         "tracking, deadlines. Requires authentication; only order parties can see it.",
       inputSchema: { order_id: z.string().uuid() },
     },
@@ -670,8 +677,9 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         openWorldHint: false,
       },
       description:
-        "Seller records the shipment's carrier and tracking code (order moves sold → label_issued; " +
-        "shippable orders only — pickups have nothing to ship). Registers a carrier tracker when the " +
+        "Seller records shipment details after shipping a sold item — carrier and tracking code " +
+        "(order moves sold → label_issued; shippable orders only — pickups have nothing to ship). " +
+        "Registers a carrier tracker when the " +
         "deployment has EasyPost configured, so status updates (in transit, delivered) arrive " +
         "automatically. Calling it again while still label_issued CORRECTS the tracking details.",
       inputSchema: {
@@ -714,9 +722,9 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         openWorldHint: false,
       },
       description:
-        "Seller confirms receiving an OFF-PLATFORM payment (cash, bank transfer, …): the order " +
-        "moves pending → sold. Only exists for off_platform orders — Stripe-mode orders flip to " +
-        "sold automatically when payment succeeds.",
+        "Seller confirms receiving an OFF-PLATFORM payment for a sold item (cash, bank transfer, …): " +
+        "the order moves pending → sold. Only exists for off_platform orders — " +
+        "Stripe-mode orders flip to sold automatically when payment succeeds.",
       inputSchema: {
         order_id: z.string().uuid(),
         note: z.string().max(500).optional().describe("e.g. 'cash received at pickup'"),
@@ -746,7 +754,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         openWorldHint: false,
       },
       description:
-        "Buyer confirms receiving the item: the order moves to delivered and the dispute window " +
+        "Buyer confirms receiving the purchased item: the order moves to delivered and the dispute window " +
         "opens (48h default). For local pickup this is the delivery step; for shipped items it is " +
         "an early confirm (carriers usually report delivery automatically).",
       inputSchema: { order_id: z.string().uuid() },

@@ -813,6 +813,38 @@ alert is visible in the log and (if configured) the webhook, marked `test:true`.
 **Rollback:** comment the crontab line (detection stops; nothing else depends on
 it). The script reads but never modifies app/db/Caddy state.
 
+## 6b. Daily sprint metrics snapshot (THI-394)
+
+`scripts/daily-metrics.sh` (source of truth; see `docs/metrics.md`) aggregates
+the sprint's three numbers — activation, search success, listing funnel — from
+app-container analytics lines + read-only SQL, prints a 4-line summary, and
+writes `metrics/daily-YYYY-MM-DD.json` (counts only, no PII). Snapshots are the
+durable record because container logs rotate (§7).
+
+Install once from the repo checkout at `/opt/thingery` (the script runs in
+place; it needs no copy in `/usr/local/bin`):
+
+```bash
+sudo tee /etc/cron.d/thingery-daily-metrics >/dev/null <<'CRON'
+# THI-394: daily sprint metrics snapshot (00:10 UTC). Read-only; writes /opt/thingery/metrics/.
+10 0 * * * deploy cd /opt/thingery && scripts/daily-metrics.sh >> /var/log/thingery-daily-metrics.log 2>&1
+CRON
+sudo chmod 644 /etc/cron.d/thingery-daily-metrics
+sudo touch /var/log/thingery-daily-metrics.log && sudo chown deploy:deploy /var/log/thingery-daily-metrics.log
+```
+
+(`deploy` owns `/opt/thingery` and is in the `docker` group — same posture as
+the deploy flow in §5.)
+
+**Verify:** `scripts/daily-metrics.sh` from `/opt/thingery` (expect a summary
+block + a file under `metrics/`), then `tail -1 /var/log/thingery-daily-metrics.log`
+the next day. Read any snapshot with
+`cat /opt/thingery/metrics/daily-*.json | jq .`
+
+**Rollback:** `sudo rm /etc/cron.d/thingery-daily-metrics` — collection stops;
+existing snapshots stay. The script only reads containers/DB and writes under
+`metrics/`; it never mutates app or Caddy state.
+
 ## 7. Logs: Caddy access log + container output
 
 THI-312: every container's stdout/stderr goes to Docker's `json-file` driver with

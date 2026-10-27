@@ -153,9 +153,10 @@ PORT=3000 node node_modules/thingery/dist/index.js
 ```
 
 The server boots at `http://localhost:3000` — `/mcp`, `/browse`, `/healthz`, and the HTTP
-API. Note: in the npm package the web signup page is not shipped (0.1.2 packaging gap —
-`/login.html` 404s), so create your account through the API — the `thg_...` key is
-returned exactly once, in the signup response:
+API. Create your account by opening [`/login.html`](http://localhost:3000/login.html) —
+your `thg_...` MCP key is shown right after signup. (On the pre-fix 0.1.2 release the
+page 404'd — a packaging gap fixed after it; there you can still create the account
+through the API — the key is returned exactly once, in the signup response:)
 
 ```bash
 curl -s -X POST http://localhost:3000/api/signup \

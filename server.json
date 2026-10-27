@@ -6,12 +6,12 @@
     "url": "https://github.com/thingery/thingery",
     "source": "github"
   },
-  "version": "0.1.2",
+  "version": "0.1.3",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "thingery",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "transport": {
         "type": "stdio"
       }
@@ -19,7 +19,7 @@
     {
       "registryType": "npm",
       "identifier": "thingery",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "transport": {
         "type": "streamable-http",
         "url": "https://thingery.dev/mcp"

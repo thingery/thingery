@@ -4,7 +4,7 @@
 // database — the same code paths the MCP tools use.
 
 import type { SellerRow } from "./db.js";
-import { getCategory, getItem, createItem, listCategories, myItems, searchItems, undeclaredKeyUsage, updateItem } from "./items.js";
+import { getCategory, getItem, createItem, listCategories, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import { logSecurityEvent } from "./security-events.js";
@@ -35,6 +35,7 @@ Selling:
 - Prices are integer cents (EUR 12.50 -> price_cents 1250). Confirm the price with the user before creating a listing.
 - Estimate weight_grams/dimensions_mm from the item type; shipping_tier: locker for shoebox-sized items, parcel up to ~30kg, bulky for furniture, local for pickup-only.
 - After creating, give the item URL and mention they can ask you to mark it reserved/sold later.
+- Listings are hidden from search until they have at least one photo (THI-308): after creating, tell the user it's created but pending — they add a photo on the item page to publish it. Give the item URL.
 
 Buying:
 - Search with filters (max_price_cents, category, condition, attributes like {"size_eu": 43}).
@@ -235,7 +236,28 @@ export async function executeTool(
         attributes,
       });
       const base = (process.env.PUBLIC_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
-      return { created: true, id: item.id, url: `${base}/item/${item.id}` };
+      const url = `${base}/item/${item.id}`;
+      // THI-308 PR 2: chat listings are always created photoless, so they
+      // start pending — the result carries the publish state plus a note so
+      // the assistant's prose tells the seller "created — add a photo to
+      // publish" and links the item page (the web publish moment = photo
+      // lands). Additive fields; `url`/`created`/`id` unchanged.
+      const visible = visibleInFeeds(item);
+      return {
+        created: true,
+        id: item.id,
+        url,
+        photo_required: item.photo_required,
+        visible,
+        ...(visible
+          ? {}
+          : {
+              photo_note:
+                `Created, but hidden from search until it has at least one photo. ` +
+                `Tell the user: your listing is created — add a photo to publish it. ` +
+                `Photo upload is on the item page: ${url}`,
+            }),
+      };
     }
     case "my_listings": {
       const s = requireSeller();

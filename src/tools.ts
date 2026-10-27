@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ItemRow, SellerRow } from "./db.js";
 import { CONDITIONS, SHIPPING_TIERS, STATUSES } from "./db.js";
-import { getCategory, getItem, createItem, listCategories, ListingLimitError, myItems, searchItems, undeclaredKeyUsage, updateItem } from "./items.js";
+import { getCategory, getItem, createItem, listCategories, ListingLimitError, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, AttributeValidationError, type Attributes } from "./attributes.js";
 import { addItemImageBase64 } from "./images.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
@@ -70,6 +70,11 @@ export function itemToPublic(item: ItemRow & { score?: number }) {
       ? { payment_available: orderFlowConfig().stripePaymentsEnabled && seller_payout_ready === true }
       : {}),
     orderable: item.status === "active",
+    // THI-308 PR 2 (additive): derived pending-photo state — true only for
+    // photo-gated listings with no images yet. Pending items are hidden from
+    // feeds; the first photo publishes them (visibleInFeeds in items.ts is
+    // the same predicate's JS twin). Existing fields unchanged.
+    needs_photo: item.photo_required && item.images.length === 0,
     url: `${publicBaseUrl()}/item/${id}`,
   };
 }
@@ -184,7 +189,8 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         "Create a listing for a second-hand item. Requires seller authentication (Bearer API key). " +
         "Prices are in integer cents (EUR 12.50 = 1250). Category-specific fields go in `attributes` " +
         "(call describe_category first to see what's declared — undeclared keys are allowed " +
-        "and searchable). Generates the item's embedding for semantic search.",
+        "and searchable). Generates the item's embedding for semantic search. " +
+        "Listings are hidden from search until they have at least one photo.",
       inputSchema: {
         title: z.string().min(3).max(200).describe("Short item title, e.g. 'Nike Air Max 90, size 43'"),
         description: z.string().max(5000).default("").describe("Honest description incl. flaws"),
@@ -234,30 +240,44 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
           return err(`Invalid attributes for category '${category}': ${attributeErrors.join("; ")}`, "invalid_attributes");
         }
 
-        const item = await createItem({
-          seller_id: seller.id,
-          title: args.title as string,
-          description: (args.description as string) ?? "",
-          category,
-          condition: (args.condition as string) ?? "good",
-          brand: (args.brand as string) ?? null,
-          price_cents: args.price_cents as number,
-          currency: ((args.currency as string) ?? "EUR").toUpperCase(),
-          location: (args.location as string) ?? null,
-          weight_grams: (args.weight_grams as number | undefined) ?? null,
-          dimensions_mm: (args.dimensions_mm as string) ?? null,
-          shipping_tier: (args.shipping_tier as string) ?? "unknown",
-          images: (args.images as string[]) ?? [],
-          attributes,
-        });
+        const item = itemToPublic(
+          await createItem({
+            seller_id: seller.id,
+            title: args.title as string,
+            description: (args.description as string) ?? "",
+            category,
+            condition: (args.condition as string) ?? "good",
+            brand: (args.brand as string) ?? null,
+            price_cents: args.price_cents as number,
+            currency: ((args.currency as string) ?? "EUR").toUpperCase(),
+            location: (args.location as string) ?? null,
+            weight_grams: (args.weight_grams as number | undefined) ?? null,
+            dimensions_mm: (args.dimensions_mm as string) ?? null,
+            shipping_tier: (args.shipping_tier as string) ?? "unknown",
+            images: (args.images as string[]) ?? [],
+            attributes,
+          }),
+        );
+        // THI-308 PR 2 (additive): publish state at create time. A zero-image
+        // create succeeds but stays pending — next_steps then tells the agent
+        // how to publish instead of implying the listing is live. status is
+        // 'active' on insert, so this reduces to the photo gate.
+        const visible = visibleInFeeds(item);
         return ok({
           created: true,
           seller: seller.display_name,
-          item: itemToPublic(item),
-          next_steps: [
-            "Share the item URL with potential buyers",
-            "Update status to 'reserved' when a deal is close, 'sold' when completed",
-          ],
+          item,
+          photo_required: item.photo_required,
+          visible,
+          next_steps: visible
+            ? [
+                "Share the item URL with potential buyers",
+                "Update status to 'reserved' when a deal is close, 'sold' when completed",
+              ]
+            : [
+                "The listing is hidden from search until it has at least one photo — add one with the add_item_image tool (the first photo publishes it)",
+                `Or share the item page so the seller can upload a photo there: ${item.url}`,
+              ],
         });
       } catch (e) {
         // createItem throws ListingLimitError over the per-seller velocity
@@ -457,7 +477,16 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         args.media_type as string,
       );
       if ("error" in result) return err(result.error, "invalid_image");
-      return ok({ added: true, image_url: `${publicBaseUrl()}${result.url}` });
+      // THI-308 PR 2 (additive): post-append feed visibility — the first
+      // photo on a pending listing publishes it, so the agent can tell the
+      // seller the listing is now live. Read-back derives it; nothing is
+      // stored per-transition.
+      const item = await getItem(args.item_id as string);
+      return ok({
+        added: true,
+        image_url: `${publicBaseUrl()}${result.url}`,
+        ...(item ? { visible: visibleInFeeds(item) } : {}),
+      });
     },
   );
 

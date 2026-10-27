@@ -1,7 +1,7 @@
 # Spec: Sellers bear Stripe processing fees (THI-374)
 
 - **Status:** Accepted design, pending Security review → implementation
-- **Date:** 2026-10-28
+- **Date:** 2026-10-27
 - **Author:** Architect
 - **Decision source:** board 2026-10-27T15:02:33Z — rejection of the THI-358 confirmation card `112e00aa`, verbatim: *"sellers will pay the fees with their stripe account. Platform will not bare any cost."* Supersedes ADR 0003 OQ1 for the fee axis.
 - **Gates THI-358** (DevOps live-mode flip). DevOps will not flip prod onto a cost model the board rejected.
@@ -18,7 +18,7 @@ Today the platform transfers the **full** order amount to the seller's Express a
   - All payout sites already run inside the `payout_pending` retry semantics: a Stripe failure leaves the order `payout_pending` without `transfer_id`; sweep rule 4 retries under the same `payout:{order_id}` idempotency key; rule 7 alerts if stuck (§6.6).
   - Refunds always refund the **buyer in full** (`createRefundForOrder`, gross amount) from: stale sale / stuck transit / never-shipped (sweep rules 2/3/8, `refundFirst`), carrier failure (`webhooks-carrier.ts`), unexpected payment on a cancelled order (`webhooks-stripe.ts` F2), and admin refund after transfer (`routes.ts` `refundAfterTransfer` — full transfer reversal first, then gross refund, operator alert on shortfall).
   - Stripe SDK v23 types confirm the read path: `PaymentIntent.latest_charge: string | Charge | null` (expandable) → `Charge.balance_transaction: string | BalanceTransaction | null` (expandable) → `BalanceTransaction.fee / .net / .currency`.
-- **Verified against current Stripe docs** (docs.stripe.com/refunds, retrieved 2026-10-28): *"You can cancel a payment before it completes at no cost. Alternatively, you can refund a payment in full or in part after it succeeds, but this might incur a cost. The Stripe processing fees on the original transaction aren't returned."* Refunds issued shortly after the original charge may instead process as **reversals**, for which Stripe withholds no fees — a possible recovery on fast refunds, never a design assumption.
+- **Verified against current Stripe docs** (docs.stripe.com/refunds, retrieved 2026-10-27): *"You can cancel a payment before it completes at no cost. Alternatively, you can refund a payment in full or in part after it succeeds, but this might incur a cost. The Stripe processing fees on the original transaction aren't returned."* Refunds issued shortly after the original charge may instead process as **reversals**, for which Stripe withholds no fees — a possible recovery on fast refunds, never a design assumption.
 
 ## Proposed design (option A — net the transfer, preserve escrow)
 

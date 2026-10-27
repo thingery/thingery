@@ -29,8 +29,27 @@ class FakeElement {
   scrollHeight = 0;
   onsubmit: unknown = null;
   href = "";
+  src = "";
+  alt = "";
+  loading = "";
+  referrerPolicy = "";
+  type = "";
+  hidden = false;
+  dataset: Record<string, string> = {};
+  /** THI-308 PR 3 shim extension: event wiring is addEventListener-based —
+   *  record registrations so tests can prove listeners exist without any
+   *  inline handler attributes. */
+  listeners: Array<[string, unknown]> = [];
+  classList = {
+    add: (c: string) => {},
+    remove: (c: string) => {},
+    toggle: (_c: string, _on?: boolean) => {},
+  };
   constructor(tag: string) {
     this.tag = tag;
+  }
+  addEventListener(event: string, handler: unknown) {
+    this.listeners.push([event, handler]);
   }
   appendChild<T>(node: T): T {
     this.children.push(node as FakeElement | string);
@@ -42,6 +61,10 @@ class FakeElement {
   replaceChildren(...nodes: (FakeElement | string)[]) {
     this.children = nodes;
   }
+  remove() {
+    this.removed = true;
+  }
+  removed = false;
 }
 
 describe("website/ HTML sinks", () => {
@@ -145,5 +168,69 @@ describe("chat.js account link (gh#8)", () => {
       .map((c) => (c instanceof FakeElement ? c.textContent : c))
       .join("");
     expect(rendered).toBe(`Logged in as ${HOSTILE_NAME} · use your own model · account`);
+  });
+});
+
+describe("photos.js / imaging.js (THI-308 PR 3: CSP-safe capture UI)", () => {
+  const readScript = (name: string) => readFileSync(`${websiteDir}/${name}`, "utf8");
+
+  /** DOM shim matching the server-rendered owner panel (src/web-pages.ts):
+   *  photo-zone with dataset, the two file inputs, status/strip targets. */
+  function captureDom() {
+    const byId = new Map<string, FakeElement>();
+    const el = (id: string) => {
+      if (!byId.has(id)) byId.set(id, new FakeElement("div"));
+      return byId.get(id)!;
+    };
+    const zone = el("photo-zone");
+    zone.dataset = { itemId: "itm-1", imageCount: "0", maxImages: "12" };
+    const document = {
+      getElementById: el,
+      createElement: (tag: string) => new FakeElement(tag),
+      listeners: [] as Array<[string, unknown]>,
+      addEventListener(event: string, handler: unknown) {
+        this.listeners.push([event, handler]);
+      },
+    };
+    return { byId, document, zone, take: el("photo-take"), choose: el("photo-choose") };
+  }
+
+  it("imaging.js registers its helpers globally without touching the DOM", () => {
+    delete (globalThis as { ThingeryImaging?: unknown }).ThingeryImaging;
+    new Function(readScript("imaging.js"))();
+    const imaging = (globalThis as { ThingeryImaging?: unknown }).ThingeryImaging;
+    expect(imaging).toBeTruthy();
+    expect((imaging as { initialQuality: () => number }).initialQuality()).toBe(0.8);
+  });
+
+  it("photos.js wires the capture UI purely via addEventListener (no inline handlers, no javascript: URIs)", () => {
+    const src = readScript("photos.js");
+    // CSP hygiene: nothing navigates or executes via a javascript: URI, and
+    // (already enforced file-wide above) no HTML-string sinks exist.
+    expect(src).not.toMatch(/javascript:/i);
+    const { document, take, choose, zone } = captureDom();
+    new Function("document", "window", src)(document, { ThingeryImaging: {} });
+    // Camera + gallery inputs auto-upload on change (one tap → snap → upload).
+    expect(take.listeners.map(([e]) => e)).toContain("change");
+    expect(choose.listeners.map(([e]) => e)).toContain("change");
+    // Desktop affordances: drop target on the zone, clipboard paste globally.
+    expect(zone.listeners.map(([e]) => e)).toEqual(expect.arrayContaining(["dragover", "drop"]));
+    expect(document.listeners.map(([e]) => e)).toContain("paste");
+  });
+
+  it("photos.js is a no-op when the owner panel is absent (non-owner pages)", () => {
+    const byId = new Map<string, FakeElement>();
+    const document = {
+      getElementById: (id: string) => {
+        // photos.js asks for photo-zone first; absent → returns undefined.
+        return id === "photo-zone" ? (undefined as unknown as FakeElement) : new FakeElement("div");
+      },
+      createElement: (tag: string) => new FakeElement(tag),
+      listeners: [] as Array<[string, unknown]>,
+      addEventListener() {},
+    };
+    expect(() => new Function("document", "window", readScript("photos.js"))(document, {})).not.toThrow();
+    expect(document.listeners).toEqual([]); // no paste listener without the panel
+    expect(byId.size).toBe(0);
   });
 });

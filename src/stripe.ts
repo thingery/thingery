@@ -5,7 +5,10 @@
 // platform balance until release; the platform then transfers to the
 // seller's Express account. application_fee_amount is always 0 — Thingery
 // never charges the users who create liquidity (any fee change is the
-// human's call, never introduced here).
+// human's call, never introduced here). The Stripe processing fee on the
+// buyer's charge is borne by the SELLER via payout netting (board decision
+// 2026-10-27, THI-374; ADR 0003 amendment 2026-10-27): the transfer is
+// gross − fee, so a completed order costs the platform €0 net.
 //
 // Money-path idempotency (THI-8 F3): every transfers.create uses the Stripe
 // idempotency key `payout:{order_id}` and every refunds.create uses
@@ -124,15 +127,72 @@ export async function getCheckoutPaymentStatus(
 // ---------------------------------------------------------------------------
 // Money movement (§6.4) — idempotency keys + reconcile-don't-recreate
 
+/** Shape every payout call site passes (all three pass the full OrderRow). */
+export interface PayoutOrder {
+  id: string;
+  payment_intent_id: string | null;
+  price_cents: number;
+  shipping_price_cents: number;
+  currency: string;
+}
+
+/**
+ * Seller net payout = gross − the Stripe processing fee on the buyer's
+ * charge (THI-374; spec docs/specs/seller-borne-stripe-fees.md). The fee is
+ * read from the PaymentIntent's latest-charge balance transaction — the
+ * settlement source of truth — and is fixed once the charge settles, so
+ * repeated attempts under the same payout:{order_id} idempotency key carry
+ * identical params (F3 stays sound; drift can only produce an
+ * idempotency_error, never a second or different transfer).
+ *
+ * Fails closed on ANY unknown — missing payment intent, non-succeeded or
+ * unexpanded charge, missing/unexpanded balance transaction, currency or
+ * amount mismatch, or a net below 1 cent — so the order stays payout_pending
+ * for the sweep retry + rule-7 alert (§6.6). It never falls back to gross:
+ * a gross fallback would silently reinstate the board-rejected cost model
+ * (Security review THI-375: fail-securely).
+ */
+export async function sellerNetTransferCents(order: PayoutOrder, stripe: Stripe): Promise<number> {
+  if (!order.payment_intent_id) throw new Error("inconsistent_state: paid order missing payment intent");
+  const pi = await stripe.paymentIntents.retrieve(order.payment_intent_id, {
+    expand: ["latest_charge.balance_transaction"],
+  });
+  // THI-375 R2: the expanded latest_charge must be an object in a succeeded
+  // state — anything else fails closed with a precise reason instead of a
+  // confusing "missing balance transaction".
+  const charge = typeof pi.latest_charge === "object" ? pi.latest_charge : null;
+  if (!charge || charge.status !== "succeeded") {
+    throw new Error(`payout_netting_unavailable: no succeeded charge on ${order.payment_intent_id}`);
+  }
+  const bt = typeof charge.balance_transaction === "object" ? charge.balance_transaction : null;
+  if (!bt) throw new Error(`payout_netting_unavailable: no balance transaction on charge ${charge.id}`);
+  const gross = orderAmountCents(order);
+  // THI-375 R1: the balance transaction must BE this order's charge — the
+  // gross match is an invariant, not an assumption. A mismatch (dashboard
+  // manipulation, partial capture, cross-currency settlement) fails closed;
+  // netting against the wrong base could over- or under-pay the seller.
+  if (bt.currency !== order.currency.toLowerCase() || bt.amount !== gross) {
+    throw new Error(
+      `payout_charge_mismatch: balance transaction ${bt.amount} ${bt.currency} ≠ order ${gross} ${order.currency.toLowerCase()}`,
+    );
+  }
+  const net = Math.min(gross - bt.fee, gross); // clamp pathological fees (negative); never overpay
+  if (net < 1) throw new Error(`payout_netting_unavailable: net ${net}c after fee ${bt.fee}c (gross ${gross}c)`);
+  return net;
+}
+
 export async function createTransferForOrder(
-  order: { id: string; price_cents: number; shipping_price_cents: number; currency: string },
+  order: PayoutOrder,
   destination: string,
   stripe: Stripe = getStripe() ?? undefined!,
 ): Promise<Stripe.Transfer> {
   // application_fee_amount is omitted → 0: the platform takes no cut (§6.1).
+  // The seller bears the Stripe processing fee by netting (THI-374) — a
+  // pass-through of Stripe's own processing cost, not platform revenue.
+  const amount = await sellerNetTransferCents(order, stripe);
   return stripe.transfers.create(
     {
-      amount: orderAmountCents(order),
+      amount,
       currency: order.currency.toLowerCase(),
       destination,
     },

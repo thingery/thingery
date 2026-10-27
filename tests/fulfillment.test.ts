@@ -37,9 +37,21 @@ function fakeStripe(transferImpl?: () => Promise<unknown>): { client: Stripe; ca
   const calls: string[] = [];
   const client = {
     checkout: { sessions: { create: async () => ({ id: `cs_${n0}`, url: `https://pay.test/${n0}` }) } },
+    paymentIntents: {
+      retrieve: async () => ({
+        // THI-374 netting read: expanded PI → succeeded charge → balance
+        // transaction. Test orders are 10000 + 500 = 10500 gross (eur);
+        // fee 182 → seller transfer 10318, platform keeps 0.
+        latest_charge: {
+          id: "ch_net",
+          status: "succeeded",
+          balance_transaction: { amount: 10500, currency: "eur", fee: 182 },
+        },
+      }),
+    },
     transfers: {
-      create: async (_a: unknown, o: unknown) => {
-        calls.push(`transfers.create:${(o as { idempotencyKey: string }).idempotencyKey}`);
+      create: async (a: unknown, o: unknown) => {
+        calls.push(`transfers.create:${(o as { idempotencyKey: string }).idempotencyKey}:${(a as { amount: number }).amount}`);
         if (transferImpl) return transferImpl();
         return { id: `tr_${n0}` };
       },
@@ -254,7 +266,7 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
     const result = await releaseFunds(order.id, buyerId);
     expect(result.order.status).toBe("payout_pending");
     expect(result.order.transfer_id).toBe(`tr_${n0}`);
-    expect(calls).toEqual([`transfers.create:payout:${order.id}`]);
+    expect(calls).toEqual([`transfers.create:payout:${order.id}:10318`]); // net of the 182c fee (THI-374)
   });
 
   it("release_funds stripe: transfer failure keeps payout_pending, logs payout_attempt_failed", async () => {

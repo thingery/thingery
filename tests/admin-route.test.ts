@@ -37,6 +37,18 @@ function fakeStripe(opts: { reversalFails?: boolean } = {}) {
   const n = Math.random().toString(36).slice(2, 8);
   const calls: string[] = [];
   const client = {
+    paymentIntents: {
+      retrieve: async () => ({
+        // THI-374 netting read: expanded PI → succeeded charge → balance
+        // transaction. Test orders are 10000 + 500 = 10500 gross (eur);
+        // fee 182 → seller transfer 10318, platform keeps 0.
+        latest_charge: {
+          id: "ch_net",
+          status: "succeeded",
+          balance_transaction: { amount: 10500, currency: "eur", fee: 182 },
+        },
+      }),
+    },
     refunds: {
       create: async (_a: unknown, o: unknown) => {
         calls.push(`refunds.create:${(o as { idempotencyKey: string }).idempotencyKey}`);
@@ -327,6 +339,18 @@ describe.skipIf(!available)("admin resolve-dispute route (DB + HTTP)", () => {
     const m = Math.random().toString(36).slice(2, 8);
     const calls: string[] = [];
     const client = {
+    paymentIntents: {
+      retrieve: async () => ({
+        // THI-374 netting read: expanded PI → succeeded charge → balance
+        // transaction. Test orders are 10000 + 500 = 10500 gross (eur);
+        // fee 182 → seller transfer 10318, platform keeps 0.
+        latest_charge: {
+          id: "ch_net",
+          status: "succeeded",
+          balance_transaction: { amount: 10500, currency: "eur", fee: 182 },
+        },
+      }),
+    },
       refunds: {
         create: async (_a: unknown, o: unknown) => {
           calls.push(`refunds.create:${(o as { idempotencyKey: string }).idempotencyKey}`);

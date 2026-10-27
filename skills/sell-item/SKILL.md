@@ -38,13 +38,20 @@ The Thingery MCP server must be connected. Listing requires the seller's API key
    prices: median, range, days to sell. It needs a SoldStack key (free tier: 100
    lookups/month; docs: https://soldstack.dev/docs#mcp); skip it if no key is configured.
 5. **Publish** — Call `create_listing` with everything above. Prices are **integer cents**
-   (EUR 12.50 → `1250`, EUR 125.00 → `12500`).
+   (EUR 12.50 → `1250`, EUR 125.00 → `12500`). A zero-image create succeeds but the listing
+   is **pending** — hidden from search until it has a photo — so keep going to step 6; check the
+   result's `visible` / `next_steps`.
 6. **Attach photos** — If the user shared photos (local files), attach them with
    `add_item_image`: pass the bytes base64-encoded in `image_base64` (a data-URL prefix is
    accepted), set `media_type` (`image/jpeg`, `image/png`, `image/webp`, `image/gif`),
    max 5 MB per image. Public image URLs in `create_listing`'s `images` also work.
+   The **first photo publishes** the listing — the first `add_item_image` result comes back
+   with `visible: true` and the listing appears in search immediately after.
 7. **Report** — Give the user the item URL and say what happens next (questions from buyers
-   will arrive; update to `reserved` when a deal is near, `sold` when done).
+   will arrive; update to `reserved` when a deal is near, `sold` when done). If the listing is
+   still photoless, say it plainly: *created, but hidden from search until you add a photo* —
+   and either attach one more turn or point the user at the item page, where they can snap or
+   upload one (it publishes instantly).
 
 ## Rules
 
@@ -53,3 +60,5 @@ The Thingery MCP server must be connected. Listing requires the seller's API key
 - Keep `attributes` compact: max 64 entries, keys up to 128 chars, string values up to
   500 chars — anything larger fails with `invalid_attributes` on create and update alike.
 - If `create_listing` returns `unauthorized`, tell the user to set their API key — don't retry.
+- Listings are hidden from search until they have at least one photo: don't end the pipeline
+  photoless if the user shared photos — attach at least one before reporting success.

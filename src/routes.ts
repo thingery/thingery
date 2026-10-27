@@ -49,7 +49,9 @@ import {
   type ResolvedLlmCredential,
   type VerifyLlmCredentialResult,
 } from "./llm-credentials.js";
-import { addItemImage, MAX_IMAGE_BYTES } from "./images.js";
+import { addItemImage, MAX_IMAGE_BYTES, MAX_IMAGES_PER_ITEM, uploadsDir } from "./images.js";
+import { unlink } from "node:fs/promises";
+import path from "node:path";
 import { asyncHandler } from "./oauth.js";
 import { RateLimiter } from "./rate-limit.js";
 import crypto from "node:crypto";
@@ -66,6 +68,7 @@ export const chatAuthedLimiter = new RateLimiter(chatLimits.turnsHourlyAuthed, 6
 export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin calls per IP per hour (F7)
 export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
 export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 image upload attempts per IP per hour (THI-140 / THI-123 obs 2)
+export const imageMutationLimiter = new RateLimiter(60, 60 * 60_000); // 60 image delete/reorder mutations per seller per hour (THI-308 F6: churn here must never consume upload quota)
 export const llmCredentialLimiter = new RateLimiter(10, 60 * 60_000); // 10 BYO credential writes per seller per hour (THI-189)
 export const chatgptConnectLimiter = new RateLimiter(10, 60 * 60_000); // 10 ChatGPT connect starts per seller per hour (THI-193 §3.2)
 
@@ -563,6 +566,159 @@ api.post("/items/:id/images", imageUploadIpGate, imageUpload, asyncHandler(async
     return;
   }
   res.json({ url: result.url });
+}));
+
+// THI-308 PR 4 (spec rev 2, Security THI-314 F4–F7): owner-side photo
+// mutation — delete one member of items.images and reorder the array. The
+// images array is the source of truth; files on disk are best-effort
+// residue. Mutations draw from their own limiter bucket (F6) so delete /
+// reorder churn can never eat a seller's upload quota — every 429 is logged
+// per the THI-144 convention.
+
+const SERVER_IMAGE_PREFIX = "/img/items/"; // storage-managed members; everything else is an external URL
+
+/** F4: the only string that may ever reach path.join below. Generated names
+ *  are `{itemId}-{base36}.{ext}`, so `[\w.-]` covers every stored file; the
+ *  explicit basename/separator checks are belt-and-braces on top (spec asks
+ *  for `path.basename(filename) !== filename` rejection). Express decodes
+ *  path params AFTER routing, so an encoded `..%2F` arrives here as "../"
+ *  and dies at this gate — 400 with a fixed string, no echo (F7). */
+function validStoredFilename(filename: string): boolean {
+  return (
+    filename.length > 0 &&
+    filename.length <= 300 &&
+    !filename.includes("/") &&
+    !filename.includes("\\") &&
+    filename !== "." &&
+    filename !== ".." &&
+    path.basename(filename) === filename &&
+    /^[\w.-]+$/.test(filename)
+  );
+}
+
+api.delete("/items/:id/images/:filename", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage photos." });
+    return;
+  }
+  if (!imageMutationLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/items/:id/images/:filename" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many photo changes — try again later." });
+    return;
+  }
+  // F4-secondary: an external-URL member is removable too — it is matched
+  // exactly against images[] and never touches the filesystem. Anything else
+  // is a stored filename and must pass the traversal gate first.
+  const raw = req.params.filename;
+  let member: string;
+  if (/^https?:\/\//i.test(raw)) {
+    member = raw;
+  } else {
+    if (!validStoredFilename(raw)) {
+      res.status(400).json({ error: "Invalid photo reference." });
+      return;
+    }
+    member = `${SERVER_IMAGE_PREFIX}${raw}`;
+  }
+  // F5: one atomic statement — membership, ownership and the removal are a
+  // single row update, so a photo appended concurrently with this delete is
+  // removed-none-of (array_remove only drops the matched member) and can
+  // never be lost to a read-modify-write race. Zero rows means: no such
+  // item, not this seller's, or not a member — all three answer the same
+  // unified 404 (F7: no enumeration oracle, fixed string, no echo).
+  const removed = await pool.query<{ images: string[]; photo_required: boolean }>(
+    `UPDATE items SET images = array_remove(images, $2)
+     WHERE id = $1 AND seller_id = $3 AND $2 = ANY(images)
+     RETURNING images, photo_required`,
+    [req.params.id, member, seller.id],
+  );
+  if (removed.rows.length === 0) {
+    res.status(404).json({ error: "Item not found or not owned by this seller." });
+    return;
+  }
+  const { images, photo_required } = removed.rows[0];
+  // F4: unlink only a server-stored file of THIS item, only after the row
+  // update committed. The array is the source of truth — a failed unlink is a
+  // logged warning and the request still succeeds (F7).
+  if (member.startsWith(`${SERVER_IMAGE_PREFIX}${req.params.id}-`)) {
+    const stored = member.slice(SERVER_IMAGE_PREFIX.length);
+    await unlink(path.join(uploadsDir(), "items", stored)).catch((err: unknown) => {
+      console.warn(`[images] best-effort unlink of stored photo failed: ${(err as Error).message}`);
+    });
+  }
+  const visible = !photo_required || images.length > 0;
+  res.set("Cache-Control", "no-store");
+  res.json({
+    images,
+    visible,
+    // Deleting the last photo of a photo_required listing returns it to
+    // pending — hidden from every feed until a photo lands again.
+    ...(photo_required && images.length === 0
+      ? { warning: "This listing is hidden from search until you add a photo." }
+      : {}),
+  });
+}));
+
+const imageOrderSchema = z.object({
+  images: z.array(z.string().min(1).max(500)).max(MAX_IMAGES_PER_ITEM), // array ≤ 12, short elements; the 256 kb JSON body cap already bounds the request
+});
+
+api.put("/items/:id/images/order", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage photos." });
+    return;
+  }
+  if (!imageMutationLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/items/:id/images/order" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many photo changes — try again later." });
+    return;
+  }
+  const parsed = imageOrderSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: `Send images as an array of up to ${MAX_IMAGES_PER_ITEM} photo references.` });
+    return;
+  }
+  const next = parsed.data.images;
+  const current = await pool.query<{ images: string[] }>(
+    "SELECT images FROM items WHERE id = $1 AND seller_id = $2",
+    [req.params.id, seller.id],
+  );
+  if (current.rows.length === 0) {
+    res.status(404).json({ error: "Item not found or not owned by this seller." });
+    return;
+  }
+  const cur = current.rows[0].images ?? [];
+  // Exact permutation: same length and same multiset (order is the only
+  // degree of freedom). Partial sets, duplicates and foreign references are
+  // 400 — reorder can never smuggle an add or a delete past this gate.
+  const sortedCur = [...cur].sort();
+  const sortedNext = [...next].sort();
+  if (sortedCur.length !== sortedNext.length || sortedCur.some((v, i) => v !== sortedNext[i])) {
+    res.status(400).json({ error: "Photos must be the exact same set as the current ones." });
+    return;
+  }
+  // F5 optimistic-concurrency guard: the write lands only against the exact
+  // array the permutation was validated against. A concurrent append, delete
+  // or reorder that slipped in between flips the WHERE to zero rows → 409
+  // with a re-read. Replay-safe by construction: the same body twice still
+  // matches (images is already $next), so the second call is a 200 no-op.
+  const updated = await pool.query<{ images: string[] }>(
+    "UPDATE items SET images = $3 WHERE id = $1 AND seller_id = $2 AND images = $4 RETURNING images",
+    [req.params.id, seller.id, next, cur],
+  );
+  if (updated.rows.length === 0) {
+    const reread = await pool.query<{ images: string[] }>(
+      "SELECT images FROM items WHERE id = $1 AND seller_id = $2",
+      [req.params.id, seller.id],
+    );
+    res.set("Cache-Control", "no-store");
+    res.status(409).json({ error: "Photos changed since the page loaded — showing the current set.", images: reread.rows[0]?.images ?? [] });
+    return;
+  }
+  res.set("Cache-Control", "no-store");
+  res.json({ images: updated.rows[0].images });
 }));
 
 // --- chat -------------------------------------------------------------------

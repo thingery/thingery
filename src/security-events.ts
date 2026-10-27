@@ -25,6 +25,8 @@ export type SecurityEventRoute =
   | "/api/login"
   | "/mcp"
   | "/api/items/:id/images"
+  | "/api/items/:id/images/:filename" // THI-308 PR 4: image-mutation limiter 429s (F6)
+  | "/api/items/:id/images/order" // THI-308 PR 4: image-mutation limiter 429s (F6)
   | "/api/chat"
   | "/api/me/llm-credential"
   | "/api/me/chatgpt/connect";

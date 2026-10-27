@@ -122,7 +122,10 @@ describe.skipIf(!available)("intents core (DB)", () => {
     const nonce = randomUUID();
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1, $2, $3) RETURNING id`,
-      [`thg_intents_${nonce}`, `intents-${tag}`, `intents-${tag}-${nonce}@t.dev`],
+      // Not a thg_ prefixed value — gitleaks' custom seller-key rule flags
+      // thg_ + 20+ word chars, and this column is plain TEXT (a hash, never
+      // a live key format) so any unique string works as a fixture.
+      [`intents-fixture-${nonce}`, `intents-${tag}`, `intents-${tag}-${nonce}@t.dev`],
     );
     buyerIds.push(rows[0].id);
     return rows[0].id;

@@ -8,6 +8,7 @@ import { sellerFromSession } from "./auth.js";
 import type { ItemRow } from "./db.js";
 import { pool } from "./db.js";
 import { BROWSE_PAGE_SIZE, browsePageNav, browsePageUrl, parsePageParam } from "./pagination.js";
+import { classifyVisitOrigin, logPageView } from "./analytics.js";
 
 const escapeHtml = (value: unknown): string =>
   String(value ?? "")
@@ -226,6 +227,12 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
     image: firstImage ? (firstImage.startsWith("/") ? `${baseUrl}${firstImage}` : firstImage) : undefined,
     twitterCard: item.images.length ? "summary_large_image" : "summary",
   };
+
+  // THI-396: capture visit origin at request time. Canonical URLs are
+  // query-string-free (PR #166), so referrer/utm context exists only here —
+  // it cannot be reconstructed from the URL later. One `page_view` line per
+  // successful render; 404s and analytics failures emit nothing.
+  logPageView({ itemId: item.id, owner: isOwner, ...classifyVisitOrigin(req) });
 
   res.send(page(item.title, `${money(item.price_cents, item.currency)} — used, ${item.condition}`, body, og, pending));
 }

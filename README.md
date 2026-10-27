@@ -228,10 +228,12 @@ Reading `undeclared_in_use` as an agent:
 ## Roadmap
 
 1. ~~**Order state machine**~~ — **shipped**: orders with Stripe Connect payouts, carrier webhooks, disputes, and deadline sweeps ([ADR 0003](docs/adr/0003-order-state-machine.md)). Next: live-mode Stripe after legal/ToS sign-off.
-2. **Seller skill upgrade** — photo capture flow, comparable-based pricing from live data.
-3. **Buyer alerts** — event stream: "new match for your intent".
-4. **Federation protocol** — instance-to-instance sync so anyone can host a node of the Item Graph.
-5. **Agent-to-agent negotiation** — bounded-mandate negotiation between buyer and seller agents.
+2. **Seller skill upgrade** — **in progress**: photo capture flow. Comparable-based pricing is deferred until listings are numerous enough to be real comparables.
+3. **Buyer alerts** — **next up** after photos: "new match for your intent" event stream.
+4. **Federation protocol** — instance-to-instance sync so anyone can host a node of the Item Graph. **Deferred**.
+5. **Agent-to-agent negotiation** — bounded-mandate negotiation between buyer and seller agents. **Deferred**.
+
+We'll revisit federation and negotiation when there's real traction: more than 10 new listings per week for 2 consecutive weeks, or concrete pull from self-host adopters.
 
 ## Contributing
 

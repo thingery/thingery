@@ -8,6 +8,7 @@ import { sellerFromApiKey } from "./auth.js";
 import { mcpRoutes } from "./mcp-gate.js";
 import { asyncHandler, mountOauthRoutes } from "./oauth.js";
 import { startOauthSweepTimer } from "./oauth-sweep.js";
+import { startIntentSweepTimer } from "./intent-sweep.js";
 import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
 import { mountApiRoutes } from "./routes.js";
@@ -17,6 +18,7 @@ import { carrierWebhookRouter } from "./webhooks-carrier.js";
 import { logConfigBootReport, orderFlowConfig } from "./config.js";
 import { startSweepScheduler } from "./orders-sweep.js";
 import { statsHandler } from "./stats.js";
+import { homeSearchHandler } from "./home-search.js";
 import { browsePage, itemPage, orderReturnPage, payoutSetupReturnPage, websiteErrorMiddleware } from "./web-pages.js";
 import { uploadsDir } from "./images.js";
 import { securityHeaders } from "./security-headers.js";
@@ -130,6 +132,12 @@ function runHttp(): void {
   // TTL-cached aggregate counts; see src/stats.ts for the definitions.
   app.get("/stats.json", asyncHandler(statsHandler));
 
+  // THI-389: homepage "Try it right now" demo — read-only JSON search over
+  // the same feed choke point as /browse (searchItems). Website asset, not
+  // an API surface change — mounted at the app root like /stats.json,
+  // outside the protected src/routes.ts router. See src/home-search.ts.
+  app.get("/search.json", asyncHandler(homeSearchHandler));
+
   app.get("/item/:id", asyncHandler(itemPage));
   app.get("/browse", asyncHandler(browsePage));
   // Order return pages (spec THI-3 §4.3 F15). The literal payout-setup route
@@ -153,6 +161,9 @@ function runHttp(): void {
   app.listen(PORT, () => {
     // OAuth retention sweeps (spec THI-11 §4.5): boot run + hourly, unref'd.
     startOauthSweepTimer();
+    // Intent match retention (THI-360 §3.4): read > 30 d, any > 180 d —
+    // boot run + daily, unref'd.
+    startIntentSweepTimer();
     // Order deadline sweeps + webhook reprocessing (spec THI-3 §4.5):
     // boot run + every SWEEP_INTERVAL_MINUTES (10 default), unref'd.
     startSweepScheduler(orderFlowConfig());

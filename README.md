@@ -59,17 +59,22 @@ env-tunable). Design record: [ADR 0003](docs/adr/0003-order-state-machine.md).
 Sellers authenticate with **OAuth** (one-click sign-in from any MCP host — see below) or a
 `thg_...` API key (`Authorization: Bearer`); search is anonymous.
 
-### Buyer alerts
+### Buyer alerts (saved searches)
+
+A buyer who finds nothing good can save the search as an intent; when a matching listing
+publishes later, their agent reads it as a match on the next session — no email, the
+buyer's agent pulls `my_matches` (design record: [ADR 0006](docs/adr/0006-buyer-alert-channel.md)).
+Fan-out is bounded: each match is inserted at most once per (intent, item), at most 10 new
+matches per buyer per day, at most 100 per published listing, and a seller never matches
+their own listing.
 
 | Tool | Auth | Purpose |
 |---|---|---|
-| `save_intent` | seller | Save a buyer alert — what you're looking for as a free-text query and/or structured filters (category, condition, price range, shipping tier, attributes). Max 25 stored intents, 50 saves/day |
-| `my_intents` | seller | Your saved alerts, newest first, each with its unread match count and muted state |
-| `update_intent` | seller | Mute or unmute one alert — muted alerts stop collecting new matches |
-| `delete_intent` | seller | Delete an alert and its match records |
-
-Saved intents feed buyer alerts: when a new listing matching an intent publishes, the match
-shows up in `my_intents`' unread counts (a dedicated `my_matches` view is landing next).
+| `save_intent` | account | Save what the buyer is looking for — a query and/or the same filters as `search_items` (at least one of the two; max 25 saved intents, 50 saves/day) |
+| `my_intents` | account | Your saved searches, newest first, each with its unread-match count and muted state |
+| `update_intent` | account | Mute or unmute a saved search — muting stops future matches; existing matches stay readable |
+| `delete_intent` | account | Delete a saved search; its matches go with it |
+| `my_matches` | account | New listings matching a saved search — `unread_only`, `mark_read`, limit 1–50 (default 10). Items carry `content_provenance: "user_generated"` |
 
 ### Photo-required publishing
 
@@ -316,7 +321,7 @@ Order-flow windows and abuse caps (`PAYMENT_DEADLINE_HOURS`, `DISPUTE_WINDOW_HOU
 ## Agent skills
 
 - [`skills/sell-item`](skills/sell-item/SKILL.md) — the seller pipeline: photos → identified item → priced listing
-- [`skills/find-item`](skills/find-item/SKILL.md) — the buyer pipeline: intent → scored matches → one best proposal
+- [`skills/find-item`](skills/find-item/SKILL.md) — the buyer pipeline: intent → scored matches → one best proposal → saved-search alerts
 
 ## Data conventions
 

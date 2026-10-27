@@ -668,6 +668,66 @@ otherwise). **Kill switch:** set `CHAT_DAILY_TOKEN_BUDGET=0` + restart to disabl
 aggregate cap without a deploy (hourly limiters still apply). Rollback of the whole
 feature = revert the PR; PR-A/B modules are inert without the routes wiring.
 
+### 5.3 Stripe order flow: enabling payments (live mode) + rollback (THI-358)
+
+The order flow (ADR 0003) ships with a **kill switch**: with `STRIPE_SECRET_KEY`
+empty/unset the app answers `payments_not_configured`, listings stay buyable as
+off-platform orders, and the Stripe webhook endpoint mounts as a 503 stub.
+`docker-compose.prod.yml` passes the three `STRIPE_*` vars through from the VPS
+`.env` (merged 2026-10-27, PR #142); before that the container never saw them.
+Mode (test vs live) is derived **only** from the key prefix (`sk_test_` / `sk_live_`)
+and is logged at boot:
+
+```bash
+docker compose -f docker-compose.prod.yml logs app 2>&1 | grep '\[config\] Stripe'
+# → "Stripe payments enabled (live mode)" | "Stripe payments not configured … (kill switch)"
+```
+
+**Gate.** Live mode means real buyer payments and real Connect payouts. Flip only
+after the board's legal/ToS sign-off is recorded (THI-357 confirmation card), and
+only the Stripe account owner activates the account for live mode (business
+profile, bank details, platform + Connect terms accepted in the Stripe dashboard).
+
+**Flip (all on the VPS, secrets never leave the box or this file):**
+
+1. Account owner (or operator acting on owner-provided values) appends to
+   `/opt/thingery/.env` — `STRIPE_SECRET_KEY=sk_live_…` and
+   `STRIPE_WEBHOOK_SECRET=whsec_…` (the signing secret of the **live-mode**
+   webhook endpoint below). Leave `STRIPE_WEBHOOK_SECRET_PREVIOUS` unset unless
+   rotating.
+2. In the Stripe dashboard (live mode) register the webhook endpoint
+   `https://thingery.dev/api/webhooks/stripe` with events:
+   `checkout.session.completed`, `payment_intent.succeeded`, `charge.refunded`,
+   `charge.dispute.created`, `charge.dispute.closed`, `transfer.created`,
+   `transfer.updated`, `transfer.paid`, `account.updated`. Copy its signing
+   secret into `STRIPE_WEBHOOK_SECRET`.
+3. Recreate the app container (env changes need recreation, not rebuild):
+   `cd /opt/thingery && docker compose -f docker-compose.prod.yml up -d`
+4. Verify: boot log shows `(live mode)`; `curl -s https://thingery.dev/healthz`
+   still `200`; a listing shows `payment_available: true` via the MCP order tools;
+   the Stripe dashboard's webhook page shows signature-verified deliveries.
+
+**Seller onboarding.** Sellers complete Stripe Connect onboarding via the app's
+payout-setup flow once the platform account is live-enabled; `account.updated`
+webhook events flip `sellers.stripe_onboarded_at` when `transfers` capability is
+active. Confirm one seller onboarding before declaring live mode operational.
+
+**Rollback (documented path back to the kill switch).** Comment out or remove the
+`STRIPE_*` lines in `/opt/thingery/.env`, then
+`cd /opt/thingery && docker compose -f docker-compose.prod.yml up -d`. The app
+returns to `payments_not_configured` (new orders are off-platform), the webhook
+endpoint returns to its 503 stub, and live-mode events stop verifying. Orders,
+payment intents, and payouts already created in Stripe **remain real** — a
+rollback stops new payments; it does not erase history or pending Connect
+payouts. Rolling forward again = restore the same three lines (or rotate keys and
+keep the old webhook secret in `STRIPE_WEBHOOK_SECRET_PREVIOUS` for zero-downtime
+verification).
+
+**Known gap.** No carrier (EasyPost) keys are configured on this deployment, so
+`in_transit` orders cannot advance via carrier webhooks. Orders reach `delivered`
+via buyer `confirm_receipt` (state machine T6/T13) and payouts release via buyer
+`release_funds` (T17) or the dispute-window sweep (T16).
+
 ## 6. LLM guard: provider balance/failure detection (THI-282)
 
 On 2026-10-21 the z.ai company account balance hit zero and prod chat failed

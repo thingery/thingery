@@ -339,7 +339,16 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         return ok({
           count: results.length,
           results: results.map((r) => itemToPublic(r)),
-          note: results.length === 0 ? "No matches. Try broader terms or fewer filters." : undefined,
+          // THI-371 PR B (empty-search growth hint): zero results is the most
+          // common first-session outcome on a thin marketplace — one honest
+          // line turns a dead end into an invitation. Seller-conditional so it
+          // reads as product copy for the end user, not an instruction to the
+          // calling model (H5.3 discipline: our tool output stays data).
+          note:
+            results.length === 0
+              ? "No active listings match yet. Try broader terms or fewer filters — or, if the user " +
+                "has a matching item to sell, create_listing (requires a seller API key) adds it."
+              : undefined,
         });
       } catch (e) {
         return err(`search_items failed: ${describeError(e)}`);

@@ -1,0 +1,235 @@
+{
+  "$comment": "THI-393 search relevance suite. 20 realistic buyer queries across the two sprint seed categories (fashion sneakers + consumer electronics). Expectations are graded judgments pinned to the 2026-10-31 prod corpus (9 feed-visible listings, snapshot in corpus). Grades: 3 = bullseye (exact intent match), 2 = relevant, 1 = marginal/partial, 0 (implicit) = irrelevant. Queries with expected: [] are no-inventory probes: the correct answer is zero results. Re-baseline when the corpus drifts (see README.md).",
+  "snapshot_date": "2026-10-31",
+  "corpus": {
+    "3973d8fa-4744-4fbf-90a3-ffd0bb4d15b2": { "title": "Gattino carino ed elegante stampato in 3D (PLA)", "category": "collectibles" },
+    "2a887044-8da5-4f21-8308-595178182f30": { "title": "Nike Air Max 90, size 43", "category": "sneakers" },
+    "cbe483a8-8fe4-4c31-9621-ffc568ac92af": { "title": "Sony WH-1000XM3 wireless headphones", "category": "electronics" },
+    "86812df7-7c88-4783-901c-d2f1aa79b9d1": { "title": "Adidas Samba OG, size 43", "category": "sneakers" },
+    "a250a901-0632-4f77-b568-ebe4638ab1c4": { "title": "Sony WH-1000XM3 headphones", "category": "electronics" },
+    "2e43d4f1-109d-45c7-a6d7-4c37b8fdd5a8": { "title": "Adidas Samba OG, size 43", "category": "sneakers" },
+    "b50dd21c-1983-4802-8066-bae2f1233fb5": { "title": "Nike Air Max 90, size 43", "category": "sneakers" },
+    "ee4ff92e-590b-4e26-bf99-024b19cdb8eb": { "title": "3D Printed Robotic Dog – Movable Legs", "category": "electronics" },
+    "83bd7e90-59cd-43ce-80cb-6d4cc80d7291": { "title": "iPhone 6s 16GB - Good Condition with Original Box & Cable", "category": "phones" }
+  },
+  "queries": [
+    {
+      "id": "snk-01",
+      "group": "sneakers",
+      "type": "exact",
+      "intent": "Both Air Max 90 size-43 listings",
+      "args": { "q": "Nike Air Max 90 size 43", "limit": 10 },
+      "expected": [
+        { "id": "2a887044-8da5-4f21-8308-595178182f30", "grade": 3 },
+        { "id": "b50dd21c-1983-4802-8066-bae2f1233fb5", "grade": 3 }
+      ]
+    },
+    {
+      "id": "snk-02",
+      "group": "sneakers",
+      "type": "fuzzy",
+      "intent": "Air Max 90s via partial model name",
+      "args": { "q": "Nike Air Max", "limit": 10 },
+      "expected": [
+        { "id": "2a887044-8da5-4f21-8308-595178182f30", "grade": 3 },
+        { "id": "b50dd21c-1983-4802-8066-bae2f1233fb5", "grade": 3 }
+      ]
+    },
+    {
+      "id": "snk-03",
+      "group": "sneakers",
+      "type": "exact",
+      "intent": "Both Samba OG listings",
+      "args": { "q": "adidas samba", "limit": 10 },
+      "expected": [
+        { "id": "86812df7-7c88-4783-901c-d2f1aa79b9d1", "grade": 3 },
+        { "id": "2e43d4f1-109d-45c7-a6d7-4c37b8fdd5a8", "grade": 3 }
+      ]
+    },
+    {
+      "id": "snk-04",
+      "group": "sneakers",
+      "type": "fuzzy",
+      "intent": "Sambas described by colorway, no model token",
+      "args": { "q": "samba og black white stripes", "limit": 10 },
+      "expected": [
+        { "id": "86812df7-7c88-4783-901c-d2f1aa79b9d1", "grade": 3 },
+        { "id": "2e43d4f1-109d-45c7-a6d7-4c37b8fdd5a8", "grade": 3 }
+      ]
+    },
+    {
+      "id": "snk-05",
+      "group": "sneakers",
+      "type": "fuzzy",
+      "intent": "Running shoes; corpus has only lifestyle retros — at best a marginal match",
+      "args": { "q": "used running shoes size 43", "limit": 10 },
+      "expected": [
+        { "id": "2a887044-8da5-4f21-8308-595178182f30", "grade": 1 },
+        { "id": "b50dd21c-1983-4802-8066-bae2f1233fb5", "grade": 1 }
+      ]
+    },
+    {
+      "id": "snk-06",
+      "group": "sneakers",
+      "type": "browse",
+      "intent": "All four sneakers are under EUR 100 (80/80/95/95)",
+      "args": { "q": "sneakers", "max_price_cents": 10000, "limit": 10 },
+      "expected": [
+        { "id": "2a887044-8da5-4f21-8308-595178182f30", "grade": 3 },
+        { "id": "b50dd21c-1983-4802-8066-bae2f1233fb5", "grade": 3 },
+        { "id": "86812df7-7c88-4783-901c-d2f1aa79b9d1", "grade": 3 },
+        { "id": "2e43d4f1-109d-45c7-a6d7-4c37b8fdd5a8", "grade": 3 }
+      ]
+    },
+    {
+      "id": "snk-07",
+      "group": "sneakers",
+      "type": "fuzzy",
+      "intent": "White colorway: AM90s are white/grey; Sambas black/white are marginal",
+      "args": { "q": "white sneakers", "limit": 10 },
+      "expected": [
+        { "id": "2a887044-8da5-4f21-8308-595178182f30", "grade": 3 },
+        { "id": "b50dd21c-1983-4802-8066-bae2f1233fb5", "grade": 3 },
+        { "id": "86812df7-7c88-4783-901c-d2f1aa79b9d1", "grade": 1 },
+        { "id": "2e43d4f1-109d-45c7-a6d7-4c37b8fdd5a8", "grade": 1 }
+      ]
+    },
+    {
+      "id": "snk-08",
+      "group": "sneakers",
+      "type": "browse",
+      "intent": "No basketball shoes exist — correct answer is zero results",
+      "args": { "q": "basketball shoes", "limit": 10 },
+      "expected": []
+    },
+    {
+      "id": "snk-09",
+      "group": "sneakers",
+      "type": "browse",
+      "intent": "Category + condition filter browse; all four sneakers are size 43/good",
+      "args": { "category": "sneakers", "condition": "good", "limit": 10 },
+      "expected": [
+        { "id": "2a887044-8da5-4f21-8308-595178182f30", "grade": 3 },
+        { "id": "b50dd21c-1983-4802-8066-bae2f1233fb5", "grade": 3 },
+        { "id": "86812df7-7c88-4783-901c-d2f1aa79b9d1", "grade": 3 },
+        { "id": "2e43d4f1-109d-45c7-a6d7-4c37b8fdd5a8", "grade": 3 }
+      ]
+    },
+    {
+      "id": "snk-10",
+      "group": "sneakers",
+      "type": "fuzzy",
+      "intent": "Italian buyer phrasing (Milan-IT corpus): used Nike shoes; Sambas marginal",
+      "args": { "q": "scarpe Nike usate", "limit": 10 },
+      "expected": [
+        { "id": "2a887044-8da5-4f21-8308-595178182f30", "grade": 3 },
+        { "id": "b50dd21c-1983-4802-8066-bae2f1233fb5", "grade": 3 },
+        { "id": "86812df7-7c88-4783-901c-d2f1aa79b9d1", "grade": 1 },
+        { "id": "2e43d4f1-109d-45c7-a6d7-4c37b8fdd5a8", "grade": 1 }
+      ]
+    },
+    {
+      "id": "ele-01",
+      "group": "electronics",
+      "type": "exact",
+      "intent": "Both WH-1000XM3 listings",
+      "args": { "q": "Sony WH-1000XM3", "limit": 10 },
+      "expected": [
+        { "id": "cbe483a8-8fe4-4c31-9621-ffc568ac92af", "grade": 3 },
+        { "id": "a250a901-0632-4f77-b568-ebe4638ab1c4", "grade": 3 }
+      ]
+    },
+    {
+      "id": "ele-02",
+      "group": "electronics",
+      "type": "fuzzy",
+      "intent": "Headphones by brand + use case",
+      "args": { "q": "sony headphones noise cancelling", "limit": 10 },
+      "expected": [
+        { "id": "cbe483a8-8fe4-4c31-9621-ffc568ac92af", "grade": 3 },
+        { "id": "a250a901-0632-4f77-b568-ebe4638ab1c4", "grade": 3 }
+      ]
+    },
+    {
+      "id": "ele-03",
+      "group": "electronics",
+      "type": "fuzzy",
+      "intent": "Paraphrase, no model tokens",
+      "args": { "q": "wireless over-ear headphones", "limit": 10 },
+      "expected": [
+        { "id": "cbe483a8-8fe4-4c31-9621-ffc568ac92af", "grade": 2 },
+        { "id": "a250a901-0632-4f77-b568-ebe4638ab1c4", "grade": 2 }
+      ]
+    },
+    {
+      "id": "ele-04",
+      "group": "electronics",
+      "type": "browse",
+      "intent": "Single-word category browse",
+      "args": { "q": "headphones", "limit": 10 },
+      "expected": [
+        { "id": "cbe483a8-8fe4-4c31-9621-ffc568ac92af", "grade": 3 },
+        { "id": "a250a901-0632-4f77-b568-ebe4638ab1c4", "grade": 3 }
+      ]
+    },
+    {
+      "id": "ele-05",
+      "group": "electronics",
+      "type": "browse",
+      "intent": "Browse + price ceiling; both XM3s are EUR 65",
+      "args": { "q": "headphones", "max_price_cents": 8000, "limit": 10 },
+      "expected": [
+        { "id": "cbe483a8-8fe4-4c31-9621-ffc568ac92af", "grade": 3 },
+        { "id": "a250a901-0632-4f77-b568-ebe4638ab1c4", "grade": 3 }
+      ]
+    },
+    {
+      "id": "ele-06",
+      "group": "electronics",
+      "type": "exact",
+      "intent": "The iPhone 6s listing",
+      "args": { "q": "iPhone 6s 16gb", "limit": 10 },
+      "expected": [
+        { "id": "83bd7e90-59cd-43ce-80cb-6d4cc80d7291", "grade": 3 }
+      ]
+    },
+    {
+      "id": "ele-07",
+      "group": "electronics",
+      "type": "fuzzy",
+      "intent": "Buyer vocabulary ('apple', 'cheap') absent from title; item is EUR 40",
+      "args": { "q": "cheap apple phone", "limit": 10 },
+      "expected": [
+        { "id": "83bd7e90-59cd-43ce-80cb-6d4cc80d7291", "grade": 2 }
+      ]
+    },
+    {
+      "id": "ele-08",
+      "group": "electronics",
+      "type": "fuzzy",
+      "intent": "Use-case paraphrase matching the description ('backup phone', 'specific apps')",
+      "args": { "q": "backup phone for apps", "limit": 10 },
+      "expected": [
+        { "id": "83bd7e90-59cd-43ce-80cb-6d4cc80d7291", "grade": 2 }
+      ]
+    },
+    {
+      "id": "ele-09",
+      "group": "electronics",
+      "type": "fuzzy",
+      "intent": "The robotic dog toy by buyer vocabulary ('toy' not in title)",
+      "args": { "q": "robot toy dog", "limit": 10 },
+      "expected": [
+        { "id": "ee4ff92e-590b-4e26-bf99-024b19cdb8eb", "grade": 3 }
+      ]
+    },
+    {
+      "id": "ele-10",
+      "group": "electronics",
+      "type": "browse",
+      "intent": "No bluetooth speakers exist — correct answer is zero results",
+      "args": { "q": "bluetooth speaker", "limit": 10 },
+      "expected": []
+    }
+  ]
+}

@@ -11,3 +11,8 @@ secret/
 *_private_key*
 *.key
 *.zip
+
+# demo capture renderer output (regenerate with render-demo-video.py)
+scripts/demo-capture.mp4
+scripts/.demo-frames/
+__pycache__/

@@ -12,7 +12,7 @@ import pg from "pg";
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { AttributeValidationError } from "../src/attributes.js";
 import { pool } from "../src/db.js";
-import { undeclaredKeyUsage, updateItem } from "../src/items.js";
+import { listCategories, myItems, searchItems, undeclaredKeyUsage, updateItem } from "../src/items.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.resolve(__dirname, "..", "db", "schema.sql");
@@ -87,7 +87,9 @@ describe.skipIf(!available)("undeclaredKeyUsage (DB)", () => {
   });
 
   let n = 0;
-  /** One active item in `category` carrying `attrs`, owned by the seller with that email. */
+  /** One active item in `category` carrying `attrs`, owned by the seller with
+   *  that email. Carries one image so the THI-308 photo gate keeps it
+   *  feed-visible — these tests are about key thresholds, not visibility. */
   async function seedItem(
     sellerEmail: string,
     category: string,
@@ -96,8 +98,8 @@ describe.skipIf(!available)("undeclaredKeyUsage (DB)", () => {
   ): Promise<void> {
     n += 1;
     await client.query(
-      `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, attributes, status)
-       SELECT id, $1, 1000, 100, $2, $3::jsonb, $4 FROM sellers WHERE email = $5`,
+      `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, images, attributes, status)
+       SELECT id, $1, 1000, 100, $2, ARRAY['https://img.example.com/seed.jpg'], $3::jsonb, $4 FROM sellers WHERE email = $5`,
       [`UK item ${n}`, category, JSON.stringify(attrs), status, sellerEmail],
     );
   }
@@ -207,5 +209,141 @@ describe.skipIf(!available)("runtime pool statement timeout (THI-83 §3.5)", () 
     expect(m).toBeTruthy();
     const unit = m![2] === "s" ? 1000 : m![2] === "min" ? 60_000 : 1;
     expect(Number(m![1]) * unit).toBe(3000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part 3 — photo-gated listing visibility (THI-308 spec rev 2, PR 1).
+// The derived predicate `status='active' AND (NOT photo_required OR
+// cardinality(images) > 0)` must hide pending zero-photo items from every
+// feed surface (searchItems, listCategories counts, undeclaredKeyUsage)
+// while grandfathered (photo_required=false) and photo-having items stay
+// visible, and getItem/myItems-style direct access stays unfiltered.
+
+describe.skipIf(!available)("photo-gated listing visibility (THI-308 PR 1)", () => {
+  let client: pg.Client;
+  // ids filled by beforeAll; typed record so each lookup below is checked.
+  const seeded: Record<"pendingA" | "pendingB" | "grandfathered" | "photoA" | "photoC", string> =
+    {} as Record<"pendingA" | "pendingB" | "grandfathered" | "photoA" | "photoC", string>;
+
+  /** Insert one item. `photoRequired` omitted → the INSERT does not name
+   *  the column, so pending seeds pin the post-rollout schema default
+   *  (photo_required = true); `false` simulates a grandfathered row. */
+  async function seedItem(opts: {
+    sellerEmail: string;
+    images?: string[];
+    photoRequired?: false;
+    attributes?: Record<string, unknown>;
+  }): Promise<string> {
+    const base = [
+      `PG item ${Math.random().toString(36).slice(2, 8)}`,
+      "thi308-pg",
+      opts.images ?? [],
+      JSON.stringify(opts.attributes ?? {}),
+    ];
+    const { rows } =
+      opts.photoRequired === undefined
+        ? await client.query<{ id: string }>(
+            `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, images, attributes)
+             SELECT id, $1, 1000, 100, $2, $3::text[], $4::jsonb FROM sellers WHERE email = $5
+             RETURNING id`,
+            [...base, opts.sellerEmail],
+          )
+        : await client.query<{ id: string }>(
+            `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, images, attributes, photo_required)
+             SELECT id, $1, 1000, 100, $2, $3::text[], $4::jsonb, $5 FROM sellers WHERE email = $6
+             RETURNING id`,
+            [...base, opts.photoRequired, opts.sellerEmail],
+          );
+    return rows[0].id;
+  }
+
+  beforeAll(async () => {
+    client = new pg.Client({
+      connectionString: process.env.DATABASE_URL ?? "postgres://thingery:thingery@localhost:5432/thingery",
+    });
+    await client.connect();
+    // Re-apply schema.sql: doubles as the re-run/idempotency check for the
+    // THI-308 ALTER block (NULL-guarded backfill is a no-op on re-apply).
+    await client.query(readFileSync(schemaPath, "utf8"));
+    await client.query(
+      "TRUNCATE order_events, webhook_events, orders, items, sellers RESTART IDENTITY CASCADE",
+    );
+    // listCategories reads the registry table, so the test category must
+    // exist there for its counts to surface at all.
+    await client.query(
+      `INSERT INTO categories (name, description, attribute_definitions)
+       VALUES ('thi308-pg', 'THI-308 photo-gate test category', '[]')
+       ON CONFLICT (name) DO NOTHING`,
+    );
+    await client.query(
+      `INSERT INTO sellers (api_key_hash, display_name, email) VALUES
+        ('thg_pg_a', 'pg-a', 'pg-a@t.dev'),
+        ('thg_pg_b', 'pg-b', 'pg-b@t.dev'),
+        ('thg_pg_c', 'pg-c', 'pg-c@t.dev')`,
+    );
+    // Pending (default photo_required=true, zero photos) — hidden from feeds.
+    seeded.pendingA = await seedItem({ sellerEmail: "pg-a@t.dev", attributes: { pending_only_key: 1 } });
+    seeded.pendingB = await seedItem({ sellerEmail: "pg-b@t.dev", attributes: { pending_only_key: 2 } });
+    // Grandfathered zero-photo item (photo_required=false) — stays live.
+    seeded.grandfathered = await seedItem({ sellerEmail: "pg-a@t.dev", photoRequired: false });
+    // Photo-having items (external URL members count) — live.
+    seeded.photoA = await seedItem({
+      sellerEmail: "pg-a@t.dev",
+      images: ["https://img.example.com/a.jpg"],
+      attributes: { visible_key: "a" },
+    });
+    seeded.photoC = await seedItem({
+      sellerEmail: "pg-c@t.dev",
+      images: ["https://img.example.com/c.jpg"],
+      attributes: { visible_key: "c" },
+    });
+  });
+
+  afterAll(async () => {
+    await client.end();
+  });
+
+  it("searchItems hides pending zero-photo items, keeps grandfathered and photo-having ones", async () => {
+    const rows = await searchItems({ category: "thi308-pg", limit: 50 });
+    const ids = rows.map((r) => r.id);
+    expect(ids).not.toContain(seeded.pendingA);
+    expect(ids).not.toContain(seeded.pendingB);
+    expect(ids).toContain(seeded.grandfathered);
+    expect(ids).toContain(seeded.photoA);
+    expect(ids).toContain(seeded.photoC);
+    // The predicate is derived: rows still carry the flag for callers.
+    const grand = rows.find((r) => r.id === seeded.grandfathered);
+    expect(grand?.photo_required).toBe(false);
+    const photo = rows.find((r) => r.id === seeded.photoA);
+    expect(photo?.photo_required).toBe(true);
+  });
+
+  it("listCategories counts exclude pending items", async () => {
+    const cats = await listCategories();
+    const cat = cats.find((c) => c.name === "thi308-pg");
+    expect(cat?.listing_count).toBe(3); // grandfathered + two photo-having
+  });
+
+  it("undeclaredKeyUsage never surfaces pending items' attributes (F2)", async () => {
+    const rows = await undeclaredKeyUsage("thi308-pg");
+    // pending_only_key sits on 2 pending items from 2 sellers — it would
+    // qualify on thresholds alone; visibility must exclude it.
+    expect(rows.map((r) => r.key)).not.toContain("pending_only_key");
+    // Control: the same key shape on visible items still surfaces.
+    expect(rows.find((r) => r.key === "visible_key")).toEqual({
+      key: "visible_key",
+      items: 2,
+      sellers: 2,
+    });
+  });
+
+  it("myItems still returns the owner's pending items", async () => {
+    const { rows } = await pool.query<{ id: string }>(`SELECT id FROM sellers WHERE email = 'pg-a@t.dev'`);
+    const mine = await myItems(rows[0].id, undefined, 100);
+    const ids = mine.map((r) => r.id);
+    expect(ids).toContain(seeded.pendingA);
+    expect(ids).toContain(seeded.grandfathered);
+    expect(ids).toContain(seeded.photoA);
   });
 });

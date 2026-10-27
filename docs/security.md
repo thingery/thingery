@@ -134,6 +134,13 @@ SQL. Each listing also triggers an embeddings API call (`src/items.ts` `createIt
 spam doubles as a **cost DoS** on `EMBED_API_KEY`. *Lens: Sensitive Business Flows abuse
 (API6:2023), Unrestricted Resource Consumption (API4:2023).*
 
+**Photo gate — accepted residual (THI-308 / THI-314 F1).** New listings are hidden from
+feeds until they carry at least one photo (derived predicate in `src/items.ts`, ADR-0005).
+**Accepted residual:** the gate counts any `images[]` member, including external http(s)
+URLs — a spam listing can prepend one URL and be visible. Requiring a server-stored
+photo was rejected (breaks legitimate external-image MCP listings, near-zero anti-spam
+gain); the per-seller velocity caps above remain the spam control. *Lens: API6:2023.*
+
 **Fake sellers.** Signup (`src/routes.ts` `/api/signup`) requires only a syntactically
 valid email — no verification mail, no CAPTCHA, no identity proof. The account is
 immediately issued an API key. Throwaway identities are free. The one control in place

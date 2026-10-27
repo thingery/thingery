@@ -129,11 +129,20 @@ export async function getCategory(name: string): Promise<CategoryRow | null> {
   return rows[0] ?? null;
 }
 
+/** THI-308 (spec rev 2): derived feed-visibility predicate. An item is
+ *  visible in feeds iff active AND (grandfathered OR has >= 1 photo).
+ *  Defined once as a fragment so every feed surface (searchItems,
+ *  listCategories counts, undeclaredKeyUsage) derives it identically —
+ *  visibility is never stored per-transition, it is a pure function of
+ *  items.status/photo_required/images. getItem/myItems stay unfiltered:
+ *  direct URLs render pending items and owners see their own. */
+const FEED_VISIBLE = `(NOT i.photo_required OR cardinality(i.images) > 0)`;
+
 export async function listCategories(): Promise<Array<Pick<CategoryRow, "name" | "description"> & { listing_count: number }>> {
   const { rows } = await pool.query(
     `SELECT c.name, c.description, COUNT(i.id)::int AS listing_count
      FROM categories c
-     LEFT JOIN items i ON i.category = c.name AND i.status = 'active'
+     LEFT JOIN items i ON i.category = c.name AND i.status = 'active' AND ${FEED_VISIBLE}
      GROUP BY c.name, c.description
      ORDER BY listing_count DESC, c.name ASC`,
   );
@@ -160,7 +169,9 @@ export interface SearchFilters {
  * otherwise it falls back to keyword ILIKE on title and description.
  */
 export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow & { score: number }>> {
-  const where: string[] = [`i.status = 'active'`];
+  // THI-308: searchItems is the single feed choke point (browse grid + MCP
+  // search_items) — pending zero-photo items are excluded here.
+  const where: string[] = [`i.status = 'active'`, FEED_VISIBLE];
   const params: unknown[] = [];
   const add = (value: unknown): string => {
     params.push(value);
@@ -328,7 +339,9 @@ export interface UndeclaredKeyUsage {
 
 /** Which undeclared attribute keys are actually in shared use in a category:
  *  keys on >= 2 active listings from >= 2 distinct sellers, sorted by items
- *  desc then key asc, capped at 20. `declaredKeys` is always an array
+ *  desc then key asc, capped at 20. Feed-visibility applies (THI-314 F2):
+ *  attributes of pending (zero-photo) listings never surface in hints.
+ *  `declaredKeys` is always an array
  *  (default []) — passing a null array would silently surface every key, so
  *  callers must never propagate null from the DB. */
 export async function undeclaredKeyUsage(
@@ -339,7 +352,7 @@ export async function undeclaredKeyUsage(
     `SELECT k AS key, COUNT(*)::int AS items, COUNT(DISTINCT i.seller_id)::int AS sellers
      FROM items i
      CROSS JOIN LATERAL jsonb_object_keys(i.attributes) AS k
-     WHERE i.category = $1 AND i.status = 'active'
+     WHERE i.category = $1 AND i.status = 'active' AND ${FEED_VISIBLE}
        AND NOT (k = ANY($2::text[]))
        AND k ~ $3
      GROUP BY k

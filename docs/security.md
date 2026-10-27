@@ -318,7 +318,9 @@ phishing concerns — threat-model them before building, not after.
 - Prompt-injection hardening for the chat agent and downstream agent consumers (H5).
 - CSP `style-src 'unsafe-inline'` remains (inline `<style>` blocks and `style=""`
   attributes); replace with per-response nonces or external stylesheets later.
-- `npm audit`/`npm outdated` are not part of CI (see §7 — current dev-dep findings exist).
+- Full `npm audit` (incl. dev) and `npm outdated` are not part of CI — CI gates only
+  `npm audit --omit=dev --audit-level=high` per PR (see §7; the dev-dep baseline is
+  currently 0 findings).
 
 ## 5. Secrets hygiene policy
 
@@ -524,8 +526,10 @@ worst-case damage, "Exploitability" is how practical the attack is today.
   required checks `verify` + `Secret scan (gitleaks)` (strict), force pushes and
   deletions blocked, admins included (`enforce_admins: true`). See §4, mitigations in
   place.
-- `npm audit --omit=dev --audit-level=high` as a CI step + bump vitest to ≥ 4.1.11
-  (see §7).
+- ~~`npm audit --omit=dev --audit-level=high` as a CI step + bump vitest to ≥ 4.1.11~~
+  **Done** — CI audit step shipped; vitest bumped to ^4.1.11, then to ≥ 4.1.12 (THI-406)
+  clearing the remaining `@vitest/mocker` advisories. See §7 — audit baseline is now
+  0 findings incl. dev.
 - Uniform signup response to kill the 409 account-enumeration oracle (or accept and
   document it — product call; flag it in the PR either way).
 - `website/chat.html`: replace the one `innerHTML` sink (display name) with
@@ -541,15 +545,21 @@ anyone can run it anytime.
 **Baseline (recorded at this document's commit):**
 
 - `npm audit --omit=dev` (production): **0 vulnerabilities**.
-- `npm audit` (incl. dev): **3 — 2 critical, 1 moderate**, all in the test toolchain:
-  `tinypool` ≤ 2.1.1 (prototype pollution → RCE gadgets, GHSA-5gmw-xhrv-c9v3 /
-  GHSA-85c8-ppgw-ccpr) and `@vitest/mocker` (path traversal, GHSA-82fw-gwwq-j7x9),
-  both reached via `vitest`. **Not shipped in production** (the runtime image runs
-  `npm ci --omit=dev`), but CI executes the vulnerable code on every push — fix by
-  bumping vitest to ≥ 4.1.11 (breaking, dev-only) in the quick-wins PR.
-- `npm outdated`: `express` 4→5, `zod` 3→4, `typescript`, `vitest`, `@types/*` are
-  behind majors. No action forced; plan `express` 5 deliberately (rate-limit and
-  body-parser semantics shift) rather than reactively.
+- `npm audit` (incl. dev): **0 vulnerabilities** — as of the vitest 4.1.11 → 4.1.12
+  bump (THI-406). History of the test-toolchain findings, all dev-only (the runtime
+  image runs `npm ci --omit=dev`, but CI executes the toolchain on every push): the
+  `tinypool` criticals (GHSA-5gmw-xhrv-c9v3 / GHSA-85c8-ppgw-ccpr) and the original
+  `@vitest/mocker` path traversal (GHSA-82fw-gwwq-j7x9) were cleared by the vitest
+  ^4.1.11 major bump; the two follow-up `@vitest/mocker` advisories
+  (GHSA-qxg6-89mg-rqv8 — code injection via unauthenticated manual mock
+  registration, and GHSA-xp26-3454-mjgp — Windows backslash traversal bypassing the
+  redirect allowlist; both affecting ≤ 4.1.11) were cleared by the 4.1.12 bump.
+- `npm outdated`: `express` 4→5 (+ `@types/express` 4→5), `jose` 5→6,
+  `typescript` 5→7, `@types/node` 22→26 are behind majors; `zod` is current on 4.x
+  (THI-326). No action forced; plan `express` 5 deliberately (rate-limit and
+  body-parser semantics shift) rather than reactively. A `vitest` 5 major exists
+  (requires Node ≥ 22.12 per its engines) — pick it up in a dedicated PR, not
+  opportunistically.
 
 **Cadence and ownership:**
 

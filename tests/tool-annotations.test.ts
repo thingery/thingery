@@ -37,6 +37,10 @@ const EXPECTED: Record<
   my_intents: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   update_intent: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   delete_intent: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  // THI-360 spec rev 2 PR 4: my_matches reads the match inbox but
+  // mark_read stamps read_at — not a pure read, so no readOnlyHint; it
+  // deletes nothing (retention sweeps own expiry), so no destructiveHint.
+  my_matches: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 };
 
 const READ_TOOLS = new Set(Object.entries(EXPECTED).filter(([, a]) => a.readOnlyHint).map(([n]) => n));

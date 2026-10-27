@@ -1,0 +1,12 @@
+{
+  "run_date": "2026-10-27",
+  "base_url": "https://thingery.dev",
+  "seller_email": "demo-179312740021840@example.test",
+  "title": "Nike Air Max 90 Infrared, EU 44 (demo 179312740021840)",
+  "item_id": "158b5028-1d85-4080-8e83-d3da5fe54df9",
+  "item_url": "https://thingery.dev/item/158b5028-1d85-4080-8e83-d3da5fe54df9",
+  "photo_url": "https://thingery.dev/img/items/158b5028-1d85-4080-8e83-d3da5fe54df9-mvr1tr9u.jpg",
+  "price": "EUR 95.00",
+  "api_key_prefix": "thg_…",
+  "result": "17 passed, 0 failed"
+}

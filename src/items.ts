@@ -138,6 +138,15 @@ export async function getCategory(name: string): Promise<CategoryRow | null> {
  *  direct URLs render pending items and owners see their own. */
 const FEED_VISIBLE = `(NOT i.photo_required OR cardinality(i.images) > 0)`;
 
+/** JS twin of FEED_VISIBLE (THI-308 PR 2): the same derived predicate,
+ *  applied to a row. create_listing reports it at create time (status is
+ *  always 'active' on insert, so it reduces to the photo gate) and
+ *  add_item_image reports the post-append state — the first photo on a
+ *  pending listing publishes it, no stored flag to flip. */
+export function visibleInFeeds(item: Pick<ItemRow, "status" | "photo_required" | "images">): boolean {
+  return item.status === "active" && (!item.photo_required || item.images.length > 0);
+}
+
 export async function listCategories(): Promise<Array<Pick<CategoryRow, "name" | "description"> & { listing_count: number }>> {
   const { rows } = await pool.query(
     `SELECT c.name, c.description, COUNT(i.id)::int AS listing_count

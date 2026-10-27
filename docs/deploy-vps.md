@@ -148,7 +148,8 @@ FAIL=0
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
 
 # 0. Optional config: /etc/thingery-backup.env (root:root 0600, VPS only) may set
-#    RECOVERY_PUBKEY (second age recipient, THI-163), RCLONE_* (offsite push),
+#    RECOVERY_PUBKEY (second age recipient, THI-163), RCLONE_* (offsite push:
+#    RCLONE_REMOTE, RCLONE_KEEP_DAYS, RCLONE_PRUNE=off for no-delete creds),
 #    HEALTHCHECK_URL (dead-man's switch). Sourced BEFORE encryption so a recovery
 #    recipient applies to today's files immediately.
 if [ -r /etc/thingery-backup.env ]; then . /etc/thingery-backup.env; fi
@@ -193,11 +194,15 @@ log "local prune (14d) done"
 
 # 4. Offsite push - gated on /etc/thingery-backup.env (sourced in step 0).
 #    Expected vars: RCLONE_REMOTE="name:path" (+ RCLONE_CONFIG_<NAME>_* creds),
-#    optional RCLONE_KEEP_DAYS (default 30). No-op with a log line until configured.
+#    optional RCLONE_KEEP_DAYS (default 30) and RCLONE_PRUNE=off when the creds
+#    cannot delete (THI-120 F2 write-only keys; retention is provider-side).
+#    No-op with a log line until configured.
 if [ -n "${RCLONE_REMOTE:-}" ]; then
   if rclone copy "$DB_FILE" "$RCLONE_REMOTE" && rclone copy "$IMG_FILE" "$RCLONE_REMOTE"; then
     log "offsite push OK -> $RCLONE_REMOTE"
-    if rclone delete --min-age "${RCLONE_KEEP_DAYS:-30}d" "$RCLONE_REMOTE"; then
+    if [ "${RCLONE_PRUNE:-on}" = "off" ]; then
+      log "offsite prune SKIPPED (RCLONE_PRUNE=off; provider-side lifecycle owns retention)"
+    elif rclone delete --min-age "${RCLONE_KEEP_DAYS:-30}d" --include 'thingery-*.age' "$RCLONE_REMOTE"; then
       log "offsite prune (${RCLONE_KEEP_DAYS:-30}d) done"
     else log "offsite prune FAIL"; FAIL=1; fi
   else
@@ -230,6 +235,8 @@ Never in the repo. Any S3-compatible destination works via rclone:
 ```bash
 RCLONE_REMOTE="offsite:thingery-backups/"        # <remote-name>:<bucket/path>
 RCLONE_KEEP_DAYS=30                              # offsite retention
+RCLONE_PRUNE=off                                 # no-delete creds (THI-120 F2):
+                                                  # skip client-side prune entirely
 # remote defined inline via env vars (no rclone.conf needed):
 RCLONE_CONFIG_OFFSITE_TYPE=s3
 RCLONE_CONFIG_OFFSITE_PROVIDER=Other             # e.g. Infomaniak public cloud
@@ -245,9 +252,15 @@ Offsite hardening requirements (security review THI-120 F2): use a **dedicated
 bucket and a dedicated S3 key scoped to that bucket only**; prefer **write-only
 credentials (no delete)** with retention enforced by a provider-side lifecycle
 rule instead of the script's `rclone delete` — then VPS compromise cannot
-destroy offsite history. If the provider supports it, bucket versioning or
-object-lock adds another layer. If client-side pruning stays, scope it to our
-files only: `rclone delete --min-age "${RCLONE_KEEP_DAYS:-30}d" --include 'thingery-*.age' "$RCLONE_REMOTE"`.
+destroy offsite history. When the key cannot delete, set `RCLONE_PRUNE=off` in
+the env file so the script never attempts (and never fails) a client-side
+prune; retention belongs to the lifecycle rule. Backblaze B2 note: keys whose
+capabilities omit `deleteFiles` but include `listFiles`+`readFiles`+`writeFiles`
+satisfy the no-destruction goal and work with `rclone copy` (the backups are
+age-encrypted; bucket read access exposes only ciphertext). If the provider
+supports it, bucket versioning or object-lock adds another layer. If
+client-side pruning stays, scope it to our files only: `rclone delete --min-age
+"${RCLONE_KEEP_DAYS:-30}d" --include 'thingery-*.age' "$RCLONE_REMOTE"`.
 
 Optionally set `HEALTHCHECK_URL` in the same env file (dead-man's-switch ping:
 bare URL on full success, `/skip` when offsite is not configured, `/fail` on
@@ -255,7 +268,8 @@ any failure; endpoint is an operator choice, e.g. a healthchecks.io-style
 service). Until then, a daily log check stands in for alerting.
 
 > Status 2026-10-14: CEO decision — **local-only for now**; revisit offsite when
-> the service has real users. The push stays an env-gated no-op until then.
+> the service has real users. Superseded 2026-10-27: go-ahead granted (THI-404)
+> — offsite push enabled; destination and enable date are recorded on THI-404.
 
 **Rollback** to the pre-encryption pipeline (kept one cycle after the 2026-10-14
 switch): comment the `/usr/local/bin/thingery-backup` cron line, uncomment these

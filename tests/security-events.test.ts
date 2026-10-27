@@ -297,7 +297,10 @@ describe("call sites emit their events (THI-112)", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "thi112-uploads-"));
     process.env.UPLOADS_DIR = dir;
     try {
-      vi.spyOn(pool, "query").mockResolvedValue({ rows: [{ 1: 1 }] } as never);
+      // Row shape for addItemImage's ownership read and RETURNING * append
+      // (THI-360 PR 3): pending listing (photo_required, no images) — the
+      // publish-transition hook sees no flip and skips evaluation.
+      vi.spyOn(pool, "query").mockResolvedValue({ rows: [{ images: [], status: "active", photo_required: true }] } as never);
       const spy = spyLog();
       // Real decodable PNG generated at test time (THI-156): the re-encode
       // pipeline decodes every upload, so a bare signature is no longer an

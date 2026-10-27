@@ -4,7 +4,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import sharp from "sharp";
-import { pool } from "./db.js";
+import { pool, type ItemRow } from "./db.js";
+import { evaluateListingForIntents } from "./intents.js";
+import { visibleInFeeds } from "./items.js";
 import { logSecurityEvent, type SecurityEventReason } from "./security-events.js";
 
 // --- startup hardening (spec THI-156 rev 2, Security review THI-159 F2/F4) ---
@@ -220,17 +222,19 @@ export async function addItemImage(
   }
 
   // Ownership + per-item cap in one read (images is TEXT[]: empty arrays give
-  // NULL from array_length, hence the coalesce). The check-then-append race is
-  // acceptable at this scale (single instance, THI-110 design note).
-  const owned = await pool.query(
-    `SELECT coalesce(array_length(images, 1), 0) AS image_count FROM items WHERE id = $1 AND seller_id = $2`,
+  // NULL from array_length). The check-then-append race is acceptable at
+  // this scale (single instance, THI-110 design note). Full row, not just
+  // the count: the publish-transition hook below needs the before-state.
+  const owned = await pool.query<ItemRow>(
+    `SELECT * FROM items WHERE id = $1 AND seller_id = $2`,
     [itemId, sellerId],
   );
-  if (!owned.rows[0]) {
+  const before = owned.rows[0];
+  if (!before) {
     logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "not_owned" }, { sellerId });
     return { error: "item not found or not owned by this seller" };
   }
-  if ((owned.rows[0].image_count ?? 0) >= MAX_IMAGES_PER_ITEM) {
+  if (before.images.length >= MAX_IMAGES_PER_ITEM) {
     logSecurityEvent({ type: "image_upload", outcome: "rejected", reason: "item_image_limit" }, { sellerId });
     return { error: `image limit reached for this item (max ${MAX_IMAGES_PER_ITEM})` };
   }
@@ -277,8 +281,27 @@ export async function addItemImage(
   await writeFile(path.join(dir, name), reencoded.data);
 
   const url = `/img/items/${name}`;
-  await pool.query(`UPDATE items SET images = images || $2 WHERE id = $1`, [itemId, [url]]);
+  const { rows: updated } = await pool.query<ItemRow>(
+    `UPDATE items SET images = images || $2 WHERE id = $1 RETURNING *`,
+    [itemId, [url]],
+  );
   logSecurityEvent({ type: "image_upload", outcome: "success" }, { sellerId });
+
+  // THI-360 §6, publish transition 2 of 2 (PR 3): appending the first photo
+  // publishes a pending listing (THI-308) — the false→true visibleInFeeds
+  // flip is the moment the item enters feeds, so that is the moment intent
+  // matching runs. Same contract as createItem: alerting must never fail the
+  // publish; errors are caught and logged, counts only, no payload.
+  if (!visibleInFeeds(before) && visibleInFeeds(updated[0])) {
+    try {
+      const inserted = await evaluateListingForIntents(updated[0]);
+      if (inserted > 0) {
+        console.log(JSON.stringify({ type: "intent_fanout", count: inserted }));
+      }
+    } catch (err) {
+      console.error("buyer-intent evaluation failed (publish unaffected)", err instanceof Error ? err.message : err);
+    }
+  }
   return { url };
 }
 

@@ -25,9 +25,9 @@ Chinese-market name: 物坊 (Wùfāng).
 |---|---|---|
 | `describe_category` | public | List categories and their declared attribute fields — the self-describing schema for agents. Declared fields get validated on create; undeclared keys are allowed, searchable, and their real use is surfaced via `undeclared_in_use` |
 | `search_items` | public | Hybrid semantic + keyword search with price/category/condition/attribute filters (any attribute key, declared or not) |
-| `get_item` | public | Fetch one listing by id |
-| `create_listing` | seller | Publish an item — core fields plus a flexible `attributes` object (declared keys validated, extras pass through and stay searchable) |
-| `add_item_image` | seller | Attach a photo to a listing (base64 in, stored server-side — no URLs needed; max 5 MB decoded). Images are re-encoded at ingest: metadata (EXIF/GPS/XMP) stripped, downscaled to ≤ 2000 px, animated GIFs stored as stills; large PNGs may be rejected — prefer JPEG |
+| `get_item` | public | Fetch one listing by id. Pending (photoless) listings are returned too — they carry `needs_photo: true` |
+| `create_listing` | seller | Publish an item — core fields plus a flexible `attributes` object (declared keys validated, extras pass through and stay searchable). **Listings are hidden from search until they have at least one photo**: a zero-image create succeeds but stays pending (`visible: false` + `next_steps` in the result) until a photo lands |
+| `add_item_image` | seller | Attach a photo to a listing (base64 in, stored server-side — no URLs needed; max 5 MB decoded). The first photo publishes a pending listing — the result's `visible` tells you. Images are re-encoded at ingest: metadata (EXIF/GPS/XMP) stripped, downscaled to ≤ 2000 px, animated GIFs stored as stills; large PNGs may be rejected — prefer JPEG |
 | `my_listings` | seller | Your listings by status |
 | `update_listing` | seller | Mark reserved/sold, adjust price, edit text or attributes |
 
@@ -56,6 +56,26 @@ env-tunable). Design record: [ADR 0003](docs/adr/0003-order-state-machine.md).
 
 Sellers authenticate with **OAuth** (one-click sign-in from any MCP host — see below) or a
 `thg_...` API key (`Authorization: Bearer`); search is anonymous.
+
+### Photo-required publishing
+
+New listings need **at least one photo** to be visible to buyers — browse, `search_items`, and
+category counts all exclude photoless listings (a single derived predicate; design record:
+[ADR 0005](docs/adr/0005-photo-gated-visibility.md)). What that means in practice:
+
+- `create_listing` with zero images **succeeds** — the listing is created but **pending**: hidden
+  from feeds, its item page shows placeholder art and is `noindex`. The result carries
+  `photo_required`, `visible: false`, and `next_steps` pointing at `add_item_image` (or the item
+  page, where the owner can snap a photo in two taps).
+- **The first photo publishes it** — no second call needed. `add_item_image` returns
+  `visible: true`; pending items carry `needs_photo: true` everywhere items are returned
+  (`get_item`, `my_listings`, …).
+- Deleting the **last** photo returns the listing to pending (hidden again); pre-rollout
+  listings are grandfathered and stay live without photos — on thingery.dev that means
+  created before 2026-10-27; a self-hosted instance grandfathers whatever exists when it
+  first deploys this version.
+- Owners manage photos on the item page (upload, delete, reorder) via the session-cookie routes
+  documented in [docs/item-images.md](docs/item-images.md).
 
 ## Two ways to use it
 
@@ -228,8 +248,8 @@ Reading `undeclared_in_use` as an agent:
 ## Roadmap
 
 1. ~~**Order state machine**~~ — **shipped**: orders with Stripe Connect payouts, carrier webhooks, disputes, and deadline sweeps ([ADR 0003](docs/adr/0003-order-state-machine.md)). Next: live-mode Stripe after legal/ToS sign-off.
-2. **Seller skill upgrade** — **in progress**: photo capture flow. Comparable-based pricing is deferred until listings are numerous enough to be real comparables.
-3. **Buyer alerts** — **next up** after photos: "new match for your intent" event stream.
+2. **Seller skill upgrade** — **photo capture shipped**: frictionless item-page capture, placeholder art, and photo-gated publishing ([ADR 0005](docs/adr/0005-photo-gated-visibility.md)). Comparable-based pricing is deferred until listings are numerous enough to be real comparables.
+3. **Buyer alerts** — **next up**: "new match for your intent" event stream.
 4. **Federation protocol** — instance-to-instance sync so anyone can host a node of the Item Graph. **Deferred**.
 5. **Agent-to-agent negotiation** — bounded-mandate negotiation between buyer and seller agents. **Deferred**.
 

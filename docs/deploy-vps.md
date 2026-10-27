@@ -427,6 +427,10 @@ curl -s https://thingery.dev/healthz   # {"ok":true,...,"version":"…","commit"
 If `commit` reports `"unknown"`, the deploy skipped the build args — rebuild with the
 exports above. The site footer shows the same version + short commit.
 
+Post-deploy smoke tests that create seller accounts in production must follow
+[ops-smoke-policy.md](ops-smoke-policy.md): disposable `ops+thiXXX+…@thingery.test`
+accounts, deleted before the run ends.
+
 ### 5.0 Automated deploy credentials (one-time, THI-223; hardened per THI-224)
 
 The trust path is GitHub Actions → SSH → `deploy@<VPS_IP>`, restricted to the documented

@@ -31,6 +31,15 @@ tags = ["secret", "thingery"]
 # Per Security review THI-191 N1, only the exact flagged fixtures are
 # allowlisted (entropy is the trigger, prefix is not a defense); everything
 # else in the byo_test_ namespace must stay under the 3.5 entropy floor.
+#
+# False positive (2026-10-27): docs/adr/0006-buyer-alert-channel.md describes
+# the rejected email-push alternative as "a new delivery surface (SMTP
+# provider, secrets on the VPS, bounce/complaint handling)" — prose, never a
+# credential, but generic-api-key reads the 16-char token "bounce/complaint"
+# as a key following the word "secrets". Scoped to the exact phrase; the
+# history scan still trips on the commits that introduced the wording, so the
+# allowlist (not a reword) is the durable fix — same pattern as the fixtures
+# above.
 [allowlist]
 description = "Known test fixtures (fake credentials used by tests)"
 regexes = [
@@ -39,4 +48,5 @@ regexes = [
   '''byo_test_key_verify_404''',
   '''byo_test_key_verify_g2''',
   '''byo_test_key_verify_g2b''',
+  '''bounce/complaint''',
 ]

@@ -104,6 +104,12 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   "confirm_receipt",
   "open_dispute",
   "release_funds",
+  // Buyer-alert intent tools (THI-360 spec rev 2, PR 2) — counted in the
+  // funnel events instead of falling into the _unknown bucket.
+  "save_intent",
+  "my_intents",
+  "update_intent",
+  "delete_intent",
 ]);
 
 /** Credential kind from the Authorization header prefix — mirrors the

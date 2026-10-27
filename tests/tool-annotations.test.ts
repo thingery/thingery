@@ -30,6 +30,13 @@ const EXPECTED: Record<
   confirm_receipt: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   open_dispute: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   release_funds: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  // THI-360 spec rev 2 PR 2 (buyer alerts): my_intents is a pure read;
+  // save/update are plain writes; delete_intent removes the intent and its
+  // match records — destructiveHint, same posture as cancel_order.
+  save_intent: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  my_intents: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  update_intent: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  delete_intent: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
 };
 
 const READ_TOOLS = new Set(Object.entries(EXPECTED).filter(([, a]) => a.readOnlyHint).map(([n]) => n));

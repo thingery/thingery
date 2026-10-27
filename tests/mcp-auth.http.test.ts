@@ -182,6 +182,17 @@ describe.skipIf(!available)("/mcp method-aware 401 gate (HTTP)", () => {
     expect(www).not.toContain("invalid_token"); // no credentials presented → plain challenge
   });
 
+  // THI-360 PR 2: the intent tools carry per-account data — anonymous calls
+  // must hit the same method-aware gate (401 challenge, not a tool-level
+  // refusal) so OAuth-capable hosts get sent to onboarding.
+  it("anonymous save_intent call → 401 Bearer challenge (intent tools are per-account)", async () => {
+    const res = await post(rpc("tools/call", { name: "save_intent", arguments: { q: "vintage watch" } }));
+    expect(res.status).toBe(401);
+    const www = res.headers.get("www-authenticate") ?? "";
+    expect(www).toContain("Bearer");
+    expect(www).toContain("resource_metadata=");
+  });
+
   it("anonymous public-tool call passes the gate (tool-level result, not 401)", async () => {
     const res = await post(rpc("tools/call", { name: "search_items", arguments: { q: "anything" } }));
     expect(res.status).toBe(200);

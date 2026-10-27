@@ -67,6 +67,10 @@ export type SecurityEvent =
   | { type: "login"; outcome: "success" | "failure" }
   | { type: "rate_limit"; route: SecurityEventRoute }
   | { type: "listing_write"; action: "create" | "update" | "delete"; outcome: "success" | "rejected" }
+  /** THI-360 R5 (THI-380 rider): one line per buyer-intent write (save /
+   *  mute-update / delete), success and every rejection class. Buyer id
+   *  only — never q or filters (no-payload rule, §6). */
+  | { type: "intent_write"; action: "save" | "update" | "delete"; outcome: "success" | "rejected" }
   | { type: "image_upload"; outcome: "success" | "rejected"; reason?: SecurityEventReason }
   /** THI-180 §3.3 (rev 2): one line per LLM-backed chat turn. Numbers and
    *  slugs only — `model` is the resolved config string (credential ?? env,
@@ -95,7 +99,11 @@ export type SecurityEvent =
   /** THI-193 §3.3: a stored ChatGPT OAuth connection hit a TERMINAL refresh
    *  error and the row was deleted. `reason` is a fixed slug (never provider
    * text, never token material). */
-  | { type: "chatgpt_oauth_error"; reason: ChatgptOauthErrorReason };
+  | { type: "chatgpt_oauth_error"; reason: ChatgptOauthErrorReason }
+  /** THI-360 R5 (THI-380 rider): buyer-intent write audit events, mirroring
+   *  listing_write (THI-112/113). Strict no-payload rule: buyerId only —
+   *  never `q` or filters (docs/security.md §6). */
+  | { type: "intent_write"; action: "save" | "update" | "delete"; outcome: "success" | "rejected" };
 
 export interface SecurityEventContext {
   sellerId?: string;

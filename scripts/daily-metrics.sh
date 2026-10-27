@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
 done
 
 # --- 1. Capture analytics lines from the app container ----------------------
-RAW_LINES=$(docker compose -f "$COMPOSE_FILE" logs --since "${HOURS}h" app 2>/dev/null \
+RAW_LINES=$(docker compose -f "$COMPOSE_FILE" logs --no-log-prefix --since "${HOURS}h" app 2>/dev/null \
   | jq -Rr 'fromjson? // empty' | jq -c 'select(.type == "tool_call" or .type == "tool_result")' || true)
 
 LOG_METRICS=$(printf '%s\n' "$RAW_LINES" | jq -s '
@@ -136,4 +136,5 @@ echo "== Thingery daily metrics (window: last ${HOURS}h, saved to $SNAP) =="
 jq -r '"activation:      callers with >=1 OK call: \(.activation.activated_callers)  | anon useful calls: \(.activation.anon_useful_calls)  | calls: \(.activation.calls_total) (\(.activation.calls_completed_ok) OK)",
        "search:          \(.search.searches) searches, \(.search.with_results) with results (\(.search.success_pct // "n/a")% success), \(.search.click_through) with follow-up get_item (\(.search.ctr_pct // "n/a")% CTR, 10-min window)",
        "listing funnel:  attempts \(.listings.log_attempts) -> created \(.listings.log_created) -> visible at create \(.listings.log_created_visible) | SQL truth: created \(.listings.sql_created), published \(.listings.sql_published), pending photo \(.listings.sql_pending_photo)",
-       "liquidity:       live items \(.liquidity.live_items) | new sellers \(.liquidity.new_sellers) | npm dl (1d) \(.npm_downloads_1d // "n/a")"' "$SNAP"
+       "liquidity:       live items \(.liquidity.live_items) | new sellers \(.liquidity.new_sellers) | npm dl (1d) \(.npm_downloads_1d // "n/a")",
+       "sharing:          \(.sharing.item_views) item views (\(.sharing.item_views_human) human, \(.sharing.unfurl_bot_views) unfurl bots) | origins \(.sharing.human_by_origin.direct // 0) direct / \(.sharing.human_by_origin.internal // 0) internal / \(.sharing.human_by_origin.external // 0) external | \(.sharing.share_attributable_views) share-attributable | top referrers: \(.sharing.top_ref_hosts | if length > 0 then map("\(.host) x\(.views)") | join(", ") else "none" end)"' "$SNAP"

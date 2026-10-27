@@ -822,7 +822,8 @@ writes `metrics/daily-YYYY-MM-DD.json` (counts only, no PII). Snapshots are the
 durable record because container logs rotate (§7).
 
 Install once from the repo checkout at `/opt/thingery` (the script runs in
-place; it needs no copy in `/usr/local/bin`):
+place; it needs no copy in `/usr/local/bin`). Dependency: `jq`
+(`sudo apt-get install -y jq` — installed on the VPS 2026-10-27):
 
 ```bash
 sudo tee /etc/cron.d/thingery-daily-metrics >/dev/null <<'CRON'

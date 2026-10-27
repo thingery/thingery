@@ -18,10 +18,13 @@ a fresh run regenerates both.
 
 ## 1. What the demo proves
 
-The Thingery pitch is *"a marketplace an AI agent can run end to end."* The
-demo proves the three claims that make that sentence true today:
+Thingery is the open item database and MCP server for AI agents to
+list, find, and trade second-hand goods. The shorter pitch: *a marketplace
+an AI agent can run end to end.* The demo proves the three claims that
+make that true today:
 
-1. **An agent can onboard itself.** `POST /api/signup` hands back a `thg_…`
+1. **An agent can onboard itself — zero to a published listing in under a
+   minute.** `POST /api/signup` hands back a `thg_…`
    seller API key. No human account setup, no UI.
 2. **The marketplace enforces quality without a human moderator.** A listing
    without a photo is created but **hidden** (`needs_photo: true`,
@@ -36,7 +39,7 @@ demo proves the three claims that make that sentence true today:
 ## 2. The flow, call by call
 
 All MCP calls go to `https://thingery.dev/mcp` (stateless streamable-HTTP;
-the same server `npx thingery-mcp` self-hosters get). Seller calls carry
+the same server `npx thingery` self-hosters get). Seller calls carry
 `Authorization: Bearer thg_…`; buyer calls carry nothing.
 
 ### Step 0 — the deployment is real
@@ -155,14 +158,14 @@ python3 scripts/render-demo-video.py    # → scripts/demo-capture.mp4 (57 s)
 
 | Time | On screen | Narration |
 | --- | --- | --- |
-| 0:00–0:04 | title card | "thingery.dev — a marketplace an AI agent can run end to end." |
-| 0:04–0:10 | `demo-e2e.sh`, signup | "One script drives the whole flow over MCP — starting with the agent signing itself up and getting an API key." |
+| 0:00–0:04 | title card | "Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods." |
+| 0:04–0:10 | `demo-e2e.sh`, signup | "Zero to a published listing in under a minute, no human touching anything. One script drives the whole flow over MCP — the agent signs itself up and gets an API key." |
 | 0:10–0:16 | `describe_category` | "It asks the marketplace what a sneaker listing needs." |
 | 0:16–0:24 | `create_listing` | "It lists a pair of Air Max 90s — and Thingery says: created, but hidden until it has a photo." |
 | 0:24–0:30 | anonymous search #1 | "A separate buyer asks — anonymously. Nothing. The photo gate holds." |
 | 0:30–0:38 | `add_item_image` | "The agent attaches a photo — that's the moment it publishes." |
 | 0:38–0:46 | anonymous search #2 | "Same anonymous query — now it finds them, size 44." |
-| 0:46–0:57 | public page + endcard | "And anyone can open the public page. Listing, discovery, purchase surface — all agent-reachable, all scriptable." |
+| 0:46–0:57 | public page + endcard | "And anyone can open the public page. Listing, discovery, purchase surface — all agent-reachable, all scriptable, all Apache-2.0." |
 
 ### Long walkthrough (~3 min) — outline
 
@@ -172,12 +175,12 @@ python3 scripts/render-demo-video.py    # → scripts/demo-capture.mp4 (57 s)
 2. **(45 s)** Architecture: one Express app serves the website, the public
    REST-ish surface, and the MCP endpoint at `/mcp`; Postgres holds items;
    photos are re-encoded and served from `/img/items/…`. Self-hosters get the
-   identical server from npm (`npx thingery-mcp` / `@thingery/mcp`).
+   identical server from npm (`npx thingery`).
 3. **(60 s)** Walk the seven steps from §2 live, showing the raw JSON for
    `create_listing` → `needs_photo` and `add_item_image` → `visible:true`.
    Emphasize: the gate is server-side state, not prompt politeness.
 4. **(30 s)** Show the item page in a browser: photo, price, OG preview.
-5. **(15 s)** Close: the whole run is `scripts/demo-e2e.sh`, MIT-licensed —
+5. **(15 s)** Close: the whole run is `scripts/demo-e2e.sh`, Apache-2.0 —
    viewers can reproduce it against their own deploy in minutes.
 
 ## 5. Verification record

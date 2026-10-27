@@ -712,6 +712,25 @@ payout-setup flow once the platform account is live-enabled; `account.updated`
 webhook events flip `sellers.stripe_onboarded_at` when `transfers` capability is
 active. Confirm one seller onboarding before declaring live mode operational.
 
+**Payout verification (seller-borne fees — THI-374).** Under the board decision
+of 2026-10-27 (recorded via the THI-358 card `112e00aa` rejection) sellers bear
+the Stripe processing fee: the seller transfer is **gross − fee**
+(`src/stripe.ts` `sellerNetTransferCents`), with the fee read at payout time
+from the PaymentIntent's latest-charge **balance transaction** (settlement
+source of truth). Expected €1 verification order: buyer pays €1.00, seller
+receives ~€0.73 (~€0.27 standard EEA fee) — that is correct behavior under the
+model, not a bug; platform net cost per completed order is €0. When verifying a
+payout (read-only, e.g. Stripe CLI `payment_intents retrieve … --expand
+latest_charge.balance_transaction`): the transfer amount must equal
+`bt.amount − bt.fee`, and `bt.amount` must equal the order gross (Security
+THI-375 R1 invariant — a mismatch fails closed, never nets against a wrong
+base). If the platform account settles in a currency ≠ the item currency,
+payouts fail closed by design (currency invariant): the order stays
+`payout_pending`, the deadline sweep retries, and the rule-7 alert fires —
+that is a funding-setup signal (platform payout currency), not a code bug.
+On refunded orders buyers are refunded in full and Stripe keeps the fee; the
+platform's exposure per refunded order is bounded by that fee.
+
 **Rollback (documented path back to the kill switch).** Comment out or remove the
 `STRIPE_*` lines in `/opt/thingery/.env`, then
 `cd /opt/thingery && docker compose -f docker-compose.prod.yml up -d`. The app

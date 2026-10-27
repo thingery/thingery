@@ -63,6 +63,14 @@ services:
       # GET /.well-known/openai-apps-challenge serves this exact token
       # (503 while unset). Value lives only in the VPS .env.
       OPENAI_APPS_CHALLENGE_TOKEN: ${OPENAI_APPS_CHALLENGE_TOKEN:-}
+      # Order flow — Stripe Connect (THI-358). Passthrough only: values live
+      # in the VPS .env. All three default empty = kill switch (payments off,
+      # order tools answer payments_not_configured). STRIPE_WEBHOOK_SECRET is
+      # required before the Stripe webhook endpoint leaves its 503 stub;
+      # STRIPE_WEBHOOK_SECRET_PREVIOUS enables zero-downtime secret rotation.
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_WEBHOOK_SECRET_PREVIOUS: ${STRIPE_WEBHOOK_SECRET_PREVIOUS:-}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}

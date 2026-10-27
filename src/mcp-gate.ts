@@ -72,6 +72,76 @@ export function jsonRpcRequiresSeller(body: unknown): boolean {
   return Array.isArray(body) ? body.some(one) : one(body);
 }
 
+// ---------------------------------------------------------------------------
+// THI-371 funnel instrumentation (spec §3, docs/metrics.md). One structured
+// JSON line per tools/call message at dispatch time, mirroring the security
+// event shape (ts/type + fixed slugs — Docker/Caddy capture is the ship path,
+// no new infra). The weekly metrics script derives install → first call →
+// repeat from these lines. Discipline, same as security-events.ts: never log
+// secrets, tokens or payloads; `tool` is logged only when it is a known tool
+// name (client-controlled strings never reach the log raw — unknown names
+// collapse to the fixed "_unknown" slug). sellerId is the resolved seller
+// UUID (same field security events already log) or null for anonymous calls.
+
+/** The 16 registered MCP tool names — the only `tool` values ever logged.
+ *  Drift-checked against live registration in tests/tool-call-events.test.ts
+ *  (the tool-annotations test pattern), so a new tool cannot silently lose
+ *  its funnel line. */
+export const TOOL_NAMES: ReadonlySet<string> = new Set([
+  "describe_category",
+  "create_listing",
+  "search_items",
+  "get_item",
+  "my_listings",
+  "update_listing",
+  "add_item_image",
+  "get_payout_setup",
+  "create_order",
+  "get_order",
+  "cancel_order",
+  "record_tracking",
+  "confirm_payment",
+  "confirm_receipt",
+  "open_dispute",
+  "release_funds",
+]);
+
+/** Credential kind from the Authorization header prefix — mirrors the
+ *  dual-token dispatch in authenticateRequest (thg_ API key / thgo_ OAuth).
+ *  Read-only prefix check only; no auth logic lives here. */
+export function credentialKind(authorization: string | undefined): "api_key" | "oauth" | "none" {
+  if (authorization?.startsWith("Bearer thg_")) return "api_key";
+  if (authorization?.startsWith("Bearer thgo_")) return "oauth";
+  return "none";
+}
+
+/** Emit one `tool_call` JSON line per tools/call message in a parsed
+ *  JSON-RPC body (single or batch). Measures dispatch, not success: a call
+ *  is counted when the request passes the gates and reaches the transport.
+ *  Requests rejected earlier (429, 401, 413, parse error) never log — they
+ *  executed nothing. Pure stdout side effect; safe to call on any body. */
+export function logToolCallEvents(
+  parsed: unknown,
+  credential: "api_key" | "oauth" | "none",
+  sellerId: string | null,
+): void {
+  const one = (msg: unknown): string | null => {
+    if (typeof msg !== "object" || msg === null) return null;
+    const m = msg as { method?: unknown; params?: { name?: unknown } | null };
+    if (m.method !== "tools/call") return null;
+    const name = typeof m.params?.name === "string" ? m.params.name : "";
+    return TOOL_NAMES.has(name) ? name : "_unknown";
+  };
+  const messages = Array.isArray(parsed) ? parsed : [parsed];
+  for (const message of messages) {
+    const tool = one(message);
+    if (tool === null) continue;
+    console.log(
+      JSON.stringify({ ts: new Date().toISOString(), type: "tool_call", tool, credential, sellerId }),
+    );
+  }
+}
+
 export interface McpLimiters {
   authedLimiter: RateLimiter;
   anonLimiter: RateLimiter;
@@ -142,6 +212,11 @@ export function mcpRoutes(limiters: McpLimiters): Router {
         unauthorized(res, issuerFromRequest(req), false);
         return;
       }
+
+      // THI-371 §3: count this dispatch for the activation funnel (one line
+      // per tools/call message, incl. anonymous public reads). Placed after
+      // every gate so only requests the transport actually handles log.
+      logToolCallEvents(parsed, credentialKind(req.headers.authorization), auth.seller?.id ?? null);
 
       try {
         const server = buildServer({ seller: auth.seller });

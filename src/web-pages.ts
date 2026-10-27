@@ -106,6 +106,10 @@ function page(title: string, description: string, body: string, og?: OgMeta, noi
     .thumb { position: relative; display: inline-block; margin: .35rem .4rem 0 0; }
     .thumb img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px;
       border: 1px solid rgba(127,127,127,.3); display: block; }
+    .thumb .thumb-del { position: absolute; right: -7px; top: -7px; width: 22px; height: 22px; padding: 0;
+      line-height: 1; border-radius: 50%; font-size: .9rem; background: rgba(0,0,0,.75); color: #fff; }
+    .thumb.dragging img { outline: 2px dashed #019686; outline-offset: 2px; }
+    .thumb img { cursor: grab; }
     .cover-badge { position: absolute; left: 4px; top: 4px; font-size: .65rem;
       background: rgba(0,0,0,.65); color: #fff; border-radius: 6px; padding: 0 .3rem; }
     .photo-row { font-size: .9rem; opacity: .9; margin: .25rem 0; }
@@ -165,10 +169,10 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
     `<span class="thumb">${i === 0 ? `<span class="cover-badge">cover</span>` : ""}<img src="${escapeHtml(src)}" alt="" loading="lazy" referrerpolicy="no-referrer"></span>`;
   const uploadHtml = isOwner
     ? `${pending ? `<p class="banner-warn" id="pending-banner" role="status">This listing is hidden from search until you add a photo.</p>` : ""}
-      <div class="upload" id="photo-zone" data-item-id="${escapeHtml(item.id)}" data-image-count="${item.images.length}" data-max-images="${MAX_IMAGES_PER_ITEM}">
+      <div class="upload" id="photo-zone" data-item-id="${escapeHtml(item.id)}" data-image-count="${item.images.length}" data-max-images="${MAX_IMAGES_PER_ITEM}" data-images="${escapeHtml(JSON.stringify(item.images))}">
         <label class="pick primary">📷 Take photo<input type="file" id="photo-take" accept="image/*" capture="environment"></label>
         <label class="pick">🖼️ Choose photos<input type="file" id="photo-choose" accept="image/jpeg,image/png,image/webp,image/gif" multiple></label>
-        <span class="meta">or drop / paste here · <span id="photo-count">${item.images.length}/${MAX_IMAGES_PER_ITEM}</span></span>
+        <span class="meta">or drop / paste here · <span id="photo-count">${item.images.length}/${MAX_IMAGES_PER_ITEM}</span> · drag thumbnails to reorder</span>
         <p class="meta">Listings with photos get far more views. First photo publishes the listing. jpg/png/webp/gif up to 5 MB each —
         compressed in your browser, re-encoded and metadata-stripped server-side.</p>
         <div id="photo-strip">${item.images.map(thumb).join("")}</div>

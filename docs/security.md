@@ -258,7 +258,10 @@ phishing concerns — threat-model them before building, not after.
 - scrypt password hashing with per-user salt and `timingSafeEqual`; HMAC-signed session
   cookies verified in constant time; 192-bit API keys.
 - Zod validation on every MCP tool input and browser API route (type/length/range).
-- Rate limiters: `/mcp` 120/min per key, 30/min per IP; signup+login 10/h per IP; chat
+- Rate limiters: `/mcp` 120/min per key, 30/min per IP; signup+login 10/h per IP; image
+  uploads 30/h per seller + 120 attempts/h per IP (THI-110/H3, THI-140) and, since THI-308
+  (F6), image delete/reorder mutations in their own 60/h-per-seller bucket so churn there
+  can never consume upload quota; chat
   turn limiters are env-configurable since THI-180 (`CHAT_TURNS_HOURLY_AUTHED`/`_ANON`,
   defaults 60/h per seller and 10/h per IP) plus a process-wide **daily LLM token budget**
   (`CHAT_DAILY_TOKEN_BUDGET`, default 2M tokens/day, `0` = disabled; UTC-day rollover,

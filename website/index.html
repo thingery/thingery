@@ -6,6 +6,8 @@
   <title>Thingery — sell your things by telling your AI</title>
   <meta name="description" content="Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.">
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
   <link rel="icon" href="/assets/favicon.ico" sizes="48x48">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <meta property="og:title" content="Thingery — sell your things by telling your AI">
@@ -59,11 +61,18 @@
       background: var(--accent); color: #fff; padding: .8rem 1.6rem; border-radius: 12px; }
     .cta:hover { filter: brightness(1.08); }
     .cta.ghost { background: transparent; color: inherit; border: 1px solid var(--line); margin-left: .6rem; }
+    .hero-art { margin: 2.6rem auto 0; max-width: 44rem; }
+    .hero-art img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 14px; }
     .demo { margin: 2.2rem auto 0; max-width: 40rem; text-align: left; border: 1px solid var(--line);
       border-radius: 14px; background: var(--card); padding: 1rem 1.2rem; font-size: .95rem; }
     .demo .you { color: var(--muted); }
     .demo .you b { color: inherit; }
     .demo .reply { margin-top: .5rem; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1rem;
+      margin: 2.2rem auto 0; max-width: 40rem; text-align: center; }
+    .stat { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: .9rem 1rem; }
+    .stat .num { display: block; font-size: 1.6rem; font-weight: 750; letter-spacing: -.02em; }
+    .stat .lbl { color: var(--muted); font-size: .9rem; }
     .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; padding: 2.5rem 0; }
     .step { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 1.2rem 1.3rem; }
     .step .n { font-weight: 750; color: var(--accent); }
@@ -88,7 +97,7 @@
   <div class="wrap">
 
   <header>
-    <a class="logo" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="28" height="26">Thingery</a>
+    <a class="logo" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="26" height="26">Thingery</a>
     <nav>
       <a href="/browse">Browse</a>
       <a href="/chat.html">Chat</a>
@@ -106,10 +115,20 @@
     <a class="cta ghost" href="/browse">Browse listings</a>
     <a class="cta ghost" href="/chat.html">Try the chat assistant</a>
 
+    <figure class="hero-art">
+      <img src="/assets/hero-brand.webp" alt="Thingery — the AI marketplace for used objects" width="1683" height="935" decoding="async">
+    </figure>
+
     <div class="demo">
       <div class="you"><b>You:</b> “Sell my Diplomat fountain pen, Marrakesh brown, good condition, 120&nbsp;euros.”</div>
       <div class="reply"><b>Your assistant:</b> “Listed ✓ <a class="inline" href="/browse">thingery.dev/item/83bd7e90</a> — Diplomat Excellence A2, EUR 120.00, condition: good, ships as a locker parcel. Want me to tweak the price?”</div>
     </div>
+  </div>
+
+  <div class="stats" id="platform-stats" hidden aria-label="Platform usage">
+    <div class="stat"><span class="num" id="stat-items">–</span><span class="lbl">items listed</span></div>
+    <div class="stat"><span class="num" id="stat-agents">–</span><span class="lbl">agents connected</span></div>
+    <div class="stat"><span class="num" id="stat-users">–</span><span class="lbl">users</span></div>
   </div>
 
   <div class="steps">
@@ -166,6 +185,7 @@
   </div>
 
   <script src="/legacy-item-redirect.js"></script>
+  <script src="/stats.js" defer></script>
   <script src="/build-info.js" defer></script>
 </body>
 </html>

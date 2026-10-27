@@ -50,6 +50,19 @@ services:
       LLM_BYO_ALLOWED_MODELS: ${LLM_BYO_ALLOWED_MODELS:-}
       # G1: opt-in for local/loopback endpoints (dev). Off in prod by default.
       LLM_BYO_ALLOW_LOCAL_ENDPOINTS: ${LLM_BYO_ALLOW_LOCAL_ENDPOINTS:-}
+      # Sign in with ChatGPT (spec THI-193 / THI-211): feature flag + client id
+      # gate it (empty/unset ⇒ off: /api/me/chatgpt routes 404, no UI).
+      # REDIRECT_URI default derives from PUBLIC_BASE_URL; values live only in
+      # the VPS .env, never in this repo.
+      CHATGPT_OAUTH_ENABLED: ${CHATGPT_OAUTH_ENABLED:-}
+      CHATGPT_OAUTH_CLIENT_ID: ${CHATGPT_OAUTH_CLIENT_ID:-}
+      CHATGPT_OAUTH_CLIENT_SECRET: ${CHATGPT_OAUTH_CLIENT_SECRET:-}
+      CHATGPT_OAUTH_REDIRECT_URI: ${CHATGPT_OAUTH_REDIRECT_URI:-}
+      CHATGPT_OAUTH_DEFAULT_MODEL: ${CHATGPT_OAUTH_DEFAULT_MODEL:-}
+      # OpenAI plugin directory domain verification (THI-296 AC1):
+      # GET /.well-known/openai-apps-challenge serves this exact token
+      # (503 while unset). Value lives only in the VPS .env.
+      OPENAI_APPS_CHALLENGE_TOKEN: ${OPENAI_APPS_CHALLENGE_TOKEN:-}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}
@@ -66,6 +79,13 @@ services:
     volumes:
       # Uploaded item images survive redeploys
       - uploads:/app/uploads
+    # THI-312: keep stdout/stderr (security events, startup) on disk across
+    # container restarts, bounded by rotation. See docs/deploy-vps.md §7.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Internal only; Caddy terminates TLS and proxies to it.
     expose:
       - "3000"
@@ -82,6 +102,13 @@ services:
       - caddy_config:/config
     depends_on:
       - app
+    # THI-312: the Caddy access log (Caddyfile `log`) goes to stderr; keep it
+    # on disk across container restarts, bounded by rotation (docs/deploy-vps.md §7).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   thingery_pgdata:

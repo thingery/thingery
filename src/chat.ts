@@ -596,6 +596,21 @@ const CHATGPT_PLAN_REJECTED =
 const CHATGPT_PLAN_UNAVAILABLE =
   "⚠️ Your ChatGPT plan is temporarily unavailable — please try again in a moment.";
 
+/** THI-276: company-key turns rejected provider-side. A provider 429 is
+ *  quota/balance/rate (operator-actionable, not user-fixable — e.g. z.ai
+ *  error 1113 "Insufficient balance"); 5xx (incl. the Responses adapter's
+ *  502 stream failures) is an outage. Both degrade to a fixed friendly
+ *  string instead of the generic "Something went wrong" 500 banner — same
+ *  posture as the BYO-key and ChatGPT-plan paths above (H4.2: never a
+ *  provider body). Telemetry unchanged: the chat_turn_usage line keeps
+ *  outcome "error". Company-key 4xx (misconfigured key/model) still throws
+ *  so the /api 500 middleware stays the loud operator signal for config
+ *  bugs. */
+const COMPANY_LLM_AT_CAPACITY =
+  "Sorry — the assistant is at capacity right now. Please try again in a little while.";
+const COMPANY_LLM_UNAVAILABLE =
+  "Sorry — the assistant is temporarily unavailable. Please try again in a moment.";
+
 /** Pending-op tokens are valid for 15 minutes. */
 export const CHAT_CONFIRM_TTL_SECONDS = 15 * 60;
 
@@ -989,6 +1004,16 @@ export async function chatTurn(
       } else if (e.status === 401 || e.status === 402 || e.status === 403) {
         return { text: BYO_KEY_REJECTED, usage: usageSummary() };
       }
+    }
+    // THI-276: provider-side company-key failures (429 quota/balance, 5xx
+    // outage) degrade gracefully — the user cannot fix them by retrying, and
+    // the generic 500 banner was misleading ("Something went wrong" for a
+    // provider balance condition). Config-class 4xx still throws → 500.
+    if (credential === null && e instanceof LlmApiError && (e.status === 429 || e.status >= 500)) {
+      return {
+        text: e.status === 429 ? COMPANY_LLM_AT_CAPACITY : COMPANY_LLM_UNAVAILABLE,
+        usage: usageSummary(),
+      };
     }
     throw e;
   } finally {

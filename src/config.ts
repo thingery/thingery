@@ -143,5 +143,10 @@ export function logConfigBootReport(cfg: OrderFlowConfig = orderFlowConfig()): O
   if (!cfg.adminRouteEnabled) {
     console.log("[config] Admin dispute route disabled (ADMIN_API_KEY unset or shorter than 32 chars)");
   }
+  // THI-296: presence-only signal — the challenge token value is public-by-design
+  // but still never printed (logs stay clean of verbatim operator input).
+  console.log(
+    `[config] OpenAI apps challenge: ${process.env.OPENAI_APPS_CHALLENGE_TOKEN ? "token set (200)" : "unset (503)"}`,
+  );
   return cfg;
 }

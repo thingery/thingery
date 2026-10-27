@@ -113,6 +113,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "describe_category",
     {
+      title: "Describe category",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       description:
         "Discover a category's declared attribute fields (e.g. sneakers want size_eu, " +
         "colorway...). Declared fields are validated by create_listing; listings may also carry " +
@@ -166,6 +173,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "create_listing",
     {
+      title: "Create listing",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description:
         "Create a listing for a second-hand item. Requires seller authentication (Bearer API key). " +
         "Prices are in integer cents (EUR 12.50 = 1250). Category-specific fields go in `attributes` " +
@@ -195,7 +209,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
             "image URLs must be http(s) — javascript:, data:, file: and other schemes are rejected",
           ),
         ).max(12).default([]).describe("Image URLs (http/https only, max 2048 chars each)"),
-        attributes: z.record(z.union([z.string(), z.number(), z.boolean()])).default({})
+        attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({})
           .describe("Category-specific fields, e.g. {\"size_eu\": 43, \"colorway\": \"white/grey\"}"),
       },
     },
@@ -262,6 +276,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "search_items",
     {
+      title: "Search items",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       description:
         "Search active second-hand listings. Public (no API key needed). " +
         "Hybrid: semantic similarity when embeddings are configured, keyword fallback otherwise. " +
@@ -274,7 +295,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         max_price_cents: z.number().int().min(0).optional(),
         currency: z.string().length(3).default("EUR"),
         shipping_tier: z.enum(SHIPPING_TIERS).optional(),
-        attributes: z.record(z.union([z.string(), z.number(), z.boolean()])).optional()
+        attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
           .describe("Exact-match attribute filter, e.g. {\"size_eu\": 43} — matches any attribute key, declared or not"),
         limit: z.number().int().min(1).max(50).default(10),
       },
@@ -306,6 +327,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "get_item",
     {
+      title: "Get item details",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       description: "Fetch a single listing by its item id. Public. " + CONTENT_PROVENANCE_NOTE,
       inputSchema: { id: z.string().uuid() },
     },
@@ -326,6 +354,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "my_listings",
     {
+      title: "My listings",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       description: "List the authenticated seller's own listings. Requires API key.",
       inputSchema: {
         status: z.enum(STATUSES).optional(),
@@ -343,6 +378,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "update_listing",
     {
+      title: "Update listing",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description:
         "Update one of your own listings: change status (active/reserved/sold/deleted), " +
         "adjust price, or edit title/description. Requires API key.",
@@ -352,7 +394,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         price_cents: z.number().int().min(0).optional(),
         title: z.string().min(3).max(200).optional(),
         description: z.string().max(5000).optional(),
-        attributes: z.record(z.union([z.string(), z.number(), z.boolean()])).optional()
+        attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
           .describe("Replaces the whole attributes object (read-modify-write)"),
       },
     },
@@ -384,6 +426,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "add_item_image",
     {
+      title: "Add item image",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description:
         "Attach a photo to one of your listings. Pass the image as base64 (a data-URL prefix is " +
         "accepted — e.g. what you get when the user shares a photo in this conversation). " +
@@ -415,6 +464,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "get_payout_setup",
     {
+      title: "Get payout setup",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description:
         "Get this seller's payout setup for the order flow: a Stripe Express onboarding URL " +
         "when payments are enabled for this Thingery deployment, plus current onboarding status. " +
@@ -458,6 +514,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "create_order",
     {
+      title: "Create order",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description:
         "Order an item. Default payment_mode is 'stripe' (Checkout URL returned) when the " +
         "deployment has payments AND the seller finished payout onboarding; otherwise " +
@@ -505,6 +568,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "get_order",
     {
+      title: "Get order",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       description: "Fetch one of your orders (as buyer or seller): status, price breakdown, " +
         "tracking, deadlines. Requires authentication; only order parties can see it.",
       inputSchema: { order_id: z.string().uuid() },
@@ -521,6 +591,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "cancel_order",
     {
+      title: "Cancel order",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description:
         "Cancel one of your orders (buyer or seller) while it is still cancellable " +
         "(pending, sold, label_issued). Stripe-mode orders that already paid cannot be " +
@@ -556,6 +633,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "record_tracking",
     {
+      title: "Record tracking",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description:
         "Seller records the shipment's carrier and tracking code (order moves sold → label_issued; " +
         "shippable orders only — pickups have nothing to ship). Registers a carrier tracker when the " +
@@ -593,6 +677,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "confirm_payment",
     {
+      title: "Confirm payment",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description:
         "Seller confirms receiving an OFF-PLATFORM payment (cash, bank transfer, …): the order " +
         "moves pending → sold. Only exists for off_platform orders — Stripe-mode orders flip to " +
@@ -618,6 +709,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "confirm_receipt",
     {
+      title: "Confirm receipt",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description:
         "Buyer confirms receiving the item: the order moves to delivered and the dispute window " +
         "opens (48h default). For local pickup this is the delivery step; for shipped items it is " +
@@ -643,6 +741,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "open_dispute",
     {
+      title: "Open dispute",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description:
         "Buyer opens a dispute on a delivered order (within the dispute window). Payout is held " +
         "while the order is disputed; a deployment operator resolves it.",
@@ -667,6 +772,13 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   server.registerTool(
     "release_funds",
     {
+      title: "Release funds",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description:
         "Buyer waives the remaining dispute window and releases the seller's payout immediately " +
         "(delivered → payout_pending for Stripe orders; → completed for off-platform). Use when " +

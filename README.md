@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="website/assets/logo-mark.svg" width="112" alt="Thingery logo" />
+</p>
+
 # Thingery
 
 > **Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.**
@@ -5,6 +9,8 @@
 Say *"sell this"* to your AI assistant — it identifies the item, writes the listing, prices it,
 and publishes it. Say *"find me a used camera under €300"* — it searches every listing and
 proposes the best one. Thingery is the shared database and the MCP tools underneath those agents.
+
+[![M8ven Score](https://m8ven.ai/badge/mcp/thingery-thingery-aupktp?v=d2e97eed605c8f7862fd994bb95f2f03)](https://m8ven.ai/mcp/thingery-thingery-aupktp?s=readme)
 
 - **Free** for everyone. No take rate, no platform lock-in.
 - **Open source** (Apache-2.0). Self-host the whole thing, or use the flagship instance.
@@ -125,8 +131,9 @@ public read tools is always available. Design note: the decision record for the 
 
 ### Run locally over stdio (`npx`)
 
-Self-host without any web server — the package runs as a local stdio MCP server against your
-own Postgres, spawnable by Claude Desktop and similar clients:
+Self-host without any web server — the package is [`thingery` on npm](https://www.npmjs.com/package/thingery)
+and runs as a local stdio MCP server against your own Postgres, spawnable by Claude Desktop and
+similar clients:
 
 ```json
 {
@@ -163,6 +170,12 @@ curl -s http://localhost:3000/mcp \
 ```
 
 Responses come back as Server-Sent Events; the JSON-RPC result is on the `data:` line.
+
+### Use an agent framework (LangChain, LlamaIndex, Composio)
+
+Framework toolkits reach the same `/mcp` endpoint over streamable HTTP — copy-paste
+quickstarts with verified end-to-end tool calls live in
+[examples/integrations/](examples/integrations/).
 
 ## Configuration
 
@@ -215,10 +228,12 @@ Reading `undeclared_in_use` as an agent:
 ## Roadmap
 
 1. ~~**Order state machine**~~ — **shipped**: orders with Stripe Connect payouts, carrier webhooks, disputes, and deadline sweeps ([ADR 0003](docs/adr/0003-order-state-machine.md)). Next: live-mode Stripe after legal/ToS sign-off.
-2. **Seller skill upgrade** — photo capture flow, comparable-based pricing from live data.
-3. **Buyer alerts** — event stream: "new match for your intent".
-4. **Federation protocol** — instance-to-instance sync so anyone can host a node of the Item Graph.
-5. **Agent-to-agent negotiation** — bounded-mandate negotiation between buyer and seller agents.
+2. **Seller skill upgrade** — **in progress**: photo capture flow. Comparable-based pricing is deferred until listings are numerous enough to be real comparables.
+3. **Buyer alerts** — **next up** after photos: "new match for your intent" event stream.
+4. **Federation protocol** — instance-to-instance sync so anyone can host a node of the Item Graph. **Deferred**.
+5. **Agent-to-agent negotiation** — bounded-mandate negotiation between buyer and seller agents. **Deferred**.
+
+We'll revisit federation and negotiation when there's real traction: more than 10 new listings per week for 2 consecutive weeks, or concrete pull from self-host adopters.
 
 ## Contributing
 

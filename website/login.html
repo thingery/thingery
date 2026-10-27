@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Account — Thingery</title>
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
   <link rel="icon" href="/assets/favicon.ico" sizes="48x48">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <meta property="og:title" content="Account — Thingery">
@@ -15,35 +17,62 @@
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://thingery.dev/assets/og-image.png">
   <style>
-    :root { color-scheme: light dark; }
+    /* THI-278: desktop layout fix — a readable, left-aligned column
+       (measure ~70ch) instead of a narrow 26rem strip, on the site design
+       tokens from website/index.html. Mobile keeps the narrow column, which
+       reads as intentional there. */
+    :root {
+      color-scheme: light dark;
+      --ink: #1a1d23;
+      --muted: #5c6470;
+      --line: rgba(127,127,127,.22);
+      --card: rgba(127,127,127,.07);
+      --accent: #0f7b6c;
+      --accent-2: #b7791f;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --ink: #e8eaee; --muted: #9aa3af; --card: rgba(127,127,127,.1); --accent: #2dd4bf; --accent-2: #f6c177; }
+    }
     * { box-sizing: border-box; }
     body {
-      margin: 0; padding: 2rem 1.5rem; max-width: 26rem; margin-inline: auto;
-      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.6;
+      margin: 0; padding: 2rem 1.5rem 3rem; max-width: min(70ch, 44rem); margin-inline: auto;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.65;
+      color: var(--ink); background:
+      radial-gradient(1100px 420px at 12% -8%, rgba(15,123,108,.10), transparent 60%),
+      radial-gradient(800px 360px at 92% 0%, rgba(183,121,31,.08), transparent 55%);
     }
-    h1 { font-size: 1.5rem; }
-    h1 .logo { display: inline-flex; align-items: center; gap: .5rem;
-      font-weight: 750; text-decoration: none; color: inherit; }
-    h1 .logo .logo-mark { display: block; height: 26px; width: auto; }
+    .site-header { display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+      margin: 0 0 1.8rem; }
+    .site-header .brand { display: inline-flex; align-items: center; gap: .55rem;
+      font-weight: 750; font-size: 1.15rem; text-decoration: none; color: inherit; }
+    .site-header .brand .logo-mark { display: block; height: 26px; width: auto; }
+    .site-header nav { font-size: .95rem; }
+    .site-header nav a { margin-left: 1.1rem; text-decoration: none; color: var(--muted); }
+    .site-header nav a:hover { color: inherit; }
+    h1 { font-size: 1.5rem; letter-spacing: -.01em; margin: 0 0 .8rem; }
+    h2 { letter-spacing: -.01em; }
+    body > section { border-top: 1px solid var(--line); padding-top: 1.5rem; margin-top: 1.6rem; }
     input { width: 100%; padding: .6rem .7rem; margin: .25rem 0 1rem; font: inherit;
-      border-radius: 8px; border: 1px solid rgba(127,127,127,.5); background: transparent; color: inherit; }
-    button { padding: .6rem 1.2rem; font: inherit; border-radius: 8px; cursor: pointer;
-      border: 1px solid rgba(127,127,127,.5); background: rgba(127,127,127,.15); color: inherit; }
-    button:hover { background: rgba(127,127,127,.3); }
+      border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: inherit; }
+    input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    button { padding: .6rem 1.2rem; font: inherit; font-weight: 600; border-radius: 10px; cursor: pointer;
+      border: 1px solid transparent; background: var(--accent); color: #fff; }
+    button:hover { filter: brightness(1.08); }
     .toggle { margin-top: 1.5rem; font-size: .95rem; opacity: .85; }
     .error { color: #e5484d; min-height: 1.4em; margin-bottom: .5rem; }
-    a { color: inherit; }
+    a { color: var(--accent); }
+    a:hover { filter: brightness(.9); }
     .key { font-family: ui-monospace, Menlo, monospace; font-size: .9em; word-break: break-all;
-      background: rgba(127,127,127,.12); padding: .6rem .8rem; border-radius: 8px; margin: .5rem 0 1rem; }
+      background: var(--card); border: 1px solid var(--line); padding: .6rem .8rem; border-radius: 10px; margin: .5rem 0 1rem; }
     /* Approved "Continue with ChatGPT" button format (OpenAI sign-in brand
        guidelines): solid black, official logo asset, white label. */
     .chatgpt-btn { display: inline-flex; align-items: center; gap: .55rem; background: #000; color: #fff;
-      padding: .55rem 1.15rem; font: inherit; border-radius: 8px; cursor: pointer;
+      padding: .55rem 1.15rem; font: inherit; font-weight: 500; border-radius: 10px; cursor: pointer;
       border: 1px solid rgba(127,127,127,.5); text-decoration: none; }
-    .chatgpt-btn:hover { background: #222; }
+    .chatgpt-btn:hover { background: #222; filter: none; }
     .chatgpt-btn img { width: 1.15rem; height: 1.15rem; display: block; }
-    #chatgpt-banner { font-size: .9rem; padding: .55rem .8rem; border-radius: 8px; margin: .6rem 0;
-      background: rgba(127,127,127,.12); }
+    #chatgpt-banner { font-size: .9rem; padding: .55rem .8rem; border-radius: 10px; margin: .6rem 0;
+      background: var(--card); }
     #chatgpt-banner.error { background: transparent; }
     #chatgpt-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
       display: flex; align-items: center; justify-content: center; padding: 1rem; }
@@ -51,11 +80,18 @@
     #chatgpt-modal { background: canvas; color: canvastext; border: 1px solid rgba(127,127,127,.5);
       border-radius: 12px; padding: 1.4rem 1.6rem; max-width: 24rem; text-align: center; }
     #chatgpt-modal img { width: 1.6rem; height: 1.6rem; margin-bottom: .3rem; }
+    @media (max-width: 30rem) {
+      body { padding: 1.2rem 1rem 2.2rem; }
+      .site-header { flex-wrap: wrap; }
+    }
   </style>
 </head>
 <body>
-  <h1><a class="logo" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="28" height="26">Thingery</a> — account</h1>
-  <nav aria-label="Site" style="font-size:.9rem;opacity:.85;margin:-.8rem 0 1.4rem"><a href="/browse">Browse</a> · <a href="/chat.html">Chat</a></nav>
+  <header class="site-header">
+    <a class="brand" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="26" height="26">Thingery</a>
+    <nav aria-label="Site"><a href="/browse">Browse</a><a href="/chat.html">Chat</a><a href="https://github.com/thingery/thingery">GitHub</a></nav>
+  </header>
+  <h1>Account</h1>
 
   <!-- Callback banner for the ChatGPT OAuth round-trip (spec THI-193 §3.2/
        §3.6): /api/me/chatgpt/callback redirects here with ?chatgpt=<slug>.

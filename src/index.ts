@@ -11,10 +11,12 @@ import { startOauthSweepTimer } from "./oauth-sweep.js";
 import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
 import { mountApiRoutes } from "./routes.js";
+import { mountOpenaiAppsChallenge } from "./openai-apps-challenge.js";
 import { stripeWebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
 import { logConfigBootReport, orderFlowConfig } from "./config.js";
 import { startSweepScheduler } from "./orders-sweep.js";
+import { statsHandler } from "./stats.js";
 import { browsePage, itemPage, orderReturnPage, payoutSetupReturnPage, websiteErrorMiddleware } from "./web-pages.js";
 import { uploadsDir } from "./images.js";
 import { securityHeaders } from "./security-headers.js";
@@ -97,6 +99,11 @@ function runHttp(): void {
   // PR-1): mount position unchanged, right where the router sat before.
   mountApiRoutes(app);
 
+  // OpenAI plugin directory domain verification (THI-296 AC1): bare-token
+  // route, 503 while the env token is unset. See src/openai-apps-challenge.ts
+  // for the behavior + security notes.
+  mountOpenaiAppsChallenge(app);
+
   // THI-54: /healthz has its own try/catch (DB fault → 503), but every
   // async handler on the app is wrapped uniformly — the wrapper is a no-op
   // for handlers that never reject.
@@ -117,6 +124,12 @@ function runHttp(): void {
   // becoming an unhandled rejection (hung response, dead process on
   // Node >= 15). Healthy paths are unchanged; each page keeps its own
   // fail-secure .catch() degrade behavior.
+  // THI-311: public platform-usage counters for the homepage strip
+  // (/stats.json). Website asset, not an API surface change — mounted at the
+  // app root like /healthz, outside the protected src/routes.ts router.
+  // TTL-cached aggregate counts; see src/stats.ts for the definitions.
+  app.get("/stats.json", asyncHandler(statsHandler));
+
   app.get("/item/:id", asyncHandler(itemPage));
   app.get("/browse", asyncHandler(browsePage));
   // Order return pages (spec THI-3 §4.3 F15). The literal payout-setup route

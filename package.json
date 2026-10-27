@@ -1,7 +1,18 @@
 {
   "name": "thingery",
-  "version": "0.1.1",
-  "description": "Thingery — the open item database and MCP server for AI agents to list, find, and trade second-hand goods.",
+  "version": "0.1.2",
+  "description": "Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "modelcontextprotocol",
+    "marketplace",
+    "second-hand",
+    "secondhand",
+    "classifieds",
+    "thingery"
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "mcpName": "io.github.thingery/thingery",
@@ -21,6 +32,10 @@
     "type": "git",
     "url": "https://github.com/thingery/thingery"
   },
+  "homepage": "https://thingery.dev",
+  "bugs": {
+    "url": "https://github.com/thingery/thingery/issues"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
@@ -39,7 +54,7 @@
     "pg": "^8.13.1",
     "sharp": "0.35.5",
     "stripe": "^23.0.0",
-    "zod": "^3.24.1"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

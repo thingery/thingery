@@ -17,7 +17,7 @@ Buyer alerts v1 needs a delivery channel for "new match for your saved intent". 
 
 ## Alternatives rejected
 
-- **Email push** — reaches the human directly, but it is a new PII usage (alerting changes the consent posture of an email stored for accounts), a new delivery surface (SMTP provider, secrets on the VPS, bounce/complaint handling) and a Security-review-heavy footprint — blowing the "V1 deliberately small" budget. Revisit as V2 once intent adoption is visible.
+- **Email push** — reaches the human directly, but it is a new PII usage (alerting changes the consent posture of an email stored for accounts), a new delivery surface (SMTP provider, secrets on the VPS, bounce/complaint handling) and a heavy Security-review footprint — blowing the "V1 deliberately small" budget. Revisit as V2 once intent adoption is visible.
 - **Both email and in-app now** — strictly more surface than either option alone; everything email adds is deferred, not removed, by choosing pull first.
 - **MCP server-push** — the MCP protocol cannot notify a disconnected client; only live sessions could be pushed to, and buyers are rarely connected at publish time. Does not satisfy the requirement.
 

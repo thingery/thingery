@@ -3,6 +3,7 @@
 
 import type { NextFunction, Request, Response } from "express";
 import { getItem, searchItems } from "./items.js";
+import { MAX_IMAGES_PER_ITEM } from "./images.js";
 import { sellerFromSession } from "./auth.js";
 import type { ItemRow } from "./db.js";
 import { pool } from "./db.js";
@@ -65,7 +66,7 @@ function baseUrlFromRequest(req: Request): string {
   return `${req.protocol}://${req.get("host") ?? "localhost"}`;
 }
 
-function page(title: string, description: string, body: string, og?: OgMeta): string {
+function page(title: string, description: string, body: string, og?: OgMeta, noindex = false): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -77,7 +78,7 @@ function page(title: string, description: string, body: string, og?: OgMeta): st
   <link rel="icon" href="/assets/favicon.ico" sizes="48x48">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <title>${escapeHtml(title)}</title>
-  <meta name="description" content="${escapeHtml(description)}">${ogMetaHtml(og)}
+  <meta name="description" content="${escapeHtml(description)}">${noindex ? '\n  <meta name="robots" content="noindex">' : ""}${ogMetaHtml(og)}
   <style>
     :root { color-scheme: light dark; }
     * { box-sizing: border-box; }
@@ -95,7 +96,20 @@ function page(title: string, description: string, body: string, og?: OgMeta): st
     .card .p { font-weight: 650; }
     .gallery img { max-width: 100%; border-radius: 12px; display: block; margin: .5rem 0; border: 1px solid var(--line, rgba(127,127,127,.3)); }
     .upload { border: 1px dashed rgba(127,127,127,.5); border-radius: 12px; padding: .8rem 1rem; margin: 1rem 0; font-size: .95rem; }
-    .upload button { margin-left: .5rem; }
+    .upload input[type="file"] { display: none; }
+    .upload .pick { display: inline-block; padding: .6rem 1.1rem; margin: .35rem .5rem .35rem 0; font: inherit; border-radius: 10px;
+      cursor: pointer; border: 1px solid #019686; background: rgba(1,150,134,.12); color: inherit; }
+    .upload .pick.primary { background: #019686; color: #fff; }
+    .upload.drag { outline: 2px dashed #019686; outline-offset: 4px; }
+    .upload.at-cap .pick { opacity: .5; cursor: not-allowed; }
+    .banner-warn { border: 1px solid #b45309; background: rgba(180,83,9,.12); border-radius: 12px; padding: .6rem 1rem; margin: 1rem 0; }
+    .thumb { position: relative; display: inline-block; margin: .35rem .4rem 0 0; }
+    .thumb img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px;
+      border: 1px solid rgba(127,127,127,.3); display: block; }
+    .cover-badge { position: absolute; left: 4px; top: 4px; font-size: .65rem;
+      background: rgba(0,0,0,.65); color: #fff; border-radius: 6px; padding: 0 .3rem; }
+    .photo-row { font-size: .9rem; opacity: .9; margin: .25rem 0; }
+    .photo-state { margin-left: .5rem; }
     form { display: flex; gap: .5rem; margin: 1rem 0; }
     input { flex: 1; padding: .6rem .8rem; font: inherit; border-radius: 10px;
       border: 1px solid rgba(127,127,127,.5); background: transparent; color: inherit; }
@@ -122,6 +136,11 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
   const isOwner = Boolean(viewer && viewer.id === item.seller_id);
 
   const sold = item.status !== "active";
+  // THI-308 PR 3: derived pending state — same pure predicate as the feed
+  // gate (src/items.ts FEED_VISIBLE minus the status term; non-active items
+  // are already out of every feed). Zero-photo pending listings render for
+  // direct visitors but get the placeholder + a crawler-visible noindex.
+  const pending = item.photo_required && item.images.length === 0;
   const attributesHtml = Object.keys(item.attributes ?? {}).length
     ? `<p class="meta">${Object.entries(item.attributes)
         .map(([k, v]) => `<span class="badge">${escapeHtml(k.replaceAll("_", " "))}: ${escapeHtml(v)}</span>`)
@@ -129,27 +148,34 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
     : "";
 
   const imagesHtml = item.images.length
-    ? `<div class="gallery">${item.images
+    ? `<div class="gallery" id="item-gallery">${item.images
         // THI-130 (THI-128 review follow-up): never send the viewer's referrer to
         // arbitrary https image hosts — partial mitigation for the accepted H3
         // residual risk (tracking pixels still learn the viewer's IP).
         .map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer">`)
         .join("\n")}</div>`
-    : `<p class="meta">No photos yet.</p>`;
+    : `<div class="gallery" id="item-gallery"><img id="item-placeholder" src="/assets/placeholder-item.svg" alt="No photos yet" width="640" height="480" loading="lazy" referrerpolicy="no-referrer"></div>`;
 
+  // THI-308 PR 3: owner-only capture panel at the top of the owner area,
+  // replacing the old single-file form. "Take photo" (capture="environment")
+  // opens the camera in one tap; the snap auto-uploads — <= 2 taps to the
+  // first photo. photos.js (static file, CSP-safe) adds drag-drop, paste,
+  // per-file progress + retry, and disables the inputs at the 12-photo cap.
+  const thumb = (src: string, i: number) =>
+    `<span class="thumb">${i === 0 ? `<span class="cover-badge">cover</span>` : ""}<img src="${escapeHtml(src)}" alt="" loading="lazy" referrerpolicy="no-referrer"></span>`;
   const uploadHtml = isOwner
-    ? `<div class="upload">
-        <strong>Add photos</strong> (jpg/png/webp/gif, up to 5 MB each)<br>
-        Images are re-encoded server-side: all metadata (EXIF/GPS/XMP) is stripped, orientation
-        is baked in, and large images are downscaled to ≤ 2000 px before storage. Animated GIFs
-        are stored as stills. Large PNGs may be rejected — prefer JPEG.
-        <form id="upload-form" data-item-id="${escapeHtml(item.id)}">
-          <input type="file" id="file" accept="image/jpeg,image/png,image/webp,image/gif" required>
-          <button type="submit">Upload</button>
-        </form>
-        <span class="meta" id="upload-status"></span>
+    ? `${pending ? `<p class="banner-warn" id="pending-banner" role="status">This listing is hidden from search until you add a photo.</p>` : ""}
+      <div class="upload" id="photo-zone" data-item-id="${escapeHtml(item.id)}" data-image-count="${item.images.length}" data-max-images="${MAX_IMAGES_PER_ITEM}">
+        <label class="pick primary">📷 Take photo<input type="file" id="photo-take" accept="image/*" capture="environment"></label>
+        <label class="pick">🖼️ Choose photos<input type="file" id="photo-choose" accept="image/jpeg,image/png,image/webp,image/gif" multiple></label>
+        <span class="meta">or drop / paste here · <span id="photo-count">${item.images.length}/${MAX_IMAGES_PER_ITEM}</span></span>
+        <p class="meta">Listings with photos get far more views. First photo publishes the listing. jpg/png/webp/gif up to 5 MB each —
+        compressed in your browser, re-encoded and metadata-stripped server-side.</p>
+        <div id="photo-strip">${item.images.map(thumb).join("")}</div>
+        <div id="photo-status" aria-live="polite"></div>
       </div>
-      <script src="/upload.js" defer></script>`
+      <script src="/imaging.js" defer></script>
+      <script src="/photos.js" defer></script>`
     : "";
 
   const jsonLd = {
@@ -197,7 +223,7 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
     twitterCard: item.images.length ? "summary_large_image" : "summary",
   };
 
-  res.send(page(item.title, `${money(item.price_cents, item.currency)} — used, ${item.condition}`, body, og));
+  res.send(page(item.title, `${money(item.price_cents, item.currency)} — used, ${item.condition}`, body, og, pending));
 }
 
 export async function browsePage(req: Request, res: Response): Promise<void> {

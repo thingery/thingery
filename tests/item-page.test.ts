@@ -31,6 +31,9 @@ const item: ItemRow = {
   images: ["https://cdn.example.com/a.jpg", "http://cdn.example.net/b.jpg"],
   attributes: {},
   status: "active",
+  /** THI-308: this fixture has photos, so photo_required=true still means
+   *  live — proves the images-present branch never renders the noindex. */
+  photo_required: true,
   created_at: new Date("2026-10-01T00:00:00Z"),
 };
 
@@ -49,6 +52,19 @@ function renderItemPage(itemId = "itm-1"): Promise<string> {
   });
 }
 
+/** Renders with getItem mocked to `mockItem` and the session mocked to
+ *  `viewer` (null = anonymous). Restores both spies. */
+async function renderWith(mockItem: ItemRow, viewer: { id: string; display_name: string } | null): Promise<string> {
+  const getItemSpy = vi.spyOn(items, "getItem").mockResolvedValue(mockItem);
+  const sessionSpy = vi.spyOn(auth, "sellerFromSession").mockResolvedValue(viewer);
+  try {
+    return await renderItemPage(mockItem.id);
+  } finally {
+    getItemSpy.mockRestore();
+    sessionSpy.mockRestore();
+  }
+}
+
 describe("item page gallery (THI-130: referrerpolicy=no-referrer)", () => {
   it("renders every gallery <img> with referrerpolicy=\"no-referrer\"", async () => {
     const getItemSpy = vi.spyOn(items, "getItem").mockResolvedValue(item);
@@ -65,6 +81,60 @@ describe("item page gallery (THI-130: referrerpolicy=no-referrer)", () => {
     } finally {
       getItemSpy.mockRestore();
       sessionSpy.mockRestore();
+    }
+  });
+});
+
+describe("item page photo step (THI-308 PR 3)", () => {
+  const pendingItem: ItemRow = { ...item, images: [] }; // photo_required: true
+  const owner = { id: "seller-1", display_name: "Owner" };
+  const stranger = { id: "seller-2", display_name: "Stranger" };
+
+  it("renders placeholder art + crawler-visible noindex for a zero-image pending item", async () => {
+    const html = await renderWith(pendingItem, null);
+    expect(html).toContain('src="/assets/placeholder-item.svg"');
+    expect(html).not.toContain("No photos yet.</p>"); // text replaced by the SVG
+    // Server-rendered in <head> — crawler-visible, not a JS afterthought.
+    expect(html).toContain('<meta name="robots" content="noindex">');
+  });
+
+  it("does not noindex live listings (photos present, or grandfathered photo_required=false)", async () => {
+    const html = await renderWith(item, null); // photos present
+    expect(html).not.toContain("noindex");
+    const grandfathered = await renderWith({ ...pendingItem, photo_required: false }, null);
+    expect(grandfathered).not.toContain("noindex");
+  });
+
+  it("shows the owner the capture UI (≤2-tap camera path) + pending banner, with zero inline handlers", async () => {
+    const html = await renderWith(pendingItem, owner);
+    // Pending banner while hidden from search (P1, light — no modal).
+    expect(html).toContain("This listing is hidden from search until you add a photo.");
+    // Capture panel: one tap to camera (capture=environment), snap auto-uploads.
+    expect(html).toContain('id="photo-take" accept="image/*" capture="environment"');
+    expect(html).toContain('id="photo-choose"');
+    expect(html).toContain("multiple");
+    expect(html).toContain("Listings with photos get far more views.");
+    expect(html).toContain('data-max-images="12"'); // existing cap
+    expect(html).toContain('src="/imaging.js"');
+    expect(html).toContain('src="/photos.js"');
+    // CSP script-src 'self': every script is an external static file (the
+    // ld+json data block is inert) and no element carries an inline
+    // event-handler attribute.
+    for (const tag of html.match(/<script\b[^>]*>/g) ?? []) {
+      expect(/\bsrc=/.test(tag) || /application\/ld\+json/.test(tag), tag).toBe(true);
+    }
+    expect(html).not.toMatch(/\son[a-z]+\s*=/i);
+  });
+
+  it("hides the capture UI from non-owners (and anonymous visitors)", async () => {
+    for (const viewer of [stranger, null]) {
+      const html = await renderWith(pendingItem, viewer);
+      expect(html).not.toContain("photo-zone");
+      expect(html).not.toContain("photo-take");
+      expect(html).not.toContain('src="/photos.js"');
+      // The placeholder + noindex still render — they are viewer-independent.
+      expect(html).toContain('src="/assets/placeholder-item.svg"');
+      expect(html).toContain('<meta name="robots" content="noindex">');
     }
   });
 });

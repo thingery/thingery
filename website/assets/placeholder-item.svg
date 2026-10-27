@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="No photos yet">
+  <!-- THI-308 PR 3: item-page placeholder art. Camera glyph on the Thingery
+       brand palette (green #019686 from the THI-356 logo). Light/dark aware:
+       SVG referenced via <img> honors prefers-color-scheme media queries
+       inside its own <style>, so the card re-tints with the site (which sets
+       color-scheme: light dark). Replaces the old "No photos yet." text. -->
+  <style>
+    .bg { fill: #eef5f4; }
+    .cam { fill: #019686; }
+    .lens { fill: #eef5f4; }
+    .txt { fill: #5f7472; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #1b2422; }
+      .cam { fill: #35b3a2; }
+      .lens { fill: #1b2422; }
+      .txt { fill: #9fb9b5; }
+    }
+  </style>
+  <rect class="bg" width="640" height="480" rx="18"/>
+  <g>
+    <rect class="cam" x="238" y="196" width="164" height="112" rx="14"/>
+    <path class="cam" d="M282 196 v-12 a10 10 0 0 1 10 -10 h56 a10 10 0 0 1 10 10 v12 z"/>
+    <circle class="lens" cx="320" cy="252" r="34"/>
+    <circle class="cam" cx="320" cy="252" r="18"/>
+    <rect class="lens" x="356" y="210" width="24" height="8" rx="4"/>
+  </g>
+  <text class="txt" x="320" y="356" text-anchor="middle" font-family="system-ui, sans-serif" font-size="26">No photos yet</text>
+</svg>

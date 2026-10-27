@@ -57,6 +57,18 @@ env-tunable). Design record: [ADR 0003](docs/adr/0003-order-state-machine.md).
 Sellers authenticate with **OAuth** (one-click sign-in from any MCP host — see below) or a
 `thg_...` API key (`Authorization: Bearer`); search is anonymous.
 
+### Buyer alerts
+
+| Tool | Auth | Purpose |
+|---|---|---|
+| `save_intent` | seller | Save a buyer alert — what you're looking for as a free-text query and/or structured filters (category, condition, price range, shipping tier, attributes). Max 25 stored intents, 50 saves/day |
+| `my_intents` | seller | Your saved alerts, newest first, each with its unread match count and muted state |
+| `update_intent` | seller | Mute or unmute one alert — muted alerts stop collecting new matches |
+| `delete_intent` | seller | Delete an alert and its match records |
+
+Saved intents feed buyer alerts: when a new listing matching an intent publishes, the match
+shows up in `my_intents`' unread counts (a dedicated `my_matches` view is landing next).
+
 ### Photo-required publishing
 
 New listings need **at least one photo** to be visible to buyers — browse, `search_items`, and
@@ -92,6 +104,75 @@ category counts all exclude photoless listings (a single derived predicate; desi
   API key still works, and self-hosting is below (`npx thingery` over stdio).
 
 ## Quickstart
+
+Pick your mode first — hosted and self-hosted expose the **same MCP tools** but **not the same
+data**: listings you create on the hosted service are visible to everyone; listings on your
+self-hosted instance live only in your database.
+
+| Mode | Endpoint | Data | Best for |
+|---|---|---|---|
+| **Hosted** | `https://thingery.dev/mcp` | the shared public marketplace | first success in under a minute — nothing to install |
+| **Self-hosted** | your own `/mcp`, or stdio | your Postgres, your data | private deployments, full control, hacking on it |
+
+### Mode A — hosted: search in one minute
+
+No install. Add `https://thingery.dev/mcp` as a remote HTTP server in your MCP client
+(Claude Desktop, ChatGPT connectors, VS Code, Inspector — see [Connect an MCP client](#connect-an-mcp-client)
+below) and sign in with OAuth, or grab an API key at [`/login.html`](https://thingery.dev/login.html)
+(free account; the `thg_...` key is shown after signup). Searching needs no account at all —
+verify the wire format with curl:
+
+```bash
+curl -s https://thingery.dev/mcp \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+       "params":{"name":"search_items","arguments":{"q":"Air Max"}}}'
+```
+
+Responses come back as Server-Sent Events; the JSON-RPC result is on the `data:` line.
+
+### Mode B — self-hosted: the npm package
+
+The [`thingery` npm package](https://www.npmjs.com/package/thingery) runs the whole server
+against your own Postgres. No git clone needed:
+
+```bash
+mkdir my-thingery && cd my-thingery
+npm install thingery
+
+# 1. a Postgres with the pgvector extension (Docker: `docker run -d -p 5432:5432 \
+#    -e POSTGRES_PASSWORD=thingery pgvector/pgvector:pg16`; Homebrew: see below)
+# 2. apply the shipped schema (idempotent, safe to re-run):
+psql "postgres://postgres:thingery@localhost:5432/postgres" \
+  -f node_modules/thingery/db/schema.sql
+
+# 3. run it (DATABASE_URL is the only required env var):
+DATABASE_URL="postgres://postgres:thingery@localhost:5432/postgres" \
+PORT=3000 node node_modules/thingery/dist/index.js
+```
+
+The server boots at `http://localhost:3000` — `/mcp`, `/browse`, `/healthz`, and the HTTP
+API. Note: in the npm package the web signup page is not shipped (0.1.2 packaging gap —
+`/login.html` 404s), so create your account through the API — the `thg_...` key is
+returned exactly once, in the signup response:
+
+```bash
+curl -s -X POST http://localhost:3000/api/signup \
+  -H 'content-type: application/json' \
+  -d '{"email":"you@example.com","password":"at-least-8-chars"}'
+# → {"seller":{"name":"you","email":"…","api_key":"thg_…"}}
+```
+
+Then point any MCP client at `http://localhost:3000/mcp` with
+`Authorization: Bearer thg_...` — or spawn it over stdio with the
+[`npx` config below](#run-locally-over-stdio-npx).
+
+> Note: the npm package publishes at release cadence and can lag `main` on thingery.dev
+> by days — `/healthz` reports the running version. If you need today's features,
+> self-host from source instead:
+
+### Self-hosted from source (development)
 
 ```bash
 git clone https://github.com/thingery/thingery
@@ -170,7 +251,22 @@ similar clients:
 }
 ```
 
-`THINGERY_API_KEY` is optional; without it the server runs read-only (search + get).
+`THINGERY_API_KEY` is optional; without it the server runs read-only (search + get). The
+stdio server needs the same prerequisites as Mode B: a Postgres with the schema applied
+(`psql -f node_modules/thingery/db/schema.sql`) and, for write tools, a key that exists in
+*that* database (from that deployment's `/login.html` or `/api/signup`).
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `search_items` returns 0 for a common word like "sneakers" | thingery.dev runs keyword-only search (no embeddings configured): it matches literal words in titles/descriptions — and no live listing contains the word "sneakers" | search brand/product words (`"Air Max"`, `"Samba"`), or filter by `category` instead |
+| `create_listing` returns `visible: false` | photo-required publishing: zero-image listings stay pending and hidden | call `add_item_image` — the first photo publishes the listing |
+| HTTP 401 `authentication required` | protected tool called without a credential | sign in with OAuth, or send `Authorization: Bearer thg_...` |
+| HTTP 406 from `/mcp` | the MCP Streamable HTTP transport requires the SSE Accept header | send `accept: application/json, text/event-stream` |
+| `npm run db:migrate` fails inside an installed package | `scripts/` isn't published — the schema ships as `db/schema.sql` | `psql "$DATABASE_URL" -f node_modules/thingery/db/schema.sql` |
+| stdio warning: `THINGERY_API_KEY set but not found in the database` | the key belongs to a different deployment's database | get a key from *this* deployment (`/login.html` or `/api/signup`) |
+| Self-hosted behaves differently from thingery.dev | the npm release can lag `main` (e.g. photo-gating) | compare `/healthz` versions; self-host from source for today's `main` |
 
 ### Try it with curl
 

@@ -1,6 +1,6 @@
 {
   "name": "thingery",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.",
   "keywords": [
     "mcp",

@@ -8,6 +8,7 @@ import { sellerFromSession } from "./auth.js";
 import type { ItemRow } from "./db.js";
 import { pool } from "./db.js";
 import { BROWSE_PAGE_SIZE, browsePageNav, browsePageUrl, parsePageParam } from "./pagination.js";
+import { orderFlowConfig } from "./config.js";
 import { classifyVisitOrigin, logPageView } from "./analytics.js";
 
 const escapeHtml = (value: unknown): string =>
@@ -30,18 +31,27 @@ export function safeJsonLd(value: unknown): string {
   return JSON.stringify(value).replaceAll("<", "\\u003c");
 }
 
-/** Open Graph / Twitter Card meta for link unfurling (chat apps, social, launch posts). */
+/** Open Graph / Twitter Card meta for link unfurling (chat apps, social, launch posts).
+ *  `canonical` also renders a <link rel="canonical"> tag — the absolute URL
+ *  crawlers and scrapers should treat as the one true address of the page
+ *  (query strings stripped, e.g. utm_* share-tracking params, so tracking
+ *  links never split the index or the unfurl identity — THI-396). */
 export interface OgMeta {
   title?: string;
   description?: string;
   siteName?: string;
   url?: string;
   image?: string;
+  /** Alt text for og:image / twitter:image (also an a11y hint for scrapers). */
+  imageAlt?: string;
   /** twitter:card value, e.g. "summary_large_image"; rendered with name= instead of property=. */
   twitterCard?: string;
+  /** Absolute canonical URL; renders <link rel="canonical"> alongside the og: tags. */
+  canonical?: string;
 }
 
-/** Renders og:/twitter: meta tags; empty fields are omitted, values HTML-escaped. */
+/** Renders og:/twitter: meta tags (plus the canonical link when set);
+ *  empty fields are omitted, values HTML-escaped. */
 export function ogMetaHtml(og: OgMeta | undefined): string {
   if (!og) return "";
   const propertyTags: Array<[name: string, value: string | undefined]> = [
@@ -50,12 +60,16 @@ export function ogMetaHtml(og: OgMeta | undefined): string {
     ["og:site_name", og.siteName],
     ["og:url", og.url],
     ["og:image", og.image],
+    ["og:image:alt", og.imageAlt],
   ];
   const lines = propertyTags
     .filter(([, value]) => value)
     .map(([name, value]) => `  <meta property="${name}" content="${escapeHtml(value)}">`);
   if (og.twitterCard) {
     lines.push(`  <meta name="twitter:card" content="${escapeHtml(og.twitterCard)}">`);
+  }
+  if (og.canonical) {
+    lines.push(`  <link rel="canonical" href="${escapeHtml(og.canonical)}">`);
   }
   return lines.length ? `\n${lines.join("\n")}` : "";
 }
@@ -141,6 +155,36 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
   const isOwner = Boolean(viewer && viewer.id === item.seller_id);
 
   const sold = item.status !== "active";
+  // THI-396: base URL is needed before the body (CTA + share button carry
+  // absolute URLs); PUBLIC_BASE_URL wins so prod pages are deterministic.
+  const baseUrl = baseUrlFromRequest(req);
+  const canonicalUrl = `${baseUrl}/item/${item.id}`;
+  // Payments are "on" for a listing only when the deployment has Stripe
+  // configured AND this seller finished payout onboarding (§11.2) — the
+  // same predicate order-flow uses to allow a stripe-mode order.
+  const paymentsOn = orderFlowConfig().stripePaymentsEnabled && item.seller_payout_ready === true;
+  // Prefilled opener for the built-in assistant (/chat.html?q=…). It can
+  // look up the listing and answer questions; orders still run through an
+  // MCP-connected agent, so the button says "ask about", not "buy".
+  const chatQ = encodeURIComponent(
+    `I'm interested in this Thingery listing: ${item.title} (${money(item.price_cents, item.currency)}, id ${item.id}). Is it still available, and how do I buy it?`.slice(0, 400),
+  );
+  // THI-396: obvious next action + one-tap share. Sold listings keep their
+  // stable URL/OG card (no churn after a sale) but drop the action block.
+  const ctaHtml = sold
+    ? ""
+    : `<div class="cta" id="next-step">
+      <div class="cta-row">
+        <a class="cta-btn" id="cta-chat" href="/chat.html?q=${chatQ}">💬 Ask Thingery's assistant</a>
+        <button class="share-btn" id="share-btn" type="button" data-share-url="${escapeHtml(canonicalUrl)}" data-share-title="${escapeHtml(item.title)}">🔗 Share</button>
+      </div>
+      <p class="meta">${
+        paymentsOn
+          ? "Card payments are on — your AI assistant's order gets a secure Stripe checkout link."
+          : "To buy, ask your AI assistant (Claude, ChatGPT, …) — it connects via MCP and arranges everything with the seller."
+      }</p>
+    </div>
+    <script src="/share.js" defer></script>`;
   // THI-308 PR 3: derived pending state — same pure predicate as the feed
   // gate (src/items.ts FEED_VISIBLE minus the status term; non-active items
   // are already out of every feed). Zero-photo pending listings render for
@@ -202,6 +246,7 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
   <p class="meta"><a href="/browse">← Browse</a> · <a href="/">Thingery</a></p>
   <h1>${escapeHtml(item.title)}</h1>
   <p class="price ${sold ? "sold" : ""}">${escapeHtml(money(item.price_cents, item.currency))}${sold ? ` · ${escapeHtml(item.status)}` : ""}</p>
+  ${ctaHtml}
   ${imagesHtml}
   ${uploadHtml}
   <p class="meta">
@@ -217,15 +262,25 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
   To buy, message the seller through the assistant that showed you this listing.</p>
   <script type="application/ld+json">${safeJsonLd(jsonLd)}</script>`;
 
-  const baseUrl = baseUrlFromRequest(req);
   const firstImage = item.images[0];
+  // Photo listings unfurl with their cover photo; photo-less ones fall back
+  // to the branded 1200×630 og-image so every shared link still renders a
+  // large card (THI-396). Item photos are absolute or root-relative — the
+  // branded fallback is always root-relative, so absolutize both.
+  const ogImage = firstImage
+    ? firstImage.startsWith("/")
+      ? `${baseUrl}${firstImage}`
+      : firstImage
+    : `${baseUrl}/assets/og-image.png`;
   const og: OgMeta = {
     title: item.title,
-    description: `${money(item.price_cents, item.currency)} — used, ${item.condition.replaceAll("_", " ")}`,
+    description: `${money(item.price_cents, item.currency)} — used, ${item.condition.replaceAll("_", " ")}${item.location ? ` · ${item.location}` : ""}`,
     siteName: "Thingery",
-    url: `${baseUrl}/item/${item.id}`,
-    image: firstImage ? (firstImage.startsWith("/") ? `${baseUrl}${firstImage}` : firstImage) : undefined,
-    twitterCard: item.images.length ? "summary_large_image" : "summary",
+    url: canonicalUrl,
+    canonical: canonicalUrl,
+    image: ogImage,
+    imageAlt: item.title,
+    twitterCard: "summary_large_image",
   };
 
   // THI-396: capture visit origin at request time. Canonical URLs are
@@ -274,7 +329,9 @@ export async function browsePage(req: Request, res: Response): Promise<void> {
 
   const title = q ? `${q} — Browse — Thingery` : "Browse used items — Thingery";
   const description = "Browse second-hand listings published through Thingery.";
-  res.send(page(title, description, body, { title, description }));
+  // THI-396: search/pagination params are ephemeral — canonicalize every
+  // /browse variant to the bare path so crawlers keep one address.
+  res.send(page(title, description, body, { title, description, canonical: `${baseUrlFromRequest(req)}/browse` }));
 }
 
 /** Order payment-return page (spec THI-3 §4.3, finding F15).

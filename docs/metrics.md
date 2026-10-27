@@ -39,6 +39,26 @@ exact publish count is `sql_published`.
 - `tool_result` measures tool execution, not buyer conversion; `create_order`
 success is available in `by_tool` if the sprint later needs it.
 
+## Sharing attribution (THI-396, sprint D9)
+
+Every successful public item-page render (`GET /item/:id`, 200 only) emits one
+`page_view` line with the visit origin classified **at request time** —
+canonical listing URLs are query-string-free (SEO/unfurl stability), so the
+Referer header and `utm_*` params are the only origin signals and they cannot
+be reconstructed later. The snapshot's `sharing` section and the 5th output
+line of `scripts/daily-metrics.sh` carry:
+
+| Metric | Definition | Source |
+|---|---|---|
+| `item_views` / `item_views_human` | All item-page renders; human = non-unfurler User-Agent | `page_view` lines |
+| `unfurl_bot_views` | Card-unfurl fetches (facebookexternalhit, twitterbot, …) — share *evidence*, not visits | `page_view` `.bot` |
+| `human_by_origin` | Human views by origin: `direct` (no/blocked referrer) / `internal` (own host) / `external` (referrer host = sharing platform) | `page_view` `.origin` |
+| `top_ref_hosts` | Top 5 external referrer hosts among human views | `page_view` `.refHost` |
+| `utm_tagged_views` | Human views carrying valid `utm_*` params (a sharer tagged the link) | `page_view` `.utm` |
+| `share_attributable_views` | Human views with `external` origin **or** utm params — the "share-clicks" number for the ≥5-shares sprint target | `page_view` lines |
+
+Owner self-views carry `owner:true` and can be filtered out (jq: `select(.owner != true)`).
+
 ### Privacy & retention
 
 What is collected per tool call — and nothing else:
@@ -49,6 +69,15 @@ ok boolean, duration ms, plus at most one results count (search) or two
 booleans (created/visible). **Never collected:** tool arguments, search query
 text, item ids/titles/attributes, user content, IPs, tokens, error messages.
 `src/analytics.ts` reads payload fields by fixed name only and clamps them.
+
+page_view line (THI-396): timestamp, public listing UUID, owner boolean,
+origin (`direct`/`internal`/`external`), optional external referrer **host
+only** (never the full Referer URL — third-party referrer paths can identify
+users), optional utm values (kept only when they match a conservative clamped
+charset; anything else dropped), unfurler boolean from a fixed User-Agent
+substring list. **Never collected for views:** full referrer URLs, arbitrary
+query strings beyond the five utm params, viewer identity or IPs — not even
+the owner flag resolves to a logged seller UUID.
 
 Storage: container stdout → Docker `json-file` driver, rotation `max-size:
 10m`, `max-file: 3` per service (docker-compose.prod.yml, THI-312) — raw lines
@@ -139,6 +168,7 @@ One JSON object per line, stdout, ship path = Docker/Caddy log capture:
 ```json
 {"ts":"2026-10-27T15:04:05.000Z","type":"tool_call","tool":"search_items","credential":"oauth","sellerId":"<uuid>|null"}
 {"ts":"2026-10-27T15:04:05.030Z","type":"tool_result","tool":"search_items","sellerId":"<uuid>|null","ok":true,"ms":30,"results":3}
+{"ts":"2026-11-04T10:02:00.000Z","type":"page_view","page":"item","itemId":"<uuid>","owner":false,"origin":"external","refHost":"web.whatsapp.com","utm":{"source":"wa","medium":"chat"},"bot":false}
 ```
 
 - `tool_call` (THI-371): one per `tools/call` message at **dispatch** — the
@@ -150,6 +180,10 @@ One JSON object per line, stdout, ship path = Docker/Caddy log capture:
   (search_items) and `created`/`visible` (create_listing, add_item_image)
   are read by fixed name from the handler's own JSON output and clamped
   (see `src/analytics.ts`).
+- `page_view` (THI-396): one per successful public item-page render, emitted
+  in `itemPage` (src/web-pages.ts) with the origin classified server-side in
+  `classifyVisitOrigin` (src/analytics.ts). `refHost`/`utm` appear only when
+  present; `owner` lets self-views be excluded from share metrics.
 - `credential`: `api_key` | `oauth` | `none` (Authorization header prefix).
 - `sellerId`: resolved seller UUID (security events already log this field)
   or `null` for anonymous public reads.

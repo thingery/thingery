@@ -6,7 +6,7 @@
 // with the listing (the pixel host still learns the viewer's IP either way).
 // In-process only: getItem/sellerFromSession are spied, no Postgres needed.
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import type { Request, Response } from "express";
 import * as items from "../src/items.js";
 import * as auth from "../src/auth.js";
@@ -142,5 +142,103 @@ describe("item page photo step (THI-308 PR 3)", () => {
       expect(html).toContain('src="/assets/placeholder-item.svg"');
       expect(html).toContain('<meta name="robots" content="noindex">');
     }
+  });
+});
+
+// THI-396: shareable listing URLs — canonical link, rich OG card with a
+// branded fallback image, and an obvious next action (CTA + share button).
+// Same in-process pattern as above: getItem/sellerFromSession spied, and
+// the config module spied to flip the payments phrase deterministically.
+import * as config from "../src/config.js";
+
+describe("item page sharing (THI-396)", () => {
+  const savedBaseUrl = process.env.PUBLIC_BASE_URL;
+
+  beforeEach(() => {
+    delete process.env.PUBLIC_BASE_URL;
+  });
+
+  afterEach(() => {
+    if (savedBaseUrl === undefined) delete process.env.PUBLIC_BASE_URL;
+    else process.env.PUBLIC_BASE_URL = savedBaseUrl;
+    vi.restoreAllMocks();
+  });
+
+  it("emits a canonical link equal to og:url, query-string-free and absolute", async () => {
+    const html = await renderWith(item, null);
+    expect(html).toContain('<link rel="canonical" href="https://thingery.test/item/itm-1">');
+    expect(html).toContain('<meta property="og:url" content="https://thingery.test/item/itm-1">');
+    // Canonical is the bare path — utm_* share-tracking params never fork it.
+    expect(html).not.toMatch(/rel="canonical"[^>]*\?/);
+  });
+
+  it("prefers PUBLIC_BASE_URL over the request host for canonical/og:url", async () => {
+    process.env.PUBLIC_BASE_URL = "https://thingery.dev/";
+    const html = await renderWith(item, null);
+    expect(html).toContain('<link rel="canonical" href="https://thingery.dev/item/itm-1">');
+    expect(html).toContain('<meta property="og:url" content="https://thingery.dev/item/itm-1">');
+  });
+
+  it("absolutizes root-relative cover photos and sets og:image:alt + location in the description", async () => {
+    const localShot = { ...item, images: ["/img/items/itm-1-cover.jpg"] };
+    const html = await renderWith(localShot, null);
+    expect(html).toContain('<meta property="og:image" content="https://thingery.test/img/items/itm-1-cover.jpg">');
+    expect(html).toContain(`<meta property="og:image:alt" content="${item.title}">`);
+    // Location rides along in the unfurl text (fixture: Dublin, condition used_good).
+    expect(html).toContain('<meta property="og:description" content="520.00 EUR — used, used good · Dublin">');
+    expect(html).toContain('<meta name="twitter:card" content="summary_large_image">');
+  });
+
+  it("keeps http(s) cover photos absolute as-is", async () => {
+    const html = await renderWith(item, null);
+    expect(html).toContain(`<meta property="og:image" content="${item.images[0]}">`);
+  });
+
+  it("falls back to the branded og-image so photo-less shares still render a card", async () => {
+    const html = await renderWith({ ...item, images: [] }, null);
+    expect(html).toContain('<meta property="og:image" content="https://thingery.test/assets/og-image.png">');
+    expect(html).toContain('<meta name="twitter:card" content="summary_large_image">');
+  });
+
+  it("renders the next-action CTA: prefilled chat deep link + share button + share.js", async () => {
+    const html = await renderWith(item, null);
+    expect(html).toContain('id="next-step"');
+    // Deep link prefills a question about this exact listing (URL-encoded:
+    // spaces become %20 under encodeURIComponent).
+    expect(html).toMatch(/href="\/chat\.html\?q=[^"]*Sony%20A6400[^"]*"/);
+    expect(html).toMatch(/href="\/chat\.html\?q=[^"]*itm-1[^"]*"/);
+    // Share button carries the canonical URL + title as data attributes.
+    expect(html).toContain('id="share-btn"');
+    expect(html).toContain('data-share-url="https://thingery.test/item/itm-1"');
+    expect(html).toContain(`data-share-title="${item.title}"`);
+    expect(html).toContain('src="/share.js"');
+    // Payments are off in this environment (no STRIPE_SECRET_KEY): the MCP path copy.
+    expect(html).toContain("ask your AI assistant");
+    expect(html).not.toContain("Stripe checkout link");
+  });
+
+  it("flips the CTA copy to the Stripe path when payments are on for this seller", async () => {
+    const cfgSpy = vi
+      .spyOn(config, "orderFlowConfig")
+      // web-pages only reads stripePaymentsEnabled here; the rest of the
+      // OrderFlowConfig shape is irrelevant to this page.
+      .mockReturnValue({ stripePaymentsEnabled: true } as ReturnType<typeof config.orderFlowConfig>);
+    expect(cfgSpy).toBeTruthy();
+    const on = await renderWith({ ...item, seller_payout_ready: true }, null);
+    expect(on).toContain("Stripe checkout link");
+    // Payout-ready seller but Stripe off deployment-wide → back to the MCP path.
+    cfgSpy.mockReturnValue({ stripePaymentsEnabled: false } as ReturnType<typeof config.orderFlowConfig>);
+    const off = await renderWith({ ...item, seller_payout_ready: true }, null);
+    expect(off).toContain("ask your AI assistant");
+  });
+
+  it("drops the CTA and share script on sold listings — URL and OG card stay stable", async () => {
+    const html = await renderWith({ ...item, status: "sold" }, null);
+    expect(html).not.toContain('id="next-step"');
+    expect(html).not.toContain("share-btn");
+    expect(html).not.toContain('src="/share.js"');
+    // The shareable address and unfurl survive the sale (no link churn).
+    expect(html).toContain('<link rel="canonical" href="https://thingery.test/item/itm-1">');
+    expect(html).toContain(`<meta property="og:image" content="${item.images[0]}">`);
   });
 });

@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Thingery — sell your things by telling your AI</title>
+  <title>Thingery — find, sell, and trade second-hand things with your AI</title>
   <meta name="description" content="Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.">
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
   <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
   <link rel="icon" href="/assets/favicon.ico" sizes="48x48">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
-  <meta property="og:title" content="Thingery — sell your things by telling your AI">
+  <meta property="og:title" content="Thingery — find, sell, and trade second-hand things with your AI">
   <meta property="og:description" content="Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.">
   <meta property="og:site_name" content="Thingery">
   <meta property="og:url" content="https://thingery.dev/">
@@ -36,9 +36,15 @@
       --card: rgba(127,127,127,.07);
       --accent: #0f7b6c;
       --accent-2: #b7791f;
+      /* THI-389 path CTAs: equal weight, one colour per path. Bg/fg pairs
+         chosen for WCAG AA on button-size text in both schemes. */
+      --btn-find-bg: #0f7b6c; --btn-find-fg: #fff;
+      --btn-sell-bg: #8a5a14; --btn-sell-fg: #fff;
+      --btn-build-bg: #1a1d23; --btn-build-fg: #fff;
     }
     @media (prefers-color-scheme: dark) {
-      :root { --ink: #e8eaee; --muted: #9aa3af; --card: rgba(127,127,127,.1); --accent: #2dd4bf; --accent-2: #f6c177; }
+      :root { --ink: #e8eaee; --muted: #9aa3af; --card: rgba(127,127,127,.1); --accent: #2dd4bf; --accent-2: #f6c177;
+        --btn-build-bg: #e8eaee; --btn-build-fg: #1a1d23; }
     }
     * { box-sizing: border-box; }
     body {
@@ -53,41 +59,76 @@
     .logo .logo-mark { display: block; height: 26px; width: auto; }
     nav a { margin-left: 1.1rem; text-decoration: none; color: var(--muted); font-size: .95rem; }
     nav a:hover { color: inherit; }
-    .hero { text-align: center; padding: 3.5rem 0 2.5rem; }
-    .hero h1 { font-size: clamp(2rem, 5.5vw, 3.2rem); line-height: 1.15; letter-spacing: -.02em; margin: 0 0 1rem; }
+    .hero { text-align: center; padding: 3rem 0 2rem; }
+    .hero h1 { font-size: clamp(1.9rem, 5vw, 3rem); line-height: 1.15; letter-spacing: -.02em; margin: 0 0 1rem; }
     .hero h1 em { font-style: normal; background: linear-gradient(92deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
-    .hero p.sub { font-size: 1.15rem; color: var(--muted); max-width: 44rem; margin: 0 auto 2rem; }
-    .cta { display: inline-block; text-decoration: none; font-weight: 600;
-      background: var(--accent); color: #fff; padding: .8rem 1.6rem; border-radius: 12px; }
+    .hero p.sub { font-size: 1.15rem; color: var(--muted); max-width: 44rem; margin: 0 auto .5rem; }
+    .hero p.sub2 { color: var(--muted); margin: 0 auto 1.8rem; }
+    .cta-row { display: flex; flex-wrap: wrap; gap: .7rem; justify-content: center; }
+    .cta { display: inline-block; text-decoration: none; font-weight: 600; font-size: 1rem;
+      padding: .8rem 1.5rem; border-radius: 12px; }
     .cta:hover { filter: brightness(1.08); }
-    .cta.ghost { background: transparent; color: inherit; border: 1px solid var(--line); margin-left: .6rem; }
-    .hero-art { margin: 2.6rem auto 0; max-width: 44rem; }
-    .hero-art img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 14px; }
-    .demo { margin: 2.2rem auto 0; max-width: 40rem; text-align: left; border: 1px solid var(--line);
-      border-radius: 14px; background: var(--card); padding: 1rem 1.2rem; font-size: .95rem; }
-    .demo .you { color: var(--muted); }
-    .demo .you b { color: inherit; }
-    .demo .reply { margin-top: .5rem; }
+    .cta.find { background: var(--btn-find-bg); color: var(--btn-find-fg); }
+    .cta.sell { background: var(--btn-sell-bg); color: var(--btn-sell-fg); }
+    .cta.build { background: var(--btn-build-bg); color: var(--btn-build-fg); }
+    /* THI-389 working demo: real search on the homepage, no signup. */
+    .demo-live { border: 1px solid var(--line); border-radius: 16px; background: var(--card);
+      padding: 1.4rem 1.5rem 1.2rem; margin: .6rem auto 0; max-width: 46rem; }
+    .demo-live h2 { font-size: 1.25rem; margin: 0 0 .2rem; letter-spacing: -.01em; }
+    .demo-live .label { color: var(--muted); font-size: .92rem; margin: 0 0 .9rem; }
+    .chips { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 .9rem; }
+    .chip { display: inline-block; font: inherit; font-size: .85rem; text-decoration: none; cursor: pointer;
+      color: inherit; border: 1px solid var(--line); background: transparent; border-radius: 999px;
+      padding: .3rem .8rem; }
+    .chip:hover { border-color: var(--accent); color: inherit; }
+    .demo-live form { display: flex; gap: .5rem; }
+    .demo-live input { flex: 1; min-width: 0; font: inherit; padding: .65rem .9rem; border-radius: 10px;
+      border: 1px solid var(--line); background: transparent; color: inherit; }
+    .demo-live input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .demo-live button { font: inherit; font-weight: 600; border: none; border-radius: 10px; cursor: pointer;
+      padding: .65rem 1.2rem; background: var(--accent); color: #fff; }
+    .demo-live .caption { color: var(--muted); font-size: .9rem; margin: .9rem 0 0; }
+    .demo-live .caption a { color: var(--accent); }
+    .demo-results { margin-top: .8rem; font-size: .95rem; }
+    .demo-results .empty { color: var(--muted); margin: .4rem 0; }
+    .demo-results .result { display: flex; gap: .8rem; align-items: center; border: 1px solid var(--line);
+      border-radius: 10px; padding: .5rem .7rem; margin: .45rem 0; text-decoration: none; color: inherit; }
+    .demo-results .result:hover { border-color: var(--accent); }
+    .demo-results .result img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; flex: none; }
+    .demo-results .result .ph { width: 44px; height: 44px; border-radius: 8px; flex: none;
+      background: var(--card); display: grid; place-items: center; }
+    .demo-results .result strong { display: block; }
+    .demo-results .result .meta { color: var(--muted); font-size: .85rem; }
     .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1rem;
       margin: 2.2rem auto 0; max-width: 40rem; text-align: center; }
     .stat { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: .9rem 1rem; }
     .stat .num { display: block; font-size: 1.6rem; font-weight: 750; letter-spacing: -.02em; }
     .stat .lbl { color: var(--muted); font-size: .9rem; }
-    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; padding: 2.5rem 0; }
-    .step { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 1.2rem 1.3rem; }
-    .step .n { font-weight: 750; color: var(--accent); }
-    .step h3 { margin: .3rem 0 .4rem; font-size: 1.02rem; }
-    .step p { margin: 0; color: var(--muted); font-size: .95rem; }
     section.block { padding: 2.2rem 0; border-top: 1px solid var(--line); }
     section.block h2 { font-size: 1.35rem; margin: 0 0 .8rem; letter-spacing: -.01em; }
     section.block p.lead { color: var(--muted); max-width: 46rem; margin: 0 0 1.2rem; }
     .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-    @media (max-width: 44rem) { .cols { grid-template-columns: 1fr; } }
+    @media (max-width: 44rem) { .cols { grid-template-columns: 1fr; } .demo-live form { flex-direction: column; } }
+    .setup { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 1.1rem 1.2rem; }
+    .setup h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+    .setup p { margin: 0; color: var(--muted); font-size: .95rem; }
+    .setup .copy-mcp { display: inline-block; }
+    /* THI-389: three equal path cards (find / sell / build). */
+    .paths { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    @media (max-width: 48rem) { .paths { grid-template-columns: 1fr; } }
+    .path { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 1.2rem 1.3rem; }
+    .path .tag { font-size: .78rem; font-weight: 700; letter-spacing: .06em; }
+    .path h3 { margin: .25rem 0 .35rem; font-size: 1.1rem; }
+    .path p { margin: 0 0 .6rem; color: var(--muted); font-size: .95rem; }
+    .path ul { list-style: none; padding: 0; margin: 0 0 .9rem; }
+    .path ul li { margin: .4rem 0; padding-left: 1.4rem; position: relative; color: var(--muted); font-size: .92rem; }
+    .path ul li::before { content: "✓"; position: absolute; left: 0; font-weight: 700; }
+    .path.find .tag, .path.find ul li::before { color: var(--accent); }
+    .path.sell .tag, .path.sell ul li::before { color: var(--accent-2); }
+    .path.build .tag, .path.build ul li::before { color: var(--ink); }
+    .path a.cta { font-size: .95rem; padding: .55rem 1rem; }
     pre { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1rem; overflow-x: auto; font-size: .85rem; }
     code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .88em; }
-    ul.checks { list-style: none; padding: 0; margin: 0; }
-    ul.checks li { margin: .45rem 0; padding-left: 1.5rem; position: relative; }
-    ul.checks li::before { content: "✓"; position: absolute; left: 0; color: var(--accent); font-weight: 700; }
     footer { border-top: 1px solid var(--line); margin-top: 2.5rem; padding: 1.4rem 0 2.5rem; color: var(--muted); font-size: .92rem; }
     footer a { color: inherit; }
     a.inline { color: var(--accent); }
@@ -107,60 +148,96 @@
   </header>
 
   <div class="hero">
-    <h1>Sell your things by<br><em>telling your AI</em></h1>
-    <p class="sub">Thingery is the open item database and MCP server for AI agents to list, find,
-    and trade second-hand goods. No forms, no photo uploads, no category hunting —
-    one sentence to your assistant, and your thing is listed.</p>
-    <a class="cta" href="/login.html">Get started in one minute</a>
-    <a class="cta ghost" href="/browse">Browse listings</a>
-    <a class="cta ghost" href="/chat.html">Try the chat assistant</a>
-
-    <figure class="hero-art">
-      <img src="/assets/hero-brand.webp" alt="Thingery — the AI marketplace for used objects" width="1683" height="935" decoding="async">
-    </figure>
-
-    <div class="demo">
-      <div class="you"><b>You:</b> “Sell my Diplomat fountain pen, Marrakesh brown, good condition, 120&nbsp;euros.”</div>
-      <div class="reply"><b>Your assistant:</b> “Listed ✓ <a class="inline" href="/browse">thingery.dev/item/83bd7e90</a> — Diplomat Excellence A2, EUR 120.00, condition: good, ships as a locker parcel. Want me to tweak the price?”</div>
+    <h1>Find, sell, and trade second-hand things — <em>just by talking to your AI</em></h1>
+    <p class="sub">Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.</p>
+    <p class="sub2">Browse it like any marketplace, or plug it into your assistant and go hands-free.</p>
+    <div class="cta-row">
+      <a class="cta find" href="/browse">Find an item</a>
+      <a class="cta sell" href="/chat.html">Sell an item</a>
+      <a class="cta build" href="#build">Build with Thingery</a>
     </div>
   </div>
 
-  <div class="stats" id="platform-stats" hidden aria-label="Platform usage">
-    <div class="stat"><span class="num" id="stat-items">–</span><span class="lbl">items listed</span></div>
-    <div class="stat"><span class="num" id="stat-agents">–</span><span class="lbl">agents connected</span></div>
-    <div class="stat"><span class="num" id="stat-users">–</span><span class="lbl">users</span></div>
-  </div>
+  <section class="demo-live" id="demo" aria-label="Live demo">
+    <h2>Try it right now</h2>
+    <p class="label">Live demo — searching needs no account</p>
+    <div class="chips">
+      <button class="chip" type="button" data-q="Find me a used film camera under €300">🔍 Find me a used film camera under €300</button>
+      <a class="chip" href="/chat.html" title="Opens the full assistant">🏷️ Sell my Diplomat fountain pen, Marrakesh brown, good condition, 120 euros</a>
+    </div>
+    <form id="demo-search" action="/browse" method="get">
+      <input name="q" id="demo-q" placeholder="Search listings… e.g. film camera under €300" autocomplete="off" aria-label="Search listings">
+      <button type="submit">Search</button>
+    </form>
+    <div class="demo-results" id="demo-results" aria-live="polite"></div>
+    <p class="caption">Search is free and instant. To publish a listing you'll create a free account (email + password) and snap one photo — listings need a photo to go live. Want the full hands-free experience? <a href="/chat.html">Open the full assistant →</a></p>
+  </section>
 
-  <div class="steps">
-    <div class="step"><span class="n">1</span><h3>Create a free account</h3><p>Email and password. You get your API key instantly — <a class="inline" href="/login.html">60 seconds, no card</a>.</p></div>
-    <div class="step"><span class="n">2</span><h3>Connect your assistant</h3><p>Paste <code>https://thingery.dev/mcp</code> into your MCP host and <strong>sign in — no API key needed</strong> (Claude Desktop, ChatGPT connectors, VS Code and Inspector support it). Prefer a key? Your personal config is on the account page. Runs on your assistant's own quota — we never charge for AI.</p></div>
-    <div class="step"><span class="n">3</span><h3>Say “sell this”</h3><p>Your agent identifies the item, writes the listing, prices it, and publishes. Buyers' agents find it and negotiate. You get a link to share.</p></div>
-  </div>
+  <section class="block" id="build">
+    <h2>Fastest setup</h2>
+    <div class="cols">
+      <div class="setup">
+        <h3>Use your own AI</h3>
+        <p>Paste <code class="copy-mcp">https://thingery.dev/mcp</code> into your MCP host — Claude Desktop, ChatGPT connectors, VS Code, Inspector — and sign in. One click, no API key.</p>
+      </div>
+      <div class="setup">
+        <h3>Run your own</h3>
+        <p>Open source (Apache-2.0). One command: <code>npx thingery</code></p>
+      </div>
+    </div>
+    <p style="margin:.9rem 0 0"><a class="inline" href="https://github.com/thingery/thingery#quickstart">Full quickstart on GitHub →</a></p>
+  </section>
+
+  <section class="block" id="paths">
+    <h2>Three ways in</h2>
+    <div class="paths">
+      <div class="path find">
+        <span class="tag">FIND AN ITEM</span>
+        <h3>Find an item</h3>
+        <p>Ask in plain words. Your assistant searches the whole catalog and proposes the best match — price, condition, specs.</p>
+        <ul>
+          <li>Semantic search — "used film camera under €300" just works</li>
+          <li>A public, shareable page for every item</li>
+          <li>Zero-config chat at <code>/chat</code> — no account needed to search</li>
+        </ul>
+        <a class="cta find" href="/browse">Browse items</a>
+      </div>
+      <div class="path sell">
+        <span class="tag">SELL AN ITEM</span>
+        <h3>Sell an item</h3>
+        <p>One sentence to your assistant: it identifies the item, writes the listing, prices it, and publishes with a shareable link.</p>
+        <ul>
+          <li>No forms, no category hunting — your agent does the typing</li>
+          <li>Snap one photo to publish (that's all a listing needs)</li>
+          <li>Free for sellers — mark reserved or sold any time</li>
+        </ul>
+        <a class="cta sell" href="/chat.html">List your first item</a>
+      </div>
+      <div class="path build">
+        <span class="tag">BUILD WITH THINGERY</span>
+        <h3>Build with Thingery</h3>
+        <p>Every capability is an MCP tool on an open item database. Point any MCP client at it — or self-host the whole marketplace.</p>
+        <ul>
+          <li>Standard Streamable HTTP MCP + one-click OAuth (PKCE)</li>
+          <li>Open data surface: <code>llms.txt</code>, <code>agents.json</code>, public search</li>
+          <li>Apache-2.0 · self-host in one command: <code>npx thingery</code></li>
+        </ul>
+        <a class="cta build" href="https://github.com/thingery/thingery#quickstart">Read the quickstart</a>
+      </div>
+    </div>
+
+    <div class="stats" id="platform-stats" hidden aria-label="Platform usage">
+      <div class="stat"><span class="num" id="stat-items">–</span><span class="lbl">items listed</span></div>
+      <div class="stat"><span class="num" id="stat-agents">–</span><span class="lbl">agents connected</span></div>
+      <div class="stat"><span class="num" id="stat-users">–</span><span class="lbl">users</span></div>
+    </div>
+  </section>
 
   <section class="block">
     <h2>Why a database, not another marketplace app?</h2>
     <p class="lead">Marketplaces lock your items behind their forms and their apps. Thingery is
     infrastructure: one open catalog that <em>any</em> AI agent can publish to and search — today's
     assistants and tomorrow's, on your phone or self-hosted. Your things become addressable with a URL.</p>
-    <div class="cols">
-      <div>
-        <h3 style="font-size:1.02rem;margin:0 0 .4rem">For humans</h3>
-        <ul class="checks">
-          <li>Listing in one sentence, from your chat window</li>
-          <li>Public pages for every item — shareable, crawlable</li>
-          <li>Free forever for buyers and sellers</li>
-        </ul>
-      </div>
-      <div>
-        <h3 style="font-size:1.02rem;margin:0 0 .4rem">For agents &amp; developers</h3>
-        <ul class="checks">
-          <li>Seven MCP tools, standard Streamable HTTP</li>
-          <li>OAuth one-click sign-in for MCP hosts (PKCE, auto-rotating tokens, revoke at <code>/apps</code>)</li>
-          <li>Self-describing schema (<code>describe_category</code>)</li>
-          <li>Self-host in one command: <code>npx thingery</code></li>
-        </ul>
-      </div>
-    </div>
   </section>
 
   <section class="block">
@@ -185,6 +262,7 @@
   </div>
 
   <script src="/legacy-item-redirect.js"></script>
+  <script src="/home-demo.js" defer></script>
   <script src="/stats.js" defer></script>
   <script src="/build-info.js" defer></script>
 </body>

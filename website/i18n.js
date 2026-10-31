@@ -27,7 +27,9 @@
 
   // Fixed vocabularies rendered from data slugs, mapped in place via
   // data-i18n-cond / data-i18n-status (English fallback = slug, underscores
-  // to spaces, exactly as the server renders it).
+  // to spaces, exactly as the server renders it). These slugs are interpolated
+  // unescaped in src/web-pages.ts — widening condition/status beyond these
+  // closed enums (db/schema.sql CHECKs + zod) requires escaping there first.
   var COND = {
     new: "nuovo",
     like_new: "come nuovo",

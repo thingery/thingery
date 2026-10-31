@@ -279,6 +279,48 @@ describe.skipIf(!available)("wanted response loop (DB)", () => {
     expect((await listWantedResponses(outsider, wantedId)).responses).toHaveLength(0);
   });
 
+  // THI-442 rider W4 regression: responses-per-wanted is bounded per seller
+  // (3) but NOT across sellers, so the buyer's read must bound its own
+  // payload — latest 20 + exact total. 25 sellers × 1 published response
+  // each: the window is the newest 20 (the oldest response falls out) and
+  // a caller asking for more still gets 20. Fails against an unclamped
+  // read (API4:2023 Unrestricted Resource Consumption — griefer-seller
+  // bloat of the buyer's protected read).
+  it("W4: 25 published responses clamp to the newest 20 with an exact total", async () => {
+    const buyer = await seedPerson("rb-w4");
+    const wantedId = await seedWanted(buyer, "W4 window probe wanted");
+    const itemIds: string[] = [];
+    for (let i = 0; i < 25; i++) {
+      const seller = await seedPerson(`rs-w4-${i}`);
+      const { item } = await respondToWanted(
+        seller,
+        wantedId,
+        listing(`W4 window probe listing ${i}`, [`https://cdn.t.dev/w4-${i}.jpg`]),
+      );
+      itemIds.push(item.id);
+    }
+
+    const page = await listWantedResponses(buyer, wantedId);
+    expect(page.total).toBe(25); // exact count beside the truncated window
+    expect(page.responses).toHaveLength(20); // clamped, not 25
+    expect(page.responses[0].item.id).toBe(itemIds[24]); // newest first
+    expect(page.responses.map((r) => r.item.id)).not.toContain(itemIds[0]); // oldest fell out
+
+    // A caller asking for more than 20 still gets 20 (clamp, not default).
+    const greedy = await listWantedResponses(buyer, wantedId, { limit: 100 });
+    expect(greedy.responses).toHaveLength(20);
+    expect(greedy.total).toBe(25);
+
+    // markRead stamps only the returned window.
+    const marked = await listWantedResponses(buyer, wantedId, { markRead: true });
+    expect(marked.markedRead).toBe(20);
+    const unread = await client.query<{ n: string }>(
+      `SELECT count(*) AS n FROM wanted_responses WHERE wanted_item_id = $1 AND read_at IS NULL`,
+      [wantedId],
+    );
+    expect(unread.rows[0].n).toBe("5"); // the 5 outside the window stay unread
+  });
+
   it("graceful degradation: link-row insert failure keeps the listing, logs, returns empty response id", async () => {
     const buyer = await seedPerson("rb-g");
     const seller = await seedPerson("rs-g");

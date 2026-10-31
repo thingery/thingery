@@ -8,6 +8,7 @@ import { pool, type ItemRow } from "./db.js";
 import { evaluateListingForIntents } from "./intents.js";
 import { visibleInFeeds } from "./items.js";
 import { logSecurityEvent, type SecurityEventReason } from "./security-events.js";
+import { markWantedResponsesPublished } from "./wanted.js";
 
 // --- startup hardening (spec THI-156 rev 2, Security review THI-159 F2/F4) ---
 //
@@ -300,6 +301,20 @@ export async function addItemImage(
       }
     } catch (err) {
       console.error("buyer-intent evaluation failed (publish unaffected)", err instanceof Error ? err.message : err);
+    }
+    // THI-439 §5 (B4, PR 3): first-photo publish also stamps pending
+    // wanted_responses — the respond-without-photo flow's buyer notification
+    // moment (ADR 0007). Same never-fail contract as the fanout above.
+    try {
+      const stamped = await markWantedResponsesPublished(itemId);
+      if (stamped > 0) {
+        logSecurityEvent(
+          { type: "wanted_response", action: "publish", outcome: "success", count: stamped },
+          { sellerId },
+        );
+      }
+    } catch (err) {
+      console.error("wanted-response stamping failed (publish unaffected)", err instanceof Error ? err.message : err);
     }
   }
   return { url };

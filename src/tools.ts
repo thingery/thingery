@@ -5,6 +5,7 @@ import { getCategory, getItem, createItem, listCategories, ListingLimitError, my
 import { validateAttributes, AttributeValidationError, attributeShapeErrors, type Attributes } from "./attributes.js";
 import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
 import { addItemImageBase64 } from "./images.js";
+import { respondToWanted, WantedResponseError } from "./wanted-responses.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
 import { cancelOrder, createOrder, getOrderView, OrderFlowError } from "./order-flow.js";
@@ -48,6 +49,9 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   "delete_intent",
   // THI-360 PR 4: the buyer's match inbox is per-account data too.
   "my_matches",
+  // THI-439 (B4): the response loop writes a listing on the caller's
+  // behalf — per-account write surface, same 401-challenge treatment.
+  "respond_to_wanted",
 ]);
 
 // H5.3 provenance marker (docs/security.md §6 H5, fix 3; spec THI-109): the
@@ -329,6 +333,100 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
           return err(describeError(e), e.code);
         }
         return err(`create_listing failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "respond_to_wanted",
+    {
+      title: "Respond to a wanted listing",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "Seller side of the wanted board: reply to a buyer's wanted (I have this) by creating a " +
+        "real listing for them. Creates the listing on the seller's full rails (photo gate, caps — " +
+        "same rules as create_listing) and links it as a response to the wanted; the buyer sees it " +
+        "when it publishes. Price the item within the buyer's stated budget when one is given. " +
+        "Requires seller authentication (Bearer API key). " + CONTENT_PROVENANCE_NOTE,
+      inputSchema: {
+        wanted_id: z.string().uuid().describe("The wanted to respond to (from search_wanted / get_wanted)"),
+        title: z.string().min(3).max(200).describe("Listing title, e.g. 'Nintendo Switch OLED, boxed'"),
+        description: z.string().max(5000).default("").describe("Honest description incl. flaws"),
+        category: z.string().min(2).max(40).default("other"),
+        condition: z.enum(CONDITIONS).default("good"),
+        brand: z.string().max(80).optional(),
+        price_cents: z.number().int().min(0).describe("Asking price in cents — check the wanted's budget"),
+        currency: z.string().length(3).default("EUR"),
+        location: z.string().max(120).optional(),
+        weight_grams: z.number().int().min(1).optional(),
+        dimensions_mm: z.string().max(40).optional(),
+        shipping_tier: z.enum(SHIPPING_TIERS).default("unknown"),
+        images: z.array(
+          z.string().url().max(2048).refine(
+            (v) => /^https?:\/\//i.test(v),
+            "image URLs must be http(s)",
+          ),
+        ).max(12).default([]).describe("Image URLs (http/https only) — the first photo publishes the response"),
+        attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const { item, response } = await respondToWanted(
+          seller.id,
+          args.wanted_id as string,
+          {
+            title: args.title as string,
+            description: (args.description as string) ?? "",
+            category: (args.category as string) ?? "other",
+            condition: (args.condition as string) ?? "good",
+            brand: (args.brand as string) ?? null,
+            price_cents: args.price_cents as number,
+            currency: ((args.currency as string) ?? "EUR").toUpperCase(),
+            location: (args.location as string) ?? null,
+            weight_grams: (args.weight_grams as number | undefined) ?? null,
+            dimensions_mm: (args.dimensions_mm as string) ?? null,
+            shipping_tier: (args.shipping_tier as string) ?? "unknown",
+            images: (args.images as string[]) ?? [],
+            attributes: args.attributes as Attributes | undefined,
+          },
+        );
+        const publicItem = itemToPublic(item);
+        const visible = visibleInFeeds(item);
+        return ok({
+          created: true,
+          response_id: response.id || null, // null when the link row degraded (listing still created)
+          wanted_id: args.wanted_id,
+          seller: seller.display_name,
+          item: { ...publicItem, content_provenance: "user_generated" },
+          published: response.published_at !== null,
+          next_steps: visible
+            ? [
+                "The listing is live and linked — the buyer sees it in their wanted's responses",
+              ]
+            : [
+                "The response is pending: add the first photo with add_item_image — publishing it notifies the buyer",
+              ],
+        });
+      } catch (e) {
+        // Typed rejections carry their own machine-readable codes (not_found,
+        // own_wanted, not_active, response_limit); createItem rails can still
+        // throw ListingLimitError underneath — same bare-message treatment
+        // as create_listing (THI-113 parity).
+        if (e instanceof WantedResponseError) {
+          return err(describeError(e), e.code);
+        }
+        if (e instanceof ListingLimitError) {
+          return err(describeError(e), e.code);
+        }
+        return err(`respond_to_wanted failed: ${describeError(e)}`);
       }
     },
   );

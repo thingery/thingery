@@ -81,7 +81,7 @@ export type SecurityEvent =
    *  first becomes feed-visible (the idempotent photo-publish stamp).
    *  Seller id only; the publish line carries the stamped count as a number,
    *  never listing or wanted payload. */
-  | { type: "wanted_response"; action: "respond" | "publish"; outcome: "success" | "rejected"; count?: number }
+  | { type: "wanted_response"; action: "respond" | "publish"; outcome: "success" | "rejected" | "degraded"; count?: number }
   | { type: "image_upload"; outcome: "success" | "rejected"; reason?: SecurityEventReason }
   /** THI-180 §3.3 (rev 2): one line per LLM-backed chat turn. Numbers and
    *  slugs only — `model` is the resolved config string (credential ?? env,

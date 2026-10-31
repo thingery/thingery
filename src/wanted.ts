@@ -10,7 +10,6 @@
 import { pool, CONDITIONS } from "./db.js";
 import { embedText } from "./embed.js";
 import { logSecurityEvent } from "./security-events.js";
-import { getCategory } from "./items.js";
 import { screenContactInfo, contactInfoMessage } from "./contact-scrub.js";
 
 // Fan-out controls (spec §3.3 — Security-owned numbers, THI-442 review gate):
@@ -195,10 +194,15 @@ async function validateWantedFields(input: CreateWantedInput): Promise<{
   }
 
   // Category registry check — same check + available-list error as
-  // create_listing (spec §3.1). 'other' is the registry default.
+  // create_listing (spec §3.1). 'other' is the registry default. Queried
+  // directly (not via items.ts getCategory) to keep this module a leaf —
+  // items.ts imports wanted.ts for the publish-stamp hook (PR 3).
   const category = (input.category ?? "other").toLowerCase();
-  const categoryRow = await getCategory(category);
-  if (!categoryRow) {
+  const { rows: catRows } = await pool.query<{ name: string }>(
+    `SELECT name FROM categories WHERE name = $1`,
+    [category],
+  );
+  if (catRows.length === 0) {
     throw new WantedValidationError(`Unknown category '${category}'. Use describe_category to list them.`);
   }
 
@@ -644,4 +648,22 @@ export function wantedToPublic(wanted: WantedRow) {
     ),
     url: `${publicBaseUrl()}/wanted/${id}`,
   };
+}
+
+
+/** Publish stamping (spec §5 publish hook, consumed by createItem and
+ *  addItemImage in PR 3): when a listing becomes feed-visible (create with
+ *  photos, or the first-photo publish), every pending response for that item
+ *  is stamped now — once, idempotently. `published_at IS NULL` keeps
+ *  re-publishes (and a respond-birth stamp racing this hook) from
+ *  double-stamping. Pool-only on purpose: wanted.ts stays a leaf module so
+ *  items.ts can import this without a cycle. Returns how many rows stamped
+ *  so callers log counts only (no payload, docs/security.md §6). */
+export async function markWantedResponsesPublished(itemId: string): Promise<number> {
+  const { rowCount } = await pool.query(
+    `UPDATE wanted_responses SET published_at = now()
+     WHERE item_id = $1 AND published_at IS NULL`,
+    [itemId],
+  );
+  return rowCount ?? 0;
 }

@@ -110,6 +110,8 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   "my_intents",
   "update_intent",
   "delete_intent",
+  // THI-360 spec rev 2 PR 4: the buyer's match inbox joins the funnel.
+  "my_matches",
 ]);
 
 /** Credential kind from the Authorization header prefix — mirrors the

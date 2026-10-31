@@ -79,7 +79,9 @@ describe.skipIf(!available)("PROTECTED_TOOLS annotation (F7)", () => {
   it("covers the current seller-owned tools (spec §2.10c)", () => {
     for (const name of ["create_listing", "add_item_image", "my_listings", "update_listing",
       // THI-360 PR 2: buyer-alert intent tools carry per-account data too.
-      "save_intent", "my_intents", "update_intent", "delete_intent"]) {
+      "save_intent", "my_intents", "update_intent", "delete_intent",
+      // THI-360 PR 4: the buyer's match inbox.
+      "my_matches"]) {
       expect(PROTECTED_TOOLS.has(name)).toBe(true);
     }
   });

@@ -209,6 +209,115 @@ export async function deleteIntent(intentId: string, buyerId: string): Promise<b
   return rows.length > 0;
 }
 
+/** One match row as my_matches returns it (PR 4 of 5): the joined intent
+ *  and item rows shaped for intentToPublic / itemToPublic. `read` is the
+ *  fetch-time state; item columns are selected explicitly — the embedding
+ *  vector is never fetched, so it cannot leak into tool output (R4). */
+export interface MatchRow {
+  id: string;
+  score: number;
+  read: boolean;
+  created_at: Date;
+  intent: IntentRow;
+  item: ItemRow & { seller_payout_ready?: boolean };
+}
+
+/** Reads the caller's match inbox newest-first (spec THI-360 §5 tool 5).
+ *  Scoped WHERE buyer_id = caller; matches whose item has since been
+ *  soft-deleted are silently skipped. unread_only keeps read_at IS NULL
+ *  rows. mark_read stamps read_at = now() on the returned unread rows only —
+ *  the `read_at IS NULL` guard makes read → read a no-op (never an error)
+ *  and the deliberately absent un-read transition cannot be expressed.
+ *  Returns the page plus how many rows the mark touched. */
+export async function listMatches(
+  buyerId: string,
+  opts: { limit: number; unreadOnly: boolean; markRead: boolean },
+): Promise<{ matches: MatchRow[]; markedRead: number }> {
+  // Explicit aliases, never SELECT *: three joined tables share column
+  // names (id/created_at/currency/…) and node-postgres keeps only the last
+  // of a duplicated name — a collision here would silently swap fields.
+  const { rows } = await pool.query<Record<string, unknown>>(
+    `SELECT m.id AS match_id, m.score, m.read_at, m.created_at AS match_created_at,
+            bi.id AS intent_id, bi.q, bi.category AS intent_category,
+            bi.condition AS intent_condition, bi.min_price_cents, bi.max_price_cents,
+            bi.currency AS intent_currency, bi.shipping_tier AS intent_shipping_tier,
+            bi.attributes AS intent_attributes, bi.muted,
+            bi.created_at AS intent_created_at, bi.updated_at AS intent_updated_at,
+            i.id AS item_id, i.seller_id, i.title, i.description, i.category, i.condition,
+            i.brand, i.price_cents, i.currency, i.location, i.weight_grams, i.dimensions_mm,
+            i.shipping_tier, i.shipping_price_cents, i.images, i.attributes, i.status,
+            i.photo_required, i.created_at,
+            (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL)
+              AS seller_payout_ready
+     FROM intent_matches m
+     JOIN buyer_intents bi ON bi.id = m.intent_id
+     JOIN items i ON i.id = m.item_id
+     JOIN sellers s ON s.id = i.seller_id
+     WHERE m.buyer_id = $1
+       AND i.status <> 'deleted'
+       ${opts.unreadOnly ? "AND m.read_at IS NULL" : ""}
+     ORDER BY m.created_at DESC
+     LIMIT $2`,
+    [buyerId, opts.limit],
+  );
+  const matches: MatchRow[] = rows.map((r) => ({
+    id: r.match_id as string,
+    score: r.score as number,
+    read: r.read_at !== null,
+    created_at: r.match_created_at as Date,
+    intent: {
+      id: r.intent_id as string,
+      buyer_id: buyerId,
+      q: r.q as string | null,
+      category: r.intent_category as string | null,
+      condition: r.intent_condition as string | null,
+      min_price_cents: r.min_price_cents as number | null,
+      max_price_cents: r.max_price_cents as number | null,
+      currency: r.intent_currency as string,
+      shipping_tier: r.intent_shipping_tier as string | null,
+      attributes: r.intent_attributes as Record<string, unknown>,
+      muted: r.muted as boolean,
+      created_at: r.intent_created_at as Date,
+      updated_at: r.intent_updated_at as Date,
+    },
+    item: {
+      id: r.item_id as string,
+      seller_id: r.seller_id as string,
+      title: r.title as string,
+      description: r.description as string,
+      category: r.category as string,
+      condition: r.condition as string,
+      brand: r.brand as string | null,
+      price_cents: r.price_cents as number,
+      currency: r.currency as string,
+      location: r.location as string | null,
+      weight_grams: r.weight_grams as number | null,
+      dimensions_mm: r.dimensions_mm as string | null,
+      shipping_tier: r.shipping_tier as string,
+      shipping_price_cents: r.shipping_price_cents as number,
+      images: r.images as string[],
+      attributes: r.attributes as Record<string, unknown>,
+      status: r.status as string,
+      photo_required: r.photo_required as boolean,
+      created_at: r.created_at as Date,
+      seller_payout_ready: r.seller_payout_ready as boolean,
+    },
+  }));
+  let markedRead = 0;
+  if (opts.markRead) {
+    const ids = matches.filter((m) => !m.read).map((m) => m.id);
+    if (ids.length > 0) {
+      const marked = await pool.query(
+        `UPDATE intent_matches SET read_at = now()
+         WHERE buyer_id = $1 AND id = ANY($2::uuid[]) AND read_at IS NULL`,
+        [buyerId, ids],
+      );
+      markedRead = marked.rowCount ?? 0;
+    }
+  }
+  return { matches, markedRead };
+}
+
 /**
  * Match evaluation at publish (spec THI-360 §3.2/§6, PR 3 of 5): one bounded,
  * idempotent, replay-safe INSERT…SELECT that records a match for every

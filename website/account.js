@@ -23,6 +23,28 @@ const resumeNext = () => {
   return false;
 };
 
+// THI-441 (B3, spec THI-439 §6.4): seller demand strip. One read-only
+// fetch of /wanted/demand.json (active wanteds per category); hidden while
+// empty — including while the wanted backend (THI-440) has not landed, so
+// the account page never shows stale or synthetic demand. Growth uses this
+// line for seller outreach ("3 buyers want a Nintendo Switch …").
+async function loadWantedDemand() {
+  try {
+    const res = await fetch("/wanted/demand.json");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data || !data.total || !Array.isArray(data.demand) || !data.demand.length) return;
+    const chips = data.demand.map((row) => `${row.category}: ${row.count}`).join(" · ");
+    const top = data.demand[0];
+    $("wanted-demand").textContent =
+      `${data.total} buyer${data.total === 1 ? "" : "s"} currently ${data.total === 1 ? "wants" : "want"} ` +
+      `things like ${top.example_title} — ${chips}`;
+    $("wanted-strip").hidden = false;
+  } catch {
+    /* strip stays hidden — demand is a bonus, never a blocker */
+  }
+}
+
 async function checkSession() {
   const res = await fetch("/api/me");
   const data = await res.json();
@@ -38,6 +60,7 @@ function showDone(seller) {
   $("welcome").textContent = `Logged in as ${seller.name}`;
   loadByo();
   loadChatgpt();
+  loadWantedDemand();
 
   const mcpUrl = `${location.origin}/mcp`;
   $("mcp-url").textContent = mcpUrl;

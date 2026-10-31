@@ -141,6 +141,21 @@ URLs — a spam listing can prepend one URL and be visible. Requiring a server-s
 photo was rejected (breaks legitimate external-image MCP listings, near-zero anti-spam
 gain); the per-seller velocity caps above remain the spam control. *Lens: API6:2023.*
 
+**Intent spam — buyer alerts (THI-360).** Saved buyer intents open a reach channel into
+buyer-agent context: a hostile seller can craft listings to match saved intents
+(keyword-stuffed titles, floor-price items) so their content surfaces unsolicited in
+the next `my_matches` pull. Bounded (spec rev 2, Security-approved THI-380): ≤ 10 new
+matches per buyer per day (checked per publish statement — approximate, the documented
+pragmatic-90% posture: a buyer with many simultaneously matching intents can overshoot
+slightly), exactly-once dedupe per (intent, item) via unique constraint,
+≤ 100 matches per published listing, self-exclusion (sellers never match their own
+listings), per-intent mute/delete, and 30 d read / 180 d any retention sweeps
+(`src/intents.ts`, `src/intent-sweep.ts`). Output discipline: match items go through
+`itemToPublic` with `content_provenance: "user_generated"` and the
+`CONTENT_PROVENANCE_NOTE` — data only, exactly like `get_item`. Every intent write
+emits an `intent_write` security event (buyer id only — never the query or filters).
+*Lens: LLM01 prompt injection via unsolicited content (H5 family), API4:2023.*
+
 **Fake sellers.** Signup (`src/routes.ts` `/api/signup`) requires only a syntactically
 valid email — no verification mail, no CAPTCHA, no identity proof. The account is
 immediately issued an API key. Throwaway identities are free. The one control in place
@@ -481,7 +496,7 @@ worst-case damage, "Exploitability" is how practical the attack is today.
      is `ListingLimitError` → MCP code `rate_limited`, logged as a rejected `listing_write`
      security event. Fixes 3–4 below remain open.
   2. Security event logging as structured JSON lines (signup, login success/failure,
-     rate-limit rejections, listing create/update/delete, image upload) — never logging
+     rate-limit rejections, listing create/update/delete, image upload, intent writes) — never logging
      secrets or full payloads. Ship to stdout; Caddy/Docker capture is enough for now.
   3. A takedown path: an operator-only way to mark a seller/listing `deleted` (even a
      documented SQL runbook is acceptable for v1) — plus a `report` affordance for

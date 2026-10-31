@@ -8,6 +8,7 @@ import { sellerFromApiKey } from "./auth.js";
 import { mcpRoutes } from "./mcp-gate.js";
 import { asyncHandler, mountOauthRoutes } from "./oauth.js";
 import { startOauthSweepTimer } from "./oauth-sweep.js";
+import { startIntentSweepTimer } from "./intent-sweep.js";
 import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
 import { mountApiRoutes } from "./routes.js";
@@ -18,7 +19,18 @@ import { logConfigBootReport, orderFlowConfig } from "./config.js";
 import { startSweepScheduler } from "./orders-sweep.js";
 import { statsHandler } from "./stats.js";
 import { homeSearchHandler } from "./home-search.js";
-import { browsePage, itemPage, orderReturnPage, payoutSetupReturnPage, websiteErrorMiddleware } from "./web-pages.js";
+import {
+  browsePage,
+  itemPage,
+  orderReturnPage,
+  payoutSetupReturnPage,
+  wantedBoardPage,
+  wantedDetailPage,
+  wantedMinePage,
+  wantedNewPage,
+  websiteErrorMiddleware,
+} from "./web-pages.js";
+import { wantedDemandHandler } from "./wanted-feed.js";
 import { uploadsDir } from "./images.js";
 import { securityHeaders } from "./security-headers.js";
 import { installProcessSafetyNet } from "./process-safety.js";
@@ -139,6 +151,19 @@ function runHttp(): void {
 
   app.get("/item/:id", asyncHandler(itemPage));
   app.get("/browse", asyncHandler(browsePage));
+  // THI-441 (B2+B3, spec THI-439 §6): wanted listings UX — public demand
+  // board, detail page, zero-result funnel form, my-wanted management.
+  // Server-rendered in web-pages.ts; data flows through src/wanted-feed.ts,
+  // the seam the backend sibling (THI-440) plugs into. Literal paths must
+  // register before /wanted/:id. demand.json is a read-only website asset
+  // consumed by the account page demand strip — mounted at the app root on
+  // the /stats.json + /search.json precedent (THI-389), outside the
+  // protected src/routes.ts router.
+  app.get("/wanted/demand.json", asyncHandler(wantedDemandHandler));
+  app.get("/wanted/new", asyncHandler(wantedNewPage));
+  app.get("/wanted/mine", asyncHandler(wantedMinePage));
+  app.get("/wanted", asyncHandler(wantedBoardPage));
+  app.get("/wanted/:id", asyncHandler(wantedDetailPage));
   // Order return pages (spec THI-3 §4.3 F15). The literal payout-setup route
   // must be registered before the :id pattern to not be captured as an id.
   app.get("/order/payout-setup", asyncHandler(payoutSetupReturnPage));
@@ -160,6 +185,9 @@ function runHttp(): void {
   app.listen(PORT, () => {
     // OAuth retention sweeps (spec THI-11 §4.5): boot run + hourly, unref'd.
     startOauthSweepTimer();
+    // Intent match retention (THI-360 §3.4): read > 30 d, any > 180 d —
+    // boot run + daily, unref'd.
+    startIntentSweepTimer();
     // Order deadline sweeps + webhook reprocessing (spec THI-3 §4.5):
     // boot run + every SWEEP_INTERVAL_MINUTES (10 default), unref'd.
     startSweepScheduler(orderFlowConfig());

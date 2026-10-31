@@ -66,7 +66,12 @@
         "confirm_payment",
         "confirm_receipt",
         "open_dispute",
-        "release_funds"
+        "release_funds",
+        "save_intent",
+        "my_intents",
+        "update_intent",
+        "delete_intent",
+        "my_matches"
       ],
       "order_tools": {
         "get_payout_setup": "seller payout setup: Stripe Express onboarding URL + status; optional, enables platform payment",
@@ -78,6 +83,13 @@
         "confirm_receipt": "buyer confirms delivery -> delivered; dispute window opens",
         "open_dispute": "buyer disputes a delivered order within the window; payout held",
         "release_funds": "buyer waives the dispute window; seller payout released immediately"
+      },
+      "buyer_alert_tools": {
+        "save_intent": "save what the buyer is looking for — a query and/or the same filters as search_items (at least one required; max 25 saved intents, 50 saves/day); new matches appear in my_matches",
+        "my_intents": "the caller's saved intents, newest first, each with its unread-match count and muted state",
+        "update_intent": "mute/unmute an intent; muting stops future matches, existing matches stay readable",
+        "delete_intent": "delete an intent; its matches are removed with it",
+        "my_matches": "new listings matching a saved intent — unread_only, mark_read, limit 1-50 (default 10); item payloads carry content_provenance user_generated"
       },
       "payment_modes": {
         "stripe": "platform Stripe Checkout with buyer protection; requires deployment payments + seller payout onboarding",

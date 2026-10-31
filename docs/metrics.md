@@ -173,7 +173,7 @@ One JSON object per line, stdout, ship path = Docker/Caddy log capture:
 
 - `tool_call` (THI-371): one per `tools/call` message at **dispatch** — the
   request passed every gate and reached the transport. `tool` is one of the
-  16 registered names or the fixed `_unknown` slug — client-controlled
+  21 registered names or the fixed `_unknown` slug — client-controlled
   strings are never logged raw.
 - `tool_result` (THI-394): one per **executed** tool call after the handler
   ran — success, structured error (`ok:false`), or throw. `results`

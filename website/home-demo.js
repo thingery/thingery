@@ -6,6 +6,15 @@
 // text nodes only — no HTML-string sinks — because item titles are
 // user-authored text.
 (function () {
+  // THI-445: runtime strings go through the shared i18n dictionary (EN is
+  // the inline fallback, so this file still works if i18n.js has not run —
+  // e.g. under the DOM-shim unit test).
+  var t = window.__thingeryT || function (key, fallback, params) {
+    if (!params) return fallback;
+    return Object.keys(params).reduce(function (s, k) {
+      return s.split("{" + k + "}").join(params[k]);
+    }, fallback);
+  };
   var form = document.getElementById("demo-search");
   var input = document.getElementById("demo-q");
   var results = document.getElementById("demo-results");
@@ -33,14 +42,15 @@
   }
 
   function money(cents, currency) {
-    return (cents / 100).toLocaleString("en-IE", { minimumFractionDigits: 2 }) + " " + currency;
+    var locale = window.__thingeryI18N && window.__thingeryI18N.lang() === "it" ? "it-IT" : "en-IE";
+    return (cents / 100).toLocaleString(locale, { minimumFractionDigits: 2 }) + " " + currency;
   }
 
   function render(list, q) {
     if (!list.length) {
       note([
-        "No listings match “" + q + "” yet — new items arrive as agents list them. ",
-        link("/browse", "Browse everything →", "inline"),
+        t("demo.empty.pre", "No listings match “" + q + "” yet — new items arrive as agents list them. ", { q: q }),
+        link("/browse", t("demo.empty.link", "Browse everything →"), "inline"),
       ]);
       return;
     }
@@ -64,7 +74,11 @@
       var title = el("strong");
       title.textContent = item.title;
       var meta = el("span", "meta");
-      meta.textContent = [money(item.price_cents, item.currency), String(item.condition).replace(/_/g, " "), item.category]
+      meta.textContent = [
+        money(item.price_cents, item.currency),
+        t("cond." + item.condition, String(item.condition).replace(/_/g, " ")),
+        item.category,
+      ]
         .filter(Boolean)
         .join(" · ");
       body.appendChild(title);
@@ -78,10 +92,10 @@
   function search() {
     var q = input.value.trim();
     if (q.length < 2) {
-      note(["Type at least two characters to search."]);
+      note([t("demo.tooShort", "Type at least two characters to search.")]);
       return;
     }
-    note(["Searching…"]);
+    note([t("demo.searching", "Searching…")]);
     fetch("/search.json?limit=3&q=" + encodeURIComponent(q))
       .then(function (res) {
         if (!res.ok) throw new Error("search " + res.status);
@@ -92,8 +106,8 @@
       })
       .catch(function () {
         note([
-          "Search hiccup on our side — ",
-          link("/browse?q=" + encodeURIComponent(q), "try the browse page →", "inline"),
+          t("demo.error.pre", "Search hiccup on our side — "),
+          link("/browse?q=" + encodeURIComponent(q), t("demo.error.link", "try the browse page →"), "inline"),
         ]);
       });
   }

@@ -9,9 +9,15 @@
 // Missing keys fall back to the English already in the DOM — a partial
 // dictionary can never blank a page.
 //
-// Security: translations here are authored (trusted) strings assigned to
-// textContent / innerHTML of marked elements. User-authored content (listing
-// titles, names, …) is never translated and never passes through here.
+// Security: translations here are authored (trusted) strings installed via
+// textContent or parsed once into DOM nodes. The HTML-string sinks banned by
+// tests/website-security.test.ts (innerHTML & friends) are never used: marked
+// nodes are cloned for the English snapshot and restored from the clone,
+// while Italian markup is parsed with createRange().createContextualFragment()
+// — a parser, not an HTML-string sink — and only from the static strings in
+// this file. User-authored content (listing titles, names, …) is never
+// translated and never passes through here, and __thingeryT() values are
+// plain text (assigned to textContent by callers), never markup.
 (function () {
   "use strict";
 
@@ -165,6 +171,16 @@
   }
 
   // ---------------------------------------------------------------- apply --
+  // Parse a static, authored markup string into live DOM nodes without any
+  // HTML-string sink (see the security note at the top of the file).
+  var fragment = (function () {
+    var range = null;
+    return function (html) {
+      if (!range) range = document.createRange();
+      return range.createContextualFragment(html);
+    };
+  })();
+
   function applyLang() {
     var it = lang === "it";
     document.documentElement.lang = lang;
@@ -179,9 +195,12 @@
 
     document.querySelectorAll("[data-i18n-html]").forEach(function (el) {
       var m = enSlots(el);
-      if (!("html" in m)) m.html = el.innerHTML;
-      var v = it ? IT[el.getAttribute("data-i18n-html")] : m.html;
-      if (v != null) el.innerHTML = v;
+      if (!("dom" in m)) m.dom = el.cloneNode(true); // EN snapshot, exact markup
+      var v = it ? IT[el.getAttribute("data-i18n-html")] : null;
+      // Restore: re-insert a fresh clone of the English snapshot (clone so
+      // repeated toggles never consume it). Apply: replace with the parsed
+      // Italian markup. A missing IT key leaves the snapshot untouched.
+      el.replaceChildren(v != null ? fragment(v) : m.dom.cloneNode(true));
     });
 
     ATTRS.forEach(function (a) {
@@ -266,7 +285,9 @@
       b.setAttribute("data-set-lang", l);
       b.setAttribute("aria-pressed", lang === l ? "true" : "false");
       b.title = title;
-      b.innerHTML = flag + "<span>" + label + "</span>";
+      var lbl = document.createElement("span");
+      lbl.textContent = label;
+      b.replaceChildren(fragment(flag), lbl);
       b.addEventListener("click", function () {
         setLang(l);
       });

@@ -9,7 +9,7 @@
   // THI-445: runtime strings go through the shared i18n dictionary (EN is
   // the inline fallback, so this file still works if i18n.js has not run —
   // e.g. under the DOM-shim unit test).
-  var t = window.__thingeryT || function (key, fallback, params) {
+  var t = globalThis.__thingeryT || function (key, fallback, params) {
     if (!params) return fallback;
     return Object.keys(params).reduce(function (s, k) {
       return s.split("{" + k + "}").join(params[k]);
@@ -42,7 +42,7 @@
   }
 
   function money(cents, currency) {
-    var locale = window.__thingeryI18N && window.__thingeryI18N.lang() === "it" ? "it-IT" : "en-IE";
+    var locale = globalThis.__thingeryI18N && globalThis.__thingeryI18N.lang() === "it" ? "it-IT" : "en-IE";
     return (cents / 100).toLocaleString(locale, { minimumFractionDigits: 2 }) + " " + currency;
   }
 

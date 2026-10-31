@@ -115,6 +115,15 @@
     <h2>You're in</h2>
     <p id="welcome"></p>
 
+    <!-- THI-441 (B3, spec THI-439 §6.4): seller demand strip — live wanted
+         listings per category. Hidden while there is nothing to show (or
+         until the wanted backend, THI-440, lands); account.js fills it from
+         /wanted/demand.json. -->
+    <div id="wanted-strip" hidden>
+      <h2 style="font-size:1.05rem">Buyers are looking for <small>(<a href="/wanted">wanted board →</a>)</small></h2>
+      <p id="wanted-demand" style="font-size:.9rem;opacity:.9"></p>
+    </div>
+
     <h2 style="font-size:1.05rem">Connect your AI assistant <small>(uses your assistant's own quota)</small></h2>
     <ol style="padding-left:1.2rem">
       <li style="margin-bottom:.7rem"><strong>Claude Desktop / Claude Code</strong> — paste this into the MCP config

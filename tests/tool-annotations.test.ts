@@ -41,6 +41,9 @@ const EXPECTED: Record<
   // mark_read stamps read_at — not a pure read, so no readOnlyHint; it
   // deletes nothing (retention sweeps own expiry), so no destructiveHint.
   my_matches: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  // THI-439 (B4, PR 3): respond_to_wanted mints a real listing (plain
+  // write, not destructive — it creates) and links it to the wanted.
+  respond_to_wanted: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 };
 
 const READ_TOOLS = new Set(Object.entries(EXPECTED).filter(([, a]) => a.readOnlyHint).map(([n]) => n));

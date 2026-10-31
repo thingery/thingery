@@ -54,8 +54,19 @@ import { unlink } from "node:fs/promises";
 import path from "node:path";
 import { asyncHandler } from "./oauth.js";
 import { RateLimiter } from "./rate-limit.js";
+import {
+  createWanted,
+  updateWanted,
+  listMyWanted,
+  wantedToPublic,
+  WantedLimitError,
+  WantedValidationError,
+  ContactInfoError,
+  WantedNotFoundError,
+} from "./wanted.js";
+import { saveIntent, IntentLimitError } from "./intents.js";
 import crypto from "node:crypto";
-import { pool } from "./db.js";
+import { pool, CONDITIONS } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
 import { applyTransition, IllegalTransitionError, type OrderRow } from "./orders.js";
 import { logSecurityEvent } from "./security-events.js";
@@ -71,6 +82,7 @@ export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 im
 export const imageMutationLimiter = new RateLimiter(60, 60 * 60_000); // 60 image delete/reorder mutations per seller per hour (THI-308 F6: churn here must never consume upload quota)
 export const llmCredentialLimiter = new RateLimiter(10, 60 * 60_000); // 10 BYO credential writes per seller per hour (THI-189)
 export const chatgptConnectLimiter = new RateLimiter(10, 60 * 60_000); // 10 ChatGPT connect starts per seller per hour (THI-193 §3.2)
+export const wantedWriteLimiter = new RateLimiter(20, 60 * 60_000); // 20 wanted writes per seller per hour (THI-439 §6.3)
 
 function clientIp(req: Request): string {
   return req.ip ?? "unknown";
@@ -719,6 +731,204 @@ api.put("/items/:id/images/order", asyncHandler(async (req: Request, res: Respon
   }
   res.set("Cache-Control", "no-store");
   res.json({ images: updated.rows[0].images });
+}));
+
+// --- wanted listings, browser CRUD (spec THI-439 §6.3 — protected path) ------
+// Session-authed browser surface for the funnel form + my-wanted management
+// (website/wanted.js). Every body routes through src/wanted.ts only — caps,
+// quota, scrub and events are the module's, never bypassed (same layering
+// note as THI-360 §5). 20 writes/hour per seller; 429s log rate_limit events
+// (THI-144 convention). Zod mirrors the MCP create_wanted field set — one
+// source of truth per field set; drift is a review finding.
+
+const wantedCreateSchema = z.object({
+  title: z.string().min(3).max(200),
+  notes: z.string().max(2000).optional(),
+  category: z.string().min(2).max(40).optional(),
+  condition: z.enum(CONDITIONS).optional(),
+  budget_min_cents: z.number().int().min(0).nullable().optional(),
+  budget_max_cents: z.number().int().min(0).nullable().optional(),
+  currency: z.string().length(3).optional(),
+  reference_images: z.array(z.string().url().max(2048).refine(
+    (v) => /^https?:\/\//i.test(v),
+    "reference image URLs must be http(s)",
+  )).max(3).optional(),
+  // Dual-save (THI-437 §4 step 3): the funnel form also saves a buyer
+  // alert intent unless the buyer opts out. Default on.
+  alert_me: z.boolean().optional(),
+});
+
+const wantedEditSchema = z.object({
+  title: z.string().min(3).max(200).optional(),
+  notes: z.string().max(2000).optional(),
+  budget_min_cents: z.number().int().min(0).nullable().optional(),
+  budget_max_cents: z.number().int().min(0).nullable().optional(),
+});
+
+/** Session seller or 401 — the wanted surface is login-first (the /wanted
+ *  board is public; writes are not). */
+async function wantedSeller(req: Request, res: Response): Promise<{ id: string } | null> {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage your wanted listings." });
+    return null;
+  }
+  return seller;
+}
+
+/** Wanted-module error → response. Same mapping for every write route. */
+function wantedErrorResponse(e: unknown, res: Response): void {
+  if (e instanceof WantedLimitError) {
+    res.status(429).json({ error: e.message });
+    return;
+  }
+  if (e instanceof ContactInfoError) {
+    // The message is the generic contactInfoMessage — never echoes which
+    // rule tripped, so it cannot be used as an oracle to evade the scrub.
+    res.status(400).json({ error: e.message });
+    return;
+  }
+  if (e instanceof WantedValidationError) {
+    res.status(400).json({ error: e.message });
+    return;
+  }
+  if (e instanceof WantedNotFoundError) {
+    res.status(404).json({ error: "Wanted listing not found." });
+    return;
+  }
+  throw e; // unknown: the terminal error middleware owns it
+}
+
+api.post("/wanted", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await wantedSeller(req, res);
+  if (!seller) return;
+  if (!wantedWriteLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/wanted" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many wanted-listing changes. Try again later." });
+    return;
+  }
+  const parsed = wantedCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid wanted listing." });
+    return;
+  }
+  const { alert_me: alertMe, ...createRest } = parsed.data;
+  const create: Parameters<typeof createWanted>[1] = {
+    title: createRest.title,
+    notes: createRest.notes,
+    category: createRest.category,
+    condition: createRest.condition,
+    budget_min_cents: createRest.budget_min_cents ?? null,
+    budget_max_cents: createRest.budget_max_cents ?? null,
+    currency: createRest.currency,
+    reference_images: createRest.reference_images,
+  };
+  let row;
+  try {
+    row = await createWanted(seller.id, create);
+  } catch (e) {
+    wantedErrorResponse(e, res);
+    return;
+  }
+  // Dual-save (THI-437 §4 step 3): a wanted create doubles as a buyer alert
+  // intent unless opted out. Intent failure never fails the wanted — the
+  // buyer keeps the listing and the UI says the alert could not be saved.
+  let alertSaved = false;
+  if (alertMe !== false) {
+    try {
+      await saveIntent(seller.id, {
+        q: create.title,
+        category: create.category,
+        condition: create.condition ?? undefined,
+        min_price_cents: create.budget_min_cents ?? undefined,
+        max_price_cents: create.budget_max_cents ?? undefined,
+        currency: create.currency,
+      });
+      alertSaved = true;
+    } catch (e) {
+      if (!(e instanceof IntentLimitError)) throw e; // unexpected: surface it
+      // Quota: the buyer keeps the wanted; the alert silently degrades.
+    }
+  }
+  res.set("Cache-Control", "no-store");
+  res.status(201).json({ wanted: wantedToPublic(row), alert_saved: alertSaved });
+}));
+
+api.get("/wanted/mine", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await wantedSeller(req, res);
+  if (!seller) return;
+  const { wanteds } = await listMyWanted(seller.id);
+  res.set("Cache-Control", "no-store");
+  // Raw field shape (not wantedToPublic): the management UI edits
+  // budget_min_cents/budget_max_cents directly. buyer_id/embedding never
+  // selected-then-stripped here — the SELECT lists public columns plus the
+  // derived counts (searchWanted's R4 discipline, same reason).
+  res.json({
+    wanteds: wanteds.map(({ buyer_id: _b, embedding: _e, ...w }) => ({
+      ...w,
+      budget: w.budget_min_cents !== null || w.budget_max_cents !== null
+        ? { min_cents: w.budget_min_cents, max_cents: w.budget_max_cents, currency: w.currency }
+        : null,
+      days_left: Math.max(0, Math.ceil((w.expires_at.getTime() - Date.now()) / 86_400_000)),
+    })),
+  });
+}));
+
+api.put("/wanted/:id", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await wantedSeller(req, res);
+  if (!seller) return;
+  if (!wantedWriteLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/wanted/:id" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many wanted-listing changes. Try again later." });
+    return;
+  }
+  const parsed = wantedEditSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid changes." });
+    return;
+  }
+  const fields = { ...parsed.data };
+  try {
+    const row = await updateWanted(req.params.id, seller.id, { fields });
+    res.set("Cache-Control", "no-store");
+    res.json({ wanted: wantedToPublic(row) });
+  } catch (e) {
+    wantedErrorResponse(e, res);
+  }
+}));
+
+api.post("/wanted/:id/expire", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await wantedSeller(req, res);
+  if (!seller) return;
+  if (!wantedWriteLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/wanted/:id/expire" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many wanted-listing changes. Try again later." });
+    return;
+  }
+  try {
+    const row = await updateWanted(req.params.id, seller.id, { expire: true });
+    res.set("Cache-Control", "no-store");
+    res.json({ wanted: wantedToPublic(row) });
+  } catch (e) {
+    wantedErrorResponse(e, res);
+  }
+}));
+
+api.post("/wanted/:id/renew", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await wantedSeller(req, res);
+  if (!seller) return;
+  if (!wantedWriteLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/wanted/:id/renew" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many wanted-listing changes. Try again later." });
+    return;
+  }
+  try {
+    const row = await updateWanted(req.params.id, seller.id, { renew: true });
+    res.set("Cache-Control", "no-store");
+    res.json({ wanted: wantedToPublic(row) });
+  } catch (e) {
+    wantedErrorResponse(e, res);
+  }
 }));
 
 // --- chat -------------------------------------------------------------------

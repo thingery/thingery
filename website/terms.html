@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Terms of Service — Thingery</title>
+  <title data-i18n="tm.title">Terms of Service — Thingery</title>
   <meta name="description" content="The rules for using thingery.dev: accounts, listings, orders, payments, and AI apps.">
   <meta name="robots" content="noindex">
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
@@ -47,6 +47,19 @@
     footer { border-top: 1px solid var(--line); margin-top: 2rem; padding: 1.2rem 0 0; color: var(--muted); font-size: .92rem; }
     footer a { color: inherit; }
     code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .88em; }
+    /* THI-445: EN/IT toggle in the header. Legal note: shown only in IT view,
+       where the English original remains canonical. */
+    header { flex-wrap: wrap; gap: .4rem .8rem; }
+    .lang-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; flex: none; }
+    .lang-btn { display: inline-flex; align-items: center; gap: .35rem; font: inherit; font-size: .78rem;
+      font-weight: 650; letter-spacing: .02em; padding: .32rem .62rem; border: none; background: transparent;
+      color: var(--muted); cursor: pointer; }
+    .lang-btn:hover { color: var(--ink); }
+    .lang-btn .lang-flag { width: 1.15em; height: auto; border-radius: 2px; display: block; }
+    .lang-btn[aria-pressed="true"] { background: var(--card); color: var(--ink); }
+    .legal-note { display: none; border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+      padding: .7rem 1rem; margin: 0 0 1.5rem; font-size: .9rem; }
+    html[data-lang="it"] .legal-note { display: block; }
   </style>
 </head>
 <body>
@@ -54,104 +67,109 @@
 
   <header>
     <a class="logo" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="26" height="26">Thingery</a>
-    <a class="home" href="/">← Back to Thingery</a>
+    <span style="display:inline-flex;align-items:center;gap:.8rem">
+      <div class="lang-switch" data-lang-switch></div>
+      <a class="home" href="/" data-i18n="legal.back">← Back to Thingery</a>
+    </span>
   </header>
 
-  <h1>Terms of Service</h1>
-  <p class="updated">Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+  <h1 data-i18n="tm.h1">Terms of Service</h1>
+  <p class="updated" data-i18n-html="tm.updated">Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
   These terms cover the service at <strong>thingery.dev</strong>. Effective: 16 October 2026.</p>
+  <p class="legal-note" data-i18n-html="legal.note">This Italian translation is provided for convenience. If the two versions differ, the <strong>English original</strong> — always reachable with the EN switch above — is the canonical text.</p>
 
   <section id="short-version">
-    <h2>The short version</h2>
+    <h2 data-i18n="tm.short.h2">The short version</h2>
     <div class="card">
       <ul>
-        <li><strong>Thingery is a venue, not a seller.</strong> Listings belong to their sellers. You buy from and sell to other people — Thingery provides the catalog, the order tracking, and (optionally) the payment plumbing.</li>
-        <li><strong>Listings are public by design.</strong> Don't publish anything in a listing you want to keep private.</li>
-        <li><strong>You are responsible for your account</strong> — including what you (or an AI app you connected) list, buy, and agree to.</li>
-        <li><strong>Play straight:</strong> describe items honestly, sell only what you may sell, and follow the law.</li>
-        <li><strong>The service is free and open source</strong> (Apache-2.0), provided as-is, with no warranty.</li>
+        <li data-i18n-html="tm.short.li1"><strong>Thingery is a venue, not a seller.</strong> Listings belong to their sellers. You buy from and sell to other people — Thingery provides the catalog, the order tracking, and (optionally) the payment plumbing.</li>
+        <li data-i18n-html="tm.short.li2"><strong>Listings are public by design.</strong> Don't publish anything in a listing you want to keep private.</li>
+        <li data-i18n-html="tm.short.li3"><strong>You are responsible for your account</strong> — including what you (or an AI app you connected) list, buy, and agree to.</li>
+        <li data-i18n-html="tm.short.li4"><strong>Play straight:</strong> describe items honestly, sell only what you may sell, and follow the law.</li>
+        <li data-i18n-html="tm.short.li5"><strong>The service is free and open source</strong> (Apache-2.0), provided as-is, with no warranty.</li>
       </ul>
     </div>
   </section>
 
   <section id="what-thingery-is">
-    <h2>What Thingery is — and is not</h2>
-    <p>Thingery is a free, open-source service for listing and finding second-hand goods, designed to be used by people directly and by AI assistants acting for them. Browsing and searching needs no account; listing and ordering need one.</p>
-    <p>Thingery is a <em>venue</em>. We host listings, track orders between buyers and sellers, and can process payments (see below). We do not own, inspect, or warrant the goods, and we are not a party to the contract of sale between buyer and seller — that contract is between the two of you.</p>
+    <h2 data-i18n="tm.what.h2">What Thingery is — and is not</h2>
+    <p data-i18n="tm.what.p1">Thingery is a free, open-source service for listing and finding second-hand goods, designed to be used by people directly and by AI assistants acting for them. Browsing and searching needs no account; listing and ordering need one.</p>
+    <p data-i18n-html="tm.what.p2">Thingery is a <em>venue</em>. We host listings, track orders between buyers and sellers, and can process payments (see below). We do not own, inspect, or warrant the goods, and we are not a party to the contract of sale between buyer and seller — that contract is between the two of you.</p>
   </section>
 
   <section id="accounts">
-    <h2>Your account</h2>
+    <h2 data-i18n="tm.acc.h2">Your account</h2>
     <ul>
-      <li>You need an email address to create an account, and you must be old enough to sign binding contracts in your country.</li>
-      <li>Keep your password and API key to yourself. Actions taken with your account — by you or by an app you connected — are your responsibility.</li>
-      <li>One person or organization may hold an account; don't misrepresent who you are.</li>
-      <li>You can delete your account at any time; see the <a href="/privacy">privacy policy</a> for what that removes.</li>
+      <li data-i18n="tm.acc.li1">You need an email address to create an account, and you must be old enough to sign binding contracts in your country.</li>
+      <li data-i18n="tm.acc.li2">Keep your password and API key to yourself. Actions taken with your account — by you or by an app you connected — are your responsibility.</li>
+      <li data-i18n="tm.acc.li3">One person or organization may hold an account; don't misrepresent who you are.</li>
+      <li data-i18n-html="tm.acc.li4">You can delete your account at any time; see the <a href="/privacy">privacy policy</a> for what that removes.</li>
     </ul>
   </section>
 
   <section id="ai-apps">
-    <h2>AI apps acting for you</h2>
-    <p>Apps like ChatGPT or Claude Desktop connect through a per-user sign-in: an app you approve acts <strong>only</strong> as you, on your listings and your orders, and only for as long as you let it. You can review and revoke every connection at <a href="/apps">thingery.dev/apps</a>.</p>
-    <p>What your connected app lists, buys, or agrees to on your account counts as your action. Check what it did before confirming purchases.</p>
+    <h2 data-i18n="tm.ai.h2">AI apps acting for you</h2>
+    <p data-i18n-html="tm.ai.p1">Apps like ChatGPT or Claude Desktop connect through a per-user sign-in: an app you approve acts <strong>only</strong> as you, on your listings and your orders, and only for as long as you let it. You can review and revoke every connection at <a href="/apps">thingery.dev/apps</a>.</p>
+    <p data-i18n="tm.ai.p2">What your connected app lists, buys, or agrees to on your account counts as your action. Check what it did before confirming purchases.</p>
   </section>
 
   <section id="listings">
-    <h2>Listings and content</h2>
+    <h2 data-i18n="tm.list.h2">Listings and content</h2>
     <ul>
-      <li><strong>Ownership.</strong> Your listings and photos remain yours. By publishing, you give Thingery and its users permission to display, reproduce, and search them as part of running the service — that is the point of a public catalog. This permission ends when your listing is deleted.</li>
-      <li><strong>Honesty.</strong> Describe the item and its condition truthfully, price it in the currency shown, and only list items you actually have and may sell.</li>
-      <li><strong>Legality.</strong> No illegal goods, weapons, drugs, counterfeits, stolen or hazardous items, or anything prohibited by the law that applies to you or to us. Personal details (phone numbers, home addresses) do not belong in listings.</li>
-      <li><strong>Moderation.</strong> We may remove listings and suspend accounts that break these rules or the law. We do not pre-screen listings and cannot verify every item.</li>
+      <li data-i18n-html="tm.list.li1"><strong>Ownership.</strong> Your listings and photos remain yours. By publishing, you give Thingery and its users permission to display, reproduce, and search them as part of running the service — that is the point of a public catalog. This permission ends when your listing is deleted.</li>
+      <li data-i18n-html="tm.list.li2"><strong>Honesty.</strong> Describe the item and its condition truthfully, price it in the currency shown, and only list items you actually have and may sell.</li>
+      <li data-i18n-html="tm.list.li3"><strong>Legality.</strong> No illegal goods, weapons, drugs, counterfeits, stolen or hazardous items, or anything prohibited by the law that applies to you or to us. Personal details (phone numbers, home addresses) do not belong in listings.</li>
+      <li data-i18n-html="tm.list.li4"><strong>Moderation.</strong> We may remove listings and suspend accounts that break these rules or the law. We do not pre-screen listings and cannot verify every item.</li>
     </ul>
   </section>
 
   <section id="orders-and-payments">
-    <h2>Orders and payments</h2>
-    <p>A buyer and a seller make an order together, and its status is tracked until it is paid out, refunded, or cancelled. Payment works in one of two ways:</p>
+    <h2 data-i18n="tm.pay.h2">Orders and payments</h2>
+    <p data-i18n="tm.pay.p1">A buyer and a seller make an order together, and its status is tracked until it is paid out, refunded, or cancelled. Payment works in one of two ways:</p>
     <ul>
-      <li><strong>Direct (off-platform).</strong> The two of you agree on payment yourselves — cash at pickup, a bank transfer, whatever you choose. The seller confirms receipt in Thingery, and the order completes. Thingery cannot reverse an off-platform payment; sort problems out between yourselves.</li>
-      <li><strong>On-platform (Stripe).</strong> Checkout runs on <a href="https://stripe.com">Stripe's</a> payment page: your card details go to Stripe and never touch Thingery's servers. The payment is held by the platform's Stripe account until the item is delivered and the dispute window has passed, then paid out to the seller's connected Stripe account (minus Stripe's fees). Cancelling a paid order refunds the buyer through Stripe.</li>
+      <li data-i18n-html="tm.pay.li1"><strong>Direct (off-platform).</strong> The two of you agree on payment yourselves — cash at pickup, a bank transfer, whatever you choose. The seller confirms receipt in Thingery, and the order completes. Thingery cannot reverse an off-platform payment; sort problems out between yourselves.</li>
+      <li data-i18n-html="tm.pay.li2"><strong>On-platform (Stripe).</strong> Checkout runs on <a href="https://stripe.com">Stripe's</a> payment page: your card details go to Stripe and never touch Thingery's servers. The payment is held by the platform's Stripe account until the item is delivered and the dispute window has passed, then paid out to the seller's connected Stripe account (minus Stripe's fees). Cancelling a paid order refunds the buyer through Stripe.</li>
     </ul>
-    <p><strong>If something goes wrong</strong> with an on-platform order, the buyer can open a dispute during the dispute window (48 hours after delivery by default). Payout is held while a Thingery operator looks at the order and decides the outcome. Unpaid orders are cancelled automatically after 24 hours; delivered orders pay out automatically after the dispute window.</p>
+    <p data-i18n-html="tm.pay.p2"><strong>If something goes wrong</strong> with an on-platform order, the buyer can open a dispute during the dispute window (48 hours after delivery by default). Payout is held while a Thingery operator looks at the order and decides the outcome. Unpaid orders are cancelled automatically after 24 hours; delivered orders pay out automatically after the dispute window.</p>
   </section>
 
   <section id="fair-use">
-    <h2>Fair use</h2>
-    <p>The service is rate-limited. Don't try to work around those limits, overwhelm the service, scrape it abusively, probe or attack it, or use it to harm others. Use the API and MCP endpoints under the same rules.</p>
+    <h2 data-i18n="tm.fair.h2">Fair use</h2>
+    <p data-i18n="tm.fair.p">The service is rate-limited. Don't try to work around those limits, overwhelm the service, scrape it abusively, probe or attack it, or use it to harm others. Use the API and MCP endpoints under the same rules.</p>
   </section>
 
   <section id="availability">
-    <h2>Availability, changes, and exit</h2>
-    <p>Thingery is free for buyers and sellers, and the whole platform is open source under Apache-2.0 — anyone can self-host an instance. We may add, change, or remove features, and we may discontinue the thingery.dev service; we will give reasonable notice before any shutdown. These terms cover only the instance we operate at thingery.dev — other instances set their own terms.</p>
-    <p>Your data stays yours: you can delete any listing at any time, and delete your account as described in the <a href="/privacy">privacy policy</a>.</p>
+    <h2 data-i18n="tm.avail.h2">Availability, changes, and exit</h2>
+    <p data-i18n="tm.avail.p1">Thingery is free for buyers and sellers, and the whole platform is open source under Apache-2.0 — anyone can self-host an instance. We may add, change, or remove features, and we may discontinue the thingery.dev service; we will give reasonable notice before any shutdown. These terms cover only the instance we operate at thingery.dev — other instances set their own terms.</p>
+    <p data-i18n-html="tm.avail.p2">Your data stays yours: you can delete any listing at any time, and delete your account as described in the <a href="/privacy">privacy policy</a>.</p>
   </section>
 
   <section id="no-warranty">
-    <h2>No warranty; limit of liability</h2>
-    <p>The service is provided “as is” and “as available”, without warranties of any kind. To the fullest extent the law allows, Thingery is not liable for indirect or consequential damages, and our total liability for anything connected with the service is limited to the amounts you paid through the platform in the twelve months before the event. Nothing in these terms limits liability that cannot be limited by law, and it does not remove rights you have as a consumer.</p>
-    <p>Disputes between a buyer and a seller are yours to resolve — use the dispute process above for on-platform payment questions. We are not a party to your transactions.</p>
+    <h2 data-i18n="tm.warr.h2">No warranty; limit of liability</h2>
+    <p data-i18n-html="tm.warr.p1">The service is provided “as is” and “as available”, without warranties of any kind. To the fullest extent the law allows, Thingery is not liable for indirect or consequential damages, and our total liability for anything connected with the service is limited to the amounts you paid through the platform in the twelve months before the event. Nothing in these terms limits liability that cannot be limited by law, and it does not remove rights you have as a consumer.</p>
+    <p data-i18n="tm.warr.p2">Disputes between a buyer and a seller are yours to resolve — use the dispute process above for on-platform payment questions. We are not a party to your transactions.</p>
   </section>
 
   <section id="changes">
-    <h2>Changes to these terms</h2>
-    <p>We may update these terms as the service changes. When we do, we update the date at the top of this page. If a change is significant, we will say so on the site before it takes effect. Continuing to use the service after a change means you accept the updated terms.</p>
+    <h2 data-i18n="tm.chg.h2">Changes to these terms</h2>
+    <p data-i18n="tm.chg.p">We may update these terms as the service changes. When we do, we update the date at the top of this page. If a change is significant, we will say so on the site before it takes effect. Continuing to use the service after a change means you accept the updated terms.</p>
   </section>
 
   <section id="contact">
-    <h2>Contact</h2>
-    <p>Questions about these terms: <a href="https://github.com/thingery/thingery">github.com/thingery/thingery</a>. Privacy, deletion, and data requests: <a href="mailto:privacy@thingery.dev">privacy@thingery.dev</a> — see the <a href="/privacy">privacy policy</a>.</p>
+    <h2 data-i18n="tm.contact.h2">Contact</h2>
+    <p data-i18n-html="tm.contact.p1">Questions about these terms: <a href="https://github.com/thingery/thingery">github.com/thingery/thingery</a>. Privacy, deletion, and data requests: <a href="mailto:privacy@thingery.dev">privacy@thingery.dev</a> — see the <a href="/privacy">privacy policy</a>.</p>
   </section>
 
   <footer>
-    <p><strong>Thingery</strong> — the open item database and MCP server for AI agents to list, find,
+    <p data-i18n-html="home.foot.tagline"><strong>Thingery</strong> — the open item database and MCP server for AI agents to list, find,
     and trade second-hand goods.</p>
-    <p><a href="/">Home</a> · <a href="/browse">Browse</a> · <a href="/chat.html">Chat</a> ·
-    <a href="/login.html">Account</a> · <a href="/apps">Connected apps</a> ·
-    <a href="/privacy">Privacy</a> ·
+    <p><a href="/" data-i18n="legal.home">Home</a> · <a href="/browse" data-i18n="nav.browse">Browse</a> · <a href="/chat.html" data-i18n="nav.chat">Chat</a> ·
+    <a href="/login.html" data-i18n="nav.account">Account</a> · <a href="/apps" data-i18n="legal.apps">Connected apps</a> ·
+    <a href="/privacy" data-i18n="foot.privacy">Privacy</a> ·
     <a href="https://github.com/thingery/thingery">GitHub</a></p>
   </footer>
 
   </div>
+  <script src="/i18n.js"></script>
 </body>
 </html>

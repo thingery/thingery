@@ -262,6 +262,42 @@ describe.skipIf(!available)("wanted core (DB)", () => {
     expect(clean.status).toBe("active");
   });
 
+  // THI-442 rider W1: reference_images are public clickable URLs, so a URL
+  // whose host/path encodes a contact channel defeats §3.3 by construction.
+  // One test per rule class, each failing against unscreened code. The
+  // message is generic (never echoes the URL) — no oracle for evasion.
+  it("rejects reference_images that encode contact channels (W1 rule classes)", async () => {
+    const buyer = await seedBuyer("w1");
+    const cases: Array<[string, string]> = [
+      ["deep-link host (wa.me)", "https://wa.me/447911123456"],
+      ["deep-link host (discord invite)", "https://discord.gg/abc123"],
+      ["deep-link host (calendly)", "https://calendly.com/lamp-hunter/30min"],
+      ["deep-link host path (zoom)", "https://zoom.us/j/1234567890"],
+      ["service word in host", "https://wa-whatsapp-bait.example/img.jpg"],
+      ["email shape in path", "https://cdn.example/u/me@example.com/look.jpg"],
+      ["8-digit phone run in path", "https://cdn.example/i/447911123456/x.jpg"],
+    ];
+    for (const [label, url] of cases) {
+      await expect(
+        create(buyer, { title: `W1 probe ${label}`, reference_images: [url] }),
+      ).rejects.toBeInstanceOf(ContactInfoError);
+    }
+    // Edit path carries the same screening (merged through
+    // validateWantedFields).
+    const w = await create(buyer, { title: "W1 probe edit target" });
+    await expect(
+      updateWanted(w.id, buyer, { fields: { reference_images: ["https://t.me/lamp_hunter"] } }),
+    ).rejects.toBeInstanceOf(ContactInfoError);
+
+    // Clean image URLs still pass: ordinary hosts, short digit runs, dates,
+    // no service words — over-blocking must not eat real reference photos.
+    const clean = await create(buyer, {
+      title: "W1 probe clean images",
+      reference_images: ["https://cdn.example/photos/lamp-2024-ref.jpg"],
+    });
+    expect(clean.reference_images).toHaveLength(1);
+  });
+
   it("state machine: edit expired → invalid; renew fresh active → invalid; renew past grace → invalid", async () => {
     const buyer = await seedBuyer("sm");
     const w = await create(buyer);

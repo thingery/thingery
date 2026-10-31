@@ -19,9 +19,10 @@ export type ContactScrubRule =
   | "phone"
   | "url"
   | "handle"
-  | "service_word";
+  | "service_word"
+  | "contact_link";
 
-export type ScreenedField = "title" | "notes";
+export type ScreenedField = "title" | "notes" | "reference_images";
 
 export interface ContactScrubHit {
   rule: ContactScrubRule;
@@ -92,6 +93,63 @@ export function screenContactInfo(fields: { title: string; notes: string }): Con
   return screenText(fields.title, "title") ?? screenText(fields.notes, "notes");
 }
 
+// THI-442 rider W1: reference_images are http(s) URLs by construction, so
+// the text-field URL rule would reject all of them — the contact risk is a
+// URL whose host/path IS a contact channel (messaging/meeting deep links,
+// encoded phones/handles). Screened separately, same typed error.
+
+/** Messaging/meeting deep-link host+path prefixes (fixed list, Security-
+ *  owned). Any reference-image URL matching one is a contact link by design. */
+const CONTACT_LINK_HOSTS = [
+  "wa.me",
+  "t.me",
+  "telegram.me",
+  "discord.gg",
+  "discord.com/invite",
+  "signal.me",
+  "snapchat.com/add",
+  "meet.google.com",
+  "zoom.us/j",
+  "calendly.com",
+  "cal.com",
+] as const;
+
+/** Contiguous digit run anywhere in the URL (phone encoding; ≥ 8 digits —
+ *  W1, over-blocking direction accepted, same posture as the text rules). */
+const DIGIT_RUN = /\d{8,}/;
+
+/** Screens one reference-image URL (W1): returns a hit when the URL encodes
+ *  an off-platform contact channel, else null. Order: deep-link hosts →
+ *  service word anywhere in host+path (substring, not word-bounded — a
+ *  URL has no word boundaries to respect) → email shape → digit run. */
+export function screenReferenceImage(url: string): ContactScrubHit | null {
+  let parsed: URL;
+  try {
+    // globalThis.URL: the module-level URL *regex* shadows the constructor
+    // name — an unqualified `new URL` here would always throw.
+    parsed = new globalThis.URL(url);
+  } catch {
+    return { rule: "url", field: "reference_images", match: url.slice(0, 60) }; // unreachable: shape checks run first
+  }
+  const hostPath = `${parsed.host}${parsed.pathname}`.toLowerCase();
+  for (const prefix of CONTACT_LINK_HOSTS) {
+    if (hostPath.startsWith(prefix)) {
+      return { rule: "contact_link", field: "reference_images", match: prefix };
+    }
+  }
+  const lowered = `${parsed.host}${parsed.pathname}${parsed.search}`.toLowerCase();
+  for (const word of SERVICE_WORDS) {
+    if (lowered.includes(word)) {
+      return { rule: "service_word", field: "reference_images", match: word };
+    }
+  }
+  const email = lowered.match(EMAIL);
+  if (email) return { rule: "email", field: "reference_images", match: email[0] };
+  const digits = lowered.match(DIGIT_RUN);
+  if (digits) return { rule: "phone", field: "reference_images", match: digits[0] };
+  return null;
+}
+
 /** Human-facing rejection message for a hit — names the rule family and the
  *  field, then states the rule (responses happen through listings). */
 export function contactInfoMessage(hit: ContactScrubHit): string {
@@ -101,6 +159,7 @@ export function contactInfoMessage(hit: ContactScrubHit): string {
     url: "a link/URL",
     handle: "a social handle (@…)",
     service_word: "a contact-service word",
+    contact_link: "a messaging/meeting link",
   };
   return (
     `${hit.field} looks like it contains ${ruleText[hit.rule]} — ` +

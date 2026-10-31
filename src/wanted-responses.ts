@@ -8,7 +8,7 @@ import { pool, type ItemRow } from "./db.js";
 import { logSecurityEvent } from "./security-events.js";
 import { createItem, visibleInFeeds } from "./items.js";
 import type { Attributes } from "./attributes.js";
-import { type WantedRow, MAX_RESPONSES_PER_SELLER_PER_WANTED } from "./wanted.js";
+import { type WantedRow, MAX_RESPONSES_PER_SELLER_PER_WANTED, WANTED_ROW_COLS } from "./wanted.js";
 
 /** A response-loop rejection. `code` is the MCP error code the tool layer
  *  reports; `own_wanted` and `not_active` have their own codes because they
@@ -21,13 +21,6 @@ export class WantedResponseError extends Error {
     this.code = code;
   }
 }
-
-/** Column list shared by the single-wanted read paths (respond validation,
- *  getWantedById). buyer_id is included because these rows stay internal —
- *  wantedToPublic strips it before any external surface sees the row. */
-const WANTED_ROW_COLS = `id, buyer_id, title, notes, category, condition,
-                         budget_min_cents, budget_max_cents, currency, reference_images,
-                         status, expires_at, created_at, updated_at`;
 
 /** §5 step 1–3, in order: validate the wanted (before any listing create —
  *  a rejected response must not burn the seller's listing quota or the
@@ -165,7 +158,7 @@ export async function markWantedResponsesPublished(itemId: string): Promise<numb
 export async function listWantedResponses(
   buyerId: string,
   wantedId: string,
-  opts: { markRead?: boolean } = {},
+  opts: { markRead?: boolean; limit?: number } = {},
 ): Promise<{
   responses: Array<{
     id: string;
@@ -175,7 +168,15 @@ export async function listWantedResponses(
     read: boolean;
   }>;
   markedRead: number;
+  /** Exact published-response count for the wanted — the total next to the
+   *  truncated latest-`limit` window (THI-442 W4: responses-per-wanted is
+   *  bounded per seller, not across sellers, so this read must bound its
+   *  own payload). */
+  total: number;
 }> {
+  // W4 cap: latest 20 by default, never more — a griefer seller set cannot
+  // bloat the buyer's read. `total` stays exact so nothing is hidden.
+  const limit = Math.min(Math.max(opts.limit ?? 20, 1), 20);
   const { rows } = await pool.query<{
     id: string;
     item: ItemRow & { created_at: string };
@@ -193,8 +194,14 @@ export async function listWantedResponses(
      JOIN items i ON i.id = r.item_id
      WHERE r.wanted_item_id = $1 AND w.buyer_id = $2 AND r.published_at IS NOT NULL
      ORDER BY r.created_at DESC
-     LIMIT 50`,
-    [wantedId, buyerId],
+     LIMIT $3`,
+    [wantedId, buyerId, limit],
+  );
+  // Exact published total beside the truncated window (W4).
+  const total = await pool.query<{ count: string }>(
+    `SELECT COUNT(*) AS count FROM wanted_responses
+     WHERE wanted_item_id = $1 AND published_at IS NOT NULL`,
+    [wantedId],
   );
   if (opts.markRead) {
     const ids = rows.filter((r) => r.read_at === null).map((r) => r.id);
@@ -212,6 +219,7 @@ export async function listWantedResponses(
           read: r.read_at !== null,
         })),
         markedRead: marked.rowCount ?? 0,
+        total: Number(total.rows[0].count),
       };
     }
   }
@@ -223,5 +231,6 @@ export async function listWantedResponses(
       read: r.read_at !== null,
     })),
     markedRead: 0,
+    total: Number(total.rows[0].count),
   };
 }

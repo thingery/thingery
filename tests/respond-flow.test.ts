@@ -117,6 +117,31 @@ describe.skipIf(!available)("wanted response loop (DB)", () => {
     vi.restoreAllMocks();
   });
 
+  // THI-442 rider W2 (assert-only: THI-380 R4 strip landed via THI-360
+  // PR 4): every item-bearing wanted payload must stay embedding-free
+  // across surfaces — respond_to_wanted's item and the buyer's response
+  // read. The ~1536-dim vector must never ride `...rest` out.
+  it("item-bearing wanted payloads carry no embedding (W2, THI-380 R4)", async () => {
+    const { itemToPublic } = await import("../src/tools.js");
+    const buyer = await seedPerson("rb-w2");
+    const seller = await seedPerson("rs-w2");
+    const wantedId = await seedWanted(buyer, "W2 embedding probe wanted");
+    const { item, response } = await respondToWanted(seller, wantedId, listing("W2 embedding probe listing", ["https://cdn.t.dev/w2.jpg"]));
+    expect(response.id).not.toBe("");
+
+    // Tool surface: the item exactly as respond_to_wanted returns it.
+    const publicItem = itemToPublic({ ...item, embedding: new Array(1536).fill(0.1) });
+    expect("embedding" in publicItem).toBe(false);
+
+    // Buyer read surface: items joined into listWantedResponses responses.
+    const { responses, total } = await listWantedResponses(buyer, wantedId);
+    expect(total).toBe(1); // photo at respond → born published → total 1
+    expect(responses).toHaveLength(1);
+    for (const r of responses) {
+      expect((r.item as { embedding?: unknown }).embedding ?? null).toBeNull();
+    }
+  });
+
   it("respond with a photo: listing published at birth, buyer sees the response unread", async () => {
     const buyer = await seedPerson("rb-a");
     const seller = await seedPerson("rs-a");

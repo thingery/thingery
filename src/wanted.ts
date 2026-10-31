@@ -10,7 +10,7 @@
 import { pool, CONDITIONS } from "./db.js";
 import { embedText } from "./embed.js";
 import { logSecurityEvent } from "./security-events.js";
-import { screenContactInfo, contactInfoMessage } from "./contact-scrub.js";
+import { screenContactInfo, screenReferenceImage, contactInfoMessage } from "./contact-scrub.js";
 
 // Fan-out controls (spec §3.3 — Security-owned numbers, THI-442 review gate):
 // module constants, deliberately not env-configurable (same posture as the
@@ -191,6 +191,17 @@ async function validateWantedFields(input: CreateWantedInput): Promise<{
   const hit = screenContactInfo({ title, notes });
   if (hit) {
     throw new ContactInfoError(contactInfoMessage(hit));
+  }
+  // THI-442 W1: reference_images are public, clickable, and exempt from the
+  // text-field URL rule — screen each URL for contact-channel encoding
+  // (deep-link hosts, service words, email shapes, ≥8-digit runs). Same
+  // typed contact_info error; applied here so create AND edit both carry it
+  // on both the MCP and HTTP paths.
+  for (const url of input.reference_images ?? []) {
+    const imgHit = screenReferenceImage(url);
+    if (imgHit) {
+      throw new ContactInfoError(contactInfoMessage(imgHit));
+    }
   }
 
   // Category registry check — same check + available-list error as

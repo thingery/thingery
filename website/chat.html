@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Chat — Thingery</title>
+  <title data-i18n="chat.title">Chat — Thingery</title>
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
   <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
@@ -103,19 +103,32 @@
       border: 1px solid transparent; background: var(--accent); color: #fff; }
     button:hover { filter: brightness(1.08); }
     button:disabled { opacity: .5; cursor: wait; }
-    .confirm-actions button { background: var(--card); border-color: var(--line); color: inherit; font-weight: 500; }
+    confirm-actions button { background: var(--card); border-color: var(--line); color: inherit; font-weight: 500; }
     .confirm-actions button:hover { filter: none; background: rgba(127,127,127,.2); }
+    /* THI-445: EN/IT toggle in the header, next to the account link. */
+    header { flex-wrap: wrap; }
+    .head-right { display: inline-flex; align-items: center; gap: .8rem; flex-wrap: wrap; justify-content: flex-end; }
+    .lang-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; flex: none; }
+    .lang-btn { display: inline-flex; align-items: center; gap: .35rem; font: inherit; font-size: .78rem;
+      font-weight: 650; letter-spacing: .02em; padding: .32rem .62rem; border: none; background: transparent;
+      color: var(--muted); cursor: pointer; }
+    .lang-btn:hover { color: var(--ink); }
+    .lang-btn .lang-flag { width: 1.15em; height: auto; border-radius: 2px; display: block; }
+    .lang-btn[aria-pressed="true"] { background: var(--card); color: var(--ink); }
   </style>
 </head>
 <body>
   <header>
-    <h1><a class="logo" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="24" height="24">Thingery</a> assistant</h1>
-    <span class="links" id="account-link"><a href="/login.html">Log in / sign up</a></span>
+    <h1 data-i18n-html="chat.head"><a class="logo" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="24" height="24">Thingery</a> assistant</h1>
+    <span class="head-right">
+      <div class="lang-switch" data-lang-switch></div>
+      <span class="links" id="account-link"><a href="/login.html" data-i18n="chat.login">Log in / sign up</a></span>
+    </span>
   </header>
 
   <div id="log">
     <div class="col" id="col">
-      <div class="msg bot">Hi! Tell me what you'd like to sell — a few words and I'll turn it into a listing.
+      <div class="msg bot" data-i18n-html="chat.welcome">Hi! Tell me what you'd like to sell — a few words and I'll turn it into a listing.
 Or ask me to find something used. <em>(Searching works without an account; publishing needs one.)</em></div>
     </div>
   </div>
@@ -125,17 +138,18 @@ Or ask me to find something used. <em>(Searching works without an account; publi
        link near the composer. chat.js reveals it when the status endpoint
        reports a connected plan; hidden otherwise (flag off = no element). -->
   <footer>
-    <div id="plan-indicator" hidden>
+    <div id="plan-indicator" hidden data-i18n-html="chat.plan">
       <img src="/assets/chatgpt-logo-white.svg" alt="" width="21" height="21"> Using ChatGPT plan ·
       <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener">Manage usage</a>
     </div>
 
     <form id="chat-form">
-      <input id="message" placeholder="e.g. Sell my Diplomat fountain pen, good condition, 120 euros" autocomplete="off" autofocus>
-      <button id="send" type="submit">Send</button>
+      <input id="message" placeholder="e.g. Sell my Diplomat fountain pen, good condition, 120 euros" data-i18n-placeholder="chat.placeholder" autocomplete="off" autofocus>
+      <button id="send" type="submit" data-i18n="chat.send">Send</button>
     </form>
   </footer>
 
+  <script src="/i18n.js"></script>
   <script src="/chat.js"></script>
 </body>
 </html>

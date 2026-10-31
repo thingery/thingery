@@ -152,7 +152,7 @@ log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
 #    RCLONE_REMOTE, RCLONE_KEEP_DAYS, RCLONE_PRUNE=off for no-delete creds),
 #    HEALTHCHECK_URL (dead-man's switch). Sourced BEFORE encryption so a recovery
 #    recipient applies to today's files immediately.
-if [ -r /etc/thingery-backup.env ]; then . /etc/thingery-backup.env; fi
+if [ -r /etc/thingery-backup.env ]; then set -a; . /etc/thingery-backup.env; set +a; fi
 RECIPIENTS=(-r "$PUBKEY")
 if [ -n "${RECOVERY_PUBKEY:-}" ]; then
   RECIPIENTS+=(-r "$RECOVERY_PUBKEY")
@@ -244,6 +244,14 @@ RCLONE_CONFIG_OFFSITE_ENDPOINT=https://<s3-endpoint>
 RCLONE_CONFIG_OFFSITE_ACCESS_KEY_ID=<access-key>
 RCLONE_CONFIG_OFFSITE_SECRET_ACCESS_KEY=<secret-key>
 ```
+
+Two pitfalls when filling this in (seen in practice, 2026-10-28): the
+**endpoint must be the full real URL** from the bucket page (e.g.
+`https://s3.eu-central-003.backblazeb2.com` — a leftover `<region>` placeholder
+silently truncates to host `s3.` and every push fails DNS), and on B2 the
+**access key is the numeric keyID** (`<accountId>_KP…`), not the key's display
+name. The script exports everything via `set -a`, so plain `VAR=value` lines
+are correct — no `export` prefix needed.
 
 Until this file exists the script logs `offsite push SKIPPED` and still writes
 the local encrypted backups every night.

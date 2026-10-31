@@ -99,11 +99,7 @@ export type SecurityEvent =
   /** THI-193 §3.3: a stored ChatGPT OAuth connection hit a TERMINAL refresh
    *  error and the row was deleted. `reason` is a fixed slug (never provider
    * text, never token material). */
-  | { type: "chatgpt_oauth_error"; reason: ChatgptOauthErrorReason }
-  /** THI-360 R5 (THI-380 rider): buyer-intent write audit events, mirroring
-   *  listing_write (THI-112/113). Strict no-payload rule: buyerId only —
-   *  never `q` or filters (docs/security.md §6). */
-  | { type: "intent_write"; action: "save" | "update" | "delete"; outcome: "success" | "rejected" };
+  | { type: "chatgpt_oauth_error"; reason: ChatgptOauthErrorReason };
 
 export interface SecurityEventContext {
   sellerId?: string;

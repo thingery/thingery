@@ -289,6 +289,12 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
     },
   };
 
+  // SECURITY invariant (THI-445 review): data-i18n-cond / data-i18n-status
+  // attribute values below are interpolated WITHOUT escapeHtml. That is safe
+  // only while item.condition and item.status stay closed enums — CHECK
+  // constrained in db/schema.sql and mirrored in the zod schemas. If either is
+  // ever widened to free text, escape it at these interpolation sites or you
+  // open an attribute-injection hole.
   const body = `
   <p class="meta"><a href="/browse" data-i18n="item.back">← Browse</a> · <a href="/wanted" data-i18n="item.wanted">Buyers want →</a> · <a href="/">Thingery</a></p>
   <h1>${escapeHtml(item.title)}</h1>
@@ -345,6 +351,8 @@ export async function browsePage(req: Request, res: Response): Promise<void> {
   const offset = (pageNum - 1) * BROWSE_PAGE_SIZE;
   const items = await searchItems({ q, limit: BROWSE_PAGE_SIZE, offset }).catch(() => [] as Array<ItemRow & { score: number }>);
 
+  // Same enum invariant as above: data-i18n-cond / data-i18n-status are
+  // unescaped and rely on the closed condition/status vocabularies.
   const cards = items
     .map(
       (i) => `<div class="card ${i.status !== "active" ? "sold" : ""}">

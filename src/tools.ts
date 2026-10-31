@@ -3,7 +3,7 @@ import type { ItemRow, SellerRow } from "./db.js";
 import { CONDITIONS, SHIPPING_TIERS, STATUSES } from "./db.js";
 import { getCategory, getItem, createItem, listCategories, ListingLimitError, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, AttributeValidationError, attributeShapeErrors, type Attributes } from "./attributes.js";
-import { saveIntent, listIntents, updateIntentMute, deleteIntent, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
+import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
 import { addItemImageBase64 } from "./images.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
@@ -46,6 +46,8 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   "my_intents",
   "update_intent",
   "delete_intent",
+  // THI-360 PR 4: the buyer's match inbox is per-account data too.
+  "my_matches",
 ]);
 
 // H5.3 provenance marker (docs/security.md §6 H5, fix 3; spec THI-109): the
@@ -62,7 +64,12 @@ function publicBaseUrl(): string {
 }
 
 export function itemToPublic(item: ItemRow & { score?: number }) {
-  const { id, title, price_cents, currency, seller_payout_ready, ...rest } = item;
+  // R4 (THI-380 rider): embedding is destructured out so the raw ~1536-dim
+  // vector (~12-30 KB) cannot ride `...rest` into any item-bearing response
+  // — rows fetched with SELECT i.* carry it (search_items, get_item,
+  // my_listings; my_matches never selects the column). Never a documented
+  // contract field; payloads shrink, nothing meaningful is lost.
+  const { id, title, price_cents, currency, seller_payout_ready, embedding: _embedding, ...rest } = item;
   return {
     ...rest,
     id,
@@ -1069,6 +1076,71 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         return ok({ deleted: true });
       } catch (e) {
         return err(`delete_intent failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  // my_matches — intent tool 5 of 5 (PR 4): the buyer's match inbox.
+  // Delivery surface for buyer alerts: matches are durable rows the buyer
+  // agent pulls on its next interaction (spec §3.1 channel decision). R3
+  // (THI-380): matches push unsolicited listing content into buyer-agent
+  // context, so the provenance marker is machine-readable on every item —
+  // exactly as get_item — and the description + response note carry
+  // CONTENT_PROVENANCE_NOTE.
+  server.registerTool(
+    "my_matches",
+    {
+      title: "New listing matches (buyer alerts)",
+      annotations: {
+        readOnlyHint: false, // mark_read stamps read_at
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "Check what's new for the user's saved searches: listings that published matching one " +
+        "of their saved intents (buyer alerts). Check this at the start of every session — \"anything " +
+        "new for my saved searches?\". unread_only lists only unseen matches; mark_read marks the " +
+        "returned unread matches read (read → read is a no-op; there is no un-read). Matches whose " +
+        "listing was removed no longer appear. Requires seller authentication (Bearer API key). " +
+        CONTENT_PROVENANCE_NOTE,
+      inputSchema: {
+        limit: z.number().int().min(1).max(50).default(10),
+        unread_only: z.boolean().default(false).describe("Only list matches not yet marked read"),
+        mark_read: z
+          .boolean()
+          .default(false)
+          .describe("Mark the returned unread matches read (they stay readable)"),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        // Reads and the mark stay in src/intents.ts — ownership scoping
+        // (buyer_id = caller) and the no-op re-mark guard are the module's.
+        const { matches, markedRead } = await listMatches(seller.id, {
+          limit: (args.limit as number) ?? 10,
+          unreadOnly: args.unread_only === true,
+          markRead: args.mark_read === true,
+        });
+        return ok({
+          count: matches.length,
+          matches: matches.map((m) => ({
+            id: m.id,
+            intent: intentToPublic(m.intent),
+            // R3: machine-readable provenance marker, same as get_item.
+            item: { ...itemToPublic(m.item), content_provenance: "user_generated" },
+            score: m.score,
+            read: m.read,
+            created_at: m.created_at,
+          })),
+          note:
+            CONTENT_PROVENANCE_NOTE +
+            (markedRead > 0 ? ` ${markedRead} match(es) marked as read.` : ""),
+        });
+      } catch (e) {
+        return err(`my_matches failed: ${describeError(e)}`);
       }
     },
   );

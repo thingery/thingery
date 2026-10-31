@@ -8,6 +8,7 @@ import { sellerFromApiKey } from "./auth.js";
 import { mcpRoutes } from "./mcp-gate.js";
 import { asyncHandler, mountOauthRoutes } from "./oauth.js";
 import { startOauthSweepTimer } from "./oauth-sweep.js";
+import { startIntentSweepTimer } from "./intent-sweep.js";
 import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
 import { mountApiRoutes } from "./routes.js";
@@ -160,6 +161,9 @@ function runHttp(): void {
   app.listen(PORT, () => {
     // OAuth retention sweeps (spec THI-11 §4.5): boot run + hourly, unref'd.
     startOauthSweepTimer();
+    // Intent match retention (THI-360 §3.4): read > 30 d, any > 180 d —
+    // boot run + daily, unref'd.
+    startIntentSweepTimer();
     // Order deadline sweeps + webhook reprocessing (spec THI-3 §4.5):
     // boot run + every SWEEP_INTERVAL_MINUTES (10 default), unref'd.
     startSweepScheduler(orderFlowConfig());

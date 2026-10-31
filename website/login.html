@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Account — Thingery</title>
+  <title data-i18n="acct.title">Account — Thingery</title>
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
   <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png">
@@ -84,14 +84,23 @@
       body { padding: 1.2rem 1rem 2.2rem; }
       .site-header { flex-wrap: wrap; }
     }
+    /* THI-445: EN/IT toggle, same pill as the other pages. */
+    .lang-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; flex: none; }
+    .lang-btn { display: inline-flex; align-items: center; gap: .35rem; font: inherit; font-size: .78rem;
+      font-weight: 650; letter-spacing: .02em; padding: .32rem .62rem; border: none; background: transparent;
+      color: var(--muted); cursor: pointer; }
+    .lang-btn:hover { color: var(--ink); }
+    .lang-btn .lang-flag { width: 1.15em; height: auto; border-radius: 2px; display: block; }
+    .lang-btn[aria-pressed="true"] { background: var(--card); color: var(--ink); }
   </style>
 </head>
 <body>
   <header class="site-header">
     <a class="brand" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="26" height="26">Thingery</a>
-    <nav aria-label="Site"><a href="/browse">Browse</a><a href="/chat.html">Chat</a><a href="https://github.com/thingery/thingery">GitHub</a></nav>
+    <nav aria-label="Site" data-i18n-aria-label="nav.aria"><a href="/browse" data-i18n="nav.browse">Browse</a><a href="/chat.html" data-i18n="nav.chat">Chat</a><a href="https://github.com/thingery/thingery">GitHub</a></nav>
+    <div class="lang-switch" data-lang-switch></div>
   </header>
-  <h1>Account</h1>
+  <h1 data-i18n="acct.h1">Account</h1>
 
   <!-- Callback banner for the ChatGPT OAuth round-trip (spec THI-193 §3.2/
        §3.6): /api/me/chatgpt/callback redirects here with ?chatgpt=<slug>.
@@ -100,19 +109,19 @@
   <p id="chatgpt-banner" hidden></p>
 
   <section id="auth">
-    <h2 id="form-title">Create your account</h2>
+    <h2 id="form-title" data-i18n="acct.formTitleSignup">Create your account</h2>
     <p class="error" id="error"></p>
     <form id="form">
-      <label>Email <input type="email" id="email" autocomplete="email" required></label>
-      <label>Password <small>(min 8 chars)</small> <input type="password" id="password" autocomplete="new-password" required></label>
-      <label>Name <small>(optional)</small> <input type="text" id="name" autocomplete="nickname"></label>
-      <button type="submit" id="submit">Sign up</button>
+      <label><span data-i18n="acct.f.email">Email</span> <input type="email" id="email" autocomplete="email" required></label>
+      <label><span data-i18n="acct.f.pw">Password</span> <small data-i18n="acct.f.pwHint">(min 8 chars)</small> <input type="password" id="password" autocomplete="new-password" required></label>
+      <label><span data-i18n="acct.f.name">Name</span> <small data-i18n="acct.f.nameHint">(optional)</small> <input type="text" id="name" autocomplete="nickname"></label>
+      <button type="submit" id="submit" data-i18n="acct.submitSignup">Sign up</button>
     </form>
-    <p class="toggle"><a href="#" id="mode">I already have an account — log in</a></p>
+    <p class="toggle"><a href="#" id="mode" data-i18n="acct.modeToLogin">I already have an account — log in</a></p>
   </section>
 
   <section id="done" hidden>
-    <h2>You're in</h2>
+    <h2 data-i18n="acct.done.h2">You're in</h2>
     <p id="welcome"></p>
 
     <!-- THI-441 (B3, spec THI-439 §6.4): seller demand strip — live wanted
@@ -120,62 +129,62 @@
          until the wanted backend, THI-440, lands); account.js fills it from
          /wanted/demand.json. -->
     <div id="wanted-strip" hidden>
-      <h2 style="font-size:1.05rem">Buyers are looking for <small>(<a href="/wanted">wanted board →</a>)</small></h2>
+      <h2 style="font-size:1.05rem"><span data-i18n="acct.wanted.h2">Buyers are looking for</span> <small data-i18n-html="acct.wanted.small">(<a href="/wanted">wanted board →</a>)</small></h2>
       <p id="wanted-demand" style="font-size:.9rem;opacity:.9"></p>
     </div>
 
-    <h2 style="font-size:1.05rem">Connect your AI assistant <small>(uses your assistant's own quota)</small></h2>
+    <h2 style="font-size:1.05rem"><span data-i18n="acct.connect.h2">Connect your AI assistant</span> <small data-i18n="acct.connect.small">(uses your assistant's own quota)</small></h2>
     <ol style="padding-left:1.2rem">
-      <li style="margin-bottom:.7rem"><strong>Claude Desktop / Claude Code</strong> — paste this into the MCP config
-        (<code>Settings → Developer → Edit Config</code>), then restart the app:
+      <li style="margin-bottom:.7rem"><strong>Claude Desktop / Claude Code</strong><span data-i18n="acct.connect.li1.paste"> — paste this into the MCP config</span>
+        (<code>Settings → Developer → Edit Config</code>)<span data-i18n="acct.connect.li1.restart">, then restart the app:</span>
         <div class="key" id="mcp-config"></div>
-        <button type="button" id="copy-config">Copy config</button>
+        <button type="button" id="copy-config" data-i18n="acct.connect.copyConfig">Copy config</button>
       </li>
-      <li style="margin-bottom:.7rem"><strong>Claude web / ChatGPT with connectors</strong> — add a custom connector with
-        the URL <span class="key" style="display:inline;padding:.1rem .4rem" id="mcp-url"></span>
-        <button type="button" id="copy-url" style="margin-left:.3rem">Copy URL</button>
-        and set the header <code>Authorization: Bearer &lt;your key&gt;</code>.
+      <li style="margin-bottom:.7rem"><strong data-i18n="acct.connect.li2.strong">Claude web / ChatGPT with connectors</strong><span data-i18n="acct.connect.li2.add"> — add a custom connector with
+        the URL </span><span class="key" style="display:inline;padding:.1rem .4rem" id="mcp-url"></span>
+        <button type="button" id="copy-url" style="margin-left:.3rem" data-i18n="acct.connect.copyUrl">Copy URL</button>
+        <span data-i18n="acct.connect.li2.header"> and set the header </span><code>Authorization: Bearer &lt;your key&gt;</code>.
       </li>
-      <li><strong>Any other MCP client</strong> — same URL and key; the server speaks standard Streamable HTTP.</li>
+      <li data-i18n-html="acct.connect.li3"><strong>Any other MCP client</strong> — same URL and key; the server speaks standard Streamable HTTP.</li>
     </ol>
 
-    <h2 style="font-size:1.05rem">Then just talk to your assistant</h2>
+    <h2 style="font-size:1.05rem" data-i18n="acct.talk.h2">Then just talk to your assistant</h2>
     <ul style="padding-left:1.2rem">
-      <li><em>"Sell my Diplomat fountain pen, good condition, 120 euros"</em></li>
-      <li><em>"Find me a used Sony camera under 300 euros on Thingery"</em></li>
+      <li data-i18n-html="acct.talk.li1"><em>"Sell my Diplomat fountain pen, good condition, 120 euros"</em></li>
+      <li data-i18n-html="acct.talk.li2"><em>"Find me a used Sony camera under 300 euros on Thingery"</em></li>
     </ul>
 
-    <h2 style="font-size:1.05rem">Your seller API key</h2>
-    <p id="key-note" style="font-size:.9rem;opacity:.85">Keep it private — it publishes listings as you. It is shown only when created or regenerated.</p>
+    <h2 style="font-size:1.05rem" data-i18n="acct.key.h2">Your seller API key</h2>
+    <p id="key-note" style="font-size:.9rem;opacity:.85" data-i18n="acct.keyNote">Keep it private — it publishes listings as you. It is shown only when created or regenerated.</p>
     <div class="key" id="apikey"></div>
     <p class="error" id="key-error"></p>
-    <p><button type="button" id="regen">Regenerate key</button> · <a href="/apps">Connected applications</a> · <a href="#" id="logout">Log out</a></p>
+    <p><button type="button" id="regen" data-i18n="acct.regen">Regenerate key</button> · <a href="/apps" data-i18n="acct.apps">Connected applications</a> · <a href="#" id="logout" data-i18n="acct.logout">Log out</a></p>
 
     <!-- Bring-your-own LLM key (spec THI-186 Phase 1 / THI-189): the chat
          assistant can run on the seller's own OpenAI-compatible key. -->
-    <h2 style="font-size:1.05rem">Use your own model <small>(for the <a href="/chat.html">chat assistant</a>)</small></h2>
-    <p style="font-size:.9rem;opacity:.85">Store an OpenAI-compatible API key and the assistant chats on your key instead of Thingery's. The key is encrypted at rest and verified once before saving — it is never shown again.</p>
+    <h2 style="font-size:1.05rem"><span data-i18n="acct.byo.h2">Use your own model</span> <small data-i18n-html="acct.byo.small">(for the <a href="/chat.html">chat assistant</a>)</small></h2>
+    <p style="font-size:.9rem;opacity:.85" data-i18n="acct.byo.p">Store an OpenAI-compatible API key and the assistant chats on your key instead of Thingery's. The key is encrypted at rest and verified once before saving — it is never shown again.</p>
     <p id="byo-status" style="font-size:.9rem"></p>
     <form id="byo-form" hidden>
-      <label>API key <input type="password" id="byo-key" autocomplete="off" placeholder="sk-…" required></label>
-      <label>Model <small>(tool-calling, e.g. gpt-4o-mini)</small> <input type="text" id="byo-model" placeholder="gpt-4o-mini" required></label>
-      <label>Base URL <small>(optional, any OpenAI-compatible endpoint)</small> <input type="url" id="byo-base" placeholder="https://api.openai.com/v1"></label>
-      <label>Label <small>(optional)</small> <input type="text" id="byo-label" placeholder="My OpenAI key"></label>
+      <label><span data-i18n="acct.byo.key">API key</span> <input type="password" id="byo-key" autocomplete="off" placeholder="sk-…" required></label>
+      <label><span data-i18n="acct.byo.model">Model</span> <small data-i18n="acct.byo.modelHint">(tool-calling, e.g. gpt-4o-mini)</small> <input type="text" id="byo-model" placeholder="gpt-4o-mini" required></label>
+      <label><span data-i18n="acct.byo.base">Base URL</span> <small data-i18n="acct.byo.baseHint">(optional, any OpenAI-compatible endpoint)</small> <input type="url" id="byo-base" placeholder="https://api.openai.com/v1"></label>
+      <label><span data-i18n="acct.byo.label">Label</span> <small data-i18n="acct.f.nameHint">(optional)</small> <input type="text" id="byo-label" placeholder="My OpenAI key" data-i18n-placeholder="acct.byo.labelPh"></label>
       <p class="error" id="byo-error"></p>
-      <p><button type="submit" id="byo-save">Save &amp; verify</button> <button type="button" id="byo-remove" hidden>Remove</button></p>
+      <p><button type="submit" id="byo-save" data-i18n="acct.byo.save">Save &amp; verify</button> <button type="button" id="byo-remove" hidden data-i18n="acct.byo.remove">Remove</button></p>
     </form>
 
     <!-- ChatGPT-plan connection (spec THI-193 §3.6, PR-4): hidden until
          /api/me/chatgpt reports enabled:true — flag off leaves zero UI
          footprint on this page. -->
     <section id="chatgpt" hidden>
-      <h2 style="font-size:1.05rem">Use your ChatGPT plan <small>(for the chat assistant)</small></h2>
-      <p style="font-size:.9rem;opacity:.85">Connect your ChatGPT account and eligible chat turns run on your ChatGPT plan instead of a Thingery key. You can disconnect anytime.</p>
+      <h2 style="font-size:1.05rem"><span data-i18n="acct.cg.h2">Use your ChatGPT plan</span> <small data-i18n="acct.cg.small">(for the chat assistant)</small></h2>
+      <p style="font-size:.9rem;opacity:.85" data-i18n="acct.cg.p">Connect your ChatGPT account and eligible chat turns run on your ChatGPT plan instead of a Thingery key. You can disconnect anytime.</p>
       <p id="chatgpt-status" style="font-size:.9rem"></p>
-      <p id="chatgpt-usage" hidden style="font-size:.9rem;opacity:.85">Your ChatGPT plan's usage limits apply — manage them in <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener">ChatGPT → Settings → Usage</a>.</p>
-      <p><a class="chatgpt-btn" id="chatgpt-connect" href="/api/me/chatgpt/connect" hidden><img src="/assets/chatgpt-logo-white.svg" alt="" width="21" height="21">Continue with ChatGPT</a></p>
+      <p id="chatgpt-usage" hidden style="font-size:.9rem;opacity:.85" data-i18n-html="acct.cg.usage">Your ChatGPT plan's usage limits apply — manage them in <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener">ChatGPT → Settings → Usage</a>.</p>
+      <p><a class="chatgpt-btn" id="chatgpt-connect" href="/api/me/chatgpt/connect" hidden><img src="/assets/chatgpt-logo-white.svg" alt="" width="21" height="21"><span data-i18n="acct.cg.connect">Continue with ChatGPT</span></a></p>
       <p class="error" id="chatgpt-error"></p>
-      <p><button type="button" id="chatgpt-disconnect" hidden>Disconnect</button></p>
+      <p><button type="button" id="chatgpt-disconnect" hidden data-i18n="acct.cg.disconnect">Disconnect</button></p>
     </section>
 
     <!-- First-connect confirmation (spec §3.6 + OpenAI UX guidelines): shown
@@ -184,13 +193,14 @@
     <div id="chatgpt-modal-overlay" hidden>
       <div id="chatgpt-modal" role="dialog" aria-modal="true" aria-labelledby="chatgpt-modal-title">
         <img src="/assets/chatgpt-logo-white.svg" alt="">
-        <h3 id="chatgpt-modal-title" style="margin:.2rem 0 .4rem">You're using your ChatGPT plan</h3>
-        <p style="font-size:.9rem;opacity:.85">Eligible requests in this assistant now use your ChatGPT plan. You can review usage and limits anytime in ChatGPT settings.</p>
-        <button type="button" id="chatgpt-modal-ok">Got it</button>
+        <h3 id="chatgpt-modal-title" style="margin:.2rem 0 .4rem" data-i18n="acct.cg.modal.title">You're using your ChatGPT plan</h3>
+        <p style="font-size:.9rem;opacity:.85" data-i18n="acct.cg.modal.p">Eligible requests in this assistant now use your ChatGPT plan. You can review usage and limits anytime in ChatGPT settings.</p>
+        <button type="button" id="chatgpt-modal-ok" data-i18n="acct.cg.modal.ok">Got it</button>
       </div>
     </div>
   </section>
 
+  <script src="/i18n.js"></script>
   <script type="module" src="/account.js"></script>
 </body>
 </html>

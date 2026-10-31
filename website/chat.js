@@ -1,4 +1,7 @@
 // Chat assistant UI (loaded from /chat.html).
+// THI-445: runtime strings go through the shared i18n dictionary (inline EN
+// fallback keeps this file working standalone — e.g. under the DOM-shim test).
+const t = globalThis.__thingeryT || ((key, fallback) => fallback);
 const $ = (id) => document.getElementById(id);
 const history = [];
 
@@ -45,7 +48,7 @@ function addTyping() {
   const dots = document.createElement("span");
   dots.className = "dots";
   dots.setAttribute("role", "status");
-  dots.setAttribute("aria-label", "Assistant is thinking");
+  dots.setAttribute("aria-label", t("chat.thinking", "Assistant is thinking"));
   dots.textContent = "···";
   div.appendChild(dots);
   appendMsg(div);
@@ -97,13 +100,13 @@ fetch("/api/me").then(r => r.json()).then(data => {
   if (data.seller) {
     const account = document.createElement("a");
     account.href = "/login.html";
-    account.textContent = "account";
+    account.textContent = t("chat.accountlink", "account");
     // THI-186 Phase 1: sellers can run this assistant on their own LLM key.
     const byo = document.createElement("a");
     byo.href = "/login.html";
-    byo.textContent = "use your own model";
+    byo.textContent = t("chat.byolink", "use your own model");
     // Display name is untrusted text — build text nodes only, never HTML strings.
-    $("account-link").replaceChildren("Logged in as ", data.seller.name, " · ", byo, " · ", account);
+    $("account-link").replaceChildren(t("chat.loggedAs", "Logged in as "), data.seller.name, " · ", byo, " · ", account);
   }
 });
 
@@ -130,23 +133,24 @@ function addConfirmCard(confirm) {
   card.className = "msg confirm";
   const q = document.createElement("div");
   q.className = "confirm-q";
-  q.textContent = `${confirm.summary || "Apply this change"} — are you sure?`;
+  // The summary is server-authored (English); only the fallback + suffix localize.
+  q.textContent = (confirm.summary || t("chat.confirmFallback", "Apply this change")) + t("chat.confirmSuffix", " — are you sure?");
   const actions = document.createElement("div");
   actions.className = "confirm-actions";
   const yes = document.createElement("button");
   yes.type = "button";
-  yes.textContent = "Yes, do it";
+  yes.textContent = t("chat.confirmYes", "Yes, do it");
   const no = document.createElement("button");
   no.type = "button";
-  no.textContent = "No, cancel";
+  no.textContent = t("chat.confirmNo", "No, cancel");
   const settle = () => { yes.disabled = true; no.disabled = true; };
   yes.onclick = () => {
     settle();
-    send(`chat-confirm ${confirm.token}`, "(confirmed the pending change)");
+    send(`chat-confirm ${confirm.token}`, t("chat.confirmedNote", "(confirmed the pending change)"));
   };
   no.onclick = () => {
     settle();
-    send(`chat-decline ${confirm.token}`, "(cancelled the pending change)");
+    send(`chat-decline ${confirm.token}`, t("chat.declinedNote", "(cancelled the pending change)"));
   };
   actions.append(yes, no);
   card.append(q, actions);
@@ -171,10 +175,10 @@ async function send(message, displayText) {
     // fallbacks land instantly so the user is never left waiting on them.
     let reply;
     let streamed = false;
-    if (!res.ok) reply = `⚠️ ${data.error || "Something went wrong."}`;
+    if (!res.ok) reply = `⚠️ ${data.error || t("chat.errGeneric", "Something went wrong.")}`;
     else if (typeof data.reply === "string" && data.reply) { reply = data.reply; streamed = true; }
     else if (data.reply && typeof data.reply.text === "string" && data.reply.text.trim()) { reply = data.reply.text; streamed = true; }
-    else reply = "(no reply)";
+    else reply = t("chat.noReply", "(no reply)");
     typing.remove();
     if (streamed) addBot(reply);
     else add("bot", reply);
@@ -184,7 +188,7 @@ async function send(message, displayText) {
     }
   } catch (err) {
     typing.remove();
-    add("bot", "⚠️ Network error — please try again.");
+    add("bot", t("chat.errNetwork", "⚠️ Network error — please try again."));
   } finally {
     $("send").disabled = false;
     $("message").focus();

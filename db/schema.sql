@@ -444,3 +444,59 @@ CREATE TABLE IF NOT EXISTS buyer_intent_quota (
 DROP TRIGGER IF EXISTS buyer_intents_set_updated_at ON buyer_intents;
 CREATE TRIGGER buyer_intents_set_updated_at BEFORE UPDATE ON buyer_intents
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- ---------------------------------------------------------------------------
+-- THI-439 (wanted listings MVP, spec rev 1): public buyer-demand records +
+-- seller response links. Additive only — nothing reads these tables until the
+-- tools/routes PRs wire them. Same conventions as the THI-360 block above.
+
+CREATE TABLE IF NOT EXISTS wanted_items (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  buyer_id          UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+  title             TEXT NOT NULL CHECK (char_length(title) BETWEEN 3 AND 200),
+  notes             TEXT NOT NULL DEFAULT '' CHECK (char_length(notes) <= 2000),
+  category          TEXT NOT NULL DEFAULT 'other',
+  condition         TEXT CHECK (condition IS NULL OR condition IN ('new','like_new','good','fair','poor')),
+  budget_min_cents  INTEGER CHECK (budget_min_cents IS NULL OR budget_min_cents >= 0),
+  budget_max_cents  INTEGER CHECK (budget_max_cents IS NULL OR budget_max_cents >= 0),
+  currency          CHAR(3) NOT NULL DEFAULT 'EUR',
+  reference_images  TEXT[] NOT NULL DEFAULT '{}',
+  embedding         vector(1536),              -- title+notes+category+condition; NULL when embeddings unconfigured
+  status            TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','expired')),
+  expires_at        TIMESTAMPTZ NOT NULL,      -- created_at + 30d at insert; renew resets to now()+30d
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (budget_min_cents IS NULL OR budget_max_cents IS NULL OR budget_min_cents <= budget_max_cents)
+);
+CREATE INDEX IF NOT EXISTS wanted_items_feed_idx ON wanted_items (status, category, created_at DESC);
+CREATE INDEX IF NOT EXISTS wanted_items_buyer_idx ON wanted_items (buyer_id);
+
+CREATE TABLE IF NOT EXISTS wanted_responses (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  wanted_item_id  UUID NOT NULL REFERENCES wanted_items(id) ON DELETE CASCADE,
+  seller_id       UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+  item_id         UUID NOT NULL REFERENCES items(id),      -- items are soft-deleted only; FK never dangles
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  published_at    TIMESTAMPTZ,                             -- set once, idempotently, at the listing's
+                                                            -- first feed-visible transition (photo publish)
+  read_at         TIMESTAMPTZ,                             -- buyer read marker (my_wanted mark_read)
+  UNIQUE (wanted_item_id, item_id)                          -- replay barrier
+);
+CREATE INDEX IF NOT EXISTS wanted_responses_wanted_idx ON wanted_responses (wanted_item_id, created_at DESC);
+-- unread response counts for my_wanted: partial index on the buyer's scan shape
+CREATE INDEX IF NOT EXISTS wanted_responses_unread_idx ON wanted_responses (wanted_item_id)
+  WHERE published_at IS NOT NULL AND read_at IS NULL;
+
+-- Per-buyer daily wanted quota: atomic conditional upsert (THI-380 R2 pattern).
+-- Expire-cycling wanted_items cannot reset it, unlike a count-at-create cap.
+CREATE TABLE IF NOT EXISTS wanted_buyer_quota (
+  buyer_id UUID NOT NULL,
+  day      DATE NOT NULL,
+  creates  INT NOT NULL DEFAULT 0,
+  edits    INT NOT NULL DEFAULT 0,
+  PRIMARY KEY (buyer_id, day)
+);
+
+DROP TRIGGER IF EXISTS wanted_items_set_updated_at ON wanted_items;
+CREATE TRIGGER wanted_items_set_updated_at BEFORE UPDATE ON wanted_items
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();

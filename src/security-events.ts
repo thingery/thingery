@@ -71,6 +71,17 @@ export type SecurityEvent =
    *  mute-update / delete), success and every rejection class. Buyer id
    *  only — never q or filters (no-payload rule, §6). */
   | { type: "intent_write"; action: "save" | "update" | "delete"; outcome: "success" | "rejected" }
+  /** THI-439 §3.3 (spec rev 1): one line per wanted-item write — action is
+   *  the state-machine transition (create | update | renew | expire), success
+   *  and every rejection class. Buyer id only — never title/notes (no-payload
+   *  rule, §6). Moderation correlates these exactly like listing_write. */
+  | { type: "wanted_write"; action: "create" | "update" | "renew" | "expire"; outcome: "success" | "rejected" }
+  /** THI-439 §3.3/§3.5: one line per seller response on a wanted item —
+   *  `respond` at response creation, `publish` when the response listing
+   *  first becomes feed-visible (the idempotent photo-publish stamp).
+   *  Seller id only; the publish line carries the stamped count as a number,
+   *  never listing or wanted payload. */
+  | { type: "wanted_response"; action: "respond" | "publish"; outcome: "success" | "rejected"; count?: number }
   | { type: "image_upload"; outcome: "success" | "rejected"; reason?: SecurityEventReason }
   /** THI-180 §3.3 (rev 2): one line per LLM-backed chat turn. Numbers and
    *  slugs only — `model` is the resolved config string (credential ?? env,
@@ -123,6 +134,7 @@ export function logSecurityEvent(event: SecurityEvent, ctx: SecurityEventContext
     ...("route" in event ? { route: event.route } : {}),
     ...(event.type === "image_upload" && event.reason !== undefined ? { reason: event.reason } : {}),
     ...(event.type === "chatgpt_oauth_error" ? { reason: event.reason } : {}),
+    ...(event.type === "wanted_response" && event.count !== undefined ? { count: event.count } : {}),
     ...(event.type === "chat_usage"
       ? {
           model: event.model,

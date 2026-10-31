@@ -29,7 +29,12 @@ export type SecurityEventRoute =
   | "/api/items/:id/images/order" // THI-308 PR 4: image-mutation limiter 429s (F6)
   | "/api/chat"
   | "/api/me/llm-credential"
-  | "/api/me/chatgpt/connect";
+  | "/api/me/chatgpt/connect"
+  // THI-439 §6.3: wanted-write limiter 429s — one slug per write route.
+  | "/api/wanted"
+  | "/api/wanted/:id"
+  | "/api/wanted/:id/expire"
+  | "/api/wanted/:id/renew";
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a

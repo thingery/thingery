@@ -8,9 +8,16 @@ import {
   chatgptBanner,
   chatgptModalDismissed,
   chatgptSlotVisible,
-  chatgptStatusText,
   rememberChatgptModal,
 } from "./chatgpt-view.js";
+
+// THI-445: runtime strings go through the shared i18n dictionary. account.js
+// is an ES module, so it runs after the classic i18n.js; globalThis keeps the
+// inline English fallbacks working if the dictionary is absent.
+const t = globalThis.__thingeryT || ((key, fallback, params) => {
+  if (!params) return fallback;
+  return Object.keys(params).reduce((s, k) => s.split(`{${k}}`).join(params[k]), fallback);
+});
 
 let mode = "signup";
 const $ = (id) => document.getElementById(id);
@@ -28,21 +35,35 @@ const resumeNext = () => {
 // empty — including while the wanted backend (THI-440) has not landed, so
 // the account page never shows stale or synthetic demand. Growth uses this
 // line for seller outreach ("3 buyers want a Nintendo Switch …").
+let lastDemandData = null; // for language-toggle re-render (THI-445)
 async function loadWantedDemand() {
   try {
     const res = await fetch("/wanted/demand.json");
     if (!res.ok) return;
     const data = await res.json();
-    if (!data || !data.total || !Array.isArray(data.demand) || !data.demand.length) return;
-    const chips = data.demand.map((row) => `${row.category}: ${row.count}`).join(" · ");
-    const top = data.demand[0];
-    $("wanted-demand").textContent =
-      `${data.total} buyer${data.total === 1 ? "" : "s"} currently ${data.total === 1 ? "wants" : "want"} ` +
-      `things like ${top.example_title} — ${chips}`;
-    $("wanted-strip").hidden = false;
+    lastDemandData = data;
+    renderWantedDemand(data);
   } catch {
     /* strip stays hidden — demand is a bonus, never a blocker */
   }
+}
+
+function renderWantedDemand(data) {
+    if (!data || !data.total || !Array.isArray(data.demand) || !data.demand.length) return;
+    const chips = data.demand.map((row) => `${row.category}: ${row.count}`).join(" · ");
+    const top = data.demand[0];
+    const subject = data.total === 1
+      ? t("acct.wanted.subjectOne", "1 buyer")
+      : t("acct.wanted.subjectMany", "{n} buyers", { n: data.total });
+    const verb = data.total === 1
+      ? t("acct.wanted.verbOne", "currently wants")
+      : t("acct.wanted.verbMany", "currently want");
+    $("wanted-demand").textContent = t(
+      "acct.wanted.strip",
+      "{subject} {verb} things like {example} — {chips}",
+      { subject, verb, example: top.example_title, chips },
+    );
+    $("wanted-strip").hidden = false;
 }
 
 async function checkSession() {
@@ -54,10 +75,12 @@ async function checkSession() {
   }
 }
 
+let lastSeller = null; // for language-toggle re-render (THI-445)
 function showDone(seller) {
+  lastSeller = seller;
   $("auth").hidden = true;
   $("done").hidden = false;
-  $("welcome").textContent = `Logged in as ${seller.name}`;
+  $("welcome").textContent = t("acct.loggedAs", "Logged in as ") + seller.name;
   loadByo();
   loadChatgpt();
   loadWantedDemand();
@@ -72,26 +95,30 @@ function showDone(seller) {
 
   $("copy-config").onclick = () => {
     navigator.clipboard.writeText($("mcp-config").textContent);
-    $("copy-config").textContent = "Copied ✓";
+    $("copy-config").textContent = t("acct.copied", "Copied ✓");
   };
   $("copy-url").onclick = () => {
     navigator.clipboard.writeText(mcpUrl);
-    $("copy-url").textContent = "Copied ✓";
+    $("copy-url").textContent = t("acct.copied", "Copied ✓");
   };
 }
 
 function revealKey(apiKey, mcpUrl) {
   $("apikey").textContent = apiKey;
   $("mcp-config").textContent = mcpConfigText(mcpUrl, apiKey);
-  $("key-note").textContent =
-    "Keep it private — it publishes listings as you. Shown only once; regenerate to view or rotate it later.";
+  $("key-note").textContent = t(
+    "acct.keyNoteOnce",
+    "Keep it private — it publishes listings as you. Shown only once; regenerate to view or rotate it later.",
+  );
 }
 
 function maskKey(mcpUrl) {
-  $("apikey").textContent = MASKED_KEY_HINT;
+  $("apikey").textContent = t("acct.keyMasked", MASKED_KEY_HINT);
   $("mcp-config").textContent = mcpConfigText(mcpUrl, MASKED_KEY_PLACEHOLDER);
-  $("key-note").textContent =
-    "Keep it private — it publishes listings as you. It is shown only when created or regenerated.";
+  $("key-note").textContent = t(
+    "acct.keyNote",
+    "Keep it private — it publishes listings as you. It is shown only when created or regenerated.",
+  );
 }
 
 $("regen").onclick = async () => {
@@ -101,7 +128,7 @@ $("regen").onclick = async () => {
     const res = await fetch("/api/me/api-key", { method: "POST" });
     const data = await res.json();
     if (!res.ok) {
-      $("key-error").textContent = data.error || "Could not regenerate the key.";
+      $("key-error").textContent = data.error || t("acct.errRegen", "Could not regenerate the key.");
       return;
     }
     revealKey(data.api_key, `${location.origin}/mcp`); // new show-once moment
@@ -110,14 +137,18 @@ $("regen").onclick = async () => {
   }
 };
 
+function syncAuthMode() {
+  $("form-title").textContent = mode === "signup" ? t("acct.formTitleSignup", "Create your account") : t("acct.formTitleLogin", "Log in");
+  $("submit").textContent = mode === "signup" ? t("acct.submitSignup", "Sign up") : t("acct.submitLogin", "Log in");
+  $("mode").textContent = mode === "signup"
+    ? t("acct.modeToLogin", "I already have an account — log in")
+    : t("acct.modeToSignup", "I need to create an account");
+}
+
 $("mode").onclick = (e) => {
   e.preventDefault();
   mode = mode === "signup" ? "login" : "signup";
-  $("form-title").textContent = mode === "signup" ? "Create your account" : "Log in";
-  $("submit").textContent = mode === "signup" ? "Sign up" : "Log in";
-  $("mode").textContent = mode === "signup"
-    ? "I already have an account — log in"
-    : "I need to create an account";
+  syncAuthMode();
   $("name").parentElement.style.display = mode === "signup" ? "" : "none";
   $("error").textContent = "";
 };
@@ -133,7 +164,7 @@ $("form").onsubmit = async (e) => {
     body: JSON.stringify(body),
   });
   const data = await res.json();
-  if (!res.ok) { $("error").textContent = data.error || "Something went wrong."; return; }
+  if (!res.ok) { $("error").textContent = data.error || t("acct.errGeneric", "Something went wrong."); return; }
   if (resumeNext()) return; // signup mode carries next too — new users can sign up mid-flow
   showDone(data.seller);
 };
@@ -153,24 +184,29 @@ function byoForm(show) {
   if (show) $("byo-key").focus();
 }
 
+let lastByoData; // for language-toggle re-render (THI-445)
 function renderByo(data) {
+  lastByoData = data;
   if (!data.byo_enabled) {
-    $("byo-status").textContent = "Not available on this server — the assistant runs on Thingery's key.";
+    $("byo-status").textContent = t("acct.byo.statusOff", "Not available on this server — the assistant runs on Thingery's key.");
     byoForm(false);
     return;
   }
   if (data.credential) {
     const c = data.credential;
     const where = c.base_url ? ` · ${c.base_url}` : "";
-    $("byo-status").textContent =
-      `Using your key: ${c.label || "saved key"} · ${c.model}${where} (fingerprint ${c.key_fingerprint}).`;
+    $("byo-status").textContent = t(
+      "acct.byo.statusOn",
+      "Using your key: {label} · {model}{where} (fingerprint {fp}).",
+      { label: c.label || t("acct.byo.savedKey", "saved key"), model: c.model, where, fp: c.key_fingerprint },
+    );
     $("byo-remove").hidden = false;
     byoForm(true); // stays open for rotate; key field starts empty
     $("byo-model").value = c.model;
     $("byo-base").value = c.base_url || "";
     $("byo-label").value = c.label || "";
   } else {
-    $("byo-status").textContent = "Not set — the assistant runs on Thingery's key.";
+    $("byo-status").textContent = t("acct.byo.statusNone", "Not set — the assistant runs on Thingery's key.");
     $("byo-remove").hidden = true;
     byoForm(true);
   }
@@ -190,7 +226,7 @@ $("byo-form").onsubmit = async (e) => {
   e.preventDefault();
   $("byo-error").textContent = "";
   $("byo-save").disabled = true;
-  $("byo-save").textContent = "Verifying…";
+  $("byo-save").textContent = t("acct.byo.verifying", "Verifying…");
   try {
     const res = await fetch("/api/me/llm-credential", {
       method: "PUT",
@@ -204,14 +240,14 @@ $("byo-form").onsubmit = async (e) => {
     });
     const data = await res.json();
     if (!res.ok) {
-      $("byo-error").textContent = data.error || "Could not save the key.";
+      $("byo-error").textContent = data.error || t("acct.byo.errSave", "Could not save the key.");
       return;
     }
     $("byo-key").value = ""; // never keep the plaintext in the form
     renderByo({ byo_enabled: true, credential: data.credential });
   } finally {
     $("byo-save").disabled = false;
-    $("byo-save").textContent = "Save & verify";
+    $("byo-save").textContent = t("acct.byo.save", "Save & verify");
   }
 };
 
@@ -225,7 +261,7 @@ $("byo-remove").onclick = async () => {
       renderByo({ byo_enabled: true, credential: null });
     } else {
       const data = await res.json().catch(() => ({}));
-      $("byo-error").textContent = data.error || "Could not remove the key.";
+      $("byo-error").textContent = data.error || t("acct.byo.errRemove", "Could not remove the key.");
     }
   } finally {
     $("byo-remove").disabled = false;
@@ -238,7 +274,9 @@ $("byo-remove").onclick = async () => {
 // status response is metadata only (fingerprint/model), so nothing here can
 // surface token material (it never reaches the browser at all).
 
+let lastChatgptData = null; // for language-toggle re-render (THI-445)
 function renderChatgpt(data) {
+  lastChatgptData = data;
   if (!chatgptSlotVisible(data)) return;
   $("chatgpt").hidden = false;
   const connected = data.connected === true;
@@ -246,8 +284,11 @@ function renderChatgpt(data) {
   $("chatgpt-usage").hidden = !connected;
   $("chatgpt-disconnect").hidden = !connected;
   $("chatgpt-status").textContent = connected
-    ? chatgptStatusText(data)
-    : "Not connected — the assistant runs on Thingery's key or your own key above.";
+    ? t("acct.cg.statusOn", "Using ChatGPT plan{model}{fingerprint}.", {
+        model: data.model ? t("acct.cg.segModel", " · model {m}", { m: data.model }) : "",
+        fingerprint: data.fingerprint ? t("acct.cg.segFp", " · fingerprint {f}", { f: data.fingerprint }) : "",
+      })
+    : t("acct.cg.statusOff", "Not connected — the assistant runs on Thingery's key or your own key above.");
 }
 
 async function loadChatgpt() {
@@ -280,7 +321,9 @@ function showChatgptBanner() {
   const el = $("chatgpt-banner");
   el.hidden = false;
   el.className = banner.tone === "ok" ? "" : "error";
-  el.textContent = banner.text;
+  // Fixed copy from chatgpt-view.js stays the English fallback; the slug
+  // (known values only) doubles as the dictionary key for Italian.
+  el.textContent = t(`acct.cg.banner.${params.get("chatgpt")}`, banner.text);
   // Drop the slug so a refresh doesn't replay the banner; keep other params.
   params.delete("chatgpt");
   const qs = params.toString();
@@ -288,7 +331,7 @@ function showChatgptBanner() {
 }
 
 $("chatgpt-disconnect").onclick = async () => {
-  if (!confirm("Disconnect your ChatGPT plan? The assistant will stop using it.")) return;
+  if (!confirm(t("acct.cg.confirmDisconnect", "Disconnect your ChatGPT plan? The assistant will stop using it."))) return;
   $("chatgpt-error").textContent = "";
   $("chatgpt-disconnect").disabled = true;
   try {
@@ -299,17 +342,32 @@ $("chatgpt-disconnect").onclick = async () => {
       // Server-side revocation is best-effort: if it couldn't be confirmed,
       // the seller should also remove the app on the ChatGPT side.
       if (data.revocation_unconfirmed) {
-        $("chatgpt-error").textContent =
-          "Disconnected here. To be safe, also remove Thingery in ChatGPT → Settings → Connections.";
+        $("chatgpt-error").textContent = t(
+          "acct.cg.revocation",
+          "Disconnected here. To be safe, also remove Thingery in ChatGPT → Settings → Connections.",
+        );
       }
     } else {
       const data = await res.json().catch(() => ({}));
-      $("chatgpt-error").textContent = data.error || "Could not disconnect.";
+      $("chatgpt-error").textContent = data.error || t("acct.cg.errDisconnect", "Could not disconnect.");
     }
   } finally {
     $("chatgpt-disconnect").disabled = false;
   }
 };
+
+// THI-445: re-render JS-populated strings when the language toggle flips, so
+// dynamic sections (welcome line, key note, BYO/ChatGPT status) follow the
+// choice without a reload — the signup form keeps whatever is typed.
+if (globalThis.__thingeryI18N) {
+  globalThis.__thingeryI18N.onChange(() => {
+    syncAuthMode();
+    if (lastSeller) showDone(lastSeller);
+    if (lastByoData !== undefined) renderByo(lastByoData);
+    if (lastChatgptData) renderChatgpt(lastChatgptData);
+    if (lastDemandData) renderWantedDemand(lastDemandData);
+  });
+}
 
 showChatgptBanner();
 checkSession();

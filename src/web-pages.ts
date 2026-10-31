@@ -2,12 +2,18 @@
 // Server-rendered, crawler-friendly (also for LLM browsing agents), no JS needed.
 
 import type { NextFunction, Request, Response } from "express";
-import { getItem, searchItems } from "./items.js";
+import { getItem, searchItems, listCategories } from "./items.js";
 import { MAX_IMAGES_PER_ITEM } from "./images.js";
 import { sellerFromSession } from "./auth.js";
-import type { ItemRow } from "./db.js";
-import { pool } from "./db.js";
+import { CONDITIONS, pool, type ItemRow } from "./db.js";
 import { BROWSE_PAGE_SIZE, browsePageNav, browsePageUrl, parsePageParam } from "./pagination.js";
+import {
+  budgetRange,
+  getWanted,
+  wantedBoard,
+  wantedFreshness,
+  type WantedPublicVM,
+} from "./wanted-feed.js";
 import { orderFlowConfig } from "./config.js";
 import { classifyVisitOrigin, logPageView } from "./analytics.js";
 
@@ -136,6 +142,36 @@ function page(title: string, description: string, body: string, og?: OgMeta, noi
       border: 1px solid rgba(127,127,127,.5); background: rgba(127,127,127,.15); color: inherit; }
     .sold { opacity: .55; }
     .pagination { display: flex; gap: 1.25rem; margin: 1.1rem 0; align-items: baseline; }
+    /* Wanted listings UX (THI-441, spec THI-439 §6) — WANTED visual language:
+       chip + budget as a RANGE, freshness line, never a single price badge. */
+    .wanted-chip { display: inline-block; border: 1px solid #019686; background: rgba(1,150,134,.14);
+      color: inherit; border-radius: 6px; padding: .05rem .5rem; font-size: .8rem; font-weight: 700;
+      letter-spacing: .06em; margin-right: .45rem; }
+    .wanted-budget { font-weight: 650; }
+    .fresh { opacity: .75; font-size: .85rem; margin: .15rem 0 0; }
+    .fresh.expiring { opacity: 1; color: #b45309; }
+    .chip-row { display: flex; flex-wrap: wrap; gap: .4rem; margin: .6rem 0 1rem; }
+    .chip { display: inline-block; border: 1px solid rgba(127,127,127,.5); border-radius: 999px;
+      padding: .12rem .7rem; font-size: .85rem; text-decoration: none; }
+    .chip[aria-current="page"] { background: rgba(1,150,134,.16); border-color: #019686; font-weight: 650; }
+    .funnel { border: 1px solid #019686; background: rgba(1,150,134,.08); border-radius: 12px;
+      padding: 1rem 1.2rem; margin: 1.1rem 0; }
+    .funnel .cta-btn { display: inline-block; margin-top: .5rem; padding: .6rem 1.1rem; border-radius: 10px;
+      border: 1px solid #019686; background: #019686; color: #fff; font: inherit; text-decoration: none; }
+    .wform { display: block; border: 1px solid rgba(127,127,127,.3); border-radius: 12px;
+      padding: 1rem 1.2rem; margin: 1rem 0; }
+    .wform label { display: block; margin: .6rem 0; font-size: .95rem; }
+    .wform input[type="text"], .wform input[type="number"], .wform input[type="url"],
+    .wform select, .wform textarea { width: 100%; padding: .5rem .7rem; font: inherit;
+      border-radius: 10px; border: 1px solid rgba(127,127,127,.5); background: transparent; color: inherit; }
+    .wform textarea { min-height: 5.5rem; resize: vertical; }
+    .wform .row { display: flex; gap: .8rem; flex-wrap: wrap; }
+    .wform .row > label { flex: 1 1 8rem; }
+    .wform .check { display: flex; gap: .5rem; align-items: baseline; font-size: .95rem; margin: .45rem 0; }
+    .wform .check input { width: auto; }
+    .wform button[type="submit"] { margin-top: .8rem; padding: .6rem 1.1rem; font: inherit;
+      border-radius: 10px; cursor: pointer; border: 1px solid #019686; background: #019686; color: #fff; }
+    .status-note { font-size: .95rem; margin: .8rem 0; }
   </style>
 </head>
 <body>
@@ -243,7 +279,7 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
   };
 
   const body = `
-  <p class="meta"><a href="/browse">← Browse</a> · <a href="/">Thingery</a></p>
+  <p class="meta"><a href="/browse">← Browse</a> · <a href="/wanted">Buyers want →</a> · <a href="/">Thingery</a></p>
   <h1>${escapeHtml(item.title)}</h1>
   <p class="price ${sold ? "sold" : ""}">${escapeHtml(money(item.price_cents, item.currency))}${sold ? ` · ${escapeHtml(item.status)}` : ""}</p>
   ${ctaHtml}
@@ -309,13 +345,25 @@ export async function browsePage(req: Request, res: Response): Promise<void> {
     .join("\n");
 
   const body = `
-  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents</p>
+  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents · <a href="/wanted">Buyers want →</a></p>
   <h1>Browse used items</h1>
   <form action="/browse" method="get">
     <input name="q" value="${escapeHtml(q ?? "")}" placeholder="Search listings… e.g. sneakers, camera, pen" autofocus>
     <button type="submit">Search</button>
   </form>
-  ${items.length ? cards : `<p class="meta">No listings match${q ? ` “${escapeHtml(q)}”` : ""} yet.</p>`}
+  ${items.length
+    ? cards
+    : q
+      ? // THI-441 (B2, spec THI-439 §6.2): zero-result funnel — the search
+        // dead-end becomes the conversion surface: one CTA to a wanted form
+        // prefilled from the failed query (title only; the buyer adjusts the rest).
+        `<div class="funnel" id="zero-result-funnel">
+      <strong>Nothing used listed right now.</strong>
+      <p class="meta">No marketplace results for “${escapeHtml(q)}”. Save what you're looking for and sellers
+      can respond with a listing — you'll also get an alert when a match appears.</p>
+      <a class="cta-btn" id="funnel-cta" href="/wanted/new?prefill=${encodeURIComponent(q)}">Save what you're looking for →</a>
+    </div>`
+      : `<p class="meta">No listings yet. <a href="/login.html">Sell something yourself →</a></p>`}
   ${(() => {
     const { hasPrev, hasNext } = browsePageNav(pageNum, items.length);
     if (!hasPrev && !hasNext) return "";
@@ -332,6 +380,209 @@ export async function browsePage(req: Request, res: Response): Promise<void> {
   // THI-396: search/pagination params are ephemeral — canonicalize every
   // /browse variant to the bare path so crawlers keep one address.
   res.send(page(title, description, body, { title, description, canonical: `${baseUrlFromRequest(req)}/browse` }));
+}
+
+// ---------------------------------------------------------------------------
+// Wanted listings UX (THI-441, B2+B3 — spec THI-439 §6). Board, detail, the
+// zero-result funnel form, and my-wanted management. Data flows through
+// src/wanted-feed.ts — the seam the backend sibling (THI-440) plugs into.
+// ---------------------------------------------------------------------------
+
+/** WANTED card — the non-negotiable visual language in one place: WANTED
+ *  chip + budget as a RANGE (never a single price badge), optional reference
+ *  image thumb, freshness line "wanted N days ago · expires in M days". */
+function wantedCardHtml(w: WantedPublicVM): string {
+  const fresh = wantedFreshness(w.created_at, w.expires_at);
+  return `<div class="card">
+    <div><span class="wanted-chip">WANTED</span><a href="/wanted/${escapeHtml(w.id)}"><strong>${escapeHtml(w.title)}</strong></a></div>
+    <span class="wanted-budget">${escapeHtml(budgetRange(w.budget_min_cents, w.budget_max_cents, w.currency))}</span>
+    <span class="meta"> · ${w.condition ? escapeHtml(w.condition.replaceAll("_", " ")) : "any condition"} · ${escapeHtml(w.category)}</span>
+    ${w.reference_images[0] ? `<div class="gallery"><img src="${escapeHtml(w.reference_images[0])}" alt="" loading="lazy" referrerpolicy="no-referrer" style="max-width:180px"></div>` : ""}
+    <p class="fresh ${fresh.expiringSoon ? "expiring" : ""}">${escapeHtml(fresh.text)}</p>
+  </div>`;
+}
+
+/** Category chips row for the board — "All" + one chip per registry category,
+ *  preserving the current q. Filters are links, not JS (crawler-friendly). */
+function wantedChipRowHtml(categories: string[], current: string | undefined, q: string | undefined): string {
+  const url = (category: string | undefined): string => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (category) params.set("category", category);
+    const qs = params.toString();
+    return qs ? `/wanted?${qs}` : "/wanted";
+  };
+  const chip = (label: string, category: string | undefined) =>
+    `<a class="chip" ${!category || category === current ? "aria-current=\"page\" " : ""}href="${escapeHtml(url(category))}">${escapeHtml(label)}</a>`;
+  return `<div class="chip-row" id="wanted-categories">
+    ${chip("All", undefined)}
+    ${categories.map((c) => chip(c, c)).join("\n    ")}
+  </div>`;
+}
+
+/** GET /wanted — the public demand board (B3). Mirrors browsePage: search
+ *  box, category chips, newest-first cards, pagination. Never mixed into
+ *  /browse — dedicated tab, absolute feed separation (spec §3.4). */
+export async function wantedBoardPage(req: Request, res: Response): Promise<void> {
+  const q = typeof req.query.q === "string" ? req.query.q.slice(0, 200) : undefined;
+  const category = typeof req.query.category === "string" ? req.query.category.slice(0, 100) : undefined;
+  const pageNum = parsePageParam(req.query.page);
+  const offset = (pageNum - 1) * BROWSE_PAGE_SIZE;
+  const items = await wantedBoard({ q, category, limit: BROWSE_PAGE_SIZE, offset }).catch(() => [] as WantedPublicVM[]);
+
+  // Category chips come from the shared registry (same as /browse tooling);
+  // on DB failure fall back to the categories present on this page.
+  const categories = await listCategories()
+    .then((rows) => rows.map((r) => r.name))
+    .catch(() => [...new Set(items.map((w) => w.category))].sort());
+
+  const body = `
+  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents · <a href="/browse">Browse for-sale listings →</a></p>
+  <h1>What buyers are looking for</h1>
+  <p class="meta">Wanted listings are public demand: a buyer says what they want and their budget,
+  and any seller can respond with a real listing. New to selling? <a href="/login.html">Create an account →</a></p>
+  <form action="/wanted" method="get">
+    <input name="q" value="${escapeHtml(q ?? "")}" placeholder="Search wanted listings… e.g. Switch, sneakers, mixer">
+    <button type="submit">Search</button>
+  </form>
+  ${wantedChipRowHtml(categories, category, q)}
+  ${items.length ? items.map(wantedCardHtml).join("\n") : `<p class="meta">No wanted listings${q || category ? " match those filters" : " yet"}. Buyers: <a href="/wanted/new">save what you're looking for →</a></p>`}
+  ${(() => {
+    const { hasPrev, hasNext } = browsePageNav(pageNum, items.length);
+    if (!hasPrev && !hasNext) return "";
+    const pageUrl = (n: number): string => {
+      const params = new URLSearchParams();
+      if (q) params.set("q", q);
+      if (category) params.set("category", category);
+      if (n > 1) params.set("page", String(n));
+      const qs = params.toString();
+      return qs ? `/wanted?${qs}` : "/wanted";
+    };
+    return `<nav class="pagination" aria-label="Pagination">
+      ${hasPrev ? `<a rel="prev" href="${escapeHtml(pageUrl(pageNum - 1))}">← Previous</a>` : ""}
+      <span class="meta">Page ${pageNum}</span>
+      ${hasNext ? `<a rel="next" href="${escapeHtml(pageUrl(pageNum + 1))}">Next →</a>` : ""}
+    </nav>`;
+  })()}
+  <p class="meta">Want something you can't find? <a href="/wanted/new">Save what you're looking for →</a></p>`;
+
+  const title = q ? `${q} — Wanted — Thingery` : "Wanted listings — Thingery";
+  const description = "What buyers are looking for — wanted listings with budget ranges. Sellers respond with real listings.";
+  res.send(page(title, description, body, { title, description, canonical: `${baseUrlFromRequest(req)}/wanted` }));
+}
+
+/** GET /wanted/:id — public detail page. Unknown ids render the 404 shape
+ *  (no existence oracle); expired wanteds keep their URL but get noindex
+ *  (spec §6.1). Response lane: sellers respond via their AI agent calling
+ *  respond_to_wanted — browser-native listing creation does not exist yet. */
+export async function wantedDetailPage(req: Request, res: Response): Promise<void> {
+  const id = String(req.params.id ?? "");
+  const w = UUID_RE.test(id) ? await getWanted(id).catch(() => null) : null;
+  if (!w) {
+    res.status(404).send(page("Not found — Thingery", "Wanted listing not found", `<h1>Not found</h1><p>This wanted listing does not exist or has ended.</p><p><a href="/wanted">← See what buyers are looking for</a></p>`));
+    return;
+  }
+  const fresh = wantedFreshness(w.created_at, w.expires_at);
+  const expired = fresh.expired || w.status !== "active";
+  const baseUrl = baseUrlFromRequest(req);
+  const respondQ = encodeURIComponent(
+    `A buyer wants ${w.title} (${budgetRange(w.budget_min_cents, w.budget_max_cents, w.currency)}) on Thingery, wanted id ${w.id}. I have one to sell — help me respond to this wanted listing.`.slice(0, 400),
+  );
+  const respondCta = expired
+    ? `<p class="meta">This wanted listing has ended — the buyer is no longer accepting responses.</p>`
+    : `<div class="funnel">
+      <strong>Have this?</strong>
+      <p class="meta">Respond with a real listing — the buyer is notified when it goes live. Ask your AI agent:
+      <em>“call respond_to_wanted with wanted_id ${escapeHtml(w.id)}”</em>, or</p>
+      <a class="cta-btn" href="/chat.html?q=${respondQ}">💬 Ask Thingery's assistant</a>
+    </div>`;
+  const body = `
+  <p class="meta"><a href="/wanted">← Wanted</a> · <a href="/browse">Browse for-sale listings</a> · <a href="/">Thingery</a></p>
+  <h1>${escapeHtml(w.title)}</h1>
+  <p><span class="wanted-chip">WANTED</span><span class="wanted-budget">${escapeHtml(budgetRange(w.budget_min_cents, w.budget_max_cents, w.currency))}</span></p>
+  <p class="fresh ${fresh.expiringSoon ? "expiring" : ""}">${escapeHtml(fresh.text)}</p>
+  ${respondCta}
+  ${w.reference_images.length ? `<div class="gallery">${w.reference_images.map((src) => `<img src="${escapeHtml(src)}" alt="" loading="lazy" referrerpolicy="no-referrer">`).join("")}</div>` : ""}
+  <p class="meta">
+    <span class="badge">category: ${escapeHtml(w.category)}</span>
+    ${w.condition ? `<span class="badge">condition wanted: ${escapeHtml(w.condition.replaceAll("_", " "))}</span>` : `<span class="badge">any condition</span>`}
+    <span class="badge">currency: ${escapeHtml(w.currency)}</span>
+  </p>
+  <div class="desc">${escapeHtml(w.notes) || "<em>No further details provided.</em>"}</div>
+  <p class="meta">Wanted listings carry no contact details — sellers respond with listings, never messages.</p>`;
+  const title = `${w.title} — Wanted — Thingery`;
+  const description = `Buyer wants ${w.title} — budget ${budgetRange(w.budget_min_cents, w.budget_max_cents, w.currency)}${w.category ? `, ${w.category}` : ""}.`;
+  res.send(page(title, description, body, { title, description, url: `${baseUrl}/wanted/${w.id}`, canonical: `${baseUrl}/wanted/${w.id}` }, expired));
+}
+
+/** GET /wanted/new — the zero-result funnel form (B2, spec §6.2). One-tap
+ *  card prefilled from the failed search query: title comes from ?prefill=,
+ *  the buyer adjusts category/condition/budget. The "also alert me" box is
+ *  default-on: one action, two effects — a public wanted listing (that IS
+ *  "visible to sellers", default on) plus a saved-search alert on the
+ *  THI-360 rails. website/wanted.js submits to POST /api/wanted (spec §6.3). */
+export async function wantedNewPage(req: Request, res: Response): Promise<void> {
+  const prefill = (typeof req.query.prefill === "string" ? req.query.prefill : "").slice(0, 200);
+  const categories = await listCategories()
+    .then((rows) => ["other", ...rows.map((r) => r.name).filter((name) => name !== "other")])
+    .catch(() => ["other"]);
+  const categoryOptions = categories.map((c) => `<option value="${escapeHtml(c)}"${c === "other" ? " selected" : ""}>${escapeHtml(c)}</option>`).join("");
+  const conditionOptions = CONDITIONS.map((c) => `<option value="${c}">${escapeHtml(c.replaceAll("_", " "))}</option>`).join("");
+
+  const body = `
+  <p class="meta"><a href="/wanted">← Wanted</a> · <a href="/browse">Browse listings</a> · <a href="/">Thingery</a></p>
+  <h1>Save what you're looking for</h1>
+  <p class="meta">Tell sellers what you want and your budget. It appears on the <a href="/wanted">/wanted board</a>
+  where sellers respond with real listings — and we'll alert you when a matching listing appears.
+  No account? You can also ask your AI assistant to call <code>create_wanted</code>.</p>
+  <form class="wform" id="wanted-form" data-wanted-form action="/api/wanted" method="post">
+    <label>What are you looking for? <input type="text" name="title" id="wf-title" required minlength="3" maxlength="200" value="${escapeHtml(prefill)}" placeholder="e.g. Nintendo Switch OLED"></label>
+    <div class="row">
+      <label>Category
+        <select name="category" id="wf-category">${categoryOptions}</select></label>
+      <label>Condition wanted
+        <select name="condition" id="wf-condition">
+          <option value="" selected>any condition</option>
+          ${conditionOptions}
+        </select></label>
+    </div>
+    <div class="row">
+      <label>Budget from (€, optional) <input type="number" name="budget_min" id="wf-min" min="0" step="0.01" placeholder="150"></label>
+      <label>Budget up to (€, optional) <input type="number" name="budget_max" id="wf-max" min="0" step="0.01" placeholder="200"></label>
+    </div>
+    <label>Details sellers should know <small>(optional — sizes, colours, what's acceptable)</small>
+      <textarea name="notes" id="wf-notes" maxlength="2000" placeholder="e.g. with dock and both Joy-Cons, small scratches fine"></textarea></label>
+    <label>Reference image link <small>(optional — “something like this”, no photo needed)</small>
+      <input type="url" name="reference_image" id="wf-ref" maxlength="2048" placeholder="https://…"></label>
+    <label class="check"><input type="checkbox" name="alert_me" id="wf-alert" checked>
+      Also alert me when a matching listing appears</label>
+    <p class="meta" style="font-size:.85rem">Wanted listings are public and carry no contact details — responses happen through listings, never messages. Live for 30 days; renew in the final week or after expiry. No contact info in the text (no emails, phone numbers or links to chat apps).</p>
+    <button type="submit" id="wf-submit">Save what you're looking for</button>
+    <p class="status-note" id="wf-status" role="status"></p>
+  </form>
+  <script src="/wanted.js" defer></script>`;
+  const title = prefill ? `Save “${prefill}” — Wanted — Thingery` : "Save what you're looking for — Thingery";
+  const description = "Publish what you're looking for — sellers browse the wanted board and respond with listings.";
+  res.send(page(title, description, body, { title, description, canonical: `${baseUrlFromRequest(req)}/wanted/new` }));
+}
+
+/** GET /wanted/mine — my-wanted management shell (B2 item 4: list, edit,
+  *  expire, renew). The page is a static shell; website/wanted.js loads
+  *  GET /api/wanted/mine (session-authed, spec §6.3) and renders the cards
+  *  with their actions. Anonymous visitors get a login prompt client-side. */
+export async function wantedMinePage(_req: Request, res: Response): Promise<void> {
+  const body = `
+  <p class="meta"><a href="/wanted">← Wanted board</a> · <a href="/browse">Browse listings</a> · <a href="/">Thingery</a></p>
+  <h1>My wanted listings</h1>
+  <p class="meta">Everything you're looking for, in one place: edit the details, expire early, or renew
+  in the final week. Seller responses to your wanteds appear here too.</p>
+  <noscript><p class="meta">This page needs JavaScript — or just ask your AI assistant to call <code>my_wanted</code>.</p></noscript>
+  <div id="wanted-mine" data-wanted-mine>
+    <p class="meta">Loading…</p>
+  </div>
+  <p class="meta"><a href="/wanted/new">+ Save something else you're looking for</a></p>
+  <script src="/wanted.js" defer></script>`;
+  res.send(page("My wanted listings — Thingery", "Manage your wanted listings", body, undefined, true));
 }
 
 /** Order payment-return page (spec THI-3 §4.3, finding F15).

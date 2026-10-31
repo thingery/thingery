@@ -110,7 +110,9 @@ describe("website surface fails as a logged generic 500 on handler bugs (THI-54)
     await withServer(async (base) => {
       const res = await fetch(`${base()}/browse`);
       expect(res.status).toBe(200);
-      expect(await res.text()).toContain("No listings match");
+      // THI-441: the no-query empty state now points at selling (the q-miss
+      // path renders the wanted funnel instead — see tests/wanted-page.test.ts).
+      expect(await res.text()).toContain("No listings yet");
     });
   });
 });

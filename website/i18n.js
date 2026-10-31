@@ -113,6 +113,28 @@
     "home.foot.tagline": "<strong>Thingery</strong> è il database aperto di oggetti usati e il server MCP che permette agli agenti AI di pubblicare, trovare e scambiare articoli di seconda mano.",
     "home.foot.chinese": "Nome cinese: 物坊 (Wùfāng) — il marketplace aperto per le cose inutilizzate.",
 
+    // --- chat page (/chat.html + chat.js) ----------------------------------
+    "chat.title": "Chat — Thingery",
+    "chat.head": "<a class=\"logo\" href=\"/\"><img class=\"logo-mark\" src=\"/assets/logo-mark.svg\" alt=\"\" width=\"24\" height=\"24\">Thingery</a> assistente",
+    "chat.login": "Accedi / registrati",
+    "chat.welcome": "Ciao! Dimmi cosa vorresti vendere — bastano poche parole e lo trasformo in un annuncio.\nOppure chiedimi di trovare qualcosa di usato. <em>(Per cercare non serve un account; per pubblicare sì.)</em>",
+    "chat.plan": "<img src=\"/assets/chatgpt-logo-white.svg\" alt=\"\" width=\"21\" height=\"21\"> Piano ChatGPT in uso ·\n      <a href=\"https://chatgpt.com/settings/usage\" target=\"_blank\" rel=\"noopener\">Gestisci utilizzo</a>",
+    "chat.placeholder": "es. Vendi la mia penna stilografica Diplomat, buone condizioni, 120 euro",
+    "chat.send": "Invia",
+    "chat.thinking": "L'assistente sta pensando",
+    "chat.loggedAs": "Accesso effettuato come ",
+    "chat.byolink": "usa il tuo modello",
+    "chat.accountlink": "account",
+    "chat.confirmFallback": "Applica questa modifica",
+    "chat.confirmSuffix": " — confermi?",
+    "chat.confirmYes": "Sì, procedi",
+    "chat.confirmNo": "No, annulla",
+    "chat.confirmedNote": "(modifica in sospeso confermata)",
+    "chat.declinedNote": "(modifica in sospeso annullata)",
+    "chat.errGeneric": "Qualcosa è andato storto.",
+    "chat.noReply": "(nessuna risposta)",
+    "chat.errNetwork": "⚠️ Errore di rete — riprova.",
+
     // --- homepage live demo (home-demo.js) ----------------------------------
     "demo.tooShort": "Digita almeno due caratteri per cercare.",
     "demo.searching": "Ricerca in corso…",

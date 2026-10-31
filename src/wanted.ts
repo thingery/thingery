@@ -628,6 +628,26 @@ function publicBaseUrl(): string {
   return (process.env.PUBLIC_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
 }
 
+/** Column list shared by the single-wanted read paths (respond validation,
+ *  getWantedById). buyer_id is included because these rows stay internal —
+ *  wantedToPublic strips it before any external surface sees the row. */
+export const WANTED_ROW_COLS = `id, buyer_id, title, notes, category, condition,
+                                 budget_min_cents, budget_max_cents, currency, reference_images,
+                                 status, expires_at, created_at, updated_at`;
+
+/** Single-wanted public read for /wanted/:id — the same lazy visibility
+ *  guard as searchWanted (§3.4): null for unknown ids AND for ended ones
+ *  (expired status or past expires_at), so the page renders one 404 shape
+ *  with no existence oracle. */
+export async function getWantedById(id: string): Promise<WantedRow | null> {
+  const { rows } = await pool.query<WantedRow>(
+    `SELECT ${WANTED_ROW_COLS} FROM wanted_items
+     WHERE id = $1 AND status = 'active' AND expires_at > now()`,
+    [id],
+  );
+  return rows[0] ?? null;
+}
+
 /** Public wanted payload (spec §5): id/title/notes/category/condition,
  *  budget as a range object, reference images, timestamps, days_left, url.
  *  Never buyer_id, never the embedding vector, never a single price badge —

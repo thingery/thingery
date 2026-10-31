@@ -172,10 +172,21 @@ function page(title: string, description: string, body: string, og?: OgMeta, noi
     .wform button[type="submit"] { margin-top: .8rem; padding: .6rem 1.1rem; font: inherit;
       border-radius: 10px; cursor: pointer; border: 1px solid #019686; background: #019686; color: #fff; }
     .status-note { font-size: .95rem; margin: .8rem 0; }
+    /* THI-445: EN/IT toggle shared by the server-rendered pages. */
+    .lang-bar { display: flex; justify-content: flex-end; margin: 0 0 .25rem; }
+    .lang-switch { display: inline-flex; border: 1px solid rgba(127,127,127,.4); border-radius: 999px; overflow: hidden; flex: none; }
+    .lang-btn { display: inline-flex; align-items: center; gap: .35rem; font: inherit; font-size: .78rem;
+      font-weight: 650; letter-spacing: .02em; padding: .32rem .62rem; border: none; background: transparent;
+      color: inherit; opacity: .75; cursor: pointer; }
+    .lang-btn:hover { opacity: 1; }
+    .lang-btn .lang-flag { width: 1.15em; height: auto; border-radius: 2px; display: block; }
+    .lang-btn[aria-pressed="true"] { background: rgba(127,127,127,.18); opacity: 1; }
   </style>
 </head>
 <body>
+<div class="lang-bar"><div class="lang-switch" data-lang-switch></div></div>
 ${body}
+<script src="/i18n.js"></script>
 </body>
 </html>`;
 }
@@ -183,7 +194,7 @@ ${body}
 export async function itemPage(req: Request, res: Response): Promise<void> {
   const item = await getItem(req.params.id).catch(() => null);
   if (!item || item.status === "deleted") {
-    res.status(404).send(page("Not found — Thingery", "Item not found", "<h1>Not found</h1><p>This item does not exist or was removed.</p><p><a href=\"/browse\">← Browse listings</a></p>"));
+    res.status(404).send(page("Not found — Thingery", "Item not found", `<h1 data-i18n="item.nfH1">Not found</h1><p data-i18n="item.nfP">This item does not exist or was removed.</p><p><a href="/browse" data-i18n="item.nfBack">← Browse listings</a></p>`));
     return;
   }
 
@@ -211,13 +222,13 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
     ? ""
     : `<div class="cta" id="next-step">
       <div class="cta-row">
-        <a class="cta-btn" id="cta-chat" href="/chat.html?q=${chatQ}">💬 Ask Thingery's assistant</a>
-        <button class="share-btn" id="share-btn" type="button" data-share-url="${escapeHtml(canonicalUrl)}" data-share-title="${escapeHtml(item.title)}">🔗 Share</button>
+        <a class="cta-btn" id="cta-chat" href="/chat.html?q=${chatQ}" data-i18n="item.askAssistant">💬 Ask Thingery's assistant</a>
+        <button class="share-btn" id="share-btn" type="button" data-share-url="${escapeHtml(canonicalUrl)}" data-share-title="${escapeHtml(item.title)}" data-i18n="item.share">🔗 Share</button>
       </div>
       <p class="meta">${
         paymentsOn
-          ? "Card payments are on — your AI assistant's order gets a secure Stripe checkout link."
-          : "To buy, ask your AI assistant (Claude, ChatGPT, …) — it connects via MCP and arranges everything with the seller."
+          ? `<span data-i18n="item.payOn">Card payments are on — your AI assistant's order gets a secure Stripe checkout link.</span>`
+          : `<span data-i18n="item.payOff">To buy, ask your AI assistant (Claude, ChatGPT, …) — it connects via MCP and arranges everything with the seller.</span>`
       }</p>
     </div>
     <script src="/share.js" defer></script>`;
@@ -279,23 +290,23 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
   };
 
   const body = `
-  <p class="meta"><a href="/browse">← Browse</a> · <a href="/wanted">Buyers want →</a> · <a href="/">Thingery</a></p>
+  <p class="meta"><a href="/browse" data-i18n="item.back">← Browse</a> · <a href="/wanted" data-i18n="item.wanted">Buyers want →</a> · <a href="/">Thingery</a></p>
   <h1>${escapeHtml(item.title)}</h1>
-  <p class="price ${sold ? "sold" : ""}">${escapeHtml(money(item.price_cents, item.currency))}${sold ? ` · ${escapeHtml(item.status)}` : ""}</p>
+  <p class="price ${sold ? "sold" : ""}">${escapeHtml(money(item.price_cents, item.currency))}${sold ? ` · <span data-i18n-status="${item.status}">${escapeHtml(item.status)}</span>` : ""}</p>
   ${ctaHtml}
   ${imagesHtml}
   ${uploadHtml}
   <p class="meta">
-    <span class="badge">condition: ${escapeHtml(item.condition.replaceAll("_", " "))}</span>
-    <span class="badge">category: ${escapeHtml(item.category)}</span>
-    ${item.brand ? `<span class="badge">brand: ${escapeHtml(item.brand)}</span>` : ""}
-    ${item.shipping_tier !== "unknown" ? `<span class="badge">ships: ${escapeHtml(item.shipping_tier)}</span>` : ""}
+    <span class="badge"><span data-i18n="item.cond">condition:</span> <span data-i18n-cond="${item.condition}">${escapeHtml(item.condition.replaceAll("_", " "))}</span></span>
+    <span class="badge"><span data-i18n="item.cat">category:</span> ${escapeHtml(item.category)}</span>
+    ${item.brand ? `<span class="badge"><span data-i18n="item.brand">brand:</span> ${escapeHtml(item.brand)}</span>` : ""}
+    ${item.shipping_tier !== "unknown" ? `<span class="badge"><span data-i18n="item.ships">ships:</span> ${escapeHtml(item.shipping_tier)}</span>` : ""}
     ${item.location ? `<span class="badge">📍 ${escapeHtml(item.location)}</span>` : ""}
   </p>
   ${attributesHtml}
-  <div class="desc">${escapeHtml(item.description) || "<em>No description provided.</em>"}</div>
-  <p class="meta">Listed ${new Date(item.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })} ·
-  To buy, message the seller through the assistant that showed you this listing.</p>
+  <div class="desc">${escapeHtml(item.description) || `<em data-i18n="item.noDesc">No description provided.</em>`}</div>
+  <p class="meta"><span data-i18n="item.listed">Listed</span> ${new Date(item.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })} ·
+  <span data-i18n="item.toBuy">To buy, message the seller through the assistant that showed you this listing.</span></p>
   <script type="application/ld+json">${safeJsonLd(jsonLd)}</script>`;
 
   const firstImage = item.images[0];
@@ -339,17 +350,17 @@ export async function browsePage(req: Request, res: Response): Promise<void> {
       (i) => `<div class="card ${i.status !== "active" ? "sold" : ""}">
       <a href="/item/${escapeHtml(i.id)}"><strong>${escapeHtml(i.title)}</strong></a><br>
       <span class="p">${escapeHtml(money(i.price_cents, i.currency))}</span>
-      <span class="meta"> · ${escapeHtml(i.condition.replaceAll("_", " "))} · ${escapeHtml(i.category)}${i.location ? ` · 📍 ${escapeHtml(i.location)}` : ""}${i.status !== "active" ? ` · ${escapeHtml(i.status)}` : ""}</span>
+      <span class="meta"> · <span data-i18n-cond="${i.condition}">${escapeHtml(i.condition.replaceAll("_", " "))}</span> · ${escapeHtml(i.category)}${i.location ? ` · 📍 ${escapeHtml(i.location)}` : ""}${i.status !== "active" ? ` · <span data-i18n-status="${i.status}">${escapeHtml(i.status)}</span>` : ""}</span>
     </div>`,
     )
     .join("\n");
 
   const body = `
-  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents · <a href="/wanted">Buyers want →</a></p>
-  <h1>Browse used items</h1>
+  <p class="meta"><a href="/">Thingery</a> <span data-i18n="browse.taglineMid">— the open item database for AI agents</span> · <a href="/wanted" data-i18n="item.wanted">Buyers want →</a></p>
+  <h1 data-i18n="browse.h1">Browse used items</h1>
   <form action="/browse" method="get">
-    <input name="q" value="${escapeHtml(q ?? "")}" placeholder="Search listings… e.g. sneakers, camera, pen" autofocus>
-    <button type="submit">Search</button>
+    <input name="q" value="${escapeHtml(q ?? "")}" placeholder="Search listings… e.g. sneakers, camera, pen" data-i18n-placeholder="browse.placeholder" autofocus>
+    <button type="submit" data-i18n="browse.search">Search</button>
   </form>
   ${items.length
     ? cards
@@ -358,22 +369,22 @@ export async function browsePage(req: Request, res: Response): Promise<void> {
         // dead-end becomes the conversion surface: one CTA to a wanted form
         // prefilled from the failed query (title only; the buyer adjusts the rest).
         `<div class="funnel" id="zero-result-funnel">
-      <strong>Nothing used listed right now.</strong>
-      <p class="meta">No marketplace results for “${escapeHtml(q)}”. Save what you're looking for and sellers
-      can respond with a listing — you'll also get an alert when a match appears.</p>
-      <a class="cta-btn" id="funnel-cta" href="/wanted/new?prefill=${encodeURIComponent(q)}">Save what you're looking for →</a>
+      <strong data-i18n="browse.zeroStrong">Nothing used listed right now.</strong>
+      <p class="meta"><span data-i18n="browse.zeroP1">No marketplace results for</span> “${escapeHtml(q)}”. <span data-i18n="browse.zeroP2">Save what you're looking for and sellers
+      can respond with a listing — you'll also get an alert when a match appears.</span></p>
+      <a class="cta-btn" id="funnel-cta" href="/wanted/new?prefill=${encodeURIComponent(q)}" data-i18n="browse.zeroCta">Save what you're looking for →</a>
     </div>`
-      : `<p class="meta">No listings yet. <a href="/login.html">Sell something yourself →</a></p>`}
+      : `<p class="meta"><span data-i18n="browse.none">No listings yet.</span> <a href="/login.html" data-i18n="browse.sellCta">Sell something yourself →</a></p>`}
   ${(() => {
     const { hasPrev, hasNext } = browsePageNav(pageNum, items.length);
     if (!hasPrev && !hasNext) return "";
     return `<nav class="pagination" aria-label="Pagination">
-      ${hasPrev ? `<a rel="prev" href="${escapeHtml(browsePageUrl(pageNum - 1, q))}">← Previous</a>` : ""}
-      <span class="meta">Page ${pageNum}</span>
-      ${hasNext ? `<a rel="next" href="${escapeHtml(browsePageUrl(pageNum + 1, q))}">Next →</a>` : ""}
+      ${hasPrev ? `<a rel="prev" href="${escapeHtml(browsePageUrl(pageNum - 1, q))}" data-i18n="browse.prev">← Previous</a>` : ""}
+      <span class="meta"><span data-i18n="browse.page">Page</span> ${pageNum}</span>
+      ${hasNext ? `<a rel="next" href="${escapeHtml(browsePageUrl(pageNum + 1, q))}" data-i18n="browse.next">Next →</a>` : ""}
     </nav>`;
   })()}
-  <p class="meta">Listings are published by AI agents on behalf of their owners. <a href="/login.html">Sell something yourself →</a></p>`;
+  <p class="meta"><span data-i18n="browse.footNote">Listings are published by AI agents on behalf of their owners.</span> <a href="/login.html" data-i18n="browse.sellCta">Sell something yourself →</a></p>`;
 
   const title = q ? `${q} — Browse — Thingery` : "Browse used items — Thingery";
   const description = "Browse second-hand listings published through Thingery.";

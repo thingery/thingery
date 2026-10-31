@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Thingery — find, sell, and trade second-hand things with your AI</title>
+  <title data-i18n="home.title">Thingery — find, sell, and trade second-hand things with your AI</title>
   <meta name="description" content="Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.">
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png">
@@ -132,6 +132,16 @@
     footer { border-top: 1px solid var(--line); margin-top: 2.5rem; padding: 1.4rem 0 2.5rem; color: var(--muted); font-size: .92rem; }
     footer a { color: inherit; }
     a.inline { color: var(--accent); }
+    /* THI-445: EN/IT toggle — compact pill, fits the existing header (wraps
+       on small screens, no layout regression). */
+    header { flex-wrap: wrap; gap: .4rem .8rem; }
+    .lang-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; flex: none; }
+    .lang-btn { display: inline-flex; align-items: center; gap: .35rem; font: inherit; font-size: .78rem;
+      font-weight: 650; letter-spacing: .02em; padding: .32rem .62rem; border: none; background: transparent;
+      color: var(--muted); cursor: pointer; }
+    .lang-btn:hover { color: inherit; }
+    .lang-btn .lang-flag { width: 1.15em; height: auto; border-radius: 2px; display: block; }
+    .lang-btn[aria-pressed="true"] { background: var(--card); color: inherit; }
   </style>
 </head>
 <body>
@@ -140,128 +150,130 @@
   <header>
     <a class="logo" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="26" height="26">Thingery</a>
     <nav>
-      <a href="/browse">Browse</a>
-      <a href="/chat.html">Chat</a>
-      <a href="/login.html">Account</a>
+      <a href="/browse" data-i18n="nav.browse">Browse</a>
+      <a href="/chat.html" data-i18n="nav.chat">Chat</a>
+      <a href="/login.html" data-i18n="nav.account">Account</a>
       <a href="https://github.com/thingery/thingery">GitHub</a>
     </nav>
+    <div class="lang-switch" data-lang-switch></div>
   </header>
 
   <div class="hero">
-    <h1>Find, sell, and trade second-hand things — <em>just by talking to your AI</em></h1>
-    <p class="sub">Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.</p>
-    <p class="sub2">Browse it like any marketplace, or plug it into your assistant and go hands-free.</p>
+    <h1 data-i18n-html="home.hero.h1">Find, sell, and trade second-hand things — <em>just by talking to your AI</em></h1>
+    <p class="sub" data-i18n="home.hero.sub">Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.</p>
+    <p class="sub2" data-i18n="home.hero.sub2">Browse it like any marketplace, or plug it into your assistant and go hands-free.</p>
     <div class="cta-row">
-      <a class="cta find" href="/browse">Find an item</a>
-      <a class="cta sell" href="/chat.html">Sell an item</a>
-      <a class="cta build" href="#build">Build with Thingery</a>
+      <a class="cta find" href="/browse" data-i18n="home.cta.find">Find an item</a>
+      <a class="cta sell" href="/chat.html" data-i18n="home.cta.sell">Sell an item</a>
+      <a class="cta build" href="#build" data-i18n="home.cta.build">Build with Thingery</a>
     </div>
   </div>
 
   <section class="demo-live" id="demo" aria-label="Live demo">
-    <h2>Try it right now</h2>
-    <p class="label">Live demo — searching needs no account</p>
+    <h2 data-i18n="home.demo.h2">Try it right now</h2>
+    <p class="label" data-i18n="home.demo.label">Live demo — searching needs no account</p>
     <div class="chips">
-      <button class="chip" type="button" data-q="Find me a used film camera under €300">🔍 Find me a used film camera under €300</button>
-      <a class="chip" href="/chat.html" title="Opens the full assistant">🏷️ Sell my Diplomat fountain pen, Marrakesh brown, good condition, 120 euros</a>
+      <button class="chip" type="button" data-q="Find me a used film camera under €300" data-i18n="home.demo.chip1">🔍 Find me a used film camera under €300</button>
+      <a class="chip" href="/chat.html" data-i18n="home.demo.chip2" data-i18n-title="home.demo.chip2.title" title="Opens the full assistant">🏷️ Sell my Diplomat fountain pen, Marrakesh brown, good condition, 120 euros</a>
     </div>
     <form id="demo-search" action="/browse" method="get">
-      <input name="q" id="demo-q" placeholder="Search listings… e.g. film camera under €300" autocomplete="off" aria-label="Search listings">
-      <button type="submit">Search</button>
+      <input name="q" id="demo-q" placeholder="Search listings… e.g. film camera under €300" data-i18n-placeholder="home.demo.placeholder" autocomplete="off" aria-label="Search listings" data-i18n-aria-label="home.demo.aria">
+      <button type="submit" data-i18n="home.demo.submit">Search</button>
     </form>
     <div class="demo-results" id="demo-results" aria-live="polite"></div>
-    <p class="caption">Search is free and instant. To publish a listing you'll create a free account (email + password) and snap one photo — listings need a photo to go live. Want the full hands-free experience? <a href="/chat.html">Open the full assistant →</a></p>
+    <p class="caption" data-i18n-html="home.demo.caption">Search is free and instant. To publish a listing you'll create a free account (email + password) and snap one photo — listings need a photo to go live. Want the full hands-free experience? <a href="/chat.html">Open the full assistant →</a></p>
   </section>
 
   <section class="block" id="build">
-    <h2>Fastest setup</h2>
+    <h2 data-i18n="home.build.h2">Fastest setup</h2>
     <div class="cols">
       <div class="setup">
-        <h3>Use your own AI</h3>
-        <p>Paste <code class="copy-mcp">https://thingery.dev/mcp</code> into your MCP host — Claude Desktop, ChatGPT connectors, VS Code, Inspector — and sign in. One click, no API key.</p>
+        <h3 data-i18n="home.build.own.h3">Use your own AI</h3>
+        <p data-i18n-html="home.build.own.p">Paste <code class="copy-mcp">https://thingery.dev/mcp</code> into your MCP host — Claude Desktop, ChatGPT connectors, VS Code, Inspector — and sign in. One click, no API key.</p>
       </div>
       <div class="setup">
-        <h3>Run your own</h3>
-        <p>Open source (Apache-2.0). One command: <code>npx thingery</code></p>
+        <h3 data-i18n="home.build.self.h3">Run your own</h3>
+        <p data-i18n-html="home.build.self.p">Open source (Apache-2.0). One command: <code>npx thingery</code></p>
       </div>
     </div>
-    <p style="margin:.9rem 0 0"><a class="inline" href="https://github.com/thingery/thingery#quickstart">Full quickstart on GitHub →</a></p>
+    <p style="margin:.9rem 0 0"><a class="inline" href="https://github.com/thingery/thingery#quickstart" data-i18n="home.build.quickstart">Full quickstart on GitHub →</a></p>
   </section>
 
   <section class="block" id="paths">
-    <h2>Three ways in</h2>
+    <h2 data-i18n="home.paths.h2">Three ways in</h2>
     <div class="paths">
       <div class="path find">
-        <span class="tag">FIND AN ITEM</span>
-        <h3>Find an item</h3>
-        <p>Ask in plain words. Your assistant searches the whole catalog and proposes the best match — price, condition, specs.</p>
+        <span class="tag" data-i18n="home.find.tag">FIND AN ITEM</span>
+        <h3 data-i18n="home.find.h3">Find an item</h3>
+        <p data-i18n="home.find.p">Ask in plain words. Your assistant searches the whole catalog and proposes the best match — price, condition, specs.</p>
         <ul>
-          <li>Semantic search — "used film camera under €300" just works</li>
-          <li>A public, shareable page for every item</li>
-          <li>Zero-config chat at <code>/chat</code> — no account needed to search</li>
+          <li data-i18n-html="home.find.li1">Semantic search — "used film camera under €300" just works</li>
+          <li data-i18n="home.find.li2">A public, shareable page for every item</li>
+          <li data-i18n-html="home.find.li3">Zero-config chat at <code>/chat</code> — no account needed to search</li>
         </ul>
-        <a class="cta find" href="/browse">Browse items</a>
+        <a class="cta find" href="/browse" data-i18n="home.find.cta">Browse items</a>
       </div>
       <div class="path sell">
-        <span class="tag">SELL AN ITEM</span>
-        <h3>Sell an item</h3>
-        <p>One sentence to your assistant: it identifies the item, writes the listing, prices it, and publishes with a shareable link.</p>
+        <span class="tag" data-i18n="home.sell.tag">SELL AN ITEM</span>
+        <h3 data-i18n="home.sell.h3">Sell an item</h3>
+        <p data-i18n="home.sell.p">One sentence to your assistant: it identifies the item, writes the listing, prices it, and publishes with a shareable link.</p>
         <ul>
-          <li>No forms, no category hunting — your agent does the typing</li>
-          <li>Snap one photo to publish (that's all a listing needs)</li>
-          <li>Free for sellers — mark reserved or sold any time</li>
+          <li data-i18n="home.sell.li1">No forms, no category hunting — your agent does the typing</li>
+          <li data-i18n="home.sell.li2">Snap one photo to publish (that's all a listing needs)</li>
+          <li data-i18n="home.sell.li3">Free for sellers — mark reserved or sold any time</li>
         </ul>
-        <a class="cta sell" href="/chat.html">List your first item</a>
+        <a class="cta sell" href="/chat.html" data-i18n="home.sell.cta">List your first item</a>
       </div>
       <div class="path build">
-        <span class="tag">BUILD WITH THINGERY</span>
-        <h3>Build with Thingery</h3>
-        <p>Every capability is an MCP tool on an open item database. Point any MCP client at it — or self-host the whole marketplace.</p>
+        <span class="tag" data-i18n="home.build2.tag">BUILD WITH THINGERY</span>
+        <h3 data-i18n="home.build2.h3">Build with Thingery</h3>
+        <p data-i18n="home.build2.p">Every capability is an MCP tool on an open item database. Point any MCP client at it — or self-host the whole marketplace.</p>
         <ul>
-          <li>Standard Streamable HTTP MCP + one-click OAuth (PKCE)</li>
-          <li>Open data surface: <code>llms.txt</code>, <code>agents.json</code>, public search</li>
-          <li>Apache-2.0 · self-host in one command: <code>npx thingery</code></li>
+          <li data-i18n="home.build2.li1">Standard Streamable HTTP MCP + one-click OAuth (PKCE)</li>
+          <li data-i18n-html="home.build2.li2">Open data surface: <code>llms.txt</code>, <code>agents.json</code>, public search</li>
+          <li data-i18n-html="home.build2.li3">Apache-2.0 · self-host in one command: <code>npx thingery</code></li>
         </ul>
-        <a class="cta build" href="https://github.com/thingery/thingery#quickstart">Read the quickstart</a>
+        <a class="cta build" href="https://github.com/thingery/thingery#quickstart" data-i18n="home.build2.cta">Read the quickstart</a>
       </div>
     </div>
 
-    <div class="stats" id="platform-stats" hidden aria-label="Platform usage">
-      <div class="stat"><span class="num" id="stat-items">–</span><span class="lbl">items listed</span></div>
-      <div class="stat"><span class="num" id="stat-agents">–</span><span class="lbl">agents connected</span></div>
-      <div class="stat"><span class="num" id="stat-users">–</span><span class="lbl">users</span></div>
+    <div class="stats" id="platform-stats" hidden data-i18n-aria-label="home.stats.aria" aria-label="Platform usage">
+      <div class="stat"><span class="num" id="stat-items">–</span><span class="lbl" data-i18n="home.stats.items">items listed</span></div>
+      <div class="stat"><span class="num" id="stat-agents">–</span><span class="lbl" data-i18n="home.stats.agents">agents connected</span></div>
+      <div class="stat"><span class="num" id="stat-users">–</span><span class="lbl" data-i18n="home.stats.users">users</span></div>
     </div>
   </section>
 
   <section class="block">
-    <h2>Why a database, not another marketplace app?</h2>
-    <p class="lead">Marketplaces lock your items behind their forms and their apps. Thingery is
+    <h2 data-i18n="home.why.h2">Why a database, not another marketplace app?</h2>
+    <p class="lead" data-i18n-html="home.why.lead">Marketplaces lock your items behind their forms and their apps. Thingery is
     infrastructure: one open catalog that <em>any</em> AI agent can publish to and search — today's
     assistants and tomorrow's, on your phone or self-hosted. Your things become addressable with a URL.</p>
   </section>
 
   <section class="block">
-    <h2>Honest today, growing in the open</h2>
-    <p class="lead">Live now: publishing, search, item pages, accounts. On the roadmap:
+    <h2 data-i18n="home.roadmap.h2">Honest today, growing in the open</h2>
+    <p class="lead" data-i18n-html="home.roadmap.lead">Live now: publishing, search, item pages, accounts. On the roadmap:
     payments &amp; shipping rails (the agent books the courier and releases payment on delivery),
     negotiation between agents, and federation — so anyone can host a node of the catalog.
     Apache-2.0, built in the open on <a class="inline" href="https://github.com/thingery/thingery">GitHub</a>.</p>
   </section>
 
   <footer>
-    <p><strong>Thingery</strong> — the open item database and MCP server for AI agents to list, find,
+    <p data-i18n-html="home.foot.tagline"><strong>Thingery</strong> — the open item database and MCP server for AI agents to list, find,
     and trade second-hand goods.</p>
-    <p><a href="/browse">Browse</a> · <a href="/chat.html">Chat</a> · <a href="/login.html">Account</a> ·
-    <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> ·
+    <p><a href="/browse" data-i18n="nav.browse">Browse</a> · <a href="/chat.html" data-i18n="nav.chat">Chat</a> · <a href="/login.html" data-i18n="nav.account">Account</a> ·
+    <a href="/privacy" data-i18n="foot.privacy">Privacy</a> · <a href="/terms" data-i18n="foot.terms">Terms</a> ·
     <a href="/llms.txt">llms.txt</a> · <a href="/.well-known/agents.json">agents.json</a> ·
     <a href="/healthz">healthz</a> · <a href="https://github.com/thingery/thingery">GitHub</a></p>
-    <p style="opacity:.7">Chinese name: 物坊 (Wùfāng) — the open marketplace for idle things.</p>
+    <p style="opacity:.7" data-i18n="home.foot.chinese">Chinese name: 物坊 (Wùfāng) — the open marketplace for idle things.</p>
     <p id="build-info" style="opacity:.7"></p>
   </footer>
 
   </div>
 
   <script src="/legacy-item-redirect.js"></script>
+  <script src="/i18n.js"></script>
   <script src="/home-demo.js" defer></script>
   <script src="/stats.js" defer></script>
   <script src="/build-info.js" defer></script>

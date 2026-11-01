@@ -563,8 +563,11 @@ function escapeLike(q: string): string {
  *  requirement (a wanted is intent, not inventory); hybrid q with cosine
  *  0.15 floor + ILIKE union when embeddings configured, keyword ILIKE on
  *  title+notes otherwise; created_at DESC freshness ordering without q.
- *  Explicit columns only — buyer_id and the embedding vector are never
- *  selected (R4 discipline: they cannot leak into payloads). */
+ *  Explicit columns only — the embedding vector is never selected (R4
+ *  discipline: it cannot leak into payloads). buyer_id IS selected (the
+ *  rows keep the internal WantedRow shape); every external consumer
+ *  drops it — wantedToPublic, wanted-feed's toVM (THI-453 N1: state the
+ *  invariant as it is, not as it ought to be). */
 export async function searchWanted(
   filters: WantedSearchFilters,
 ): Promise<Array<WantedRow & { score: number }>> {

@@ -133,21 +133,6 @@ export async function respondToWanted(
   }
 }
 
-/** Publish stamping (§5 publish hook): when a listing becomes feed-visible
- *  (createItem already-visible, or addItemImage's false→true photo publish),
- *  every pending response for that item is stamped now, once, idempotently —
- *  `published_at IS NULL` keeps re-publishes (and the birth-stamp above
- *  racing the hook) from double-stamping. Returns how many rows stamped so
- *  callers log counts only (no payload, docs/security.md §6). */
-export async function markWantedResponsesPublished(itemId: string): Promise<number> {
-  const { rowCount } = await pool.query(
-    `UPDATE wanted_responses SET published_at = now()
-     WHERE item_id = $1 AND published_at IS NULL`,
-    [itemId],
-  );
-  return rowCount ?? 0;
-}
-
 /** The buyer's responses view for one wanted (§4 read model): published
  *  responses newest-first with their listings (soft-deleted or expired
  *  listings still show — the response already happened). Ownership scoping

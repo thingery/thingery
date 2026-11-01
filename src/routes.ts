@@ -831,8 +831,12 @@ api.post("/wanted", asyncHandler(async (req: Request, res: Response) => {
     return;
   }
   // Dual-save (THI-437 §4 step 3): a wanted create doubles as a buyer alert
-  // intent unless opted out. Intent failure never fails the wanted — the
-  // buyer keeps the listing and the UI says the alert could not be saved.
+  // intent unless opted out. ANY intent failure never fails the wanted
+  // (B6 R3, THI-459): the wanted row already exists, so rethrowing would 500
+  // after the create and a client retry would burn another daily-create
+  // slot. The buyer keeps the listing and the UI says the alert could not
+  // be saved. Unexpected errors are logged (quota rejections are not —
+  // saveIntent already logs its own rejected events).
   let alertSaved = false;
   if (alertMe !== false) {
     try {
@@ -846,8 +850,10 @@ api.post("/wanted", asyncHandler(async (req: Request, res: Response) => {
       });
       alertSaved = true;
     } catch (e) {
-      if (!(e instanceof IntentLimitError)) throw e; // unexpected: surface it
-      // Quota: the buyer keeps the wanted; the alert silently degrades.
+      if (!(e instanceof IntentLimitError)) {
+        console.error("dual-save saveIntent failed (wanted unaffected)", e);
+      }
+      // Quota or outage: the buyer keeps the wanted; the alert degrades.
     }
   }
   res.set("Cache-Control", "no-store");
@@ -860,9 +866,10 @@ api.get("/wanted/mine", asyncHandler(async (req: Request, res: Response) => {
   const { wanteds } = await listMyWanted(seller.id);
   res.set("Cache-Control", "no-store");
   // Raw field shape (not wantedToPublic): the management UI edits
-  // budget_min_cents/budget_max_cents directly. buyer_id/embedding never
-  // selected-then-stripped here — the SELECT lists public columns plus the
-  // derived counts (searchWanted's R4 discipline, same reason).
+  // budget_min_cents/budget_max_cents directly. embedding is never selected
+  // (R4 discipline); buyer_id IS selected by the shared row query and
+  // stripped in the destructure below — the strip, not the SELECT, is the
+  // invariant (THI-453 N1: comments must state it as it is).
   res.json({
     wanteds: wanteds.map(({ buyer_id: _b, embedding: _e, ...w }) => ({
       ...w,

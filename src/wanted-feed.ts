@@ -1,18 +1,9 @@
-// THI-441 (B2+B3, spec THI-439 §6): frontend data adapter for the wanted
-// listings UX — the /wanted board, the zero-result funnel form, my-wanted
-// management, and the seller demand strip.
-//
-// This module is the single integration seam between the wanted UX frontend
-// and the backend sibling (THI-440: src/wanted.ts + /api/wanted routes).
-// Today the backend has not landed, so board/demand reads serve clearly
-// labelled demo data (non-production, or WANTED_UI_MOCK=1) and an honest
-// empty board otherwise. Browser writes (create/edit/expire/renew) POST to
-// the spec §6.3 endpoints and degrade gracefully while they 404.
-//
-// When THI-440 lands: swap the bodies of wantedBoard()/getWanted()/
-// wantedDemandByCategory() for calls into src/wanted.ts (searchWanted et al)
-// and delete the mock block. The view-model mirrors the spec §5
-// `wantedToPublic` payload exactly, so the swap is type-compatible.
+// THI-441 (B2+B3) built the wanted UX against this seam with demo data;
+// THI-440 (backend sibling) swapped the bodies for real src/wanted.ts
+// reads — wantedBoard()/getWanted()/wantedDemandByCategory() are now thin
+// view-model mappers over searchWanted/getWantedById and one aggregate
+// query. Browser writes (create/edit/expire/renew) POST to the spec §6.3
+// endpoints (/api/wanted, PR 5).
 //
 // Pure helpers (budgetRange, wantedFreshness) are unit-tested in
 // tests/wanted-feed.test.ts and shared by every wanted surface so the
@@ -20,6 +11,8 @@
 // RANGE ("€150–200"), never a single price badge (THI-437 §5).
 
 import type { Request, Response } from "express";
+import { searchWanted, getWantedById, type WantedRow } from "./wanted.js";
+import { pool } from "./db.js";
 
 /** Public wanted view-model — mirrors `wantedToPublic` (THI-439 §5).
  *  Never carries buyer identity or the embedding vector. */
@@ -112,134 +105,63 @@ export function renewableNow(expiresAt: string, now: Date = new Date()): boolean
 }
 
 // ---------------------------------------------------------------------------
-// Demo data (THI-441 frontend-from-mocks pass; deleted when THI-440 lands)
+// ---------------------------------------------------------------------------
+// Data access (real reads — src/wanted.ts, swapped in by THI-440 PR 4)
 // ---------------------------------------------------------------------------
 
-/** Mocks render in non-production environments, or in production only with
- *  an explicit opt-in — production must never show synthetic demand. */
-export function wantedMockEnabled(): boolean {
-  return process.env.NODE_ENV !== "production" || process.env.WANTED_UI_MOCK === "1";
+/** DB row → view-model: ISO timestamps for the browser; the row shape is
+ *  otherwise the wantedToPublic contract (§5) minus derived fields. */
+function toVM(w: WantedRow): WantedPublicVM {
+  return {
+    id: w.id,
+    title: w.title,
+    notes: w.notes,
+    category: w.category,
+    condition: w.condition,
+    budget_min_cents: w.budget_min_cents,
+    budget_max_cents: w.budget_max_cents,
+    currency: w.currency,
+    reference_images: w.reference_images,
+    created_at: w.created_at.toISOString(),
+    expires_at: w.expires_at.toISOString(),
+    status: w.status as WantedPublicVM["status"],
+  };
 }
 
-const DEMO_WANTEDS: WantedPublicVM[] = [
-  {
-    id: "11111111-1111-4111-8111-111111111101",
-    title: "Nintendo Switch OLED",
-    notes: "Preferably with dock and both Joy-Cons. Small scratch on the bezel is fine.",
-    category: "electronics",
-    condition: "good",
-    budget_min_cents: 15000,
-    budget_max_cents: 20000,
-    currency: "EUR",
-    reference_images: [],
-    created_at: new Date(Date.now() - 5 * DAY_MS).toISOString(),
-    expires_at: new Date(Date.now() + 25 * DAY_MS).toISOString(),
-    status: "active",
-  },
-  {
-    id: "11111111-1111-4111-8111-111111111102",
-    title: "Nike Air Max 90, EU 43",
-    notes: "Any classic colorway, worn is fine as long as the sole is intact.",
-    category: "sneakers",
-    condition: null,
-    budget_min_cents: 4000,
-    budget_max_cents: 8000,
-    currency: "EUR",
-    reference_images: [],
-    created_at: new Date(Date.now() - 2 * DAY_MS).toISOString(),
-    expires_at: new Date(Date.now() + 5 * DAY_MS).toISOString(),
-    status: "active",
-  },
-  {
-    id: "11111111-1111-4111-8111-111111111103",
-    title: "Stand mixer, any brand",
-    notes: "KitchenAid or similar. Cash budget is flexible for the right one.",
-    category: "home",
-    condition: "good",
-    budget_min_cents: null,
-    budget_max_cents: 12000,
-    currency: "EUR",
-    reference_images: [],
-    created_at: new Date(Date.now() - 9 * DAY_MS).toISOString(),
-    expires_at: new Date(Date.now() + 21 * DAY_MS).toISOString(),
-    status: "active",
-  },
-  {
-    id: "11111111-1111-4111-8111-111111111104",
-    title: "Film camera bag, canvas",
-    notes: "Something like a Domke F-2 — must fit two bodies and three lenses.",
-    category: "cameras",
-    condition: null,
-    budget_min_cents: 3000,
-    budget_max_cents: null,
-    currency: "EUR",
-    reference_images: [],
-    created_at: new Date(Date.now() - 1 * DAY_MS).toISOString(),
-    expires_at: new Date(Date.now() + 29 * DAY_MS).toISOString(),
-    status: "active",
-  },
-  {
-    id: "11111111-1111-4111-8111-111111111105",
-    title: "Kids bike, 20 inch",
-    notes: "Expired demo row — never rendered on the board (lazy guard).",
-    category: "sports",
-    condition: "fair",
-    budget_min_cents: null,
-    budget_max_cents: 6000,
-    currency: "EUR",
-    reference_images: [],
-    created_at: new Date(Date.now() - 40 * DAY_MS).toISOString(),
-    expires_at: new Date(Date.now() - 10 * DAY_MS).toISOString(),
-    status: "expired",
-  },
-];
-
-const mockBoard = (opts: WantedBoardQuery): WantedPublicVM[] => {
-  const q = opts.q?.trim().toLowerCase();
-  const now = Date.now();
-  return DEMO_WANTEDS
-    // Visibility lazy guard (spec §3.4): active AND not yet expired.
-    .filter((w) => w.status === "active" && new Date(w.expires_at).getTime() > now)
-    .filter((w) => (opts.category ? w.category === opts.category : true))
-    .filter((w) => (opts.condition ? w.condition === opts.condition : true))
-    .filter((w) => (q ? w.title.toLowerCase().includes(q) || w.notes.toLowerCase().includes(q) : true))
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(opts.offset ?? 0, (opts.offset ?? 0) + (opts.limit ?? 10));
-};
-
-const mockDemand = (): WantedDemandRow[] => {
-  const byCat = new Map<string, WantedDemandRow>();
-  for (const w of mockBoard({ limit: 100 })) {
-    const row = byCat.get(w.category) ?? { category: w.category, count: 0, example_title: w.title };
-    row.count += 1;
-    byCat.set(w.category, row);
-  }
-  return [...byCat.values()].sort((a, b) => b.count - a.count);
-};
-
-// ---------------------------------------------------------------------------
-// Data access (the seam — THI-440 swaps these bodies for src/wanted.ts calls)
-// ---------------------------------------------------------------------------
-
-/** Board read for /wanted — `searchWanted` parity (THI-439 §3.4). */
+/** Board read for /wanted — searchWanted with its full predicate family
+ *  (§3.4: visibility lazy guard, hybrid q, filters) and view-model mapping. */
 export async function wantedBoard(query: WantedBoardQuery): Promise<WantedPublicVM[]> {
-  // TODO(THI-440): return searchWanted(query) — identical shape.
-  return wantedMockEnabled() ? mockBoard(query) : [];
+  const rows = await searchWanted({
+    q: query.q,
+    category: query.category,
+    condition: query.condition,
+    limit: query.limit ?? 10,
+    offset: query.offset ?? 0,
+  });
+  return rows.map(toVM);
 }
 
-/** Single wanted for /wanted/:id — null for unknown ids (no existence oracle). */
+/** Single wanted for /wanted/:id — null for unknown AND ended ids (no
+ *  existence oracle; the lazy guard lives in getWantedById). */
 export async function getWanted(id: string): Promise<WantedPublicVM | null> {
-  // TODO(THI-440): return getWantedById(id) with the same lazy guard.
-  if (!wantedMockEnabled()) return null;
-  return mockBoard({ limit: 100 }).find((w) => w.id === id) ?? null;
+  const row = await getWantedById(id);
+  return row ? toVM(row) : null;
 }
 
-/** Active-wanted counts per category for the seller demand strip (§6.4). */
+/** Active-wanted counts per category for the seller demand strip (§6.4).
+ *  One aggregate query — public counts only, never buyer data. */
 export async function wantedDemandByCategory(): Promise<WantedDemandRow[]> {
-  // TODO(THI-440): one aggregate query over wanted_items (status='active'
-  // AND expires_at > now()), grouped by category.
-  return wantedMockEnabled() ? mockDemand() : [];
+  const { rows } = await pool.query<WantedDemandRow>(
+    `SELECT category, count(*)::int AS count,
+            (array_agg(title ORDER BY created_at DESC))[1] AS example_title
+     FROM wanted_items
+     WHERE status = 'active' AND expires_at > now()
+     GROUP BY category
+     ORDER BY count DESC, category`,
+  );
+  return rows;
 }
+
 
 /** GET /wanted/demand.json — read-only website asset consumed by the
  *  account page (B3 demand strip). Follows the /stats.json + /search.json

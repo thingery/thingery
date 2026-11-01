@@ -1,10 +1,15 @@
-// THI-441 (spec THI-439 §6): unit tests for the wanted UX data seam —
-// the visual-language helpers (budget as a RANGE, never a single price
-// badge; freshness line), the renewal window predicate, and the demo-data
-// board that stands in until the backend sibling (THI-440) lands.
-// Pure/in-process: no Postgres needed.
+// Wanted UX data seam (spec THI-439 §6): the visual-language helpers
+// (budget as a RANGE, never a single price badge; freshness line) and the
+// renewal window predicate are pure; the board/demand reads are real
+// src/wanted.ts calls since THI-440 PR 4 swapped the seam — DB-backed and
+// skip-guarded when Postgres is unreachable.
 
-import { afterEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import pg from "pg";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import {
   budgetRange,
   getWanted,
@@ -12,8 +17,29 @@ import {
   wantedBoard,
   wantedDemandByCategory,
   wantedFreshness,
-  wantedMockEnabled,
 } from "../src/wanted-feed.js";
+import { createWanted } from "../src/wanted.js";
+
+delete process.env.EMBED_API_KEY;
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const schemaPath = path.resolve(__dirname, "..", "db", "schema.sql");
+const connectionString =
+  process.env.DATABASE_URL ?? "postgres://thingery:thingery@localhost:5432/thingery";
+
+async function dbAvailable(): Promise<boolean> {
+  const client = new pg.Client({ connectionString, connectionTimeoutMillis: 1500 });
+  try {
+    await client.connect();
+    await client.end();
+    return true;
+  } catch {
+    await client.end().catch(() => {});
+    return false;
+  }
+}
+
+const available = await dbAvailable();
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date("2026-11-01T12:00:00Z");
@@ -91,57 +117,67 @@ describe("renewableNow — final week of active, or 30-day grace after expiry (�
   });
 });
 
-describe("demo board (until THI-440 swaps the seam)", () => {
-  afterEach(() => {
-    delete process.env.WANTED_UI_MOCK;
-    process.env.NODE_ENV = "test";
+describe.skipIf(!available)("board seam reads real data (THI-440 PR 4)", () => {
+  let client: pg.Client;
+  const buyerIds: string[] = [];
+
+  async function seedBuyer(tag: string): Promise<string> {
+    const nonce = randomUUID();
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1, $2, $3) RETURNING id`,
+      [`feed-fixture-${nonce}`, `feed-${tag}`, `feed-${tag}-${nonce}@t.dev`],
+    );
+    buyerIds.push(rows[0].id);
+    return rows[0].id;
+  }
+
+  beforeAll(async () => {
+    client = new pg.Client({ connectionString });
+    await client.connect();
+    await client.query(readFileSync(schemaPath, "utf8"));
   });
 
-  it("serves demo data outside production", async () => {
-    expect(wantedMockEnabled()).toBe(true);
-    const items = await wantedBoard({ limit: 100 });
-    expect(items.length).toBeGreaterThan(0);
+  afterAll(async () => {
+    await client.query(`DELETE FROM wanted_buyer_quota WHERE buyer_id = ANY($1::uuid[])`, [buyerIds]);
+    await client.query(`DELETE FROM sellers WHERE id = ANY($1::uuid[])`, [buyerIds]);
+    await client.end();
   });
 
-  it("filters by q over title+notes, category, and condition", async () => {
-    expect((await wantedBoard({ q: "switch" })).length).toBe(1);
-    expect((await wantedBoard({ q: "kitchenaid" }))[0]?.title).toContain("mixer");
-    expect((await wantedBoard({ category: "sneakers" })).length).toBe(1);
-    expect((await wantedBoard({ condition: "good" })).length).toBe(2);
-  });
-
-  it("never returns expired demo rows — the lazy visibility guard", async () => {
-    const all = await wantedBoard({ limit: 100 });
-    expect(all.every((w) => w.status === "active" && new Date(w.expires_at).getTime() > Date.now())).toBe(true);
-    expect(all.find((w) => w.title.includes("Kids bike"))).toBeUndefined();
-  });
-
-  it("orders newest-first and resolves ids via getWanted", async () => {
-    const all = await wantedBoard({ limit: 100 });
-    const times = all.map((w) => new Date(w.created_at).getTime());
-    expect([...times].sort((a, b) => b - a)).toEqual(times);
-    const found = await getWanted(all[0].id);
-    expect(found?.id).toBe(all[0].id);
+  it("wantedBoard returns seeded wanteds, filters, and hides ended rows", async () => {
+    const buyer = await seedBuyer("board");
+    const a = await createWanted(buyer, { title: "Seam probe sneaker wanted", category: "sneakers", condition: "good" });
+    await new Promise((r) => setTimeout(r, 15));
+    const b = await createWanted(buyer, { title: "Seam probe lamp wanted", category: "home" });
+    const board = await wantedBoard({ limit: 50 });
+    const ids = board.map((w) => w.id);
+    expect(ids).toContain(a.id);
+    expect(ids).toContain(b.id);
+    // ISO-string view-model contract.
+    expect(board[0].created_at).toEqual(new Date(board[0].created_at).toISOString());
+    // Filter passthrough (searchWanted predicate parity).
+    expect((await wantedBoard({ category: "sneakers", limit: 50 })).map((w) => w.id)).toEqual([a.id]);
+    // Ended rows never render, even before the sweep runs (lazy guard).
+    await client.query(`UPDATE wanted_items SET expires_at = now() - interval '1 minute' WHERE id = $1`, [b.id]);
+    expect((await wantedBoard({ limit: 50 })).map((w) => w.id)).not.toContain(b.id);
+    expect(await getWanted(b.id)).toBeNull();
+    // Unknown ids are null (no existence oracle).
     expect(await getWanted("99999999-9999-4999-8999-999999999999")).toBeNull();
+    // Visible single read works.
+    expect((await getWanted(a.id))?.id).toBe(a.id);
   });
 
-  it("serves an honest empty board in production unless explicitly opted in", async () => {
-    process.env.NODE_ENV = "production";
-    delete process.env.WANTED_UI_MOCK;
-    expect(await wantedBoard({ limit: 10 })).toEqual([]);
-    expect(await wantedDemandByCategory()).toEqual([]);
-    expect(await getWanted("11111111-1111-4111-8111-111111111101")).toBeNull();
-
-    process.env.WANTED_UI_MOCK = "1";
-    expect((await wantedBoard({ limit: 10 })).length).toBeGreaterThan(0);
-  });
-
-  it("aggregates demand per category with an example title for the strip", async () => {
+  it("wantedDemandByCategory aggregates active demand per category", async () => {
+    const buyer = await seedBuyer("demand");
+    await createWanted(buyer, { title: "Demand probe thing one", category: "toys" });
+    await createWanted(buyer, { title: "Demand probe thing two", category: "toys" });
     const demand = await wantedDemandByCategory();
-    expect(demand.length).toBeGreaterThan(1);
-    expect(demand[0].count).toBeGreaterThanOrEqual(1);
-    expect(demand[0].example_title.length).toBeGreaterThan(0);
-    const total = demand.reduce((sum, row) => sum + row.count, 0);
-    expect(total).toBe((await wantedBoard({ limit: 100 })).length);
+    const toys = demand.find((d) => d.category === "toys");
+    expect(toys).toBeDefined();
+    expect(toys!.count).toBeGreaterThanOrEqual(2);
+    expect(toys!.example_title.length).toBeGreaterThan(0);
+    // Sorted by count desc.
+    for (let i = 1; i < demand.length; i++) {
+      expect(demand[i - 1].count).toBeGreaterThanOrEqual(demand[i].count);
+    }
   });
 });

@@ -30,6 +30,11 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       | "/api/chat"
       | "/api/me/llm-credential"
       | "/api/me/chatgpt/connect" // THI-193 PR-2: connect rate-limit log line
+      // THI-439 §6.3: wanted-write limiter slugs (one per write route).
+      | "/api/wanted"
+      | "/api/wanted/:id"
+      | "/api/wanted/:id/expire"
+      | "/api/wanted/:id/renew"
     >();
     const routes: SecurityEventRoute[] = [
       "/api/signup",
@@ -41,6 +46,10 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       "/api/chat",
       "/api/me/llm-credential",
       "/api/me/chatgpt/connect",
+      "/api/wanted",
+      "/api/wanted/:id",
+      "/api/wanted/:id/expire",
+      "/api/wanted/:id/renew",
     ];
     expectTypeOf(routes).toEqualTypeOf<SecurityEventRoute[]>();
   });

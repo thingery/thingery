@@ -15,8 +15,9 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 import type { Server } from "node:http";
 import express from "express";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountApiRoutes, wantedWriteLimiter } from "../src/routes.js";
+import * as intentsModule from "../src/intents.js";
 import { SESSION_COOKIE, signSession } from "../src/auth.js";
 
 delete process.env.EMBED_API_KEY;
@@ -141,6 +142,36 @@ describe.skipIf(!available)("wanted browser CRUD routes (DB + HTTP)", () => {
     const degraded = await call("POST", "", cookie, { ...validCreate("Route probe quota alert") });
     expect(degraded.status).toBe(201);
     expect(((await degraded.json()) as { alert_saved: boolean }).alert_saved).toBe(false);
+  });
+
+  it("dual-save: a NON-quota saveIntent throw still 201s with alert_saved:false (B6 R3 regression)", async () => {
+    const { sellerId, cookie } = await seed("alert-outage");
+    // Force an unexpected failure (not IntentLimitError): the old catch
+    // rethrew those, 500-ing AFTER the wanted row was created — a client
+    // retry would burn another daily-create quota slot.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const saveSpy = vi
+      .spyOn(intentsModule, "saveIntent")
+      .mockRejectedValue(new Error("forced intent outage"));
+    try {
+      const res = await call("POST", "", cookie, validCreate("Route probe intent outage"));
+      expect(res.status).toBe(201);
+      const data = (await res.json()) as { wanted: { id: string }; alert_saved: boolean };
+      expect(data.alert_saved).toBe(false);
+      // The wanted itself was created and kept.
+      expect(
+        (await db.query("SELECT 1 FROM wanted_items WHERE id = $1", [data.wanted.id])).rowCount,
+      ).toBe(1);
+      // No intent row landed for this buyer.
+      expect(
+        (await db.query("SELECT 1 FROM buyer_intents WHERE buyer_id = $1", [sellerId])).rowCount,
+      ).toBe(0);
+      // The unexpected error is still logged (never silent).
+      expect(errSpy).toHaveBeenCalled();
+    } finally {
+      saveSpy.mockRestore();
+      errSpy.mockRestore();
+    }
   });
 
   it("contact info in notes is rejected by the module scrub (400, no oracle text)", async () => {

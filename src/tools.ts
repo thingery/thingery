@@ -354,7 +354,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         "when it publishes. Price the item within the buyer's stated budget when one is given. " +
         "Requires seller authentication (Bearer API key). " + CONTENT_PROVENANCE_NOTE,
       inputSchema: {
-        wanted_id: z.string().uuid().describe("The wanted to respond to (from search_wanted / get_wanted)"),
+        wanted_id: z.string().uuid().describe("The wanted to respond to (id from the public /wanted board — the /wanted/<id> detail page URL)"),
         title: z.string().min(3).max(200).describe("Listing title, e.g. 'Nintendo Switch OLED, boxed'"),
         description: z.string().max(5000).default("").describe("Honest description incl. flaws"),
         category: z.string().min(2).max(40).default("other"),

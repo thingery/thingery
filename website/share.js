@@ -7,6 +7,10 @@
   const btn = document.getElementById("share-btn");
   if (!btn) return; // non-item pages / sold listings render no button
 
+  // THI-445: strings run through the i18n dictionary when present, with the
+  // English original as inline fallback (static file, CSP-safe).
+  const t = globalThis.__thingeryT || ((key, fallback) => fallback);
+
   const url = (btn.dataset && btn.dataset.shareUrl) || (typeof location !== "undefined" ? location.href : "");
   const title = (btn.dataset && btn.dataset.shareTitle) || document.title || "";
   let resetTimer = null;
@@ -15,7 +19,7 @@
     btn.textContent = text;
     if (resetTimer) clearTimeout(resetTimer);
     resetTimer = setTimeout(() => {
-      btn.textContent = "🔗 Share";
+      btn.textContent = t("item.share", "🔗 Share");
       resetTimer = null;
     }, 2500);
   };
@@ -54,9 +58,9 @@
       } else {
         legacyCopy(url);
       }
-      flash("✅ Link copied");
+      flash(t("item.shareCopied", "✅ Link copied"));
     } catch {
-      flash("Copy failed — use the address bar");
+      flash(t("item.shareFail", "Copy failed — use the address bar"));
     }
   });
 })();

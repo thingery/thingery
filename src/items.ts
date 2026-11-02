@@ -2,6 +2,7 @@ import { pool, type ItemRow } from "./db.js";
 import { embedText, itemEmbeddingText } from "./embed.js";
 import { evaluateListingForIntents } from "./intents.js";
 import { logSecurityEvent } from "./security-events.js";
+import { markWantedResponsesPublished } from "./wanted.js";
 import {
   attributeShapeErrors,
   AttributeValidationError,
@@ -133,6 +134,21 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
       }
     } catch (err) {
       console.error("buyer-intent evaluation failed (publish unaffected)", err instanceof Error ? err.message : err);
+    }
+    // THI-439 §5 (B4, PR 3): the same publish transition stamps pending
+    // wanted_responses published_at — idempotent (IS NULL guard), separate
+    // try so a stamping failure can never skip the intent fanout above nor
+    // fail the publish. Counts only.
+    try {
+      const stamped = await markWantedResponsesPublished(rows[0].id);
+      if (stamped > 0) {
+        logSecurityEvent(
+          { type: "wanted_response", action: "publish", outcome: "success", count: stamped },
+          { sellerId: input.seller_id },
+        );
+      }
+    } catch (err) {
+      console.error("wanted-response stamping failed (publish unaffected)", err instanceof Error ? err.message : err);
     }
   }
   return rows[0];

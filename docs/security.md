@@ -305,7 +305,8 @@ phishing concerns — threat-model them before building, not after.
 - CI (typecheck, build, test) runs on every PR/push to `main`; deploys are SSH-gated
   behind `DEPLOY_ENABLED` + GitHub Secrets.
 - Branch protection on `main` (enabled 2026-10-14 via the classic branch-protection API):
-  PRs required before merging (0 approving reviews required), required checks `verify` +
+  PRs required before merging (0 approving reviews required — the standing interim
+  posture; see residual-risk register R1 in §9), required checks `verify` +
   `Secret scan (gitleaks)` (strict — branch must be up to date with `main`), force pushes
   and deletions blocked, and `enforce_admins: true` — admins have no bypass. The
   "never push to main" convention is now enforced by GitHub, not just discipline.
@@ -722,7 +723,34 @@ ChatGPT account; requires the board's client id):
    and the chat indicator disappears; a chat turn now logs
    `provider=company` (or `user_key`).
 
-## 9. Keeping this document honest
+## 9. Accepted residual-risk register
+
+Standing entries for risks that are knowingly accepted for a bounded interim period,
+with the decision record, compensating controls, planned remediation, and explicit
+removal criteria. Accepted ≠ forgotten: every entry stays until its removal criteria
+are met and names where the remediation is tracked.
+
+### R1 — `main` requires 0 approving reviews (merge-gate interim, THI-225)
+
+- **Risk:** `main` (github.com/thingery/thingery) requires 0 approving reviews. Any
+  principal with repo write (the `isaac1972` identity, which local agent runs also use
+  to push branches) can land changes on `main` with CI + gitleaks as the only gates.
+  Merged code executes at build time on the production VPS (`compose up --build` runs
+  repo Dockerfiles) with docker-group privileges = host root. *Lens: supply chain /
+  CI-CD trust boundary, Integrity Failures (A08:2021).*
+- **Decision:** accepted as interim by board confirmation of THI-225 (2026-10-31);
+  CEO ruling = phased Option 1.
+- **Compensating controls in force:** strict required checks (`verify`, `Secret scan
+  (gitleaks)`), `enforce_admins: true`, mandatory Security pre-merge review issues
+  for sensitive changes (THI-36 practice), THI-224 F1–F5 deploy-credential hardening.
+- **Planned remediation:** GitHub App `thingery-review-bot` (`pull_requests: write`)
+  as independent reviewer, then flip `main` to 1 approving review +
+  `dismiss_stale_reviews` + `require_last_push_approval`. Implementation owned by
+  the CTO in THI-446.
+- **Removal criteria:** strike this entry once the branch-protection flip is verified
+  live (CTO will notify per THI-446).
+
+## 10. Keeping this document honest
 
 Review triggers: any PR touching `src/auth.ts`, `src/rate-limit.ts`, `src/routes.ts`,
 `src/chat.ts`, `src/tools.ts`, `db/schema.sql`, the CI/deploy workflows, or the VPS

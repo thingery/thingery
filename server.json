@@ -14,7 +14,20 @@
       "version": "0.1.3",
       "transport": {
         "type": "stdio"
-      }
+      },
+      "environmentVariables": [
+        {
+          "name": "DATABASE_URL",
+          "description": "Postgres connection string the stdio server queries (self-host). Defaults to postgres://thingery:thingery@localhost:5432/thingery when unset; without a reachable database, tools return errors.",
+          "isRequired": false
+        },
+        {
+          "name": "THINGERY_API_KEY",
+          "description": "Seller API key (thg_...) enabling write tools in stdio mode. Optional: without it the server runs read-only public tools.",
+          "isSecret": true,
+          "isRequired": false
+        }
+      ]
     },
     {
       "registryType": "npm",

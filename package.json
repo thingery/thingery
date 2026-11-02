@@ -47,6 +47,7 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "db:seed": "tsx scripts/seed.ts",
     "backfill:reencode": "tsx scripts/reencode-existing-uploads.ts",
+    "backfill:embeddings": "tsx scripts/backfill-embeddings.ts",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {

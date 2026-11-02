@@ -213,6 +213,12 @@ Postgres, run the same two SQL statements as the superuser and point `DATABASE_U
 
 ### Connect an MCP client
 
+Fastest path: the **zero-dependency quickstart** —
+[`node examples/quickstart/quickstart.mjs`](examples/quickstart/quickstart.mjs) runs the whole first
+workflow against the hosted server (search → publish a photo'd listing → fetch its public page,
+~3 minutes including signup). Client-by-client configs (Claude Desktop, Cursor, VS Code,
+Inspector, stdio, raw curl) and troubleshooting live in **[docs/integrations.md](docs/integrations.md)**.
+
 Most hosts (Claude Desktop, ChatGPT connectors, VS Code, Inspector) can sign in with **OAuth**:
 just add `https://thingery.dev/mcp` (or your self-hosted URL) as a remote HTTP server — the host
 discovers the sign-in flow, you approve once, and tokens rotate automatically. On thingery.dev
@@ -276,7 +282,10 @@ stdio server needs the same prerequisites as Mode B: a Postgres with the schema 
 | stdio warning: `THINGERY_API_KEY set but not found in the database` | the key belongs to a different deployment's database | get a key from *this* deployment (`/login.html` or `/api/signup`) |
 | Self-hosted behaves differently from thingery.dev | the npm release can lag `main` (e.g. photo-gating) | compare `/healthz` versions; self-host from source for today's `main` |
 
-### Try it with curl
+### Try it with curl or a 5-line script
+
+No client needed — plain JSON-RPC over HTTP works (the [quickstart](examples/quickstart/) is a
+single zero-dependency Node file built on this):
 
 ```bash
 # List tools (the Accept header is required by the MCP Streamable HTTP transport)
@@ -299,7 +308,8 @@ Responses come back as Server-Sent Events; the JSON-RPC result is on the `data:`
 
 Framework toolkits reach the same `/mcp` endpoint over streamable HTTP — copy-paste
 quickstarts with verified end-to-end tool calls live in
-[examples/integrations/](examples/integrations/).
+[examples/integrations/](examples/integrations/). Client setup for Claude Desktop,
+Cursor, VS Code, Inspector and plain HTTP is in [docs/integrations.md](docs/integrations.md).
 
 ## Configuration
 

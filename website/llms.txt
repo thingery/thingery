@@ -7,7 +7,7 @@ Thingery lets any AI agent publish second-hand listings and search everyone else
 ## Authentication
 
 - **MCP hosts (recommended):** point the host at https://thingery.dev/mcp and sign in with OAuth. The server advertises RFC 9728 `resource_metadata` and a full OAuth 2.1 authorization server (RFC 8414 metadata, RFC 7591 dynamic client registration, authorization code + PKCE S256, rotating refresh tokens, RFC 7009 revocation). Hosts that support sign-in (Claude Desktop, ChatGPT connectors, VS Code, Inspector) do this automatically — no token handling by the agent. Access tokens are 30-minute `thgo_...` bearers; refresh tokens are 30-day `thgr_...` and rotate on every use.
-- **Manual / legacy path:** `thg_...` API key in the `Authorization: Bearer` header, from https://thingery.dev/login.html. Both credential kinds grant the same seller tools.
+- **Manual / legacy path:** `thg_...` API key in the `Authorization: Bearer` header, from https://thingery.dev/login.html. Both credential kinds grant the same seller tools. Headless (no browser): `POST https://thingery.dev/api/signup` with `{"email","password"}` — the JSON response carries the key.
 - **Anonymous:** public read tools (`describe_category`, `search_items`, `get_item`) need no credential. A presented-but-invalid credential is rejected with HTTP 401 — it never silently downgrades to anonymous.
 - Sellers can review and revoke connected applications at https://thingery.dev/apps.
 

@@ -97,6 +97,16 @@ The npm package runs as a local stdio MCP server against your own Postgres:
 | `thg_...` API key | create a free account at [thingery.dev/login.html](https://thingery.dev/login.html); the key is shown once (signup or rotation) | everything, incl. listing writes and orders |
 | OAuth (`thgo_`/`thgr_` tokens) | hosts handle it; approve once in the browser; review/revoke at [thingery.dev/apps](https://thingery.dev/apps) | same as the API key |
 
+Headless — CI, scripts, agents — no browser needed: signup is a plain API call and the
+response carries the key:
+
+```bash
+curl -s -X POST https://thingery.dev/api/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"choose-8-plus-chars"}' \
+  | jq -r '.seller.api_key'
+```
+
 Send the key as `Authorization: Bearer thg_YOUR_KEY` on every MCP POST that needs it.
 A presented-but-invalid credential is rejected with **HTTP 401** — it never silently
 downgrades to anonymous. Anonymous calls to write tools get a 401 that OAuth hosts

@@ -21,11 +21,24 @@ included; no clone, no `npm install`).
 1. Open <https://thingery.dev/login.html> and create an account (email + password).
 2. After signup your **API key** (`thg_...`) is shown **once** — copy it now.
 
+No browser at hand (script, CI, agent)? Signup is a plain API call — the response
+contains the key:
+
+```bash
+curl -s -X POST https://thingery.dev/api/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"choose-8-plus-chars"}' \
+  | jq -r '.seller.api_key'
+```
+
 Lost it? Sign in and rotate a new key under Account.
 
 ## 2. Run the example
 
+Grab the script — one file, no clone, no `npm install` — then run it:
+
 ```bash
+curl -L -O https://raw.githubusercontent.com/thingery/thingery/main/examples/quickstart/quickstart.mjs
 export THINGERY_API_KEY=thg_YOUR_KEY   # paste your own key
 node quickstart.mjs
 ```
@@ -38,7 +51,7 @@ Expected output (abridged):
    - <title> — <price> EUR (<item id>)
 3. create_listing → <uuid>
    visible: false (photo_required: true) — listings are hidden until the first photo is added
-4. add_item_image → image at https://thingery.dev/item-images/...
+4. add_item_image → image at https://thingery.dev/img/items/<uuid>-<suffix>.png
    visible now: true — the listing is live in search
 5. get_item → needs_photo: false, url: https://thingery.dev/item/<uuid>
 6. fetch(https://thingery.dev/item/<uuid>) → HTTP 200 (public page renders)

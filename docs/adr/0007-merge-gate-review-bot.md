@@ -87,3 +87,24 @@ merge without waiting for a human).
 - The gate flip is reversible (`required_approving_review_count: 0`) — exercised for real on
   2026-10-31 when the App drill failed the "counted" test; rollback was verified within the
   same minute. This is the documented un-wedge for any future gate failure.
+
+## Implementation record (2026-11-06, appended by the gate's own acceptance drill)
+
+This PR is the Decision-5 acceptance test: it is authored by `isaac1972`, approved by the
+reviewer identity before merge, and merged through the 1-review gate with no admin
+override. Record at merge time:
+
+- **Machine user live:** `thingery-review-bot` (type `User`) created 2026-11-06; Write
+  outside-collaborator on `thingery/thingery` accepted 2026-11-06 (verified via the
+  collaborator API: `permission: write`).
+- **Reviewer credential live:** fine-grained PAT `thingery-review-approver` per Decision 1
+  (repo-scoped to `thingery/thingery`, sole permission `pull_requests: read & write`),
+  stored as Paperclip secret `thingery_review_bot_pat`, granted to the Security agent only
+  (Decision 3). The approving review on this PR is submitted with it by Security.
+- **Gate live:** `main` flipped per Decision 2 (`required_approving_review_count: 1`,
+  `dismiss_stale_reviews: true`, `require_last_push_approval: true`; checks and
+  `enforce_admins` untouched), verified by GET after the flip. Rollback remains
+  `required_approving_review_count: 0` (Consequences).
+
+If this PR is still open, the drill has not completed: the record above is then prospective
+and the blocking step is named in the PR discussion.

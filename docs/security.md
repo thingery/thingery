@@ -304,12 +304,20 @@ phishing concerns — threat-model them before building, not after.
 - Network: only Caddy publishes ports; DB and app are `expose`-only; UFW SSH/80/443.
 - CI (typecheck, build, test) runs on every PR/push to `main`; deploys are SSH-gated
   behind `DEPLOY_ENABLED` + GitHub Secrets.
-- Branch protection on `main` (enabled 2026-10-14 via the classic branch-protection API):
-  PRs required before merging (0 approving reviews required — the standing interim
-  posture; see residual-risk register R1 in §9), required checks `verify` +
+- Branch protection on `main` (updated 2026-11-06 per ADR-0007 / THI-225 / THI-446):
+  PRs required before merging with **1 approving review** from an identity other than
+  the PR author (`dismiss_stale_reviews: true` — new pushes dismiss stale approvals;
+  `require_last_push_approval: true`), required checks `verify` +
   `Secret scan (gitleaks)` (strict — branch must be up to date with `main`), force pushes
   and deletions blocked, and `enforce_admins: true` — admins have no bypass. The
-  "never push to main" convention is now enforced by GitHub, not just discipline.
+  independent-reviewer arm is the machine user `thingery-review-bot` (Write
+  collaborator, approvals via its least-privilege fine-grained PAT — `Contents: read`,
+  `Pull requests: read+write` only, write-denial-probed). The PAT is held solely by
+  the Security agent; author agents push as `isaac1972` and cannot reach the
+  credential, so reviewer ≠ author holds by credential reach, not convention. Merge
+  flow: author agent opens PR → CI green → independent reviewer approves → author
+  merges. The "never push to main" convention is enforced by GitHub, not just
+  discipline. R1 in §9 is struck (gate live).
   `deploy` is intentionally not a required check (it runs push-to-main only and never on
   PRs).
 - `npm audit --omit=dev` on the current lockfile: **0 production vulnerabilities**.
@@ -730,25 +738,18 @@ with the decision record, compensating controls, planned remediation, and explic
 removal criteria. Accepted ≠ forgotten: every entry stays until its removal criteria
 are met and names where the remediation is tracked.
 
-### R1 — `main` requires 0 approving reviews (merge-gate interim, THI-225)
+### R1 — `main` requires 0 approving reviews — **STRUCK 2026-11-06 (resolved, removal criteria met)**
 
-- **Risk:** `main` (github.com/thingery/thingery) requires 0 approving reviews. Any
-  principal with repo write (the `isaac1972` identity, which local agent runs also use
-  to push branches) can land changes on `main` with CI + gitleaks as the only gates.
-  Merged code executes at build time on the production VPS (`compose up --build` runs
-  repo Dockerfiles) with docker-group privileges = host root. *Lens: supply chain /
-  CI-CD trust boundary, Integrity Failures (A08:2021).*
-- **Decision:** accepted as interim by board confirmation of THI-225 (2026-10-31);
-  CEO ruling = phased Option 1.
-- **Compensating controls in force:** strict required checks (`verify`, `Secret scan
-  (gitleaks)`), `enforce_admins: true`, mandatory Security pre-merge review issues
-  for sensitive changes (THI-36 practice), THI-224 F1–F5 deploy-credential hardening.
-- **Planned remediation:** GitHub App `thingery-review-bot` (`pull_requests: write`)
-  as independent reviewer, then flip `main` to 1 approving review +
-  `dismiss_stale_reviews` + `require_last_push_approval`. Implementation owned by
-  the CTO in THI-446.
-- **Removal criteria:** strike this entry once the branch-protection flip is verified
-  live (CTO will notify per THI-446).
+- **Resolved:** `main` now requires 1 approving review + `dismiss_stale_reviews` +
+  `require_last_push_approval` (strict checks `verify`/`Secret scan (gitleaks)` and
+  `enforce_admins: true` unchanged) per ADR-0007 D5. Flipped and verified live
+  2026-11-06 (THI-446) after the machine-user drill passed: drill PR #197 (author
+  `isaac1972`) approved by the machine user `thingery-review-bot` via its
+  least-privilege PAT (identity + write-denial probes + persistence receipts on
+  THI-497), then merged through the gate as squash `98b3ec5` — no admin override.
+  Historical context: accepted as interim 2026-10-31 (board confirmation of THI-225,
+  CEO ruling = phased Option 1; compensating controls: strict checks, `enforce_admins`,
+  mandatory Security pre-merge review for sensitive changes, THI-224 F1–F5).
 
 ## 10. Keeping this document honest
 

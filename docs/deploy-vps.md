@@ -40,6 +40,9 @@ Point the domain at the server before starting Caddy (it needs to solve the ACME
 | AAAA | `thingery.dev` | `<VPS_IPV6>` (if the VPS has one) |
 | CNAME | `www` | `thingery.dev` |
 
+Using your own domain? Set `SITE_DOMAIN` and `PUBLIC_BASE_URL` in `.env`. The default is
+`thingery.dev`, and Caddy serves the bare domain and redirects `www` to it.
+
 ## 3. First deploy
 
 ```bash

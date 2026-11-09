@@ -26,7 +26,7 @@ Chinese-market name: 物坊 (Wùfāng).
 | Tool | Auth | Purpose |
 |---|---|---|
 | `describe_category` | public | List categories and their declared attribute fields — the self-describing schema for agents. Declared fields get validated on create; undeclared keys are allowed, searchable, and their real use is surfaced via `undeclared_in_use` |
-| `search_items` | public | Hybrid semantic + keyword search with price/category/condition/attribute filters (any attribute key, declared or not) |
+| `search_items` | public | Hybrid semantic + keyword search with price/category/condition/attribute filters (any attribute key, declared or not). Page with `offset` (0-450, so at most 500 results per query); `count` is the page length, not a total, and `has_more` says whether the next offset returns more. Pages are separate searches, so de-duplicate by `id` |
 | `get_item` | public | Fetch one listing by id. Pending (photoless) listings are returned too — they carry `needs_photo: true` |
 | `create_listing` | seller | Publish an item — core fields plus a flexible `attributes` object (declared keys validated, extras pass through and stay searchable). **Listings are hidden from search until they have at least one photo**: a zero-image create succeeds but stays pending (`visible: false` + `next_steps` in the result) until a photo lands. Optional `shipping_price_cents` (0–100000, default 0 = free shipping) is what the buyer pays on top of the price; pickup-only (`local`) listings reject a non-zero value |
 | `add_item_image` | seller | Attach a photo to a listing (base64 in, stored server-side — no URLs needed; max 5 MB decoded). The first photo publishes a pending listing — the result's `visible` tells you. Images are re-encoded at ingest: metadata (EXIF/GPS/XMP) stripped, downscaled to ≤ 2000 px, animated GIFs stored as stills; large PNGs may be rejected — prefer JPEG |
@@ -39,7 +39,9 @@ Chinese-market name: 物坊 (Wùfāng).
 |---|---|---|
 | `get_payout_setup` | seller | Stripe Express onboarding URL + status — optional, enables platform payment |
 | `create_order` | account | Order an item — returns a Stripe Checkout URL (stripe mode) or tracks an off-platform order |
-| `get_order` | account | One of your orders (buyer or seller side): status, tracking, deadlines. The seller also gets `shipping_address` while a shipped order is `sold` or `label_issued` |
+| `get_order` | account | One of your orders (buyer or seller side): status, tracking, deadlines. The seller also gets `shipping_address` while a shipped order is `sold` or `label_issued`; off-platform, only after the buyer shares it |
+| `my_orders` | account | Your orders, newest first — filter by `role` (buyer, seller, or both) and `status`; limit 1–100 (default 20), page with `next_cursor` |
+| `share_shipping_address` | buyer | Agree to show the seller the address of an off-platform order (`sold` or `label_issued`) |
 | `cancel_order` | account | Cancel while cancellable; paid orders refund instead |
 | `record_tracking` | seller | Record carrier + tracking code; auto carrier tracker when EasyPost is configured |
 | `confirm_payment` | seller | Confirm an off-platform payment (pending → sold) |
@@ -89,6 +91,11 @@ user-generated and marked `content_provenance: "user_generated"`.
 | `search_wanted` | public | Search active wanted posts — free text plus category, condition, currency and `budget_max_cents_gte` filters, limit 1–50 (default 10), offset |
 | `get_wanted` | public | One active wanted post by id |
 | `respond_to_wanted` | seller | Answer a wanted post by creating a listing linked to it |
+| `create_wanted` | account | Publish what the buyer is looking for, with an optional budget range (max 10 active posts, 10 creates/day, 20 changes/hour). Also saves a buyer alert unless `alert_me` is false. Contact details are rejected |
+| `my_wanted` | account | Your wanted posts, every status, each with response counts and a `renewable` flag |
+| `update_wanted` | account | Edit an active post; only the fields sent change (20 edits/day) |
+| `expire_wanted` | account | End an active post now; renewable for 30 days after its expiry date |
+| `renew_wanted` | account | Extend a post 30 days — in its final 7 days or within 30 days after expiry |
 
 ### Photo-required publishing
 

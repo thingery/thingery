@@ -212,6 +212,72 @@ export async function getOrderView(orderId: string, viewerId: string): Promise<O
   return { ...order, payment_url: paymentUrl };
 }
 
+export const ORDER_ROLES = ["buyer", "seller", "both"] as const;
+export type OrderRole = (typeof ORDER_ROLES)[number];
+
+export const MAX_ORDER_LIST_LIMIT = 100;
+
+const ROLE_PREDICATES: Record<OrderRole, string> = {
+  buyer: "o.buyer_id = $1",
+  seller: "o.seller_id = $1",
+  both: "(o.buyer_id = $1 OR o.seller_id = $1)",
+};
+
+export type OrderListEntry = Pick<
+  OrderRow,
+  | "id" | "item_id" | "status" | "payment_mode" | "price_cents" | "shipping_price_cents" | "currency"
+  | "fulfillment" | "carrier" | "tracking_code" | "label_url" | "payment_deadline" | "dispute_deadline"
+  | "status_changed_at" | "created_at" | "updated_at"
+> & { item_title: string };
+
+/**
+ * The account's orders, newest first. Columns are listed explicitly so the
+ * shipping address and payment-processor references never leave the database
+ * on a bulk read. The cursor is the last order id of the previous page: its
+ * (created_at, id) is immutable, so a page boundary survives new orders and
+ * status changes, and looking it up party-scoped means another account's order
+ * id cannot be used to probe that order's position.
+ */
+export async function listOrdersForAccount(params: {
+  accountId: string;
+  role: OrderRole;
+  status?: OrderStatus;
+  limit: number;
+  cursor?: string;
+}): Promise<{ orders: OrderListEntry[]; nextCursor: string | null }> {
+  const { accountId, role, status = null, cursor = null } = params;
+  const limit = Math.min(Math.max(params.limit, 1), MAX_ORDER_LIST_LIMIT);
+  const { rows } = await pool.query<OrderListEntry>(
+    `SELECT o.id, o.item_id, o.status, o.payment_mode, o.price_cents, o.shipping_price_cents, o.currency,
+            o.fulfillment, o.carrier, o.tracking_code, o.label_url, o.payment_deadline, o.dispute_deadline,
+            o.status_changed_at, o.created_at, o.updated_at, i.title AS item_title
+     FROM orders o JOIN items i ON i.id = o.item_id
+     WHERE ${ROLE_PREDICATES[role]}
+       AND ($2::text IS NULL OR o.status = $2)
+       AND ($3::uuid IS NULL OR (o.created_at, o.id) < (
+         SELECT c.created_at, c.id FROM orders c
+         WHERE c.id = $3 AND (c.buyer_id = $1 OR c.seller_id = $1)
+       ))
+     ORDER BY o.created_at DESC, o.id DESC
+     LIMIT $4`,
+    // One extra row reveals whether another page exists.
+    [accountId, status, cursor, limit + 1],
+  );
+  if (rows.length === 0 && cursor && !(await isOrderParty(cursor, accountId))) {
+    throw new OrderFlowError("invalid_cursor", "Unknown cursor — pass next_cursor from a previous my_orders result.");
+  }
+  const orders = rows.slice(0, limit);
+  return { orders, nextCursor: rows.length > limit ? orders[orders.length - 1].id : null };
+}
+
+async function isOrderParty(orderId: string, accountId: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    "SELECT 1 FROM orders WHERE id = $1 AND (buyer_id = $2 OR seller_id = $2)",
+    [orderId, accountId],
+  );
+  return rows.length > 0;
+}
+
 // sold: paid (#2) or payment confirmed (#24), so the seller must ship now.
 // label_issued: tracking is recorded but no carrier has scanned the parcel
 // (#10 is carrier-only), so a relabel or a #23 tracking correction can still
@@ -223,16 +289,104 @@ const SELLER_SHIPPING_ADDRESS_STATUSES: readonly OrderStatus[] = ["sold", "label
 /**
  * The one place shipping_address may be released to a counterparty: the
  * order's own seller, on a shipped order, only while there is something to
- * ship. Returns null otherwise.
+ * ship and, off-platform, only after the buyer agreed for this order.
+ * Returns null otherwise.
  */
 export function shippingAddressForSeller(
-  order: Pick<OrderRow, "seller_id" | "status" | "fulfillment" | "shipping_address">,
+  order: Pick<OrderRow, "seller_id" | "status" | "fulfillment" | "shipping_address" | "payment_mode" | "shipping_address_shared_at">,
   viewerId: string,
 ): OrderRow["shipping_address"] | null {
   if (order.seller_id !== viewerId) return null;
   if (order.fulfillment !== "shipping") return null;
   if (!SELLER_SHIPPING_ADDRESS_STATUSES.includes(order.status)) return null;
+  if (needsBuyerAddressConsent(order) && !order.shipping_address_shared_at) return null;
   return order.shipping_address;
+}
+
+// Stripe verifies payment before an order reaches sold. Off-platform, sold only
+// records the seller's own claim (#24), so it cannot be what releases the address.
+function needsBuyerAddressConsent(order: Pick<OrderRow, "payment_mode">): boolean {
+  return order.payment_mode !== "stripe";
+}
+
+export type ShippingAddressConsent =
+  | { status: "granted"; granted_at: Date }
+  | { status: "awaiting_buyer"; next_step: string };
+
+const AWAITING_CONSENT_NEXT_STEP = {
+  buyer:
+    "The seller has marked this order paid but cannot see your address. Ask the buyer whether to share it; " +
+    "call share_shipping_address only if they agree.",
+  seller:
+    "The buyer has not agreed to share their address yet. It appears in shipping_address once they do; " +
+    "you cannot grant this yourself.",
+};
+
+/**
+ * What an order party is told about address consent. Null when consent does
+ * not apply: Stripe-mode and pickup orders, and states where it cannot lead to
+ * a release. Never carries the address itself.
+ */
+export function shippingAddressConsent(
+  order: Pick<OrderRow, "seller_id" | "buyer_id" | "status" | "fulfillment" | "payment_mode" | "shipping_address_shared_at">,
+  viewerId: string,
+): ShippingAddressConsent | null {
+  if (viewerId !== order.seller_id && viewerId !== order.buyer_id) return null;
+  if (order.fulfillment !== "shipping" || !needsBuyerAddressConsent(order)) return null;
+  if (order.shipping_address_shared_at) return { status: "granted", granted_at: order.shipping_address_shared_at };
+  if (!SELLER_SHIPPING_ADDRESS_STATUSES.includes(order.status)) return null;
+  return {
+    status: "awaiting_buyer",
+    next_step: AWAITING_CONSENT_NEXT_STEP[viewerId === order.buyer_id ? "buyer" : "seller"],
+  };
+}
+
+function consentClosedError(status: OrderStatus): OrderFlowError {
+  return new OrderFlowError(
+    "invalid_state",
+    `This order is ${status}. The address can be shared only once the seller has confirmed payment and ` +
+      "before the parcel is with the carrier (sold or label_issued).",
+  );
+}
+
+/**
+ * Records the buyer's agreement to show the seller this order's address.
+ * Not offered in `pending`: agreeing after the seller's payment claim is what
+ * lets the buyer check that claim first. Replaying it is a no-op.
+ */
+export async function shareShippingAddress(orderId: string, buyerId: string): Promise<OrderRow> {
+  const buyerOrder = async () =>
+    (await pool.query<OrderRow>("SELECT * FROM orders WHERE id = $1 AND buyer_id = $2", [orderId, buyerId])).rows[0];
+
+  const order = await buyerOrder();
+  if (!order) throw new OrderFlowError("not_found", "Order not found.");
+  if (!needsBuyerAddressConsent(order)) {
+    throw new OrderFlowError("not_applicable", "Stripe-mode orders need no address consent: payment is verified.");
+  }
+  if (order.fulfillment !== "shipping") {
+    throw new OrderFlowError("not_applicable", "Pickup orders have no shipping address to share.");
+  }
+  if (order.shipping_address_shared_at) return order;
+  if (!SELLER_SHIPPING_ADDRESS_STATUSES.includes(order.status)) throw consentClosedError(order.status);
+
+  // One statement, so consent and its audit row cannot diverge. The WHERE
+  // repeats the status check because a racing transition can land after the
+  // read above; IS NULL keeps a concurrent replay to a single event.
+  await pool.query(
+    `WITH shared AS (
+       UPDATE orders SET shipping_address_shared_at = now()
+       WHERE id = $1 AND buyer_id = $2 AND status = ANY($3::text[]) AND shipping_address_shared_at IS NULL
+       RETURNING id, buyer_id
+     )
+     INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason)
+     SELECT id, 'shipping_address_shared', 'buyer', buyer_id::text, 'share_shipping_address' FROM shared`,
+    [orderId, buyerId, SELLER_SHIPPING_ADDRESS_STATUSES],
+  );
+
+  const current = await buyerOrder();
+  if (!current) throw new OrderFlowError("not_found", "Order not found.");
+  if (!current.shipping_address_shared_at) throw consentClosedError(current.status);
+  return current;
 }
 
 export async function cancelOrder(orderId: string, actorId: string, reason?: string): Promise<OrderRow> {

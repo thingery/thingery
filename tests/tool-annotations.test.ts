@@ -19,6 +19,9 @@ const EXPECTED: Record<
   get_item: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   my_listings: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   get_order: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Disclosing the address cannot be undone, hence destructiveHint; replays are no-ops.
+  share_shipping_address: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  my_orders: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   get_payout_setup: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   create_listing: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   add_item_image: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -47,6 +50,13 @@ const EXPECTED: Record<
   // Public wanted-board reads: same posture as search_items / get_item.
   search_wanted: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   get_wanted: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Buyer-side wanted tools: my_wanted is a pure read; expire_wanted ends a
+  // live public post, so it carries destructiveHint like cancel_order.
+  create_wanted: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  my_wanted: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  update_wanted: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  expire_wanted: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  renew_wanted: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 };
 
 const READ_TOOLS = new Set(Object.entries(EXPECTED).filter(([, a]) => a.readOnlyHint).map(([n]) => n));

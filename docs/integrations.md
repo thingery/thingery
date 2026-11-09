@@ -133,7 +133,7 @@ curl -s https://thingery.dev/mcp \
 The two canonical agent workflows:
 
 - **Buyer:** `search_items` (filters: category, condition, price range, exact-match
-  `attributes` on any key) → `get_item` → propose. Ready to buy? `create_order`
+  `attributes` on any key; page with `offset`, up to 450) → `get_item` → propose. Ready to buy? `create_order`
   (see the README's [Order flow](../README.md#order-flow) section).
 - **Seller:** `describe_category` → `create_listing` (category-specific fields go in
   `attributes`) → `add_item_image` — **the first photo publishes the listing**; a

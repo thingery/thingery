@@ -244,6 +244,8 @@ CREATE TABLE IF NOT EXISTS orders (
   tracker_id          TEXT UNIQUE,     -- carrier-aggregator tracker id (EasyPost result.id) —
                                        -- PRIMARY webhook event-resolution key (F4, §5.2)
   label_url           TEXT,            -- https-only; stored and returned as data, never a link (F16)
+  shipping_address_shared_at TIMESTAMPTZ,  -- off_platform only: when the buyer agreed to show the seller
+                                           -- this order's address; NULL = not agreed, the seller cannot read it
   checkout_session_id TEXT UNIQUE,
   payment_intent_id   TEXT UNIQUE,
   transfer_id         TEXT,
@@ -273,6 +275,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_mode TEXT NOT NULL DEFAULT '
                       CHECK (payment_mode IN ('stripe','off_platform'));
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_price_cents INTEGER NOT NULL DEFAULT 0
                       CHECK (shipping_price_cents >= 0);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_address_shared_at TIMESTAMPTZ;
 DO $$
 BEGIN
   -- Widen the status CHECK with 'completed' (off_platform terminal state, §11.2).

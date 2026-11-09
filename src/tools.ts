@@ -119,14 +119,30 @@ function orderToPublic(order: Parameters<typeof getOrderView>[0] extends never ?
   price_cents: number; shipping_price_cents: number; currency: string; fulfillment: string;
   carrier: string | null; tracking_code: string | null; label_url: string | null;
   payment_deadline: Date | null; dispute_deadline: Date | null;
-  status_changed_at: Date; created_at: Date; payment_url?: string | null;
-  shipping_address?: Record<string, unknown>;
-  checkout_session_id?: string | null; payment_intent_id?: string | null;
-  transfer_id?: string | null; refund_id?: string | null; seller_id?: string; buyer_id?: string;
+  status_changed_at: Date; created_at: Date; updated_at: Date; payment_url?: string | null;
 }) {
-  const { shipping_address, seller_id, buyer_id, ...rest } = order;
+  // Explicit allowlist: a new orders column stays private until it is added
+  // here on purpose. item_title and payment_url exist only on OrderView rows;
+  // when undefined, JSON.stringify drops them from the tool response.
   return {
-    ...rest,
+    id: order.id,
+    item_id: order.item_id,
+    status: order.status,
+    payment_mode: order.payment_mode,
+    price_cents: order.price_cents,
+    shipping_price_cents: order.shipping_price_cents,
+    currency: order.currency,
+    fulfillment: order.fulfillment,
+    carrier: order.carrier,
+    tracking_code: order.tracking_code,
+    label_url: order.label_url,
+    payment_deadline: order.payment_deadline,
+    dispute_deadline: order.dispute_deadline,
+    status_changed_at: order.status_changed_at,
+    created_at: order.created_at,
+    updated_at: order.updated_at,
+    item_title: order.item_title,
+    payment_url: order.payment_url,
     total_price_cents: order.price_cents + order.shipping_price_cents,
   };
 }

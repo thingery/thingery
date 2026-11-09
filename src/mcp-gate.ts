@@ -99,6 +99,7 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   "create_order",
   "get_order",
   "share_shipping_address",
+  "my_orders",
   "cancel_order",
   "record_tracking",
   "confirm_payment",

@@ -49,6 +49,11 @@ Buyers post what they are looking for on the public wanted board; sellers answer
 - `search_wanted` (public): search active wanted posts — free text plus category, condition, currency, `budget_max_cents_gte` (buyers willing to pay at least this), limit 1–50 (default 10), offset.
 - `get_wanted` (public): one active wanted post by `wanted_id`; ended and unknown posts are both `not_found`.
 - `respond_to_wanted` (seller auth): answer a wanted post by creating a listing linked to it (photo gate and listing caps apply).
+- `create_wanted` (auth): publish what the buyer is looking for — title, notes, category, condition, budget_min_cents, budget_max_cents, currency, up to 3 http(s) reference_images. Max 10 active posts, 10 creates/day, 20 changes/hour; contact details are rejected with `contact_info`. Also saves a buyer alert unless `alert_me` is false.
+- `my_wanted` (auth): your wanted posts, every status, each with `response_count`, `unread_responses` and `renewable`.
+- `update_wanted` (auth): edit one of your active posts by `wanted_id`; only the fields sent change (20 edits/day). Another buyer's post is `not_found`.
+- `expire_wanted` (auth): end one of your active posts now; renewable for 30 days after its expiry date.
+- `renew_wanted` (auth): extend one of your posts 30 days — allowed in its final 7 days or within 30 days after expiry.
 
 ## Order flow (buying and getting paid)
 

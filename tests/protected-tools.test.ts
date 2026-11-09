@@ -85,7 +85,9 @@ describe.skipIf(!available)("PROTECTED_TOOLS annotation (F7)", () => {
       // Order history is per-account data.
       "my_orders",
       // THI-439 (B4): the response loop writes on the caller's behalf.
-      "respond_to_wanted"]) {
+      "respond_to_wanted",
+      // The buyer side of the wanted board.
+      "create_wanted", "my_wanted", "update_wanted", "expire_wanted", "renew_wanted"]) {
       expect(PROTECTED_TOOLS.has(name)).toBe(true);
     }
   });

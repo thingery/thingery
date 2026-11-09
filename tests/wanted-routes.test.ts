@@ -16,7 +16,8 @@ import pg from "pg";
 import type { Server } from "node:http";
 import express from "express";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { mountApiRoutes, wantedWriteLimiter } from "../src/routes.js";
+import { mountApiRoutes } from "../src/routes.js";
+import { wantedWriteLimiter } from "../src/wanted-writes.js";
 import * as intentsModule from "../src/intents.js";
 import { SESSION_COOKIE, signSession } from "../src/auth.js";
 

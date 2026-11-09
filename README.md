@@ -58,7 +58,9 @@ with `disputed`/`cancelled`/`refunded` off-ramps; deadlines are enforced by a se
 env-tunable). Design record: [ADR 0003](docs/adr/0003-order-state-machine.md).
 
 Sellers authenticate with **OAuth** (one-click sign-in from any MCP host — see below) or a
-`thg_...` API key (`Authorization: Bearer`); search is anonymous.
+`thg_...` API key (`Authorization: Bearer`); search is anonymous. First-party web clients can
+call `/mcp` as the signed-in user with `Authorization: Bearer thgs_<session cookie value>` —
+see [Connect an MCP client](#connect-an-mcp-client).
 
 ### Buyer alerts (saved searches)
 
@@ -76,6 +78,18 @@ their own listing.
 | `update_intent` | account | Mute or unmute a saved search — muting stops future matches; existing matches stay readable |
 | `delete_intent` | account | Delete a saved search; its matches go with it |
 | `my_matches` | account | New listings matching a saved search — `unread_only`, `mark_read`, limit 1–50 (default 10). Items carry `content_provenance: "user_generated"` |
+
+### Wanted board
+
+Buyers post what they are looking for on the public [/wanted](https://thingery.dev/wanted)
+board; sellers answer a post with a real listing (`respond_to_wanted`). Post text is
+user-generated and marked `content_provenance: "user_generated"`.
+
+| Tool | Auth | Purpose |
+|---|---|---|
+| `search_wanted` | public | Search active wanted posts — free text plus category, condition, currency and `budget_max_cents_gte` filters, limit 1–50 (default 10), offset |
+| `get_wanted` | public | One active wanted post by id |
+| `respond_to_wanted` | seller | Answer a wanted post by creating a listing linked to it |
 
 ### Photo-required publishing
 
@@ -244,6 +258,12 @@ Omit the `Authorization` header for buyer-only (public search) usage — anonymo
 public read tools is always available. Design note: the decision record for the OAuth flow is
 [docs/adr/0002-mcp-oauth-onboarding.md](docs/adr/0002-mcp-oauth-onboarding.md); set
 `OAUTH_DISABLED=1` to turn OAuth routes off entirely (hosts then fall back to keys).
+
+First-party web clients call `/mcp` as the signed-in user with
+`Authorization: Bearer thgs_<value of the thingery_session cookie>`. The value has exactly the
+session's lifetime and revocation (30 days, ended by an API key rotation) and is as sensitive as
+the cookie, so keep it server-side and never hand it to third-party hosts — those use OAuth or an
+API key. `/mcp` never reads the cookie itself.
 
 ### Run locally over stdio (`npx`)
 

@@ -17,6 +17,7 @@ describe("credentialKind (Authorization prefix mirror)", () => {
   it("maps thg_/thgo_/absent prefixes to api_key/oauth/none", () => {
     expect(credentialKind("Bearer thg_abc")).toBe("api_key");
     expect(credentialKind("Bearer thgo_xyz")).toBe("oauth");
+    expect(credentialKind("Bearer thgs_session")).toBe("session");
     expect(credentialKind(undefined)).toBe("none");
     expect(credentialKind("")).toBe("none");
     expect(credentialKind("Basic zzz")).toBe("none");
@@ -108,7 +109,7 @@ describe("TOOL_NAMES drift check (registration capture)", () => {
       },
       { seller: null },
     );
-    expect(registered.size).toBe(23); // +4 intent tools (THI-360 PR 2), +my_matches (PR 4), +respond_to_wanted (THI-439 PR 3), +share_shipping_address
+    expect(registered.size).toBe(25); // +4 intent tools (THI-360 PR 2), +my_matches (PR 4), +respond_to_wanted (THI-439 PR 3), +search_wanted/get_wanted, +share_shipping_address
     expect([...TOOL_NAMES].sort()).toEqual([...registered].sort());
   });
 });

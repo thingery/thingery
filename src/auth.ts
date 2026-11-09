@@ -96,10 +96,18 @@ export function oauthDisabled(): boolean {
   return flag === "1" || flag === "true";
 }
 
+/** Bearer prefix for a login session presented by a first-party web client:
+ * `thgs_` + the exact `thingery_session` cookie value. */
+const SESSION_BEARER_PREFIX = "thgs_";
+
 /**
- * Dual-token dispatch on the Authorization: Bearer header (spec THI-11
- * §2.10): `thg_` → API key, `thgo_` → OAuth access token. Anything else that
- * arrives as a Bearer credential is present-but-invalid.
+ * Token dispatch on the Authorization: Bearer header (spec THI-11 §2.10):
+ * `thg_` → API key, `thgo_` → OAuth access token, `thgs_` → login session.
+ * Anything else that arrives as a Bearer credential is present-but-invalid.
+ *
+ * Deliberately header-only: browsers attach cookies to cross-site requests on
+ * their own but never an Authorization header, so reading the session cookie
+ * here would open /mcp to CSRF. The session must be presented explicitly.
  */
 export async function authenticateRequest(req: Request): Promise<AuthResult> {
   const header = req.headers.authorization;
@@ -112,6 +120,10 @@ export async function authenticateRequest(req: Request): Promise<AuthResult> {
   if (token.startsWith("thgo_")) {
     if (oauthDisabled()) return { seller: null, failure: "invalid_token" }; // kill switch (§4.4)
     const seller = await sellerFromAccessToken(token);
+    return { seller, failure: seller ? "none" : "invalid_token" };
+  }
+  if (token.startsWith(SESSION_BEARER_PREFIX)) {
+    const seller = await sellerFromSessionValue(token.slice(SESSION_BEARER_PREFIX.length));
     return { seller, failure: seller ? "none" : "invalid_token" };
   }
   return { seller: null, failure: "invalid_token" };
@@ -265,10 +277,16 @@ function readCookie(req: Request, name: string): string | undefined {
   return undefined;
 }
 
-/** Resolves the logged-in seller from the session cookie (browser clients).
- * THI-114: no plaintext key selected — /api/me must not carry it. */
+/** Resolves the logged-in seller from the session cookie (browser clients). */
 export async function sellerFromSession(req: Request): Promise<SellerRow | null> {
-  const token = splitSessionToken(readCookie(req, SESSION_COOKIE));
+  return sellerFromSessionValue(readCookie(req, SESSION_COOKIE));
+}
+
+/** Verifies a raw session value (MAC, 30-day expiry, live `session_epoch`) —
+ * the single check behind both the cookie and the `thgs_` bearer.
+ * THI-114: no plaintext key selected — /api/me must not carry it. */
+async function sellerFromSessionValue(sessionValue: string | undefined): Promise<SellerRow | null> {
+  const token = splitSessionToken(sessionValue);
   if (!token) return null;
   // Trust-boundary format gate (THI-122 review, finding 1): sellers.id is a
   // UUID, and this SELECT runs before the MAC verifies — a non-UUID segment

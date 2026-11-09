@@ -46,6 +46,9 @@ const EXPECTED: Record<
   // THI-439 (B4, PR 3): respond_to_wanted mints a real listing (plain
   // write, not destructive — it creates) and links it to the wanted.
   respond_to_wanted: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  // Public wanted-board reads: same posture as search_items / get_item.
+  search_wanted: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  get_wanted: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 };
 
 const READ_TOOLS = new Set(Object.entries(EXPECTED).filter(([, a]) => a.readOnlyHint).map(([n]) => n));

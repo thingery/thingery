@@ -87,7 +87,9 @@ describe.skipIf(!available)("PROTECTED_TOOLS annotation (F7)", () => {
       // THI-439 (B4): the response loop writes on the caller's behalf.
       "respond_to_wanted",
       // The buyer side of the wanted board.
-      "create_wanted", "my_wanted", "update_wanted", "expire_wanted", "renew_wanted"]) {
+      "create_wanted", "my_wanted", "update_wanted", "expire_wanted", "renew_wanted",
+      // Buyer consent for releasing a shipping address to the seller.
+      "share_shipping_address"]) {
       expect(PROTECTED_TOOLS.has(name)).toBe(true);
     }
   });

@@ -289,16 +289,104 @@ const SELLER_SHIPPING_ADDRESS_STATUSES: readonly OrderStatus[] = ["sold", "label
 /**
  * The one place shipping_address may be released to a counterparty: the
  * order's own seller, on a shipped order, only while there is something to
- * ship. Returns null otherwise.
+ * ship and, off-platform, only after the buyer agreed for this order.
+ * Returns null otherwise.
  */
 export function shippingAddressForSeller(
-  order: Pick<OrderRow, "seller_id" | "status" | "fulfillment" | "shipping_address">,
+  order: Pick<OrderRow, "seller_id" | "status" | "fulfillment" | "shipping_address" | "payment_mode" | "shipping_address_shared_at">,
   viewerId: string,
 ): OrderRow["shipping_address"] | null {
   if (order.seller_id !== viewerId) return null;
   if (order.fulfillment !== "shipping") return null;
   if (!SELLER_SHIPPING_ADDRESS_STATUSES.includes(order.status)) return null;
+  if (needsBuyerAddressConsent(order) && !order.shipping_address_shared_at) return null;
   return order.shipping_address;
+}
+
+// Stripe verifies payment before an order reaches sold. Off-platform, sold only
+// records the seller's own claim (#24), so it cannot be what releases the address.
+function needsBuyerAddressConsent(order: Pick<OrderRow, "payment_mode">): boolean {
+  return order.payment_mode !== "stripe";
+}
+
+export type ShippingAddressConsent =
+  | { status: "granted"; granted_at: Date }
+  | { status: "awaiting_buyer"; next_step: string };
+
+const AWAITING_CONSENT_NEXT_STEP = {
+  buyer:
+    "The seller has marked this order paid but cannot see your address. Ask the buyer whether to share it; " +
+    "call share_shipping_address only if they agree.",
+  seller:
+    "The buyer has not agreed to share their address yet. It appears in shipping_address once they do; " +
+    "you cannot grant this yourself.",
+};
+
+/**
+ * What an order party is told about address consent. Null when consent does
+ * not apply: Stripe-mode and pickup orders, and states where it cannot lead to
+ * a release. Never carries the address itself.
+ */
+export function shippingAddressConsent(
+  order: Pick<OrderRow, "seller_id" | "buyer_id" | "status" | "fulfillment" | "payment_mode" | "shipping_address_shared_at">,
+  viewerId: string,
+): ShippingAddressConsent | null {
+  if (viewerId !== order.seller_id && viewerId !== order.buyer_id) return null;
+  if (order.fulfillment !== "shipping" || !needsBuyerAddressConsent(order)) return null;
+  if (order.shipping_address_shared_at) return { status: "granted", granted_at: order.shipping_address_shared_at };
+  if (!SELLER_SHIPPING_ADDRESS_STATUSES.includes(order.status)) return null;
+  return {
+    status: "awaiting_buyer",
+    next_step: AWAITING_CONSENT_NEXT_STEP[viewerId === order.buyer_id ? "buyer" : "seller"],
+  };
+}
+
+function consentClosedError(status: OrderStatus): OrderFlowError {
+  return new OrderFlowError(
+    "invalid_state",
+    `This order is ${status}. The address can be shared only once the seller has confirmed payment and ` +
+      "before the parcel is with the carrier (sold or label_issued).",
+  );
+}
+
+/**
+ * Records the buyer's agreement to show the seller this order's address.
+ * Not offered in `pending`: agreeing after the seller's payment claim is what
+ * lets the buyer check that claim first. Replaying it is a no-op.
+ */
+export async function shareShippingAddress(orderId: string, buyerId: string): Promise<OrderRow> {
+  const buyerOrder = async () =>
+    (await pool.query<OrderRow>("SELECT * FROM orders WHERE id = $1 AND buyer_id = $2", [orderId, buyerId])).rows[0];
+
+  const order = await buyerOrder();
+  if (!order) throw new OrderFlowError("not_found", "Order not found.");
+  if (!needsBuyerAddressConsent(order)) {
+    throw new OrderFlowError("not_applicable", "Stripe-mode orders need no address consent: payment is verified.");
+  }
+  if (order.fulfillment !== "shipping") {
+    throw new OrderFlowError("not_applicable", "Pickup orders have no shipping address to share.");
+  }
+  if (order.shipping_address_shared_at) return order;
+  if (!SELLER_SHIPPING_ADDRESS_STATUSES.includes(order.status)) throw consentClosedError(order.status);
+
+  // One statement, so consent and its audit row cannot diverge. The WHERE
+  // repeats the status check because a racing transition can land after the
+  // read above; IS NULL keeps a concurrent replay to a single event.
+  await pool.query(
+    `WITH shared AS (
+       UPDATE orders SET shipping_address_shared_at = now()
+       WHERE id = $1 AND buyer_id = $2 AND status = ANY($3::text[]) AND shipping_address_shared_at IS NULL
+       RETURNING id, buyer_id
+     )
+     INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason)
+     SELECT id, 'shipping_address_shared', 'buyer', buyer_id::text, 'share_shipping_address' FROM shared`,
+    [orderId, buyerId, SELLER_SHIPPING_ADDRESS_STATUSES],
+  );
+
+  const current = await buyerOrder();
+  if (!current) throw new OrderFlowError("not_found", "Order not found.");
+  if (!current.shipping_address_shared_at) throw consentClosedError(current.status);
+  return current;
 }
 
 export async function cancelOrder(orderId: string, actorId: string, reason?: string): Promise<OrderRow> {

@@ -9,7 +9,7 @@ import type Stripe from "stripe";
 import { afterEach, afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { setStripeForTests } from "../src/stripe.js";
 import { registerTools } from "../src/tools.js";
-import { cancelOrder, createOrder, getOrderView, OrderFlowError } from "../src/order-flow.js";
+import { cancelOrder, createOrder, getOrderView, OrderFlowError, shareShippingAddress, shippingAddressForSeller } from "../src/order-flow.js";
 import { getItem } from "../src/items.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -241,6 +241,9 @@ describe.skipIf(!available)("create_order / get_order / cancel_order (DB)", () =
     const setStatus = (status: string) => db.query("UPDATE orders SET status = $2 WHERE id = $1", [order.id, status]);
 
     expect((await callGetOrder(order.id, ids.sellerId)).order).not.toHaveProperty("shipping_address");
+    await setStatus("sold");
+    expect((await callGetOrder(order.id, ids.sellerId)).order).not.toHaveProperty("shipping_address"); // off_platform, no consent yet
+    await shareShippingAddress(order.id, ids.buyerId);
     for (const status of ["sold", "label_issued"]) {
       await setStatus(status);
       expect((await callGetOrder(order.id, ids.sellerId)).order.shipping_address).toEqual(address);
@@ -251,6 +254,60 @@ describe.skipIf(!available)("create_order / get_order / cancel_order (DB)", () =
 
     await setStatus("sold");
     expect((await callGetOrder(order.id, crypto.randomUUID())).code).toBe("not_found");
+  });
+
+  describe("share_shipping_address (real SQL)", () => {
+    const placeOrder = async () =>
+      (await createOrder({ buyerId: ids.buyerId, itemId: await seedItem(), shippingAddress: address })).order;
+    const setStatus = (id: string, status: string) => db.query("UPDATE orders SET status = $2 WHERE id = $1", [id, status]);
+    const consentEvents = (id: string) =>
+      db.query("SELECT actor_type, actor_id, reason, payload FROM order_events WHERE order_id = $1 AND event_type = 'shipping_address_shared'", [id]);
+
+    it("records consent once, with an address-free event, and replays as a no-op", async () => {
+      const order = await placeOrder();
+      await setStatus(order.id, "sold");
+      const first = await shareShippingAddress(order.id, ids.buyerId);
+      expect(first.shipping_address_shared_at).toBeInstanceOf(Date);
+      const replay = await shareShippingAddress(order.id, ids.buyerId);
+      expect(replay.shipping_address_shared_at).toEqual(first.shipping_address_shared_at);
+
+      const events = await consentEvents(order.id);
+      expect(events.rows).toEqual([{ actor_type: "buyer", actor_id: ids.buyerId, reason: "share_shipping_address", payload: {} }]);
+      expect(JSON.stringify(events.rows)).not.toContain(address.line1);
+    });
+
+    it("concurrent replays still write one event", async () => {
+      const order = await placeOrder();
+      await setStatus(order.id, "sold");
+      await Promise.all([shareShippingAddress(order.id, ids.buyerId), shareShippingAddress(order.id, ids.buyerId)]);
+      expect((await consentEvents(order.id)).rows).toHaveLength(1);
+    });
+
+    it("refuses the seller and a stranger with not_found, recording nothing", async () => {
+      const order = await placeOrder();
+      await setStatus(order.id, "sold");
+      await expectCode(shareShippingAddress(order.id, ids.sellerId), "not_found");
+      await expectCode(shareShippingAddress(order.id, crypto.randomUUID()), "not_found");
+      expect((await consentEvents(order.id)).rows).toHaveLength(0);
+    });
+
+    it("refuses pending and every later state", async () => {
+      const order = await placeOrder();
+      await expectCode(shareShippingAddress(order.id, ids.buyerId), "invalid_state");
+      for (const status of ["in_transit", "delivered", "cancelled"]) {
+        await setStatus(order.id, status);
+        await expectCode(shareShippingAddress(order.id, ids.buyerId), "invalid_state");
+      }
+      expect((await consentEvents(order.id)).rows).toHaveLength(0);
+    });
+
+    it("a Stripe-mode order releases the address without consent and refuses the tool", async () => {
+      const order = await placeOrder();
+      await db.query("UPDATE orders SET status = 'sold', payment_mode = 'stripe' WHERE id = $1", [order.id]);
+      await expectCode(shareShippingAddress(order.id, ids.buyerId), "not_applicable");
+      const view = await getOrderView(order.id, ids.sellerId);
+      expect(shippingAddressForSeller(view!, ids.sellerId)).toEqual(address);
+    });
   });
 
   it("get_item exposes payment_available + orderable (§11.2)", async () => {

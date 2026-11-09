@@ -57,7 +57,9 @@ with `disputed`/`cancelled`/`refunded` off-ramps; deadlines are enforced by a se
 env-tunable). Design record: [ADR 0003](docs/adr/0003-order-state-machine.md).
 
 Sellers authenticate with **OAuth** (one-click sign-in from any MCP host — see below) or a
-`thg_...` API key (`Authorization: Bearer`); search is anonymous.
+`thg_...` API key (`Authorization: Bearer`); search is anonymous. First-party web clients can
+call `/mcp` as the signed-in user with `Authorization: Bearer thgs_<session cookie value>` —
+see [Connect an MCP client](#connect-an-mcp-client).
 
 ### Buyer alerts (saved searches)
 
@@ -255,6 +257,12 @@ Omit the `Authorization` header for buyer-only (public search) usage — anonymo
 public read tools is always available. Design note: the decision record for the OAuth flow is
 [docs/adr/0002-mcp-oauth-onboarding.md](docs/adr/0002-mcp-oauth-onboarding.md); set
 `OAUTH_DISABLED=1` to turn OAuth routes off entirely (hosts then fall back to keys).
+
+First-party web clients call `/mcp` as the signed-in user with
+`Authorization: Bearer thgs_<value of the thingery_session cookie>`. The value has exactly the
+session's lifetime and revocation (30 days, ended by an API key rotation) and is as sensitive as
+the cookie, so keep it server-side and never hand it to third-party hosts — those use OAuth or an
+API key. `/mcp` never reads the cookie itself.
 
 ### Run locally over stdio (`npx`)
 

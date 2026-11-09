@@ -119,12 +119,13 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   "get_wanted",
 ]);
 
-/** Credential kind from the Authorization header prefix — mirrors the
- *  dual-token dispatch in authenticateRequest (thg_ API key / thgo_ OAuth).
- *  Read-only prefix check only; no auth logic lives here. */
-export function credentialKind(authorization: string | undefined): "api_key" | "oauth" | "none" {
+/** Credential kind from the Authorization header prefix — mirrors the token
+ *  dispatch in authenticateRequest (thg_ API key / thgo_ OAuth / thgs_ login
+ *  session). Read-only prefix check only; no auth logic lives here. */
+export function credentialKind(authorization: string | undefined): "api_key" | "oauth" | "session" | "none" {
   if (authorization?.startsWith("Bearer thg_")) return "api_key";
   if (authorization?.startsWith("Bearer thgo_")) return "oauth";
+  if (authorization?.startsWith("Bearer thgs_")) return "session";
   return "none";
 }
 
@@ -135,7 +136,7 @@ export function credentialKind(authorization: string | undefined): "api_key" | "
  *  executed nothing. Pure stdout side effect; safe to call on any body. */
 export function logToolCallEvents(
   parsed: unknown,
-  credential: "api_key" | "oauth" | "none",
+  credential: "api_key" | "oauth" | "session" | "none",
   sellerId: string | null,
 ): void {
   const one = (msg: unknown): string | null => {

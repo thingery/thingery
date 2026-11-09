@@ -406,7 +406,7 @@ export async function updateWanted(
   const fields = update.fields ?? {};
   if (Object.keys(fields).length === 0) {
     logWantedWrite("update", "rejected", buyerId);
-    throw new WantedValidationError("nothing to update — provide fields, expire: true, or renew: true");
+    throw new WantedValidationError("nothing to update — provide at least one field to change");
   }
   if (current.status !== "active") {
     logWantedWrite("update", "rejected", buyerId);

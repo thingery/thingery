@@ -75,7 +75,13 @@
         "my_intents",
         "update_intent",
         "delete_intent",
-        "my_matches"
+        "my_matches",
+        "respond_to_wanted",
+        "create_wanted",
+        "my_wanted",
+        "update_wanted",
+        "expire_wanted",
+        "renew_wanted"
       ],
       "order_tools": {
         "get_payout_setup": "seller payout setup: Stripe Express onboarding URL + status; optional, enables platform payment",
@@ -96,6 +102,16 @@
         "update_intent": "mute/unmute an intent; muting stops future matches, existing matches stay readable",
         "delete_intent": "delete an intent; its matches are removed with it",
         "my_matches": "new listings matching a saved intent — unread_only, mark_read, limit 1-50 (default 10); item payloads carry content_provenance user_generated"
+      },
+      "wanted_tools": {
+        "search_wanted": "public: search active wanted posts; filters category, condition, currency, budget_max_cents_gte, limit 1-50, offset",
+        "get_wanted": "public: one active wanted post by wanted_id",
+        "respond_to_wanted": "seller answers a wanted post by creating a listing linked to it",
+        "create_wanted": "publish what the buyer is looking for; max 10 active, 10 creates/day, 20 changes/hour; contact details rejected; also saves a buyer alert unless alert_me is false",
+        "my_wanted": "the caller's wanted posts, every status, with response counts and renewable",
+        "update_wanted": "edit one of your active posts; only the fields sent change; 20 edits/day",
+        "expire_wanted": "end one of your active posts now; renewable for 30 days after its expiry date",
+        "renew_wanted": "extend a post 30 days, in its final 7 days or within 30 days after expiry"
       },
       "payment_modes": {
         "stripe": "platform Stripe Checkout with buyer protection; requires deployment payments + seller payout onboarding",

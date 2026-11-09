@@ -12,7 +12,7 @@
 // to cancel a paid-but-webhook-pending order instead of stranding money.
 
 import { pool } from "./db.js";
-import type { OrderRow } from "./orders.js";
+import type { OrderRow, OrderStatus } from "./orders.js";
 import { applyTransition, IllegalTransitionError } from "./orders.js";
 import { orderFlowConfig } from "./config.js";
 import {
@@ -210,6 +210,29 @@ export async function getOrderView(orderId: string, viewerId: string): Promise<O
     }
   }
   return { ...order, payment_url: paymentUrl };
+}
+
+// sold: paid (#2) or payment confirmed (#24), so the seller must ship now.
+// label_issued: tracking is recorded but no carrier has scanned the parcel
+// (#10 is carrier-only), so a relabel or a #23 tracking correction can still
+// need the address. Every other state is either before payment, in carrier
+// custody, frozen by a dispute or finished. A won chargeback (#22r) restores
+// sold/label_issued, which re-enables disclosure through this same check.
+const SELLER_SHIPPING_ADDRESS_STATUSES: readonly OrderStatus[] = ["sold", "label_issued"];
+
+/**
+ * The one place shipping_address may be released to a counterparty: the
+ * order's own seller, on a shipped order, only while there is something to
+ * ship. Returns null otherwise.
+ */
+export function shippingAddressForSeller(
+  order: Pick<OrderRow, "seller_id" | "status" | "fulfillment" | "shipping_address">,
+  viewerId: string,
+): OrderRow["shipping_address"] | null {
+  if (order.seller_id !== viewerId) return null;
+  if (order.fulfillment !== "shipping") return null;
+  if (!SELLER_SHIPPING_ADDRESS_STATUSES.includes(order.status)) return null;
+  return order.shipping_address;
 }
 
 export async function cancelOrder(orderId: string, actorId: string, reason?: string): Promise<OrderRow> {

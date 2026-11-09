@@ -203,7 +203,19 @@ export interface SearchFilters {
   limit: number;
   /** Rows to skip, for offset pagination (1-based pages in callers). Defaults to 0. */
   offset?: number;
+  /** Fetch one row past `limit`, so a caller can tell whether another page exists without a COUNT. */
+  lookahead?: boolean;
 }
+
+export const SEARCH_MAX_LIMIT = 50;
+/** Deepest `offset` search_items accepts: with a full page that is rows 451-500, ten
+ *  pages of 50. Beyond that a caller should refine the query rather than walk it. */
+export const SEARCH_MAX_OFFSET = 450;
+/** Rows the semantic query ranks before paging. Constant across every search_items page
+ *  (deepest offset + full page + lookahead row), so the planner sees the same inner LIMIT
+ *  on each page; LIMIT 10 and OFFSET 5000 otherwise pick different plans with different
+ *  recall (ivfflat vs. exact sort) and pages stop lining up. */
+const SEARCH_RANK_WINDOW = SEARCH_MAX_OFFSET + SEARCH_MAX_LIMIT + 1;
 
 /**
  * Hybrid search: hard filters (status/price/category/attributes...) always apply.
@@ -231,7 +243,7 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
   }
 
   const q = filters.q?.trim();
-  const limit = Math.min(Math.max(filters.limit, 1), 50);
+  const limit = Math.min(Math.max(filters.limit, 1), SEARCH_MAX_LIMIT) + (filters.lookahead ? 1 : 0);
   const offset = Math.max(Math.trunc(filters.offset ?? 0), 0);
 
   if (q) {
@@ -239,15 +251,22 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
     if (embedding) {
       const vecParam = add(JSON.stringify(embedding));
       const keywordParam = add(`%${q.replace(/[%_]/g, (m) => `\\${m}`)}%`);
+      // The id tie-break lives in the outer query on purpose: a second sort key next
+      // to the distance stops Postgres 16 from using the ivfflat index at all.
+      // /browse can page past the MCP cap, hence the Math.max.
       const { rows } = await pool.query<ItemRow & { score: number }>(
-        `SELECT i.*, 1 - (i.embedding <=> ${vecParam}::vector) AS score,
-                (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL) AS seller_payout_ready
-         FROM items i LEFT JOIN sellers s ON s.id = i.seller_id
-         WHERE ${where.join(" AND ")}
-           AND i.embedding IS NOT NULL
-           AND (i.title ILIKE ${keywordParam} OR i.description ILIKE ${keywordParam}
-                OR 1 - (i.embedding <=> ${vecParam}::vector) > 0.15)
-         ORDER BY i.embedding <=> ${vecParam}::vector
+        `SELECT * FROM (
+           SELECT i.*, 1 - (i.embedding <=> ${vecParam}::vector) AS score,
+                  (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL) AS seller_payout_ready
+           FROM items i LEFT JOIN sellers s ON s.id = i.seller_id
+           WHERE ${where.join(" AND ")}
+             AND i.embedding IS NOT NULL
+             AND (i.title ILIKE ${keywordParam} OR i.description ILIKE ${keywordParam}
+                  OR 1 - (i.embedding <=> ${vecParam}::vector) > 0.15)
+           ORDER BY i.embedding <=> ${vecParam}::vector
+           LIMIT ${add(Math.max(SEARCH_RANK_WINDOW, offset + limit))}
+         ) ranked
+         ORDER BY ranked.embedding <=> ${vecParam}::vector, ranked.id
          LIMIT ${add(limit)} OFFSET ${add(offset)}`,
         params,
       );
@@ -261,7 +280,7 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
        FROM items i LEFT JOIN sellers s ON s.id = i.seller_id
        WHERE ${where.join(" AND ")}
          AND (i.title ILIKE ${keywordParam} OR i.description ILIKE ${keywordParam})
-       ORDER BY i.created_at DESC
+       ORDER BY i.created_at DESC, i.id
        LIMIT ${add(limit)} OFFSET ${add(offset)}`,
       params,
     );
@@ -273,7 +292,7 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
             (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL) AS seller_payout_ready
      FROM items i LEFT JOIN sellers s ON s.id = i.seller_id
      WHERE ${where.join(" AND ")}
-     ORDER BY i.created_at DESC
+     ORDER BY i.created_at DESC, i.id
      LIMIT ${add(limit)} OFFSET ${add(offset)}`,
     params,
   );

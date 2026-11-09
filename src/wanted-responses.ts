@@ -42,6 +42,7 @@ export async function respondToWanted(
     condition?: string;
     brand?: string | null;
     price_cents: number;
+    shipping_price_cents?: number;
     currency?: string;
     location?: string | null;
     weight_grams?: number | null;
@@ -91,6 +92,7 @@ export async function respondToWanted(
     condition: listing.condition ?? "good",
     brand: listing.brand ?? null,
     price_cents: listing.price_cents,
+    shipping_price_cents: listing.shipping_price_cents,
     currency: listing.currency ?? "EUR",
     location: listing.location ?? null,
     weight_grams: listing.weight_grams ?? null,

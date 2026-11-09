@@ -242,3 +242,18 @@ describe("item page sharing (THI-396)", () => {
     expect(html).toContain(`<meta property="og:image" content="${item.images[0]}">`);
   });
 });
+
+describe("item page shipping price", () => {
+  it("shows the shipping charge and the buyer total", async () => {
+    const html = await renderWith({ ...item, shipping_tier: "parcel", shipping_price_cents: 700 }, null);
+    expect(html).toContain("7.00 EUR");
+    expect(html).toContain("527.00 EUR");
+  });
+
+  it("shows no shipping line for free shipping or pickup", async () => {
+    const free = await renderWith({ ...item, shipping_tier: "parcel", shipping_price_cents: 0 }, null);
+    const pickup = await renderWith({ ...item, shipping_tier: "local", shipping_price_cents: 700 }, null);
+    expect(free).not.toContain("item.plusShipping");
+    expect(pickup).not.toContain("item.plusShipping");
+  });
+});

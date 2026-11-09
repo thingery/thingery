@@ -797,6 +797,43 @@ describe.skipIf(!available)("chat confirmation gate (DB)", () => {
     expect((await statusOf(bikeId)).price_cents).toBe(4000);
   });
 
+  it("holds a >20% shipping price drop, even alongside a price raise, then applies only shipping on confirm", async () => {
+    const created = await client.query(
+      `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, attributes, status)
+       VALUES ($1, 'Shipped Lamp', 5000, 1000, 'other', '{}'::jsonb, 'active') RETURNING id`,
+      [sellerA.id],
+    );
+    const lampId = created.rows[0].id as string;
+    const shippingOf = async () =>
+      (await client.query("SELECT shipping_price_cents FROM items WHERE id = $1", [lampId])).rows[0].shipping_price_cents;
+
+    mockLlm([toolCallMsg("c1", "update_listing", { id: lampId, price_cents: 6000, shipping_price_cents: 0 }), FINAL]);
+    const out = await chatTurn([], "make shipping free on the lamp", sellerA);
+    expect(out.confirm?.op).toBe("shipping=0");
+    expect(out.confirm?.summary).toContain("Make shipping free");
+    expect(await shippingOf()).toBe(1000); // not executed yet
+
+    const confirmed = await chatTurn([], `chat-confirm ${out.confirm!.token}`, sellerA);
+    expect(confirmed.text).toContain("Shipped Lamp");
+    expect(await shippingOf()).toBe(0);
+    expect((await statusOf(lampId)).price_cents).toBe(5000); // exactly the signed op
+  });
+
+  it("executes a shipping raise or a ≤20% shipping drop immediately (no gate)", async () => {
+    const created = await client.query(
+      `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, attributes, status)
+       VALUES ($1, 'Shipped Chair', 5000, 1000, 'other', '{}'::jsonb, 'active') RETURNING id`,
+      [sellerA.id],
+    );
+    const itemId = created.rows[0].id as string;
+    mockLlm([toolCallMsg("c1", "update_listing", { id: itemId, shipping_price_cents: 800 }), FINAL]);
+    expect((await chatTurn([], "lower shipping a bit", sellerA)).confirm).toBeUndefined();
+    mockLlm([toolCallMsg("c1", "update_listing", { id: itemId, shipping_price_cents: 1200 }), FINAL]);
+    expect((await chatTurn([], "raise shipping", sellerA)).confirm).toBeUndefined();
+    const row = await client.query("SELECT shipping_price_cents FROM items WHERE id = $1", [itemId]);
+    expect(row.rows[0].shipping_price_cents).toBe(1200);
+  });
+
   it("regression (THI-126 must-fix): string-typed price_cents cannot bypass the gate", async () => {
     // Security-verified attack (THI-126 review): destructiveUpdateOp only
     // evaluated numeric prices, so a JSON string fell through to updateItem,

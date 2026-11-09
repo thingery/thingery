@@ -193,6 +193,14 @@ describe.skipIf(!available)("/mcp method-aware 401 gate (HTTP)", () => {
     expect(www).toContain("resource_metadata=");
   });
 
+  it("anonymous create_wanted call → 401 Bearer challenge (wanted writes are per-account)", async () => {
+    const res = await post(rpc("tools/call", { name: "create_wanted", arguments: { title: "Vintage watch" } }));
+    expect(res.status).toBe(401);
+    const www = res.headers.get("www-authenticate") ?? "";
+    expect(www).toContain("Bearer");
+    expect(www).toContain("resource_metadata=");
+  });
+
   it("anonymous public-tool call passes the gate (tool-level result, not 401)", async () => {
     const res = await post(rpc("tools/call", { name: "search_items", arguments: { q: "anything" } }));
     expect(res.status).toBe(200);

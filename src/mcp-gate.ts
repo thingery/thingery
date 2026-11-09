@@ -117,6 +117,12 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   // Public reads of the wanted board.
   "search_wanted",
   "get_wanted",
+  // The buyer side of the wanted board.
+  "create_wanted",
+  "my_wanted",
+  "update_wanted",
+  "expire_wanted",
+  "renew_wanted",
 ]);
 
 /** Credential kind from the Authorization header prefix — mirrors the

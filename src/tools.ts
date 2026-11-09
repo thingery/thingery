@@ -6,7 +6,8 @@ import { validateAttributes, AttributeValidationError, attributeShapeErrors, typ
 import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
 import { addItemImageBase64 } from "./images.js";
 import { respondToWanted, WantedResponseError } from "./wanted-responses.js";
-import { getWantedById, searchWanted, wantedToPublic, type WantedRow } from "./wanted.js";
+import { ContactInfoError, getWantedById, listMyWanted, searchWanted, updateWanted, wantedToPublic, WantedLimitError, WantedNotFoundError, WantedValidationError, type WantedFieldUpdate, type WantedRow } from "./wanted.js";
+import { createWantedWithAlert, wantedCreateShape, wantedEditShape, wantedWriteLimiter, type WantedCreateRequest } from "./wanted-writes.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
 import { cancelOrder, createOrder, getOrderView, OrderFlowError } from "./order-flow.js";
@@ -53,6 +54,12 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   // THI-439 (B4): the response loop writes a listing on the caller's
   // behalf — per-account write surface, same 401-challenge treatment.
   "respond_to_wanted",
+  // The buyer side of the wanted board: per-account reads and writes.
+  "create_wanted",
+  "my_wanted",
+  "update_wanted",
+  "expire_wanted",
+  "renew_wanted",
 ]);
 
 // H5.3 provenance marker (docs/security.md §6 H5, fix 3; spec THI-109): the
@@ -164,6 +171,31 @@ const describeError = (e: unknown): string => {
 
 export function registerTools(server: { registerTool: Function }, ctx: ToolContext): void {
   const requireSeller = (): SellerRow | null => ctx.seller;
+
+  /** Wraps a buyer-side wanted write: account required, then the hourly
+   *  bucket shared with /api/wanted*, then the body. Typed module errors keep
+   *  their machine-readable codes (rate_limited, contact_info, invalid_wanted,
+   *  not_found); a missing and another buyer's wanted are both not_found. */
+  const wantedWrite = (
+    tool: string,
+    write: (seller: SellerRow, args: Record<string, unknown>) => Promise<unknown>,
+  ) => async (args: Record<string, unknown>) => {
+    const seller = requireSeller();
+    if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+    if (!wantedWriteLimiter.allow(`seller:${seller.id}`)) {
+      logSecurityEvent({ type: "rate_limit", route: "/mcp" }, { sellerId: seller.id });
+      return err("Too many wanted-listing changes. Try again later.", "rate_limited");
+    }
+    try {
+      return ok(await write(seller, args));
+    } catch (e) {
+      if (e instanceof WantedLimitError || e instanceof ContactInfoError ||
+          e instanceof WantedValidationError || e instanceof WantedNotFoundError) {
+        return err(describeError(e), e.code);
+      }
+      return err(`${tool} failed: ${describeError(e)}`);
+    }
+  };
 
   server.registerTool(
     "describe_category",
@@ -507,6 +539,132 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         return err(`get_wanted failed: ${describeError(e)}`);
       }
     },
+  );
+
+  server.registerTool(
+    "create_wanted",
+    {
+      title: "Create wanted post",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "Buyer side of the wanted board: publish what the user is looking for, with an optional " +
+        "budget range, so sellers can respond with real listings. Also saves a buyer alert " +
+        "unless alert_me is false (alert_saved reports the outcome). Posts last 30 days. " +
+        "Contact details are rejected. Limits: 10 active posts, 10 creates/day, 20 changes/hour. " +
+        "Requires seller authentication (Bearer API key). " + CONTENT_PROVENANCE_NOTE,
+      inputSchema: wantedCreateShape,
+    },
+    wantedWrite("create_wanted", async (seller, args) => {
+      const { wanted, alertSaved } = await createWantedWithAlert(seller.id, args as WantedCreateRequest);
+      return { created: true, wanted: wantedToTool(wanted), alert_saved: alertSaved };
+    }),
+  );
+
+  server.registerTool(
+    "my_wanted",
+    {
+      title: "My wanted posts",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      description:
+        "List your own wanted posts, every status, newest first, each with its response_count, " +
+        "unread_responses and renewable flag. Requires seller authentication (Bearer API key). " +
+        CONTENT_PROVENANCE_NOTE,
+      inputSchema: {
+        limit: z.number().int().min(1).max(50).default(50),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const { wanteds } = await listMyWanted(seller.id, { limit: (args.limit as number) ?? 50 });
+        return ok({ count: wanteds.length, wanteds: wanteds.map(wantedToTool), note: CONTENT_PROVENANCE_NOTE });
+      } catch (e) {
+        return err(`my_wanted failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_wanted",
+    {
+      title: "Update wanted post",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "Edit one of your own active wanted posts; only the fields you send change (null clears " +
+        "a budget bound or the condition, and reference_images replaces the whole list). Expired " +
+        "posts must be renewed first. Contact details are rejected. Limits: 20 edits/day, " +
+        "20 changes/hour. Requires seller authentication (Bearer API key). " + CONTENT_PROVENANCE_NOTE,
+      inputSchema: {
+        wanted_id: z.string().uuid(),
+        ...wantedEditShape,
+        category: wantedCreateShape.category,
+        condition: z.enum(CONDITIONS).nullable().optional().describe("null accepts any condition"),
+        currency: wantedCreateShape.currency,
+        reference_images: wantedCreateShape.reference_images,
+      },
+    },
+    wantedWrite("update_wanted", async (seller, args) => {
+      const { wanted_id: wantedId, ...fields } = args as WantedFieldUpdate & { wanted_id: string };
+      return { wanted: wantedToTool(await updateWanted(wantedId, seller.id, { fields })) };
+    }),
+  );
+
+  server.registerTool(
+    "expire_wanted",
+    {
+      title: "Expire wanted post",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "End one of your own active wanted posts now, removing it from the public board. It can " +
+        "be brought back with renew_wanted for 30 days after its expiry date. Requires seller " +
+        "authentication (Bearer API key). " + CONTENT_PROVENANCE_NOTE,
+      inputSchema: { wanted_id: z.string().uuid() },
+    },
+    wantedWrite("expire_wanted", async (seller, args) => ({
+      wanted: wantedToTool(await updateWanted(args.wanted_id as string, seller.id, { expire: true })),
+    })),
+  );
+
+  server.registerTool(
+    "renew_wanted",
+    {
+      title: "Renew wanted post",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "Extend one of your own wanted posts for another 30 days. Allowed in the final 7 days of " +
+        "an active post or within 30 days after expiry, and counts toward the 10 active posts " +
+        "limit. Requires seller authentication (Bearer API key). " + CONTENT_PROVENANCE_NOTE,
+      inputSchema: { wanted_id: z.string().uuid() },
+    },
+    wantedWrite("renew_wanted", async (seller, args) => ({
+      wanted: wantedToTool(await updateWanted(args.wanted_id as string, seller.id, { renew: true })),
+    })),
   );
 
   server.registerTool(

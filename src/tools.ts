@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ItemRow, SellerRow } from "./db.js";
 import { CONDITIONS, SHIPPING_TIERS, STATUSES } from "./db.js";
-import { getCategory, getItem, createItem, listCategories, ListingLimitError, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
+import { getCategory, getItem, createItem, listCategories, ListingLimitError, myItems, searchItems, SEARCH_MAX_OFFSET, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, AttributeValidationError, attributeShapeErrors, type Attributes } from "./attributes.js";
 import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
 import { addItemImageBase64 } from "./images.js";
@@ -445,6 +445,9 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         "Find used and second-hand items for sale: search the marketplace's active listings " +
         "(free text works, e.g. 'used e-bike'). Public (no API key needed). " +
         "Hybrid: semantic similarity when embeddings are configured, keyword fallback otherwise. " +
+        `Page with offset (0-${SEARCH_MAX_OFFSET}): count is the number of results in this page, not a total; ` +
+        "has_more says whether the next offset (offset + count) would return more. Each page is a fresh search, " +
+        "so listings can shift between pages: de-duplicate by id. " +
         CONTENT_PROVENANCE_NOTE,
       inputSchema: {
         q: z.string().max(400).optional().describe("Free-text query, e.g. 'running shoes size 43'"),
@@ -457,11 +460,15 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
           .describe("Exact-match attribute filter, e.g. {\"size_eu\": 43} — matches any attribute key, declared or not"),
         limit: z.number().int().min(1).max(50).default(10),
+        offset: z.number().int().min(0).max(SEARCH_MAX_OFFSET).optional()
+          .describe(`Results to skip, for paging (0-${SEARCH_MAX_OFFSET}). Default 0. For deeper results, narrow the query or filters.`),
       },
     },
     async (args: Record<string, unknown>) => {
       try {
-        const results = await searchItems({
+        const limit = (args.limit as number) ?? 10;
+        const offset = (args.offset as number | undefined) ?? 0;
+        const fetched = await searchItems({
           q: args.q as string | undefined,
           category: args.category as string | undefined,
           condition: args.condition as string | undefined,
@@ -470,10 +477,15 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
           currency: (args.currency as string) ?? "EUR",
           shipping_tier: args.shipping_tier as string | undefined,
           attributes: args.attributes as Attributes | undefined,
-          limit: (args.limit as number) ?? 10,
+          limit,
+          offset,
+          lookahead: true,
         });
+        const results = fetched.slice(0, limit);
         return ok({
           count: results.length,
+          // Promises that the next offset is accepted, so it ends at the cap.
+          has_more: fetched.length > limit && offset + limit <= SEARCH_MAX_OFFSET,
           results: results.map((r) => itemToPublic(r)),
           // THI-371 PR B (empty-search growth hint): zero results is the most
           // common first-session outcome on a thin marketplace — one honest
@@ -481,7 +493,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
           // reads as product copy for the end user, not an instruction to the
           // calling model (H5.3 discipline: our tool output stays data).
           note:
-            results.length === 0
+            results.length === 0 && offset === 0
               ? "No active listings match yet. Try broader terms or fewer filters — or, if the user " +
                 "has a matching item to sell, create_listing (requires a seller API key) adds it."
               : undefined,

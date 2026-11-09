@@ -26,7 +26,7 @@ It is maintained by the Security role; changes go through PR like everything els
 |---|---|---|
 | Seller API keys (`thg_...`) | Full write access to a seller's listings | Fake/modified listings under a real seller's name |
 | Account credentials (email + scrypt hash) | Gateway to the API key | Account takeover |
-| Session cookie (`thingery_session`) | Browser write access incl. chat agent | Listing tampering via chat tools |
+| Session cookie (`thingery_session`), also presentable to `/mcp` as `Bearer thgs_<value>` | Browser write access incl. chat agent; MCP tools as that seller | Listing tampering; API key rotation (the value works as a cookie) |
 | The Item Graph (Postgres: items, sellers) | The product itself | Platform unusable / untrustworthy |
 | Uploaded images (`/app/uploads`) | Listing content | Disk exhaustion, illegal content hosting |
 | Infrastructure secrets (`SESSION_SECRET`, `POSTGRES_PASSWORD`, `EMBED_API_KEY`, `LLM_API_KEY`) | Trust anchors + cost-bearing credentials | Session forgery, DB access, provider bill |
@@ -65,8 +65,12 @@ Boundary-by-boundary:
 3. **App ↔ Postgres.** Password auth over TCP inside the compose network, no TLS, DB not
    published. Same single-host caveat. DB password lives in the VPS `.env`.
 4. **MCP client ↔ `/mcp`.** The only client-facing API boundary. Streamable HTTP,
-   stateless, JSON-RPC. Bearer API key is the sole authentication; anonymous callers get
-   the three public tools (`describe_category`, `search_items`, `get_item`). Request
+   stateless, JSON-RPC. Authentication is `Authorization: Bearer` only: `thg_` API key,
+   `thgo_` OAuth token, or `thgs_` + the session cookie value for first-party web clients
+   (same MAC, 30-day expiry and `session_epoch` checks as the cookie; invalid → 401
+   `invalid_token`). The cookie itself is never read on `/mcp`, so the endpoint has no
+   ambient browser credential and no CSRF surface. Anonymous callers get the three public
+   tools (`describe_category`, `search_items`, `get_item`). Request
    bodies are capped at 4 MiB by the MCP SDK default (`requestBody.js` in
    `@modelcontextprotocol/sdk`), which the app relies on implicitly.
 5. **App ↔ external LLM/embedding APIs.** Server-side egress with cost-bearing keys.

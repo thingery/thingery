@@ -40,6 +40,7 @@ Chinese-market name: 物坊 (Wùfāng).
 | `get_payout_setup` | seller | Stripe Express onboarding URL + status — optional, enables platform payment |
 | `create_order` | account | Order an item — returns a Stripe Checkout URL (stripe mode) or tracks an off-platform order |
 | `get_order` | account | One of your orders (buyer or seller side): status, tracking, deadlines. The seller also gets `shipping_address` while a shipped order is `sold` or `label_issued` |
+| `my_orders` | account | Your orders, newest first — filter by `role` (buyer, seller, or both) and `status`; limit 1–100 (default 20), page with `next_cursor` |
 | `cancel_order` | account | Cancel while cancellable; paid orders refund instead |
 | `record_tracking` | seller | Record carrier + tracking code; auto carrier tracker when EasyPost is configured |
 | `confirm_payment` | seller | Confirm an off-platform payment (pending → sold) |
@@ -89,6 +90,11 @@ user-generated and marked `content_provenance: "user_generated"`.
 | `search_wanted` | public | Search active wanted posts — free text plus category, condition, currency and `budget_max_cents_gte` filters, limit 1–50 (default 10), offset |
 | `get_wanted` | public | One active wanted post by id |
 | `respond_to_wanted` | seller | Answer a wanted post by creating a listing linked to it |
+| `create_wanted` | account | Publish what the buyer is looking for, with an optional budget range (max 10 active posts, 10 creates/day, 20 changes/hour). Also saves a buyer alert unless `alert_me` is false. Contact details are rejected |
+| `my_wanted` | account | Your wanted posts, every status, each with response counts and a `renewable` flag |
+| `update_wanted` | account | Edit an active post; only the fields sent change (20 edits/day) |
+| `expire_wanted` | account | End an active post now; renewable for 30 days after its expiry date |
+| `renew_wanted` | account | Extend a post 30 days — in its final 7 days or within 30 days after expiry |
 
 ### Photo-required publishing
 

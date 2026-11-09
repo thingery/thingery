@@ -168,7 +168,7 @@ immediately issued an API key. Throwaway identities are free. The one control in
 
 **Scraping.** The dataset is open by design — scraping it is not theft, and we do not
 pretend otherwise. The scraping *threat* is resource consumption and freshness laundering:
-`search_items` is public with limit ≤ 50, `/browse` renders 30 items, and anonymous `/mcp`
+`search_items` is public with limit ≤ 50 and offset ≤ 450, `/browse` renders 30 items, and anonymous `/mcp`
 is nominally 30 req/min. Once H1 is fixed, per-IP limits make bulk scraping expensive
 enough to be polite; robots.txt already states our crawl preferences. If scraping becomes
 an operational problem, the lever is rate limits and caching, not access control.

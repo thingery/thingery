@@ -82,8 +82,12 @@ describe.skipIf(!available)("PROTECTED_TOOLS annotation (F7)", () => {
       "save_intent", "my_intents", "update_intent", "delete_intent",
       // THI-360 PR 4: the buyer's match inbox.
       "my_matches",
+      // Order history is per-account data.
+      "my_orders",
       // THI-439 (B4): the response loop writes on the caller's behalf.
-      "respond_to_wanted"]) {
+      "respond_to_wanted",
+      // The buyer side of the wanted board.
+      "create_wanted", "my_wanted", "update_wanted", "expire_wanted", "renew_wanted"]) {
       expect(PROTECTED_TOOLS.has(name)).toBe(true);
     }
   });

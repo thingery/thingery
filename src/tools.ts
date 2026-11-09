@@ -1,15 +1,17 @@
 import { z } from "zod";
 import type { ItemRow, SellerRow } from "./db.js";
 import { CONDITIONS, SHIPPING_TIERS, STATUSES } from "./db.js";
-import { getCategory, getItem, createItem, listCategories, ListingLimitError, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
+import { getCategory, getItem, createItem, listCategories, ListingLimitError, myItems, searchItems, SEARCH_MAX_OFFSET, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, AttributeValidationError, attributeShapeErrors, type Attributes } from "./attributes.js";
 import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
 import { addItemImageBase64 } from "./images.js";
 import { respondToWanted, WantedResponseError } from "./wanted-responses.js";
-import { getWantedById, searchWanted, wantedToPublic, type WantedRow } from "./wanted.js";
+import { ContactInfoError, getWantedById, listMyWanted, searchWanted, updateWanted, wantedToPublic, WantedLimitError, WantedNotFoundError, WantedValidationError, type WantedFieldUpdate, type WantedRow } from "./wanted.js";
+import { createWantedWithAlert, wantedCreateShape, wantedEditShape, wantedWriteLimiter, type WantedCreateRequest } from "./wanted-writes.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
-import { cancelOrder, createOrder, getOrderView, OrderFlowError, shippingAddressForSeller } from "./order-flow.js";
+import { cancelOrder, createOrder, getOrderView, listOrdersForAccount, MAX_ORDER_LIST_LIMIT, ORDER_ROLES, OrderFlowError, shippingAddressForSeller, type OrderRole } from "./order-flow.js";
+import { ORDER_STATUSES, type OrderStatus } from "./orders.js";
 import { confirmPayment, confirmReceipt, openDispute, recordTracking, releaseFunds } from "./fulfillment.js";
 import { logSecurityEvent } from "./security-events.js";
 
@@ -35,6 +37,7 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   "get_payout_setup",
   "create_order",
   "get_order",
+  "my_orders",
   "cancel_order",
   "record_tracking",
   "confirm_payment",
@@ -53,6 +56,12 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   // THI-439 (B4): the response loop writes a listing on the caller's
   // behalf — per-account write surface, same 401-challenge treatment.
   "respond_to_wanted",
+  // The buyer side of the wanted board: per-account reads and writes.
+  "create_wanted",
+  "my_wanted",
+  "update_wanted",
+  "expire_wanted",
+  "renew_wanted",
 ]);
 
 // H5.3 provenance marker (docs/security.md §6 H5, fix 3; spec THI-109): the
@@ -181,6 +190,31 @@ const describeError = (e: unknown): string => {
 
 export function registerTools(server: { registerTool: Function }, ctx: ToolContext): void {
   const requireSeller = (): SellerRow | null => ctx.seller;
+
+  /** Wraps a buyer-side wanted write: account required, then the hourly
+   *  bucket shared with /api/wanted*, then the body. Typed module errors keep
+   *  their machine-readable codes (rate_limited, contact_info, invalid_wanted,
+   *  not_found); a missing and another buyer's wanted are both not_found. */
+  const wantedWrite = (
+    tool: string,
+    write: (seller: SellerRow, args: Record<string, unknown>) => Promise<unknown>,
+  ) => async (args: Record<string, unknown>) => {
+    const seller = requireSeller();
+    if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+    if (!wantedWriteLimiter.allow(`seller:${seller.id}`)) {
+      logSecurityEvent({ type: "rate_limit", route: "/mcp" }, { sellerId: seller.id });
+      return err("Too many wanted-listing changes. Try again later.", "rate_limited");
+    }
+    try {
+      return ok(await write(seller, args));
+    } catch (e) {
+      if (e instanceof WantedLimitError || e instanceof ContactInfoError ||
+          e instanceof WantedValidationError || e instanceof WantedNotFoundError) {
+        return err(describeError(e), e.code);
+      }
+      return err(`${tool} failed: ${describeError(e)}`);
+    }
+  };
 
   server.registerTool(
     "describe_category",
@@ -527,6 +561,132 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
   );
 
   server.registerTool(
+    "create_wanted",
+    {
+      title: "Create wanted post",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "Buyer side of the wanted board: publish what the user is looking for, with an optional " +
+        "budget range, so sellers can respond with real listings. Also saves a buyer alert " +
+        "unless alert_me is false (alert_saved reports the outcome). Posts last 30 days. " +
+        "Contact details are rejected. Limits: 10 active posts, 10 creates/day, 20 changes/hour. " +
+        "Requires seller authentication (Bearer API key). " + CONTENT_PROVENANCE_NOTE,
+      inputSchema: wantedCreateShape,
+    },
+    wantedWrite("create_wanted", async (seller, args) => {
+      const { wanted, alertSaved } = await createWantedWithAlert(seller.id, args as WantedCreateRequest);
+      return { created: true, wanted: wantedToTool(wanted), alert_saved: alertSaved };
+    }),
+  );
+
+  server.registerTool(
+    "my_wanted",
+    {
+      title: "My wanted posts",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      description:
+        "List your own wanted posts, every status, newest first, each with its response_count, " +
+        "unread_responses and renewable flag. Requires seller authentication (Bearer API key). " +
+        CONTENT_PROVENANCE_NOTE,
+      inputSchema: {
+        limit: z.number().int().min(1).max(50).default(50),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const { wanteds } = await listMyWanted(seller.id, { limit: (args.limit as number) ?? 50 });
+        return ok({ count: wanteds.length, wanteds: wanteds.map(wantedToTool), note: CONTENT_PROVENANCE_NOTE });
+      } catch (e) {
+        return err(`my_wanted failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_wanted",
+    {
+      title: "Update wanted post",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "Edit one of your own active wanted posts; only the fields you send change (null clears " +
+        "a budget bound or the condition, and reference_images replaces the whole list). Expired " +
+        "posts must be renewed first. Contact details are rejected. Limits: 20 edits/day, " +
+        "20 changes/hour. Requires seller authentication (Bearer API key). " + CONTENT_PROVENANCE_NOTE,
+      inputSchema: {
+        wanted_id: z.string().uuid(),
+        ...wantedEditShape,
+        category: wantedCreateShape.category,
+        condition: z.enum(CONDITIONS).nullable().optional().describe("null accepts any condition"),
+        currency: wantedCreateShape.currency,
+        reference_images: wantedCreateShape.reference_images,
+      },
+    },
+    wantedWrite("update_wanted", async (seller, args) => {
+      const { wanted_id: wantedId, ...fields } = args as WantedFieldUpdate & { wanted_id: string };
+      return { wanted: wantedToTool(await updateWanted(wantedId, seller.id, { fields })) };
+    }),
+  );
+
+  server.registerTool(
+    "expire_wanted",
+    {
+      title: "Expire wanted post",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "End one of your own active wanted posts now, removing it from the public board. It can " +
+        "be brought back with renew_wanted for 30 days after its expiry date. Requires seller " +
+        "authentication (Bearer API key). " + CONTENT_PROVENANCE_NOTE,
+      inputSchema: { wanted_id: z.string().uuid() },
+    },
+    wantedWrite("expire_wanted", async (seller, args) => ({
+      wanted: wantedToTool(await updateWanted(args.wanted_id as string, seller.id, { expire: true })),
+    })),
+  );
+
+  server.registerTool(
+    "renew_wanted",
+    {
+      title: "Renew wanted post",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      description:
+        "Extend one of your own wanted posts for another 30 days. Allowed in the final 7 days of " +
+        "an active post or within 30 days after expiry, and counts toward the 10 active posts " +
+        "limit. Requires seller authentication (Bearer API key). " + CONTENT_PROVENANCE_NOTE,
+      inputSchema: { wanted_id: z.string().uuid() },
+    },
+    wantedWrite("renew_wanted", async (seller, args) => ({
+      wanted: wantedToTool(await updateWanted(args.wanted_id as string, seller.id, { renew: true })),
+    })),
+  );
+
+  server.registerTool(
     "search_items",
     {
       title: "Search items",
@@ -540,6 +700,9 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         "Find used and second-hand items for sale: search the marketplace's active listings " +
         "(free text works, e.g. 'used e-bike'). Public (no API key needed). " +
         "Hybrid: semantic similarity when embeddings are configured, keyword fallback otherwise. " +
+        `Page with offset (0-${SEARCH_MAX_OFFSET}): count is the number of results in this page, not a total; ` +
+        "has_more says whether the next offset (offset + count) would return more. Each page is a fresh search, " +
+        "so listings can shift between pages: de-duplicate by id. " +
         CONTENT_PROVENANCE_NOTE,
       inputSchema: {
         q: z.string().max(400).optional().describe("Free-text query, e.g. 'running shoes size 43'"),
@@ -552,11 +715,15 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
           .describe("Exact-match attribute filter, e.g. {\"size_eu\": 43} — matches any attribute key, declared or not"),
         limit: z.number().int().min(1).max(50).default(10),
+        offset: z.number().int().min(0).max(SEARCH_MAX_OFFSET).optional()
+          .describe(`Results to skip, for paging (0-${SEARCH_MAX_OFFSET}). Default 0. For deeper results, narrow the query or filters.`),
       },
     },
     async (args: Record<string, unknown>) => {
       try {
-        const results = await searchItems({
+        const limit = (args.limit as number) ?? 10;
+        const offset = (args.offset as number | undefined) ?? 0;
+        const fetched = await searchItems({
           q: args.q as string | undefined,
           category: args.category as string | undefined,
           condition: args.condition as string | undefined,
@@ -565,10 +732,15 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
           currency: (args.currency as string) ?? "EUR",
           shipping_tier: args.shipping_tier as string | undefined,
           attributes: args.attributes as Attributes | undefined,
-          limit: (args.limit as number) ?? 10,
+          limit,
+          offset,
+          lookahead: true,
         });
+        const results = fetched.slice(0, limit);
         return ok({
           count: results.length,
+          // Promises that the next offset is accepted, so it ends at the cap.
+          has_more: fetched.length > limit && offset + limit <= SEARCH_MAX_OFFSET,
           results: results.map((r) => itemToPublic(r)),
           // THI-371 PR B (empty-search growth hint): zero results is the most
           // common first-session outcome on a thin marketplace — one honest
@@ -576,7 +748,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
           // reads as product copy for the end user, not an instruction to the
           // calling model (H5.3 discipline: our tool output stays data).
           note:
-            results.length === 0
+            results.length === 0 && offset === 0
               ? "No active listings match yet. Try broader terms or fewer filters — or, if the user " +
                 "has a matching item to sell, create_listing (requires a seller API key) adds it."
               : undefined,
@@ -870,6 +1042,47 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
           ...(shippingAddress ? { shipping_address: shippingAddress } : {}),
         },
       });
+    },
+  );
+
+  server.registerTool(
+    "my_orders",
+    {
+      title: "My orders",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      description:
+        "List the orders of the authenticated account, newest first, as buyer, seller, or both, " +
+        "optionally by status. Page with next_cursor; it is null on the last page. Requires " +
+        "authentication. Omits payment_url: call get_order on a pending order to get it. " +
+        CONTENT_PROVENANCE_NOTE,
+      inputSchema: {
+        role: z.enum(ORDER_ROLES).default("both"),
+        status: z.enum(ORDER_STATUSES as readonly [OrderStatus, ...OrderStatus[]]).optional(),
+        limit: z.number().int().min(1).max(MAX_ORDER_LIST_LIMIT).default(20),
+        cursor: z.string().uuid().optional().describe("next_cursor from the previous page."),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const { orders, nextCursor } = await listOrdersForAccount({
+          accountId: seller.id,
+          role: (args.role as OrderRole | undefined) ?? "both",
+          status: args.status as OrderStatus | undefined,
+          limit: (args.limit as number | undefined) ?? 20,
+          cursor: args.cursor as string | undefined,
+        });
+        return ok({ count: orders.length, orders: orders.map(orderToPublic), next_cursor: nextCursor });
+      } catch (e) {
+        if (e instanceof OrderFlowError) return err(e.message, e.code);
+        return err(`my_orders failed: ${describeError(e)}`);
+      }
     },
   );
 

@@ -101,6 +101,9 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    environment:
+      # Your domain. Keep PUBLIC_BASE_URL in step with it.
+      SITE_DOMAIN: ${SITE_DOMAIN:-thingery.dev}
     ports:
       - "80:80"
       - "443:443"

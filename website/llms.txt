@@ -48,7 +48,8 @@ Orders close a deal on-platform: payment (optional Stripe), shipping state, dead
 
 - `get_payout_setup` (seller auth): this seller's payout setup — a Stripe Express onboarding URL plus current status. Onboarding is optional; without it items are still buyable as off-platform orders.
 - `create_order` (auth): order an item. Returns a Stripe Checkout URL for the buyer when in stripe mode; shippable items need a `shipping_address`; local-pickup items ignore it. Abuse-capped.
-- `get_order` (auth): one of your orders (buyer or seller side) — status, price breakdown, tracking, deadlines. Only order parties can see it. The seller also gets `shipping_address` while a shipped order is `sold` or `label_issued`; never buyers, and never in other states.
+- `get_order` (auth): one of your orders (buyer or seller side) — status, price breakdown, tracking, deadlines. Only order parties can see it. The seller also gets `shipping_address` while a shipped order is `sold` or `label_issued`, and on off-platform orders only after the buyer shares it; never buyers, and never in other states. Off-platform shipped orders carry `shipping_address_consent` (`awaiting_buyer` or `granted`).
+- `share_shipping_address` (auth, buyer): agree to show the seller the address of one off-platform order while it is `sold` or `label_issued`. Only on the buyer's explicit instruction; cannot be withdrawn.
 - `cancel_order` (auth): cancel while still cancellable (pending, sold, label_issued). Paid stripe orders refund instead of cancelling; off-platform parties reverse their own payment.
 - `record_tracking` (seller auth): record carrier + tracking code (sold → label_issued; shippable orders only). Registers an automatic carrier tracker when the deployment has EasyPost. Re-calling while label_issued corrects the details.
 - `confirm_payment` (seller auth): confirm receiving an OFF-PLATFORM payment (pending → sold). Stripe-mode orders flip automatically.

@@ -19,6 +19,8 @@ const EXPECTED: Record<
   get_item: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   my_listings: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   get_order: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Disclosing the address cannot be undone, hence destructiveHint; replays are no-ops.
+  share_shipping_address: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   get_payout_setup: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   create_listing: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   add_item_image: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },

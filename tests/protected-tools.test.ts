@@ -83,7 +83,9 @@ describe.skipIf(!available)("PROTECTED_TOOLS annotation (F7)", () => {
       // THI-360 PR 4: the buyer's match inbox.
       "my_matches",
       // THI-439 (B4): the response loop writes on the caller's behalf.
-      "respond_to_wanted"]) {
+      "respond_to_wanted",
+      // Buyer consent for releasing a shipping address to the seller.
+      "share_shipping_address"]) {
       expect(PROTECTED_TOOLS.has(name)).toBe(true);
     }
   });

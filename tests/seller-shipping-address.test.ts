@@ -174,7 +174,7 @@ describe("get_order shipping_address disclosure", () => {
 });
 
 describe("every other order tool keeps shipping_address stripped", () => {
-  const sold = orderInState("sold");
+  const sold = orderInState("sold", { shipping_address_shared_at: new Date("2026-01-02T00:00:00Z") });
   const cases: Array<[string, () => void, Record<string, unknown>]> = [
     ["create_order", () => vi.mocked(orderFlow.createOrder).mockResolvedValue({ order: sold, paymentUrl: null }), { item_id: ORDER_ID }],
     ["cancel_order", () => vi.mocked(orderFlow.cancelOrder).mockResolvedValue(sold), { order_id: ORDER_ID }],

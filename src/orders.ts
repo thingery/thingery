@@ -162,6 +162,7 @@ export interface OrderRow {
   tracking_code: string | null;
   tracker_id: string | null;
   label_url: string | null;
+  shipping_address_shared_at: Date | null;
   checkout_session_id: string | null;
   payment_intent_id: string | null;
   transfer_id: string | null;

@@ -8,7 +8,8 @@ import { addItemImageBase64 } from "./images.js";
 import { respondToWanted, WantedResponseError } from "./wanted-responses.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
-import { cancelOrder, createOrder, getOrderView, OrderFlowError } from "./order-flow.js";
+import { cancelOrder, createOrder, getOrderView, listOrdersForAccount, MAX_ORDER_LIST_LIMIT, ORDER_ROLES, OrderFlowError, type OrderRole } from "./order-flow.js";
+import { ORDER_STATUSES, type OrderStatus } from "./orders.js";
 import { confirmPayment, confirmReceipt, openDispute, recordTracking, releaseFunds } from "./fulfillment.js";
 import { logSecurityEvent } from "./security-events.js";
 
@@ -34,6 +35,7 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   "get_payout_setup",
   "create_order",
   "get_order",
+  "my_orders",
   "cancel_order",
   "record_tracking",
   "confirm_payment",
@@ -766,6 +768,47 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
       const order = await getOrderView(args.order_id as string, seller.id);
       if (!order) return err("Order not found.", "not_found");
       return ok({ order: orderToPublic(order) });
+    },
+  );
+
+  server.registerTool(
+    "my_orders",
+    {
+      title: "My orders",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      description:
+        "List the orders of the authenticated account, newest first, as buyer, seller, or both, " +
+        "optionally by status. Page with next_cursor; it is null on the last page. Requires " +
+        "authentication. Omits payment_url: call get_order on a pending order to get it. " +
+        CONTENT_PROVENANCE_NOTE,
+      inputSchema: {
+        role: z.enum(ORDER_ROLES).default("both"),
+        status: z.enum(ORDER_STATUSES as readonly [OrderStatus, ...OrderStatus[]]).optional(),
+        limit: z.number().int().min(1).max(MAX_ORDER_LIST_LIMIT).default(20),
+        cursor: z.string().uuid().optional().describe("next_cursor from the previous page."),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const { orders, nextCursor } = await listOrdersForAccount({
+          accountId: seller.id,
+          role: (args.role as OrderRole | undefined) ?? "both",
+          status: args.status as OrderStatus | undefined,
+          limit: (args.limit as number | undefined) ?? 20,
+          cursor: args.cursor as string | undefined,
+        });
+        return ok({ count: orders.length, orders: orders.map(orderToPublic), next_cursor: nextCursor });
+      } catch (e) {
+        if (e instanceof OrderFlowError) return err(e.message, e.code);
+        return err(`my_orders failed: ${describeError(e)}`);
+      }
     },
   );
 

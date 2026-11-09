@@ -40,6 +40,7 @@ Chinese-market name: 物坊 (Wùfāng).
 | `get_payout_setup` | seller | Stripe Express onboarding URL + status — optional, enables platform payment |
 | `create_order` | account | Order an item — returns a Stripe Checkout URL (stripe mode) or tracks an off-platform order |
 | `get_order` | account | One of your orders (buyer or seller side): status, tracking, deadlines. The seller also gets `shipping_address` while a shipped order is `sold` or `label_issued` |
+| `my_orders` | account | Your orders, newest first — filter by `role` (buyer, seller, or both) and `status`; limit 1–100 (default 20), page with `next_cursor` |
 | `cancel_order` | account | Cancel while cancellable; paid orders refund instead |
 | `record_tracking` | seller | Record carrier + tracking code; auto carrier tracker when EasyPost is configured |
 | `confirm_payment` | seller | Confirm an off-platform payment (pending → sold) |

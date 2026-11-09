@@ -212,6 +212,72 @@ export async function getOrderView(orderId: string, viewerId: string): Promise<O
   return { ...order, payment_url: paymentUrl };
 }
 
+export const ORDER_ROLES = ["buyer", "seller", "both"] as const;
+export type OrderRole = (typeof ORDER_ROLES)[number];
+
+export const MAX_ORDER_LIST_LIMIT = 100;
+
+const ROLE_PREDICATES: Record<OrderRole, string> = {
+  buyer: "o.buyer_id = $1",
+  seller: "o.seller_id = $1",
+  both: "(o.buyer_id = $1 OR o.seller_id = $1)",
+};
+
+export type OrderListEntry = Pick<
+  OrderRow,
+  | "id" | "item_id" | "status" | "payment_mode" | "price_cents" | "shipping_price_cents" | "currency"
+  | "fulfillment" | "carrier" | "tracking_code" | "label_url" | "payment_deadline" | "dispute_deadline"
+  | "status_changed_at" | "created_at" | "updated_at"
+> & { item_title: string };
+
+/**
+ * The account's orders, newest first. Columns are listed explicitly so the
+ * shipping address and payment-processor references never leave the database
+ * on a bulk read. The cursor is the last order id of the previous page: its
+ * (created_at, id) is immutable, so a page boundary survives new orders and
+ * status changes, and looking it up party-scoped means another account's order
+ * id cannot be used to probe that order's position.
+ */
+export async function listOrdersForAccount(params: {
+  accountId: string;
+  role: OrderRole;
+  status?: OrderStatus;
+  limit: number;
+  cursor?: string;
+}): Promise<{ orders: OrderListEntry[]; nextCursor: string | null }> {
+  const { accountId, role, status = null, cursor = null } = params;
+  const limit = Math.min(Math.max(params.limit, 1), MAX_ORDER_LIST_LIMIT);
+  const { rows } = await pool.query<OrderListEntry>(
+    `SELECT o.id, o.item_id, o.status, o.payment_mode, o.price_cents, o.shipping_price_cents, o.currency,
+            o.fulfillment, o.carrier, o.tracking_code, o.label_url, o.payment_deadline, o.dispute_deadline,
+            o.status_changed_at, o.created_at, o.updated_at, i.title AS item_title
+     FROM orders o JOIN items i ON i.id = o.item_id
+     WHERE ${ROLE_PREDICATES[role]}
+       AND ($2::text IS NULL OR o.status = $2)
+       AND ($3::uuid IS NULL OR (o.created_at, o.id) < (
+         SELECT c.created_at, c.id FROM orders c
+         WHERE c.id = $3 AND (c.buyer_id = $1 OR c.seller_id = $1)
+       ))
+     ORDER BY o.created_at DESC, o.id DESC
+     LIMIT $4`,
+    // One extra row reveals whether another page exists.
+    [accountId, status, cursor, limit + 1],
+  );
+  if (rows.length === 0 && cursor && !(await isOrderParty(cursor, accountId))) {
+    throw new OrderFlowError("invalid_cursor", "Unknown cursor — pass next_cursor from a previous my_orders result.");
+  }
+  const orders = rows.slice(0, limit);
+  return { orders, nextCursor: rows.length > limit ? orders[orders.length - 1].id : null };
+}
+
+async function isOrderParty(orderId: string, accountId: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    "SELECT 1 FROM orders WHERE id = $1 AND (buyer_id = $2 OR seller_id = $2)",
+    [orderId, accountId],
+  );
+  return rows.length > 0;
+}
+
 // sold: paid (#2) or payment confirmed (#24), so the seller must ship now.
 // label_issued: tracking is recorded but no carrier has scanned the parcel
 // (#10 is carrier-only), so a relabel or a #23 tracking correction can still

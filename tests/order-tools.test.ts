@@ -223,6 +223,36 @@ describe.skipIf(!available)("create_order / get_order / cancel_order (DB)", () =
     expect(await getOrderView(order.id, crypto.randomUUID())).toBeNull();
   });
 
+  it("get_order: seller gets shipping_address only in sold/label_issued, buyer never", async () => {
+    const callGetOrder = async (orderId: string, callerId: string) => {
+      let getOrder!: (a: Record<string, unknown>) => Promise<{ content: { text: string }[] }>;
+      registerTools(
+        {
+          registerTool(name: string, _c: unknown, handler: typeof getOrder) {
+            if (name === "get_order") getOrder = handler;
+          },
+        },
+        { seller: { id: callerId } as never },
+      );
+      return JSON.parse((await getOrder({ order_id: orderId })).content[0].text);
+    };
+
+    const { order } = await createOrder({ buyerId: ids.buyerId, itemId: await seedItem(), shippingAddress: address });
+    const setStatus = (status: string) => db.query("UPDATE orders SET status = $2 WHERE id = $1", [order.id, status]);
+
+    expect((await callGetOrder(order.id, ids.sellerId)).order).not.toHaveProperty("shipping_address");
+    for (const status of ["sold", "label_issued"]) {
+      await setStatus(status);
+      expect((await callGetOrder(order.id, ids.sellerId)).order.shipping_address).toEqual(address);
+      expect((await callGetOrder(order.id, ids.buyerId)).order).not.toHaveProperty("shipping_address");
+    }
+    await setStatus("in_transit");
+    expect((await callGetOrder(order.id, ids.sellerId)).order).not.toHaveProperty("shipping_address");
+
+    await setStatus("sold");
+    expect((await callGetOrder(order.id, crypto.randomUUID())).code).toBe("not_found");
+  });
+
   it("get_item exposes payment_available + orderable (§11.2)", async () => {
     const itemId = await seedItem();
     const bare = await getItem(itemId);

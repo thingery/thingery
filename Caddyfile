@@ -1,7 +1,8 @@
 # Caddy obtains and renews Let's Encrypt certificates automatically.
-# Requires DNS A record for thingery.dev -> this server's IP (and the
+# Requires a DNS A record for the domain -> this server's IP (and the
 # ACME HTTP-01 challenge on port 80 to be reachable).
-thingery.dev {
+# SITE_DOMAIN comes from .env, so self-hosters can use their own domain.
+{$SITE_DOMAIN:thingery.dev} {
 	encode zstd gzip
 	# THI-312: access log — one JSON line per request (client IP, method,
 	# path, status, UA) to stderr, captured by Docker's json-file driver
@@ -10,6 +11,6 @@ thingery.dev {
 	reverse_proxy app:3000
 }
 
-www.thingery.dev {
-	redir https://thingery.dev{uri} permanent
+www.{$SITE_DOMAIN:thingery.dev} {
+	redir https://{$SITE_DOMAIN:thingery.dev}{uri} permanent
 }

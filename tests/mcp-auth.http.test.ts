@@ -246,6 +246,27 @@ describe.skipIf(!available)("/mcp method-aware 401 gate (HTTP)", () => {
     expect(payload.seller).toBe("Gate Tester");
   });
 
+  it("valid thgs_ session bearer authorizes a protected tool as that seller", async () => {
+    const res = await post(rpc("tools/call", { name: "my_listings", arguments: {} }), {
+      authorization: `Bearer thgs_${signSession(sellerId)}`,
+    });
+    expect(res.status).toBe(200);
+    const body = rpcBody(await res.text());
+    expect(JSON.parse(body.result?.content?.[0]?.text ?? "{}").seller).toBe("Gate Tester");
+  });
+
+  it("thgs_ bearer dies with the session: bumped session_epoch → 401 invalid_token", async () => {
+    const beforeRotation = signSession(sellerId);
+    await db.query(`UPDATE sellers SET session_epoch = session_epoch + 1 WHERE id = $1`, [sellerId]);
+    try {
+      const revoked = await post(rpc("tools/list"), { authorization: `Bearer thgs_${beforeRotation}` });
+      expect(revoked.status).toBe(401);
+      expect(revoked.headers.get("www-authenticate")).toContain('error="invalid_token"');
+    } finally {
+      await db.query(`UPDATE sellers SET session_epoch = session_epoch - 1 WHERE id = $1`, [sellerId]);
+    }
+  });
+
   it("thgo_ use advances last_used_at; a second use within 10 min does not (THI-11 rev 2 throttle)", async () => {
     const hash = crypto.createHash("sha256").update(accessToken, "utf8").digest("hex");
     const readLastUsed = async (): Promise<Date | null> => {

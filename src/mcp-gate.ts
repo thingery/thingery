@@ -114,6 +114,9 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   "my_matches",
   // THI-439 (B4, PR 3): the seller-side wanted response loop.
   "respond_to_wanted",
+  // Public reads of the wanted board.
+  "search_wanted",
+  "get_wanted",
 ]);
 
 /** Credential kind from the Authorization header prefix — mirrors the

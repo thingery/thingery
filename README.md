@@ -76,6 +76,18 @@ their own listing.
 | `delete_intent` | account | Delete a saved search; its matches go with it |
 | `my_matches` | account | New listings matching a saved search — `unread_only`, `mark_read`, limit 1–50 (default 10). Items carry `content_provenance: "user_generated"` |
 
+### Wanted board
+
+Buyers post what they are looking for on the public [/wanted](https://thingery.dev/wanted)
+board; sellers answer a post with a real listing (`respond_to_wanted`). Post text is
+user-generated and marked `content_provenance: "user_generated"`.
+
+| Tool | Auth | Purpose |
+|---|---|---|
+| `search_wanted` | public | Search active wanted posts — free text plus category, condition, currency and `budget_max_cents_gte` filters, limit 1–50 (default 10), offset |
+| `get_wanted` | public | One active wanted post by id |
+| `respond_to_wanted` | seller | Answer a wanted post by creating a listing linked to it |
+
 ### Photo-required publishing
 
 New listings need **at least one photo** to be visible to buyers — browse, `search_items`, and

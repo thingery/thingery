@@ -45,7 +45,9 @@
       "public_tools": [
         "describe_category",
         "search_items",
-        "get_item"
+        "get_item",
+        "search_wanted",
+        "get_wanted"
       ],
       "seller_tools": [
         "create_listing",

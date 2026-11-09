@@ -31,6 +31,9 @@ The Thingery MCP server must be connected. Listing requires the seller's API key
    - `parcel` — up to ~30kg, boxed (electronics, small gear)
    - `bulky` — furniture; large appliances
    - `local` — pickup only
+
+   If it ships, ask what to charge the buyer and pass `shipping_price_cents` (unset means free
+   shipping and the seller pays the carrier). Pickup listings must not set it.
 4. **Price** — If the user gave no price, search Thingery (`search_items`) for 2–3 comparable
    listings and propose the median, minus ~10% for slower-moving flaws. State the comparables
    when you propose. For clothing, shoes, or bags priced in USD/CAD (US/Canada market), also

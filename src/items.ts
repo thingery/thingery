@@ -20,6 +20,7 @@ export interface CreateItemInput {
   condition: string;
   brand?: string | null;
   price_cents: number;
+  shipping_price_cents?: number;
   currency: string;
   location?: string | null;
   weight_grams?: number | null;
@@ -51,6 +52,41 @@ export class ListingLimitError extends Error {
   }
 }
 
+// Upper bound for a seller-set shipping price: 1,000.00 in a two-decimal
+// currency. Palletised EU freight for a single second-hand item stays well
+// under it, while a cents/euros unit slip (or a price moved into shipping to
+// look cheap in price-filtered search) is rejected instead of reaching a buyer.
+export const MAX_SHIPPING_PRICE_CENTS = 100_000;
+
+/** Code create_listing, update_listing and respond_to_wanted report. Thrown
+ *  from items.ts because the chat tools reach it without zod validation. */
+export class ShippingPriceError extends Error {
+  readonly code = "invalid_shipping_price";
+  constructor(message: string) {
+    super(message);
+    this.name = "ShippingPriceError";
+  }
+}
+
+function assertValidShippingPrice(cents: number, shippingTier: string): void {
+  if (!Number.isSafeInteger(cents) || cents < 0 || cents > MAX_SHIPPING_PRICE_CENTS) {
+    throw new ShippingPriceError(
+      `shipping_price_cents must be a whole number of cents from 0 to ${MAX_SHIPPING_PRICE_CENTS}.`,
+    );
+  }
+  if (shippingTier === "local" && cents > 0) {
+    throw new ShippingPriceError(
+      "Pickup-only (local tier) listings cannot charge shipping: omit shipping_price_cents or set it to 0.",
+    );
+  }
+}
+
+/** What the buyer pays for shipping on this listing; pickup is always 0,
+ *  matching the snapshot create_order takes. */
+export function buyerShippingCents(item: Pick<ItemRow, "shipping_price_cents" | "shipping_tier">): number {
+  return item.shipping_tier === "local" ? 0 : item.shipping_price_cents;
+}
+
 /** THI-112: listing_write event action — a status update to 'deleted' is the
  * delete path (listings are never row-deleted); everything else is an update. */
 function writeAction(status: string | undefined): "update" | "delete" {
@@ -58,6 +94,13 @@ function writeAction(status: string | undefined): "update" | "delete" {
 }
 
 export async function createItem(input: CreateItemInput): Promise<ItemRow> {
+  try {
+    assertValidShippingPrice(input.shipping_price_cents ?? 0, input.shipping_tier);
+  } catch (err) {
+    logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: input.seller_id });
+    throw err;
+  }
+
   // Caps run BEFORE the embeddings call: every create costs an embeddings-API
   // request (the cost-DoS in security doc §6 H4), so rejecting after embedding
   // would still pay the abuser's bill. One indexed COUNT round trip
@@ -96,8 +139,8 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
     `INSERT INTO items (
        seller_id, title, description, category, condition, brand,
        price_cents, currency, location, weight_grams, dimensions_mm,
-       shipping_tier, images, attributes, embedding
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::vector)
+       shipping_tier, images, attributes, embedding, shipping_price_cents
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::vector,$16)
      RETURNING *`,
     [
       input.seller_id,
@@ -115,6 +158,7 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
       input.images,
       JSON.stringify(input.attributes ?? {}),
       embedding ? JSON.stringify(embedding) : null,
+      input.shipping_price_cents ?? 0,
     ],
   );
   // THI-112 (H4.2): successful listing create — seller id only, never the
@@ -333,6 +377,7 @@ export async function myItems(
 export interface ItemUpdate {
   status?: string;
   price_cents?: number;
+  shipping_price_cents?: number;
   title?: string;
   description?: string;
   attributes?: Attributes;
@@ -351,6 +396,21 @@ export async function updateItem(
   };
   if (update.status !== undefined) sets.push(`status = ${add(update.status)}`);
   if (update.price_cents !== undefined) sets.push(`price_cents = ${add(update.price_cents)}`);
+  if (update.shipping_price_cents !== undefined) {
+    // shipping_tier has no update path, so this read cannot go stale. A row
+    // that is missing or not owned falls through to the UPDATE's not-found.
+    const { rows: tierRows } = await pool.query<Pick<ItemRow, "shipping_tier">>(
+      "SELECT shipping_tier FROM items WHERE id = $1 AND seller_id = $2",
+      [id, sellerId],
+    );
+    try {
+      assertValidShippingPrice(update.shipping_price_cents, tierRows[0]?.shipping_tier ?? "unknown");
+    } catch (err) {
+      logSecurityEvent({ type: "listing_write", action: writeAction(update.status), outcome: "rejected" }, { sellerId });
+      throw err;
+    }
+    sets.push(`shipping_price_cents = ${add(update.shipping_price_cents)}`);
+  }
   if (update.title !== undefined) sets.push(`title = ${add(update.title)}`);
   if (update.description !== undefined) sets.push(`description = ${add(update.description)}`);
   // Attributes are replaced wholesale (not merged) — agents should read,

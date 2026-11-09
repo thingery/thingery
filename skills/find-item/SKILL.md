@@ -43,7 +43,8 @@ The Thingery MCP server must be connected. `search_items` and `get_item` are pub
 
 ## Rules
 
-- Budget is a hard filter: never propose items above `max_price_cents`.
+- Budget is a hard filter: never propose items above `max_price_cents`. The filter matches the
+  item price only, so also check `total_price_cents` (price plus shipping) against the budget.
 - If results are empty, say so plainly and suggest what to relax (condition? price +15%?).
 - Prices come back as integer cents — always present them as normal currency to the user
   (12500 → "EUR 125.00").

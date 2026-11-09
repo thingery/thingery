@@ -4,7 +4,7 @@
 // database — the same code paths the MCP tools use.
 
 import type { SellerRow } from "./db.js";
-import { getCategory, getItem, createItem, listCategories, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
+import { getCategory, getItem, createItem, listCategories, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import { logSecurityEvent } from "./security-events.js";
@@ -33,6 +33,7 @@ Selling:
   Undeclared keys are allowed — include anything a buyer would filter on.
 - Grade condition honestly: new > like_new > good > fair > poor. Flaws go in the description.
 - Prices are integer cents (EUR 12.50 -> price_cents 1250). Confirm the price with the user before creating a listing.
+- If the item ships, ask what to charge the buyer for shipping and set shipping_price_cents (unset = free shipping, so the seller pays the carrier). Never set it for local pickup listings.
 - Estimate weight_grams/dimensions_mm from the item type; shipping_tier: locker for shoebox-sized items, parcel up to ~30kg, bulky for furniture, local for pickup-only.
 - After creating, give the item URL and mention they can ask you to mark it reserved/sold later.
 - Listings are hidden from search until they have at least one photo (THI-308): after creating, tell the user it's created but pending — they add a photo on the item page to publish it. Give the item URL.
@@ -40,6 +41,7 @@ Selling:
 Buying:
 - Search with filters (max_price_cents, category, condition, attributes like {"size_eu": 43}).
 - Propose ONE best match with reasoning, plus 1-2 runner-ups. Never exceed the user's budget.
+- The buyer pays price_cents plus shipping_price_cents (none for local pickup): quote that total and judge the budget against it.
 
 If the user is not logged in and wants to publish, tell them to create an account first (link on the page).
 
@@ -54,6 +56,13 @@ Keep replies short and concrete. Amounts in normal currency (12500 cents = EUR 1
 type ToolDef = {
   type: "function";
   function: { name: string; description: string; parameters: Record<string, unknown> };
+};
+
+const SHIPPING_PRICE_PARAM = {
+  type: "integer",
+  minimum: 0,
+  maximum: MAX_SHIPPING_PRICE_CENTS,
+  description: "What the buyer pays for shipping, in cents, on top of price_cents. 0 or unset = free shipping. Must be 0 for local pickup.",
 };
 
 // Exported for the provenance parity test (spec THI-109 H5.3): the chat
@@ -111,6 +120,7 @@ export const TOOLS: ToolDef[] = [
           condition: { type: "string", enum: ["new", "like_new", "good", "fair", "poor"] },
           brand: { type: "string" },
           price_cents: { type: "integer", minimum: 0 },
+          shipping_price_cents: SHIPPING_PRICE_PARAM,
           currency: { type: "string", minLength: 3, maxLength: 3 },
           location: { type: "string" },
           weight_grams: { type: "integer" },
@@ -137,13 +147,14 @@ export const TOOLS: ToolDef[] = [
     type: "function",
     function: {
       name: "update_listing",
-      description: "Update one of your listings: status (active/reserved/sold/deleted), price_cents, title, description.",
+      description: "Update one of your listings: status (active/reserved/sold/deleted), price_cents, shipping_price_cents, title, description.",
       parameters: {
         type: "object",
         properties: {
           id: { type: "string" },
           status: { type: "string", enum: ["active", "reserved", "sold", "deleted"] },
           price_cents: { type: "integer", minimum: 0 },
+          shipping_price_cents: SHIPPING_PRICE_PARAM,
           title: { type: "string" },
           description: { type: "string" },
         },
@@ -227,6 +238,7 @@ export async function executeTool(
         condition: (args.condition as string) ?? "good",
         brand: (args.brand as string) ?? null,
         price_cents: args.price_cents as number,
+        shipping_price_cents: args.shipping_price_cents as number | undefined,
         currency: ((args.currency as string) ?? "EUR").toUpperCase(),
         location: (args.location as string) ?? null,
         weight_grams: (args.weight_grams as number | undefined) ?? null,
@@ -268,6 +280,7 @@ export async function executeTool(
       const item = await updateItem(args.id as string, s.id, {
         status: args.status as string | undefined,
         price_cents: args.price_cents as number | undefined,
+        shipping_price_cents: args.shipping_price_cents as number | undefined,
         title: args.title as string | undefined,
         description: args.description as string | undefined,
       });
@@ -648,7 +661,7 @@ export function signChatConfirmToken(itemId: string, op: string, expiresAtSecond
   return `${payload}.${mac}`;
 }
 
-const CHAT_CONFIRM_OP = /^(sold|deleted|price=\d+)$/;
+const CHAT_CONFIRM_OP = /^(sold|deleted|price=\d+|shipping=\d+)$/;
 
 /** Verifies signature and expiry; returns the exact authorized op, or null. */
 export function verifyChatConfirmToken(token: string, nowMs: number = Date.now()): { itemId: string; op: string } | null {
@@ -713,6 +726,14 @@ export function normalizeUpdateArgs(
         }
         out.price_cents = value;
         break;
+      case "shipping_price_cents":
+        // Same fail-closed canonicalization as price_cents: the gate must
+        // never reason about a string or fractional shipping price.
+        if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > MAX_SHIPPING_PRICE_CENTS) {
+          return { ok: false, error: `update_listing: shipping_price_cents must be a whole number of cents from 0 to ${MAX_SHIPPING_PRICE_CENTS}` };
+        }
+        out.shipping_price_cents = value;
+        break;
       case "title":
       case "description":
         if (typeof value !== "string") {
@@ -744,7 +765,8 @@ type DestructiveVerdict =
 
 /**
  * An update is destructive — held for explicit user confirmation — when it
- * marks a listing sold/deleted or drops the price by more than 20%.
+ * marks a listing sold/deleted or drops the price or the shipping price by
+ * more than 20% (a shipping cut moves the carrier cost back onto the seller).
  * Integer math (5*new < 4*current ⇔ drop > 20%) avoids float drift.
  *
  * THI-137 §1 (Architect note 1 on PR #68): `getItem` resolving to null is a
@@ -761,7 +783,8 @@ async function destructiveUpdateOp(args: Record<string, unknown>): Promise<Destr
     typeof args.price_cents === "number" && Number.isSafeInteger(args.price_cents) && args.price_cents >= 0
       ? args.price_cents
       : null;
-  if (!status && price === null) return { outcome: "execute" }; // nothing destructive possible
+  const shipping = typeof args.shipping_price_cents === "number" ? args.shipping_price_cents : null;
+  if (!status && price === null && shipping === null) return { outcome: "execute" }; // nothing destructive possible
   let item: Awaited<ReturnType<typeof getItem>>;
   try {
     item = await getItem(id);
@@ -773,8 +796,13 @@ async function destructiveUpdateOp(args: Record<string, unknown>): Promise<Destr
     };
   }
   if (status) return { outcome: "gate", op: status, title: item?.title ?? null };
-  if (!item || price === null || price * 5 >= item.price_cents * 4) return { outcome: "execute" }; // no drop, or ≤ 20%
-  return { outcome: "gate", op: `price=${price}`, title: item.title };
+  if (!item) return { outcome: "execute" };
+  if (price !== null && price * 5 < item.price_cents * 4) return { outcome: "gate", op: `price=${price}`, title: item.title };
+  // A local-tier update falls through so updateItem's pickup rule answers it.
+  if (shipping !== null && item.shipping_tier !== "local" && shipping * 5 < item.shipping_price_cents * 4) {
+    return { outcome: "gate", op: `shipping=${shipping}`, title: item.title };
+  }
+  return { outcome: "execute" }; // no drop, or ≤ 20%
 }
 
 function confirmSummary(op: string, title: string | null): string {
@@ -786,6 +814,10 @@ function confirmSummary(op: string, title: string | null): string {
     // THI-137 §4 (cosmetic): a price of zero reads as "free", not "0.00".
     return cents === 0 ? `Make ${name} free` : `Change the price of ${name} to ${(cents / 100).toFixed(2)}`;
   }
+  if (op.startsWith("shipping=")) {
+    const cents = Number(op.slice("shipping=".length));
+    return cents === 0 ? `Make shipping free on ${name}` : `Change the shipping price of ${name} to ${(cents / 100).toFixed(2)}`;
+  }
   return `Apply this change to ${name}`;
 }
 
@@ -795,11 +827,16 @@ function confirmSummary(op: string, title: string | null): string {
  * dies here with "not found or not yours".
  */
 async function executeConfirmedOp(itemId: string, op: string, seller: SellerRow): Promise<string> {
-  const update = op.startsWith("price=") ? { price_cents: Number(op.slice("price=".length)) } : { status: op };
+  const update = op.startsWith("price=")
+    ? { price_cents: Number(op.slice("price=".length)) }
+    : op.startsWith("shipping=")
+      ? { shipping_price_cents: Number(op.slice("shipping=".length)) }
+      : { status: op };
   const item = await updateItem(itemId, seller.id, update);
   if (!item) return "⚠️ That listing wasn't found on your account — it may have been removed already.";
   if (op === "sold") return `✅ Done — "${item.title}" is now marked as sold.`;
   if (op === "deleted") return `✅ Done — "${item.title}" has been deleted.`;
+  if (op.startsWith("shipping=")) return `✅ Done — shipping on "${item.title}" now costs ${(item.shipping_price_cents / 100).toFixed(2)}.`;
   return `✅ Done — "${item.title}" now costs ${(item.price_cents / 100).toFixed(2)}.`;
 }
 

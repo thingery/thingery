@@ -121,6 +121,7 @@
   ],
   "data_conventions": {
     "price": "integer cents (12500 = EUR 125.00)",
+    "shipping_price_cents": "optional seller-set shipping charge in integer cents (0-100000, default 0 = free shipping), paid by the buyer on top of the price; must be 0 on local pickup listings; total_price_cents on listing and order output is what the buyer pays",
     "condition_scale": [
       "new",
       "like_new",

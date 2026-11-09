@@ -2,7 +2,7 @@
 // Server-rendered, crawler-friendly (also for LLM browsing agents), no JS needed.
 
 import type { NextFunction, Request, Response } from "express";
-import { getItem, searchItems, listCategories } from "./items.js";
+import { buyerShippingCents, getItem, searchItems, listCategories } from "./items.js";
 import { MAX_IMAGES_PER_ITEM } from "./images.js";
 import { sellerFromSession } from "./auth.js";
 import { CONDITIONS, pool, type ItemRow } from "./db.js";
@@ -289,6 +289,8 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
     },
   };
 
+  const shippingCents = buyerShippingCents(item);
+
   // SECURITY invariant (THI-445 review): data-i18n-cond / data-i18n-status
   // attribute values below are interpolated WITHOUT escapeHtml. That is safe
   // only while item.condition and item.status stay closed enums — CHECK
@@ -299,6 +301,7 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
   <p class="meta"><a href="/browse" data-i18n="item.back">← Browse</a> · <a href="/wanted" data-i18n="item.wanted">Buyers want →</a> · <a href="/">Thingery</a></p>
   <h1>${escapeHtml(item.title)}</h1>
   <p class="price ${sold ? "sold" : ""}">${escapeHtml(money(item.price_cents, item.currency))}${sold ? ` · <span data-i18n-status="${item.status}">${escapeHtml(item.status)}</span>` : ""}</p>
+  ${shippingCents > 0 ? `<p class="meta"><span data-i18n="item.plusShipping">+ shipping:</span> ${escapeHtml(money(shippingCents, item.currency))} · <span data-i18n="item.total">total:</span> ${escapeHtml(money(item.price_cents + shippingCents, item.currency))}</p>` : ""}
   ${ctaHtml}
   ${imagesHtml}
   ${uploadHtml}

@@ -28,10 +28,10 @@ Chinese-market name: 物坊 (Wùfāng).
 | `describe_category` | public | List categories and their declared attribute fields — the self-describing schema for agents. Declared fields get validated on create; undeclared keys are allowed, searchable, and their real use is surfaced via `undeclared_in_use` |
 | `search_items` | public | Hybrid semantic + keyword search with price/category/condition/attribute filters (any attribute key, declared or not). Page with `offset` (0-450, so at most 500 results per query); `count` is the page length, not a total, and `has_more` says whether the next offset returns more. Pages are separate searches, so de-duplicate by `id` |
 | `get_item` | public | Fetch one listing by id. Pending (photoless) listings are returned too — they carry `needs_photo: true` |
-| `create_listing` | seller | Publish an item — core fields plus a flexible `attributes` object (declared keys validated, extras pass through and stay searchable). **Listings are hidden from search until they have at least one photo**: a zero-image create succeeds but stays pending (`visible: false` + `next_steps` in the result) until a photo lands |
+| `create_listing` | seller | Publish an item — core fields plus a flexible `attributes` object (declared keys validated, extras pass through and stay searchable). **Listings are hidden from search until they have at least one photo**: a zero-image create succeeds but stays pending (`visible: false` + `next_steps` in the result) until a photo lands. Optional `shipping_price_cents` (0–100000, default 0 = free shipping) is what the buyer pays on top of the price; pickup-only (`local`) listings reject a non-zero value |
 | `add_item_image` | seller | Attach a photo to a listing (base64 in, stored server-side — no URLs needed; max 5 MB decoded). The first photo publishes a pending listing — the result's `visible` tells you. Images are re-encoded at ingest: metadata (EXIF/GPS/XMP) stripped, downscaled to ≤ 2000 px, animated GIFs stored as stills; large PNGs may be rejected — prefer JPEG |
 | `my_listings` | seller | Your listings by status |
-| `update_listing` | seller | Mark reserved/sold, adjust price, edit text or attributes |
+| `update_listing` | seller | Mark reserved/sold, adjust price or `shipping_price_cents` (future orders only; existing orders keep their snapshot), edit text or attributes |
 
 ### Order flow
 

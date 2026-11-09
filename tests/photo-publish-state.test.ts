@@ -128,7 +128,7 @@ describe("tool signatures unchanged (additive, pure)", () => {
     expect(Object.keys(schema).sort()).toEqual(
       [
         "title", "description", "category", "condition", "brand", "price_cents",
-        "currency", "location", "weight_grams", "dimensions_mm", "shipping_tier",
+        "shipping_price_cents", "currency", "location", "weight_grams", "dimensions_mm", "shipping_tier",
         "images", "attributes",
       ].sort(),
     );

@@ -129,6 +129,8 @@
     "item.cat": "categoria:",
     "item.brand": "marca:",
     "item.ships": "spedizione:",
+    "item.plusShipping": "+ spedizione:",
+    "item.total": "totale:",
     "item.noDesc": "Nessuna descrizione fornita.",
     "item.listed": "Pubblicato il",
     "item.toBuy": "Per comprare, scrivi al venditore tramite l'assistente che ti ha mostrato questo annuncio.",

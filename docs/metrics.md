@@ -184,7 +184,7 @@ One JSON object per line, stdout, ship path = Docker/Caddy log capture:
   in `itemPage` (src/web-pages.ts) with the origin classified server-side in
   `classifyVisitOrigin` (src/analytics.ts). `refHost`/`utm` appear only when
   present; `owner` lets self-views be excluded from share metrics.
-- `credential`: `api_key` | `oauth` | `none` (Authorization header prefix).
+- `credential`: `api_key` | `oauth` | `session` | `none` (Authorization header prefix).
 - `sellerId`: resolved seller UUID (security events already log this field)
   or `null` for anonymous public reads.
 - No arguments, params, tokens, payloads or error text ever reach the log.

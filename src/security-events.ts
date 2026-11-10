@@ -54,6 +54,14 @@ export type SecurityEventReason =
   | "reencode_failed"
   | "output_too_large";
 
+/** GH #212 / THI-542 write ramp (THI-543 Q4, exact shape confirmed): which
+ *  listing-write limit rejected a create — the new-seller ramp or the full
+ *  per-seller caps. A field on the listing_write event family only,
+ *  deliberately NOT a SecurityEventReason extension (separate unions per
+ *  event family, same precedent as ChatgptOauthErrorReason and the optional
+ *  wanted_response.count). */
+export type ListingWriteLimit = "new_seller_ramp" | "seller_cap";
+
 /** Fixed terminal refresh-error slugs for chatgpt_oauth_error events
  *  (THI-193 §2 error taxonomy / §3.3): any of these means the stored OAuth
  *  bundle is unusable and the row is deleted — resolution falls back to
@@ -71,7 +79,7 @@ export type SecurityEvent =
   | { type: "signup"; outcome: "success" }
   | { type: "login"; outcome: "success" | "failure" }
   | { type: "rate_limit"; route: SecurityEventRoute }
-  | { type: "listing_write"; action: "create" | "update" | "delete"; outcome: "success" | "rejected" }
+  | { type: "listing_write"; action: "create" | "update" | "delete"; outcome: "success" | "rejected"; limit?: ListingWriteLimit }
   /** THI-360 R5 (THI-380 rider): one line per buyer-intent write (save /
    *  mute-update / delete), success and every rejection class. Buyer id
    *  only — never q or filters (no-payload rule, §6). */
@@ -140,6 +148,7 @@ export function logSecurityEvent(event: SecurityEvent, ctx: SecurityEventContext
     ...(event.type === "image_upload" && event.reason !== undefined ? { reason: event.reason } : {}),
     ...(event.type === "chatgpt_oauth_error" ? { reason: event.reason } : {}),
     ...(event.type === "wanted_response" && event.count !== undefined ? { count: event.count } : {}),
+    ...(event.type === "listing_write" && event.limit !== undefined ? { limit: event.limit } : {}),
     ...(event.type === "chat_usage"
       ? {
           model: event.model,

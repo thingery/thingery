@@ -8,15 +8,21 @@ import { getCategory, getItem, createItem, listCategories, MAX_SHIPPING_PRICE_CE
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import {
+  cancelOrder,
+  createOrder,
   getOrderView,
   listOrdersForAccount,
   MAX_ORDER_LIST_LIMIT,
+  OrderFlowError,
   ORDER_ROLES,
+  shareShippingAddress,
   shippingAddressConsent,
   shippingAddressForSeller,
   type OrderRole,
+  type ShippingAddress,
 } from "./order-flow.js";
 import { ORDER_STATUSES } from "./orders.js";
+import { confirmReceipt, openDispute, releaseFunds } from "./fulfillment.js";
 import { logSecurityEvent } from "./security-events.js";
 import { logChatTurnUsage, toolNameSlug, type LlmCallUsage } from "./chat-usage.js";
 import { chatLimits, dailyTokenBudget, parseLlmUsage, fallbackUsageEstimate, type LlmUsage as NormalizedUsage } from "./chat-limits.js";
@@ -56,6 +62,7 @@ Buying:
 Completing a sale (orders):
 - Orders run the full protected flow: the buyer pays via a payment link, the seller ships after the order is sold, tracking arrives automatically once recorded, the buyer confirms receipt, and money is released after the dispute window (or early on request).
 - Check order state with my_orders (filter by role: buyer/seller) and get_order (status, price breakdown, tracking, deadlines).
+- Buyer actions: create_order places an order (you then give the user the payment_url as a link to pay), confirm_receipt when the item arrived, release_funds to pay the seller early, open_dispute if something is wrong, share_shipping_address on off-platform orders once the seller confirmed payment (it cannot be undone), cancel_order while the order is still cancellable. Every one of these only runs after the user confirms the card in the chat — never report them as done before that.
 - Payment happens on the Stripe payment page through the order's payment link — you NEVER ask the user for card details or any payment information; the link collects everything.
 - If the user asks for something the chat cannot do yet (e.g. buying shipping labels where the deployment has no carrier keys), say so plainly — never improvise a workaround.
 
@@ -212,6 +219,102 @@ export const TOOLS: ToolDef[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "create_order",
+      description:
+        "Buy an item: place an order for the logged-in user. Returns the payment link (pay there — never " +
+        "collect card details in chat). Shippable items need shipping_address; local-pickup items ignore it. " +
+        "Held for the user's confirmation card (it reserves the item and starts the payment clock).",
+      parameters: {
+        type: "object",
+        properties: {
+          item_id: { type: "string", description: "item to order" },
+          shipping_address: {
+            type: "object",
+            description: "Required for shippable items",
+            properties: {
+              name: { type: "string", minLength: 1, maxLength: 120 },
+              line1: { type: "string", minLength: 1, maxLength: 200 },
+              line2: { type: "string", maxLength: 200 },
+              city: { type: "string", minLength: 1, maxLength: 80 },
+              postal_code: { type: "string", minLength: 1, maxLength: 20 },
+              country: { type: "string", minLength: 2, maxLength: 2, description: "ISO 3166-1 alpha-2, e.g. 'IT'" },
+            },
+            required: ["name", "line1", "city", "postal_code", "country"],
+            additionalProperties: false,
+          },
+          payment_mode: { type: "string", enum: ["stripe", "off_platform"], description: "leave unset for the best available path" },
+        },
+        required: ["item_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "confirm_receipt",
+      description:
+        "Buyer confirms receiving the purchased item: the order moves to delivered and the dispute window opens " +
+        "(48h default). For local pickup this is the delivery step. Held for the user's confirmation card.",
+      parameters: { type: "object", properties: { order_id: { type: "string" } }, required: ["order_id"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "release_funds",
+      description:
+        "Buyer waives the remaining dispute window and releases the seller's payout immediately. Use when " +
+        "everything arrived fine. Held for the user's confirmation card.",
+      parameters: { type: "object", properties: { order_id: { type: "string" } }, required: ["order_id"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_dispute",
+      description:
+        "Buyer opens a dispute on a delivered order (within the dispute window). Payout is held while the " +
+        "order is disputed; an operator resolves it. Held for the user's confirmation card.",
+      parameters: {
+        type: "object",
+        properties: {
+          order_id: { type: "string" },
+          reason: { type: "string", minLength: 1, maxLength: 1000, description: "what went wrong (required)" },
+        },
+        required: ["order_id", "reason"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "share_shipping_address",
+      description:
+        "Buyer agrees to show the seller the shipping address of one off_platform order (sold or label_issued). " +
+        "Cannot be withdrawn. Call only when the user says to, for this order. Held for the user's confirmation card.",
+      parameters: { type: "object", properties: { order_id: { type: "string" } }, required: ["order_id"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "cancel_order",
+      description:
+        "Cancel one of the user's orders (buyer or seller) while it is still cancellable (pending, sold, " +
+        "label_issued). Paid Stripe orders get refunded where applicable. Held for the user's confirmation card.",
+      parameters: {
+        type: "object",
+        properties: {
+          order_id: { type: "string" },
+          reason: { type: "string", maxLength: 500 },
+        },
+        required: ["order_id"],
+      },
+    },
+  },
 ];
 
 // Exported for the parity test (spec THI-83 §8/F3): both describe_category
@@ -304,6 +407,66 @@ export function normalizeOrderArgs(
       const id = uuid(raw.order_id, "order_id");
       if (typeof id === "object") return { ok: false, error: id.bad };
       return { ok: true, args: { order_id: id } };
+    }
+    case "confirm_receipt":
+    case "release_funds":
+    case "share_shipping_address": {
+      const id = uuid(raw.order_id, "order_id");
+      if (typeof id === "object") return { ok: false, error: id.bad };
+      return { ok: true, args: { order_id: id } };
+    }
+    case "open_dispute": {
+      const id = uuid(raw.order_id, "order_id");
+      if (typeof id === "object") return { ok: false, error: id.bad };
+      const reason = raw.reason;
+      if (typeof reason !== "string" || reason.length < 1 || reason.length > 1000) {
+        return { ok: false, error: "open_dispute: reason must be 1-1000 characters" };
+      }
+      return { ok: true, args: { order_id: id, reason } };
+    }
+    case "cancel_order": {
+      const id = uuid(raw.order_id, "order_id");
+      if (typeof id === "object") return { ok: false, error: id.bad };
+      const out: Record<string, unknown> = { order_id: id };
+      if (raw.reason !== undefined) {
+        if (typeof raw.reason !== "string" || raw.reason.length > 500) {
+          return { ok: false, error: "cancel_order: reason must be a string of at most 500 characters" };
+        }
+        out.reason = raw.reason;
+      }
+      return { ok: true, args: out };
+    }
+    case "create_order": {
+      const itemId = uuid(raw.item_id, "item_id");
+      if (typeof itemId === "object") return { ok: false, error: itemId.bad };
+      const out: Record<string, unknown> = { item_id: itemId };
+      if (raw.payment_mode !== undefined) {
+        if (raw.payment_mode !== "stripe" && raw.payment_mode !== "off_platform") {
+          return { ok: false, error: "create_order: payment_mode must be 'stripe' or 'off_platform'" };
+        }
+        out.payment_mode = raw.payment_mode;
+      }
+      if (raw.shipping_address !== undefined) {
+        const a = raw.shipping_address;
+        const str = (v: unknown, max: number, what: string, min = 1): string | null =>
+          typeof v === "string" && v.length >= min && v.length <= max ? v : null;
+        const addr = a as Record<string, unknown>;
+        const allowed = ["name", "line1", "line2", "city", "postal_code", "country"];
+        if (typeof a !== "object" || a === null || Object.keys(addr).some((k) => !allowed.includes(k))) {
+          return { ok: false, error: "create_order: shipping_address may only contain name, line1, line2, city, postal_code, country" };
+        }
+        const name = str(addr.name, 120, "name");
+        const line1 = str(addr.line1, 200, "line1");
+        const line2 = addr.line2 === undefined ? undefined : str(addr.line2, 200, "line2", 0);
+        const city = str(addr.city, 80, "city");
+        const postal = str(addr.postal_code, 20, "postal_code");
+        const country = typeof addr.country === "string" && addr.country.length === 2 ? addr.country : null;
+        if (!name || !line1 || !city || !postal || !country || (addr.line2 !== undefined && line2 === null)) {
+          return { ok: false, error: "create_order: shipping_address needs name (1-120), line1 (1-200), optional line2 (≤200), city (1-80), postal_code (1-20) and a 2-letter country" };
+        }
+        out.shipping_address = { name, line1, ...(line2 !== undefined ? { line2 } : {}), city, postal_code: postal, country };
+      }
+      return { ok: true, args: out };
     }
     default:
       return { ok: false, error: `${name}: not an order tool` };
@@ -459,6 +622,20 @@ export async function executeTool(
         description: args.description as string | undefined,
       });
       return item ? { updated: true } : { error: "not found or not yours" };
+    }
+    // Order writes never execute from the tool path — the gate in chatTurn
+    // converts them into a confirmation card and executeConfirmedOrderOp
+    // runs the verified op. Reaching this case means the gate was skipped
+    // (logged out — requireSeller above throws the login error) or a future
+    // refactor broke the gate: fail closed either way.
+    case "create_order":
+    case "confirm_receipt":
+    case "release_funds":
+    case "open_dispute":
+    case "share_shipping_address":
+    case "cancel_order": {
+      requireSeller();
+      return { error: `${name}: order writes run only through the user's confirmation card — nothing was executed` };
     }
     default:
       return { error: `unknown tool ${name}` };
@@ -835,7 +1012,52 @@ export function signChatConfirmToken(itemId: string, op: string, expiresAtSecond
   return `${payload}.${mac}`;
 }
 
-const CHAT_CONFIRM_OP = /^(sold|deleted|price=\d+|shipping=\d+)$/;
+// Order writes confirm through the same H5.2 card as listing updates: the
+// verb names the operation; verbs that carry model-supplied data (reason,
+// shipping address, payment mode) bind it into the op string as base64url
+// JSON, so the HMAC covers the exact effect the card described — a token
+// authorizes exactly one mutation with exactly those arguments.
+//
+// Spec docs/specs/chat-order-parity.md §Confirm gate: create_order confirms
+// too (verb `order` — it reserves an item and starts the payment clock).
+const CHAT_CONFIRM_OP = /^(sold|deleted|price=\d+|shipping=\d+|receipt|release|address|order=[A-Za-z0-9_-]+|dispute=[A-Za-z0-9_-]+|cancel=[A-Za-z0-9_-]+)$/;
+
+/** The chat order-write tools (spec §Proposed design): each maps to the
+ *  confirm verb its token carries. */
+const ORDER_WRITE_VERBS: ReadonlyMap<string, string> = new Map([
+  ["create_order", "order"],
+  ["confirm_receipt", "receipt"],
+  ["release_funds", "release"],
+  ["open_dispute", "dispute"],
+  ["share_shipping_address", "address"],
+  ["cancel_order", "cancel"],
+]);
+
+/** Order verbs whose op string carries the model-supplied args as base64url
+ *  JSON after `=`. Bare verbs (receipt/release/address) authorize a fixed,
+ * argument-free effect for the token's order id. */
+const ORDER_PAYLOAD_VERBS: ReadonlySet<string> = new Set(["order", "dispute", "cancel"]);
+
+const encodeOrderPayload = (args: Record<string, unknown>): string =>
+  Buffer.from(JSON.stringify(args), "utf8").toString("base64url");
+
+export function decodeOrderPayload(op: string): Record<string, unknown> {
+  const eq = op.indexOf("=");
+  const verb = eq === -1 ? op : op.slice(0, eq);
+  if (!ORDER_PAYLOAD_VERBS.has(verb)) return {};
+  try {
+    const parsed = JSON.parse(Buffer.from(op.slice(eq + 1), "base64url").toString("utf8"));
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** `order` | `dispute` | … — the bare verb of an op string. */
+export function orderOpVerb(op: string): string {
+  const eq = op.indexOf("=");
+  return eq === -1 ? op : op.slice(0, eq);
+}
 
 /** Verifies signature and expiry; returns the exact authorized op, or null. */
 export function verifyChatConfirmToken(token: string, nowMs: number = Date.now()): { itemId: string; op: string } | null {
@@ -979,6 +1201,91 @@ async function destructiveUpdateOp(args: Record<string, unknown>): Promise<Destr
   return { outcome: "execute" }; // no drop, or ≤ 20%
 }
 
+/** Money as `EUR 42.50` — the order's own currency, cents never floated. */
+const fmtMoney = (cents: number, currency: string): string => `${currency} ${(cents / 100).toFixed(2)}`;
+
+/** The first line of a dispute reason / message body for a card summary —
+ *  enough to recognize, never the whole text. */
+const preview = (text: string, max = 100): string => {
+  const first = text.split("\n")[0].trim();
+  return first.length > max ? first.slice(0, max - 1) + "…" : first;
+};
+
+/** Outcome of the confirm-gate check for one order-write call (the order
+ *  twin of destructiveUpdateOp): order writes ALWAYS gate — the verdict
+ *  only decides between a model-facing error and the card itself. The
+ *  summary must show the concrete effect (spec §Confirm gate: "release
+ *  €42.50 to the seller", not just a verb), so the order is read first;
+ *  a failed read fails closed (THI-137 §1 posture). */
+type OrderGateVerdict =
+  | { outcome: "gate"; op: string; subjectId: string; summary: string; orderId?: string; itemId?: string }
+  | { outcome: "error"; error: string };
+
+async function orderWriteGate(
+  name: string,
+  args: Record<string, unknown>,
+  seller: SellerRow,
+): Promise<OrderGateVerdict> {
+  const verb = ORDER_WRITE_VERBS.get(name)!;
+  const payload: Record<string, unknown> = {};
+  if (name === "open_dispute") payload.reason = args.reason;
+  if (name === "cancel_order" && args.reason !== undefined) payload.reason = args.reason;
+  if (name === "create_order") {
+    if (args.shipping_address !== undefined) payload.shipping_address = args.shipping_address;
+    if (args.payment_mode !== undefined) payload.payment_mode = args.payment_mode;
+  }
+  const op = verb + (Object.keys(payload).length > 0 ? "=" + encodeOrderPayload(payload) : "");
+
+  if (name === "create_order") {
+    // The card describes the purchase: read the item for title and total.
+    let item: Awaited<ReturnType<typeof getItem>>;
+    try {
+      item = await getItem(args.item_id as string);
+    } catch {
+      return { outcome: "error", error: "create_order: the item could not be read right now, so nothing was ordered. Tell the user to try again in a moment." };
+    }
+    if (!item) return { outcome: "error", error: "Item not found." };
+    if (item.seller_id === seller.id) return { outcome: "error", error: "Sellers cannot order their own item." };
+    const shipping = item.shipping_tier === "local" ? 0 : item.shipping_price_cents;
+    const total = fmtMoney(item.price_cents + shipping, item.currency);
+    const how = item.shipping_tier === "local" ? " (local pickup)" : "";
+    return {
+      outcome: "gate",
+      op,
+      subjectId: item.id,
+      itemId: item.id,
+      summary: `Order "${item.title}" for ${total}${how} — the user pays via the link after confirming`,
+    };
+  }
+
+  // Order-scoped writes: read the order for the concrete summary.
+  let order: Awaited<ReturnType<typeof getOrderView>>;
+  try {
+    order = await getOrderView(args.order_id as string, seller.id);
+  } catch {
+    return { outcome: "error", error: `${name}: the order could not be read to describe this change, so it was NOT applied. Tell the user to try again in a moment.` };
+  }
+  if (!order) return { outcome: "error", error: "Order not found." };
+  const title = order.item_title ?? "this order";
+  const reasonText = typeof args.reason === "string" ? args.reason : "";
+  switch (verb) {
+    case "receipt":
+      return { outcome: "gate", op, subjectId: order.id, orderId: order.id, summary: `Confirm the user received "${title}" (opens the dispute window)` };
+    case "release": {
+      const amount = fmtMoney(order.price_cents + order.shipping_price_cents, order.currency);
+      return { outcome: "gate", op, subjectId: order.id, orderId: order.id, summary: `Release ${amount} to the seller for "${title}" now — waives the remaining dispute window` };
+    }
+    case "dispute":
+      return { outcome: "gate", op, subjectId: order.id, orderId: order.id, summary: `Open a dispute on "${title}": ${JSON.stringify(preview(reasonText))}` };
+    case "address":
+      return { outcome: "gate", op, subjectId: order.id, orderId: order.id, summary: `Share the user's shipping address with the seller of "${title}" — this cannot be undone` };
+    case "cancel":
+      return { outcome: "gate", op, subjectId: order.id, orderId: order.id, summary: `Cancel the order for "${title}"` };
+    default:
+      return { outcome: "error", error: `${name}: unknown confirm verb` };
+  }
+}
+
 function confirmSummary(op: string, title: string | null): string {
   const name = title ? `"${title}"` : "this listing";
   if (op === "sold") return `Mark ${name} as sold`;
@@ -1014,6 +1321,97 @@ async function executeConfirmedOp(itemId: string, op: string, seller: SellerRow)
   return `✅ Done — "${item.title}" now costs ${(item.price_cents / 100).toFixed(2)}.`;
 }
 
+/** Runs a confirmed order op: decodes the args bound into the token's op
+ *  string and executes exactly that — the same services the MCP tools call,
+ *  so ownership and state rules are enforced identically. Service errors
+ *  (OrderFlowError) carry user-facing messages and are relayed verbatim;
+ *  anything else fails with a generic retry line — no internals leak. */
+async function executeConfirmedOrderOp(subjectId: string, op: string, seller: SellerRow): Promise<string> {
+  const verb = orderOpVerb(op);
+  const payload = decodeOrderPayload(op);
+  const text = (v: unknown): string => (typeof v === "string" ? v : "");
+  const orderId = text(payload.order_id) || subjectId;
+  const friendly = (err: unknown): string =>
+    err instanceof OrderFlowError ? err.message : "something went wrong on our side — nothing was changed; try again in a moment";
+  // Cosmetic title for the confirmation text (the op itself already ran
+  // when this is called after success).
+  const orderTitle = async (): Promise<string> => {
+    try {
+      const view = await getOrderView(orderId, seller.id);
+      if (view?.item_title) return `"${view.item_title}"`;
+    } catch {
+      // fall through
+    }
+    return "the order";
+  };
+
+  switch (verb) {
+    case "order": {
+      // create_order: subjectId is the item id.
+      const request: Parameters<typeof createOrder>[0] = { itemId: subjectId, buyerId: seller.id };
+      const addr = payload.shipping_address as ShippingAddress | undefined;
+      if (addr) request.shippingAddress = addr;
+      const mode = text(payload.payment_mode);
+      if (mode === "stripe" || mode === "off_platform") request.paymentMode = mode;
+      try {
+        const { order, paymentUrl } = await createOrder(request);
+        const what = order.item_title ? `"${order.item_title}"` : "the item";
+        if (paymentUrl) {
+          return `✅ Order placed for ${what} — pay here: ${paymentUrl}\n(The link expires in 24h and opens the secure payment page: card details go there, never in chat.)`;
+        }
+        return `✅ Order placed for ${what} — off-platform payment: settle directly with the seller as you agreed. Once they confirm payment, we'll ask you here to share the shipping address.`;
+      } catch (err) {
+        return `⚠️ ${friendly(err)}`;
+      }
+    }
+    case "receipt": {
+      try {
+        const order = await confirmReceipt(orderId, seller.id);
+        const what = await orderTitle();
+        return `✅ Receipt confirmed — ${what} is marked ${order.status === "delivered" ? "delivered" : order.status}. The dispute window is now open (get_order shows the exact deadline).`;
+      } catch (err) {
+        return `⚠️ ${friendly(err)}`;
+      }
+    }
+    case "release": {
+      try {
+        const result = await releaseFunds(orderId, seller.id);
+        return `✅ Funds released — ${await orderTitle()}. ${result.note}`;
+      } catch (err) {
+        return `⚠️ ${friendly(err)}`;
+      }
+    }
+    case "dispute": {
+      try {
+        await openDispute(orderId, seller.id, text(payload.reason));
+        return `✅ Dispute opened on ${await orderTitle()} — the payout is held while it's resolved. Keep an eye on the order; an operator will follow up.`;
+      } catch (err) {
+        return `⚠️ ${friendly(err)}`;
+      }
+    }
+    case "address": {
+      try {
+        await shareShippingAddress(orderId, seller.id);
+        return `✅ Shipping address shared with the seller of ${await orderTitle()}. They'll use it only to ship this order.`;
+      } catch (err) {
+        return `⚠️ ${friendly(err)}`;
+      }
+    }
+    case "cancel": {
+      try {
+        const order = await cancelOrder(orderId, seller.id, payload.reason === undefined ? undefined : text(payload.reason));
+        if (order.status === "refunding") return `✅ Order cancelled — ${await orderTitle()}: refund initiated; the status moves to refunded when Stripe confirms (check get_order).`;
+        if (order.status === "cancelled") return `✅ Order cancelled — ${await orderTitle()}. The item is available again.`;
+        return `✅ Order cancelled — ${await orderTitle()} (status: ${order.status}).`;
+      } catch (err) {
+        return `⚠️ ${friendly(err)}`;
+      }
+    }
+    default:
+      return `⚠️ Unknown order operation "${verb}" — nothing was changed.`;
+  }
+}
+
 /** Runs one chat turn: user message in, assistant text out (tools executed server-side).
  * H5.2: the result may carry a `confirm` card — a signed pending op the chat
  * UI offers to the user; the op executes only when the token comes back. */
@@ -1034,7 +1432,11 @@ export async function chatTurn(
     if (!seller) {
       return { text: "⚠️ You're no longer logged in — log in again, then ask for the change once more." };
     }
-    return { text: await executeConfirmedOp(pending.itemId, pending.op, seller) };
+    // Order verbs execute through the order path (their subject may be an
+    // item id for create_order and their args ride in the op string).
+    const isOrderOp = (op: string): boolean =>
+      op === "receipt" || op === "release" || op === "address" || /^(order|dispute|cancel)=/.test(op);
+    return { text: isOrderOp(pending.op) ? await executeConfirmedOrderOp(pending.itemId, pending.op, seller) : await executeConfirmedOp(pending.itemId, pending.op, seller) };
   }
   if (userMessage.startsWith("chat-decline ")) {
     return { text: "Cancelled — nothing was changed. The pending update is void." };
@@ -1140,7 +1542,10 @@ export async function chatTurn(
         // string price_cents ("1000") would otherwise skip the >20% gate and
         // Postgres would cast it to INTEGER — executing a destructive drop
         // with no confirmation card. Non-canonical values fail closed.
-        const norm = call.function.name === "update_listing" ? normalizeUpdateArgs(args) : null;
+        const orderVerbTool = ORDER_WRITE_VERBS.has(call.function.name);
+        const norm = call.function.name === "update_listing" ? normalizeUpdateArgs(args)
+          : orderVerbTool ? normalizeOrderArgs(call.function.name, args)
+          : null;
         if (norm && !norm.ok) {
           toolArgErrors++; // THI-185: model-arg rejection, not an execution error
           result = { error: norm.error };
@@ -1148,10 +1553,14 @@ export async function chatTurn(
           const canonicalArgs = norm ? norm.args : args;
           // H5.2 gate: destructive updates never execute on the model's
           // say-so — they are held and described to the model as pending the
-          // user's confirmation card.
+          // user's confirmation card. Order writes (spec §Confirm gate) use
+          // the same card: they reserve items, move money and release
+          // addresses, so they are at least as consequential.
           const verdict = seller && call.function.name === "update_listing"
             ? await destructiveUpdateOp(canonicalArgs)
-            : null;
+            : seller && orderVerbTool
+              ? await orderWriteGate(call.function.name, canonicalArgs, seller)
+              : null;
           if (verdict?.outcome === "unverifiable") {
             // THI-137 §1: an unreadable listing must not execute ungated —
             // hold the op and surface a model-facing error instead.
@@ -1169,19 +1578,42 @@ export async function chatTurn(
                 note: "Another change is already on hold awaiting the user's confirmation card, and only one card can be pending per turn. This change was NOT applied and NO new card was shown. Do not retry now: tell the user to settle the pending card first, then ask again for this change.",
               };
             } else {
-              confirm = {
-                token: signChatConfirmToken(canonicalArgs.id as string, verdict.op, Math.floor(Date.now() / 1000) + CHAT_CONFIRM_TTL_SECONDS),
-                item_id: canonicalArgs.id as string,
-                op: verdict.op,
-                summary: confirmSummary(verdict.op, verdict.title),
-              };
-              result = {
-                confirmation_required: true,
-                item_id: canonicalArgs.id,
-                op: verdict.op,
-                note: "ON HOLD until the user confirms via the card in the chat UI. NOT applied yet. Do not retry, do not report success, and never ask the user to type or paste codes.",
-              };
+              // Order-gate verdicts carry op/subject/summary themselves (no
+              // canonicalArgs.id convention on that path); listing updates
+              // derive theirs.
+              const g = orderVerbTool ? (verdict as Extract<OrderGateVerdict, { outcome: "gate" }>) : null;
+              const op = g ? g.op : verdict.op;
+              const subjectId = g ? g.subjectId : (canonicalArgs.id as string);
+              const summary = g
+                ? g.summary
+                : confirmSummary(verdict.op, (verdict as Extract<DestructiveVerdict, { outcome: "gate" }>).title);
+              let token: string;
+              try {
+                token = signChatConfirmToken(subjectId, op, Math.floor(Date.now() / 1000) + CHAT_CONFIRM_TTL_SECONDS);
+              } catch {
+                token = "";
+              }
+              // The card must fit the 4000-char message cap (route + UI): a
+              // token this long means the model packed a maximal payload
+              // (e.g. a 1000-char dispute reason); fail closed instead of
+              // shipping a card the chat can never deliver.
+              if (!token || token.length > 3800) {
+                result = { error: "The details of this change are too long to confirm safely here — nothing was applied. Ask the user to shorten the reason and try again." };
+              } else {
+                confirm = { token, item_id: subjectId, op, summary };
+                result = {
+                  confirmation_required: true,
+                  ...(g?.orderId ? { order_id: g.orderId } : {}),
+                  item_id: g?.itemId ?? canonicalArgs.id,
+                  op,
+                  note: "ON HOLD until the user confirms via the card in the chat UI. NOT applied yet. Do not retry, do not report success, and never ask the user to type or paste codes.",
+                };
+              }
             }
+          } else if (verdict?.outcome === "error") {
+            // Order-gate read failure: not-found (model-facing, same as the
+            // MCP tools) or fail-closed unreadable (THI-137 §1 posture).
+            result = { error: verdict.error };
           } else {
             result = await executeTool(call.function.name, canonicalArgs, seller);
           }

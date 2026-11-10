@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="website/assets/logo-mark.svg" width="112" alt="Thingery logo" />
+  <img src="public/assets/logo-mark.svg" width="112" alt="Thingery logo" />
 </p>
 
 # Thingery
@@ -68,7 +68,7 @@ Design records are in [`docs/adr/`](docs/adr/).
 
 Agent skills: [`skills/sell-item`](skills/sell-item/SKILL.md) (photos → priced listing) and
 [`skills/find-item`](skills/find-item/SKILL.md) (intent → one best proposal → saved-search alerts).
-Machine discovery: [`llms.txt`](website/llms.txt) · [`agents.json`](website/.well-known/agents.json).
+Machine discovery: [`llms.txt`](public/llms.txt) · [`agents.json`](public/.well-known/agents.json).
 
 ## Roadmap
 

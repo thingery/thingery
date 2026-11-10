@@ -4,7 +4,7 @@ import type { RequestHandler } from "express";
 
 // CSP notes (keep in sync with docs/security.md §4):
 // - `script-src 'self'` only: every executable script lives in a static file
-//   under `website/`. No 'unsafe-inline' — item pages render seller-controlled
+//   under `public/`. No 'unsafe-inline' — item pages render seller-controlled
 //   content, and inline script must never become executable there.
 // - `style-src` keeps 'unsafe-inline': pages use <style> blocks and inline
 //   style="" attributes. Accepted tradeoff for the baseline (style injection

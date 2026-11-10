@@ -1,4 +1,4 @@
-// THI-308 PR 3: unit tests for website/imaging.js — the pure client-side
+// THI-308 PR 3: unit tests for public/imaging.js — the pure client-side
 // compression helpers (quality ladder, size thresholds, GIF pass-through,
 // downscale math). imaging.js is a plain browser script; we execute the real
 // source and exercise its exported helpers, no DOM needed (compressImage's
@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const imagingSrc = readFileSync(fileURLToPath(new URL("../website/imaging.js", import.meta.url)), "utf8");
+const imagingSrc = readFileSync(fileURLToPath(new URL("../public/imaging.js", import.meta.url)), "utf8");
 new Function(imagingSrc)();
 const imaging = (globalThis as { ThingeryImaging: Record<string, (...args: unknown[]) => unknown> }).ThingeryImaging;
 

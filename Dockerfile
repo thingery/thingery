@@ -23,6 +23,6 @@ COPY --from=build /app/dist ./dist
 # itself always rebuilds when the args change.
 RUN printf '{"commit":"%s","buildTime":"%s"}\n' "$GIT_COMMIT" "$BUILD_TIME" > /app/dist/build-info.json
 COPY db ./db
-COPY website ./website
+COPY public ./public
 EXPOSE 3000
 CMD ["node", "dist/index.js"]

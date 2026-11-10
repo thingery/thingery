@@ -1,5 +1,5 @@
 // Pure view helpers for the account page (THI-114). Kept free of DOM access
-// so they unit-test DOM-less (same pattern as website/next-filter.js).
+// so they unit-test DOM-less (same pattern as public/next-filter.js).
 
 /** Placeholder shown wherever the live key belongs once it is no longer
  * sent by /api/me — the key is show-once (signup/login/regenerate only). */

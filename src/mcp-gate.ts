@@ -106,6 +106,9 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   "confirm_receipt",
   "open_dispute",
   "release_funds",
+  // THI-567: order messaging tools join the funnel events.
+  "send_order_message",
+  "list_order_messages",
   // Buyer-alert intent tools (THI-360 spec rev 2, PR 2) — counted in the
   // funnel events instead of falling into the _unknown bucket.
   "save_intent",

@@ -240,7 +240,9 @@ describe.skipIf(!available)("admin dispute pages (spec admin-dispute-ui PR-B)", 
     expect(html).toContain("Messages between the parties");
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>alert");
-    expect(html).not.toContain("<textarea"); // read-only: no compose form in the admin view
+    // Read-only: no compose form for messages (name="body" input / messages action).
+    expect(html).not.toContain('name="body"');
+    expect(html).not.toContain("/messages");
     // No rows → section absent entirely.
     await db.query("DELETE FROM order_messages WHERE order_id = $1", [orderId]);
     const after = await get(`/admin/disputes/${orderId}`);

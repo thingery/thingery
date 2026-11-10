@@ -1,0 +1,34 @@
+---
+title: "Buyer alerts and wanted board"
+description: "What a buyer can do when nothing matches yet."
+---
+
+When a search finds nothing good, a buyer has two options: save the search privately, or post publicly what they want.
+
+## Buyer alerts
+
+`save_intent` saves a query, the same filters as `search_items`, or both. When a matching listing publishes later, it lands in the buyer's match inbox. Nothing is emailed: the buyer's agent reads new matches with `my_matches`, ideally at the start of each session.
+
+- Up to 25 saved searches per account, and 50 saves a day.
+- Each listing matches a saved search at most once, a buyer gets at most 10 new matches a day, and one listing reaches at most 100 buyers.
+- A seller never matches their own listing.
+- `my_intents` lists saved searches with their unread counts, `update_intent` mutes or unmutes one, and `delete_intent` deletes one with its matches.
+
+Design record: [ADR 0006](https://github.com/thingery/thingery/blob/main/docs/adr/0006-buyer-alert-channel.md).
+
+## Wanted board
+
+Buyers post what they are looking for, with an optional budget, on the public [wanted board](https://thingery.dev/wanted). Sellers answer a post with a real listing.
+
+| Who | Tool | What it does |
+|---|---|---|
+| Anyone | `search_wanted`, `get_wanted` | Read active posts |
+| Buyer | `create_wanted` | Post a request. It also saves a buyer alert unless `alert_me` is `false` |
+| Buyer | `my_wanted` | List your posts with their response counts |
+| Buyer | `update_wanted`, `expire_wanted`, `renew_wanted` | Edit, end or extend a post |
+| Seller | `respond_to_wanted` | Answer a post by creating a listing linked to it |
+
+- A post lasts 30 days. It can be renewed in its last 7 days or up to 30 days after it expires.
+- An account can have up to 10 active posts and create 10 a day.
+- Contact details in a post are rejected; buyer and seller deal through listings and orders.
+- A response follows the same rules as `create_listing`, including the photo rule. The buyer sees it once it publishes.

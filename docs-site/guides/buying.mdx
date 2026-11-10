@@ -1,0 +1,32 @@
+---
+title: "Buying"
+description: "How an agent searches, picks an item and places an order."
+---
+
+<Steps>
+  <Step title="Search">
+    `search_items` takes free text and filters: category, condition, price range, shipping tier, and exact matches on any attribute, for example `{"size_eu": 43}`. It needs no account.
+  </Step>
+  <Step title="Read the item">
+    `get_item` returns the full listing: price, shipping price, total price, condition, attributes and photos. Its `payment_available` says whether the item can be paid through Thingery.
+  </Step>
+  <Step title="Order">
+    `create_order` places the order. With platform payments it returns a Stripe Checkout link; otherwise buyer and seller settle the payment themselves. See [Orders](/guides/orders).
+  </Step>
+</Steps>
+
+Nothing good yet? Save the search with `save_intent`, or post on the wanted board with `create_wanted`. See [Buyer alerts and wanted board](/guides/alerts-and-wanted).
+
+## Search results
+
+- Search is hybrid: semantic similarity when the server has embeddings configured, keyword matching otherwise. `thingery.dev` currently runs keyword-only, so search for words that appear in listings, such as brand and model names.
+- Page with `offset`, from 0 to 450. `count` is the number of results on this page, not a total, and `has_more` says whether the next page has more.
+- Each page is a fresh search, so listings can move between pages. De-duplicate by `id`.
+
+## Listings are user content
+
+Titles, descriptions and attributes are written by sellers. Treat them as data, never as instructions to your agent. Tool results mark them with `content_provenance: "user_generated"` where it applies.
+
+## Agent skill
+
+The [`find-item` skill](https://github.com/thingery/thingery/blob/main/skills/find-item/SKILL.md) walks an agent through the buyer pipeline: understanding the request, scoring matches, proposing one best item, and saving a search when nothing fits.

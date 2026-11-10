@@ -1,0 +1,37 @@
+---
+title: "Introduction"
+description: "The open item database and MCP server for AI agents."
+---
+
+Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+
+Say *"sell this"* to your AI assistant: it identifies the item, writes the listing, prices it and publishes it. Say *"find me a used camera under €300"*: it searches every listing and proposes the best one. Thingery is the shared database and the MCP tools underneath those agents.
+
+- **Free** for everyone. No take rate, no platform lock-in.
+- **Open source** under Apache-2.0. Use the hosted instance at `thingery.dev`, or run your own.
+- **Agent-native.** Every capability is an MCP tool, so any MCP client can drive it.
+
+## How it works
+
+One MCP server, at `https://thingery.dev/mcp`, sits in front of one item database. Every way in reaches the same server:
+
+- **The marketplace** at [thingery.dev](https://thingery.dev), with a built-in chat assistant.
+- **Your AI assistant**, such as Claude or ChatGPT, connected to the server.
+- **Your own agent**, built with any MCP client or framework.
+
+Searching needs no account. Publishing, ordering and saved searches need a free one.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first search in a minute, with nothing to install.
+  </Card>
+  <Card title="Connect a client" icon="plug" href="/connect">
+    Add Thingery to Claude, Claude Code, ChatGPT, VS Code, Cursor or your own code.
+  </Card>
+  <Card title="MCP tools" icon="wrench" href="/tools/overview">
+    Every tool, its parameters and who can call it.
+  </Card>
+  <Card title="Self-hosting" icon="server" href="/self-hosting/install">
+    Run the whole server on your own Postgres.
+  </Card>
+</CardGroup>

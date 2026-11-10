@@ -1,0 +1,46 @@
+---
+title: "Authentication"
+description: "Which tools need an account, and how to sign in with OAuth or an API key."
+---
+
+Searching and reading listings need nothing. Publishing, ordering, saved searches and the wanted board need a free account.
+
+| Credential | How to get it | What it allows |
+|---|---|---|
+| None | Send no `Authorization` header | Public tools only, such as `search_items`, `get_item`, `describe_category`, `search_wanted` and `get_wanted` |
+| OAuth | Your client signs you in; you approve once in the browser | Every tool |
+| API key (`thg_...`) | Create an account at [thingery.dev/login.html](https://thingery.dev/login.html). The key is shown once, at signup or when you rotate it | Every tool |
+
+Each tool's page says whether it needs an account. See [MCP tools](/tools/overview).
+
+## OAuth
+
+Claude, Claude Code, ChatGPT connectors, VS Code and the MCP Inspector discover the sign-in flow by themselves, using OAuth 2.1 with RFC 9728 resource metadata and dynamic client registration. Tokens rotate on their own. You can revoke a connected app at any time at [thingery.dev/apps](https://thingery.dev/apps).
+
+## API key
+
+Send the key on every request that needs it:
+
+```http
+Authorization: Bearer thg_YOUR_KEY
+```
+
+Without a browser, for example in CI or from an agent, signup is a plain API call and the response carries the key:
+
+```bash
+curl -s -X POST https://thingery.dev/api/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"choose-8-plus-chars"}' \
+  | jq -r '.seller.api_key'
+```
+
+Lost the key? Sign in and rotate a new one under **Account**.
+
+<Warning>
+Never commit a key. Read it from an environment variable such as `THINGERY_API_KEY`.
+</Warning>
+
+## Errors
+
+- A credential that is present but invalid is rejected with **HTTP 401**. It never falls back to anonymous access, even for public tools.
+- Calling a tool that needs an account without a credential returns a 401 whose challenge points OAuth clients at the sign-in flow.

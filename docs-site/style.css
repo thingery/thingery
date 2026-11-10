@@ -1,0 +1,5 @@
+/* Brand rule: carbon text on Sticker yellow. Mintlify draws the topbar button text in white. */
+#topbar-cta-button .text-white,
+#topbar-cta-button svg {
+  color: #14151a;
+}

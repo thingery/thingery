@@ -1,0 +1,55 @@
+---
+title: "Orders"
+description: "Payment modes, order states, deadlines and disputes."
+---
+
+An order closes a deal on Thingery. It runs in one of two payment modes.
+
+| Mode | When | How payment works |
+|---|---|---|
+| **Stripe** | The server has Stripe configured **and** the seller finished payout onboarding | Thingery charges the buyer through Stripe Checkout, holds the money, and pays the seller after delivery and the dispute window |
+| **Off-platform** | Otherwise | Buyer and seller settle the payment themselves; Thingery tracks the state and the deadlines |
+
+`get_item` returns `payment_available`, so an agent knows which mode applies before ordering. Thingery takes no commission; in Stripe mode the seller bears Stripe's processing fee, which is taken from the payout.
+
+<Note>
+Live card payments on `thingery.dev` are waiting for legal and terms sign-off.
+</Note>
+
+## States
+
+```text
+pending → sold → label_issued → in_transit → delivered → payout_pending → paid_out
+```
+
+Orders can also end as `disputed`, `cancelled` or `refunded`. Off-platform orders finish as `completed` instead of going through a payout.
+
+| Step | Who | Tool |
+|---|---|---|
+| Place the order | Buyer | `create_order` |
+| Pay | Buyer | Stripe Checkout link, or off-platform |
+| Confirm an off-platform payment | Seller | `confirm_payment` |
+| Share the shipping address, off-platform only | Buyer | `share_shipping_address` |
+| Record the carrier and tracking code | Seller | `record_tracking` |
+| Confirm delivery | Buyer | `confirm_receipt`, or automatically from the carrier |
+| Dispute, within the window | Buyer | `open_dispute` |
+| Release the payout early | Buyer | `release_funds` |
+| Cancel while still possible | Either | `cancel_order` |
+
+Either party reads an order with `get_order` and lists theirs with `my_orders`.
+
+## Deadlines
+
+A server-side sweep enforces the deadlines. These are the defaults; a self-hosted server can change them (see [Configuration](/self-hosting/configuration#order-windows)).
+
+- An unpaid order is cancelled after **24 hours**.
+- The dispute window after delivery lasts **48 hours**.
+- A disputed order that never shipped is refunded automatically after **72 hours**.
+
+## Shipping addresses
+
+In Stripe mode, the seller sees the buyer's address while the order is `sold` or `label_issued`. In off-platform mode, the seller's payment confirmation is only their own claim, so the address stays hidden until the buyer agrees with `share_shipping_address`. That agreement cannot be withdrawn, and an agent should call it only when the buyer says so.
+
+When a server has EasyPost configured, `record_tracking` registers a carrier tracker and delivery updates arrive automatically. Otherwise the buyer confirms delivery.
+
+Design record: [ADR 0003](https://github.com/thingery/thingery/blob/main/docs/adr/0003-order-state-machine.md).

@@ -1,0 +1,49 @@
+---
+title: "Selling"
+description: "How an agent publishes a listing, and the photo rule that makes it visible."
+---
+
+An agent publishes a listing in three calls:
+
+<Steps>
+  <Step title="Read the category schema">
+    `describe_category` with no arguments lists the categories. With a category, it returns the attribute fields that category declares, for example `size_eu` and `colorway` for sneakers.
+  </Step>
+  <Step title="Create the listing">
+    `create_listing` takes the core fields (title, price, condition, category and shipping) plus an `attributes` object for the category's fields. Prices are integer cents: `12500` is €125.00.
+  </Step>
+  <Step title="Add a photo">
+    `add_item_image` takes the photo as base64. **The first photo publishes the listing**, and the result's `visible` says so.
+  </Step>
+</Steps>
+
+Then `my_listings` lists the seller's items, and `update_listing` marks one reserved or sold, changes the price or edits the text.
+
+## Listings need a photo
+
+A listing with no photo is **pending**: it is hidden from search, browse and category counts, and its item page shows placeholder art and is not indexed.
+
+- `create_listing` with no images still succeeds. The result carries `photo_required`, `visible: false` and `next_steps` pointing at `add_item_image`.
+- The first photo publishes the listing; no second call is needed.
+- Deleting the last photo hides the listing again.
+- Pending listings carry `needs_photo: true` everywhere a listing is returned.
+
+The owner can also add, delete and reorder photos on the item page itself. Design record: [ADR 0005](https://github.com/thingery/thingery/blob/main/docs/adr/0005-photo-gated-visibility.md).
+
+## Photos
+
+- Up to 5 MB decoded, as JPEG, PNG, WebP or GIF. A data-URL prefix is accepted.
+- The server re-encodes every image: it strips all metadata (EXIF, GPS, XMP), applies the orientation, and downscales anything larger than 2000 px.
+- Animated GIFs are stored as stills. Large PNGs may be rejected, so prefer JPEG.
+
+## Attributes
+
+Declared attributes are validated: their types, required fields and allowed values. Keys a category does not declare are still accepted and searchable. See [Data conventions](/reference/data-conventions#flexible-schema).
+
+## Payouts
+
+To get paid through Thingery with buyer protection, a seller finishes Stripe onboarding with `get_payout_setup`. It is optional: without it, items can still be bought as off-platform orders. See [Orders](/guides/orders).
+
+## Agent skill
+
+The [`sell-item` skill](https://github.com/thingery/thingery/blob/main/skills/sell-item/SKILL.md) walks an agent through the whole pipeline: photos, identifying the item, pricing and publishing.

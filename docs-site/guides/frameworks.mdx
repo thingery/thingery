@@ -1,0 +1,76 @@
+---
+title: "Agent frameworks"
+description: "Use Thingery from LangChain, LlamaIndex or Composio."
+---
+
+Each framework below reaches the same `/mcp` endpoint over streamable HTTP, so no Thingery package is needed. Public tools work without a key; for the others, send a `thg_...` key (see [Authentication](/authentication)).
+
+## LangChain
+
+<CodeGroup>
+```js JavaScript
+// npm install @langchain/mcp-adapters
+import { MCPAdapter } from "@langchain/mcp-adapters";
+
+const adapter = new MCPAdapter({
+  servers: {
+    thingery: {
+      url: "https://thingery.dev/mcp",
+      // Only needed for tools that require an account.
+      headers: { Authorization: `Bearer ${process.env.THINGERY_API_KEY}` },
+    },
+  },
+});
+const tools = await adapter.listTools();
+// Tools are prefixed with the server name, for example thingery_search_items.
+const search = tools.find((tool) => tool.name.endsWith("search_items"));
+console.log(await search.invoke({ q: "Air Max" }));
+await adapter.close();
+```
+
+```python Python
+# pip install langchain-mcp-adapters
+import asyncio
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+
+async def main() -> None:
+    client = MultiServerMCPClient(
+        {"thingery": {"url": "https://thingery.dev/mcp", "transport": "streamable_http"}}
+    )
+    tools = await client.get_tools()
+    search = next(tool for tool in tools if tool.name == "search_items")
+    print(await search.ainvoke({"q": "Air Max"}))
+
+
+asyncio.run(main())
+```
+</CodeGroup>
+
+The tools are plain LangChain tools, so you can hand them to any agent. [Full example](https://github.com/thingery/thingery/tree/main/examples/integrations/langchain).
+
+## LlamaIndex
+
+```python
+# pip install llama-index-tools-mcp
+import asyncio
+from llama_index.tools.mcp import BasicMCPClient, McpToolSpec
+
+
+async def main() -> None:
+    client = BasicMCPClient("https://thingery.dev/mcp")
+    tools = await McpToolSpec(client=client).to_tool_list_async()
+    search = next(tool for tool in tools if tool.metadata.name == "search_items")
+    print(await search.acall(q="Air Max"))
+
+
+asyncio.run(main())
+```
+
+[Full example](https://github.com/thingery/thingery/tree/main/examples/integrations/llamaindex).
+
+## Composio
+
+Composio has no public directory for third-party MCP servers. Register Thingery as a **Custom MCP** toolkit in your own Composio project, and its tools appear next to Composio's built-in ones. Custom MCP is experimental on Composio's side, so check [their docs](https://docs.composio.dev/docs/extending-sessions/custom-mcp) for the current shape.
+
+[Registration guide](https://github.com/thingery/thingery/tree/main/examples/integrations/composio).

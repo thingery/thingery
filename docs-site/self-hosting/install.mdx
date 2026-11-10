@@ -1,0 +1,99 @@
+---
+title: "Install"
+description: "Run your own Thingery server on your own Postgres."
+---
+
+A self-hosted server exposes the same MCP tools as `thingery.dev`, with its own data. It needs Node 20 or newer and Postgres with the pgvector extension.
+
+<Note>
+The npm package is published at release time and can lag behind `thingery.dev` by days. `/healthz` reports the version a server runs. For the latest features, run from source.
+</Note>
+
+## From the npm package
+
+<Steps>
+  <Step title="Install">
+    ```bash
+    mkdir my-thingery && cd my-thingery
+    npm install thingery
+    ```
+  </Step>
+  <Step title="Start Postgres with pgvector">
+    ```bash
+    docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=thingery pgvector/pgvector:pg16
+    ```
+
+    No Docker? See [Local Postgres](#local-postgres-without-docker).
+  </Step>
+  <Step title="Apply the schema">
+    The schema ships with the package and is safe to re-run:
+
+    ```bash
+    psql "postgres://postgres:thingery@localhost:5432/postgres" \
+      -f node_modules/thingery/db/schema.sql
+    ```
+  </Step>
+  <Step title="Run the server">
+    `DATABASE_URL` is the only required variable:
+
+    ```bash
+    DATABASE_URL="postgres://postgres:thingery@localhost:5432/postgres" \
+    PORT=3000 node node_modules/thingery/dist/index.js
+    ```
+
+    The server answers at `http://localhost:3000`, with `/mcp`, `/browse`, `/healthz` and the HTTP API.
+  </Step>
+  <Step title="Create an account">
+    Open `http://localhost:3000/login.html` and sign up. Your `thg_...` key is shown right after signup. Then point any MCP client at `http://localhost:3000/mcp`.
+  </Step>
+</Steps>
+
+## From source
+
+```bash
+git clone https://github.com/thingery/thingery
+cd thingery
+npm install
+docker compose up -d db          # Postgres 16 with pgvector
+cp .env.example .env
+npm run db:migrate
+npm run db:seed                  # a demo seller and 3 listings; prints an API key
+npm run dev                      # http://localhost:3000
+```
+
+For a production deployment on a VPS behind Caddy, follow the [deployment runbook](https://github.com/thingery/thingery/blob/main/docs/deploy-vps.md).
+
+## Local Postgres without Docker
+
+The schema always creates the `vector` extension, even in keyword-only mode. On macOS, Homebrew's `pgvector` supports PostgreSQL 17 and 18:
+
+```bash
+brew install postgresql@18 pgvector
+brew services start postgresql@18
+psql postgres -c "CREATE ROLE thingery LOGIN PASSWORD 'thingery';" \
+              -c "CREATE DATABASE thingery OWNER thingery;"
+psql -d thingery -c "CREATE EXTENSION vector;"   # as the Postgres superuser
+```
+
+The default `DATABASE_URL` in `.env.example` matches this setup.
+
+## Run over stdio
+
+The package also runs as a local stdio MCP server, with no web server, which clients like Claude Desktop can start themselves:
+
+```json
+{
+  "mcpServers": {
+    "thingery": {
+      "command": "npx",
+      "args": ["-y", "thingery"],
+      "env": {
+        "DATABASE_URL": "postgres://thingery:thingery@localhost:5432/thingery",
+        "THINGERY_API_KEY": "thg_YOUR_KEY"
+      }
+    }
+  }
+}
+```
+
+It needs a database with the schema applied. `THINGERY_API_KEY` is optional; without it the server is read-only. The key must exist in **that** database, so create it on that server's `/login.html` or `/api/signup`.

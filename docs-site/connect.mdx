@@ -1,0 +1,103 @@
+---
+title: "Connect a client"
+description: "Add Thingery to Claude, Claude Code, ChatGPT, VS Code, Cursor, the MCP Inspector or your own code."
+---
+
+The hosted server is **`https://thingery.dev/mcp`**: Streamable HTTP, JSON-RPC 2.0, POST-only and stateless, so every request stands alone. A self-hosted instance exposes the same endpoint at its own URL.
+
+## Clients that sign in with OAuth
+
+Add the URL as a remote HTTP server. The client finds the sign-in flow on its own, you approve once in the browser, and its tokens rotate automatically. You can review and revoke connected apps at [thingery.dev/apps](https://thingery.dev/apps).
+
+<Tabs>
+  <Tab title="Claude">
+    Settings → Connectors → **Add custom connector** → `https://thingery.dev/mcp`
+  </Tab>
+  <Tab title="Claude Code">
+    ```bash
+    claude mcp add --transport http thingery https://thingery.dev/mcp
+    ```
+
+    Then run `/mcp` inside Claude Code, choose **thingery** and sign in. Add `--scope project` to share the server with your team through `.mcp.json`.
+  </Tab>
+  <Tab title="ChatGPT">
+    Add `https://thingery.dev/mcp` as a connector and sign in when ChatGPT asks.
+  </Tab>
+  <Tab title="VS Code">
+    In `.vscode/mcp.json`:
+
+    ```json
+    {
+      "servers": {
+        "thingery": { "type": "http", "url": "https://thingery.dev/mcp" }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="MCP Inspector">
+    ```bash
+    npx @modelcontextprotocol/inspector
+    ```
+
+    Choose the **Streamable HTTP** transport, enter `https://thingery.dev/mcp` and connect. The Inspector offers the sign-in.
+  </Tab>
+</Tabs>
+
+## Clients that use an API key
+
+Clients without OAuth, such as Cursor, scripts and CI, send an API key as a bearer token. See [Authentication](/authentication) to get one.
+
+<Tabs>
+  <Tab title="Cursor">
+    In `.cursor/mcp.json`:
+
+    ```json
+    {
+      "mcpServers": {
+        "thingery": {
+          "url": "https://thingery.dev/mcp",
+          "headers": { "Authorization": "Bearer thg_YOUR_KEY" }
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Any client">
+    ```json
+    {
+      "mcpServers": {
+        "thingery": {
+          "type": "http",
+          "url": "https://thingery.dev/mcp",
+          "headers": { "Authorization": "Bearer thg_YOUR_KEY" }
+        }
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+Leave out the `Authorization` header to use only the public tools, such as search.
+
+## Local server over stdio
+
+The [`thingery` npm package](https://www.npmjs.com/package/thingery) also runs as a local stdio server against your own Postgres. See [Self-hosting](/self-hosting/install#run-over-stdio).
+
+## Plain HTTP
+
+No client is needed. List the tools:
+
+```bash
+curl -s https://thingery.dev/mcp \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+The `accept` header is required by the transport; without it the server answers `406`.
+
+## Machine discovery
+
+- [`llms.txt`](https://thingery.dev/llms.txt): the endpoint and tool reference for language models.
+- [`/.well-known/agents.json`](https://thingery.dev/.well-known/agents.json): the agent capabilities manifest.
+- The server is listed in the official MCP registry as `io.github.thingery/thingery`.

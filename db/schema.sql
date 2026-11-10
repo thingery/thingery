@@ -521,3 +521,28 @@ CREATE TABLE IF NOT EXISTS wanted_buyer_quota (
 DROP TRIGGER IF EXISTS wanted_items_set_updated_at ON wanted_items;
 CREATE TRIGGER wanted_items_set_updated_at BEFORE UPDATE ON wanted_items
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- ---------------------------------------------------------------------------
+-- THI-567 (order messaging, spec docs/specs/order-messaging.md): party-to-
+-- party text messages scoped to one order. Additive only — nothing reads the
+-- table until the tools PR wires it. Reads stay available in every order
+-- status (history); sends are cut off at terminal statuses by the service,
+-- which also derives sender_role from the order row (never client-supplied).
+-- Messages are NOT written to order_events — that table is the transition
+-- audit log; message rows are their own record (spec: volume discipline).
+
+CREATE TABLE IF NOT EXISTS order_messages (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id    UUID NOT NULL REFERENCES orders(id),
+  sender_id   UUID NOT NULL REFERENCES sellers(id),  -- sellers IS the accounts table
+  sender_role TEXT NOT NULL CHECK (sender_role IN ('buyer','seller')),  -- denormalized from the order row at insert
+  body        TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 2000),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Keyset pagination on (order_id, created_at) — list_order_messages pages
+-- newest-first through one order's thread.
+CREATE INDEX IF NOT EXISTS order_messages_order_created_idx
+  ON order_messages (order_id, created_at);
+-- Per-account abuse review / retention sweeps scan by sender.
+CREATE INDEX IF NOT EXISTS order_messages_sender_created_idx
+  ON order_messages (sender_id, created_at);

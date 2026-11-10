@@ -1,6 +1,6 @@
 # Spec: minimal admin dispute UI (THI-562 work item 3)
 
-Status: proposed (2026-11-10) · Owner: Architect · Review: Security (new authenticated surface), CEO sign-off required — touches protected path `src/routes.ts`.
+Status: revised 2026-11-10 — THI-566 verdict pins B1–B3 landed (limiter scope, output encoding, no-store) · Owner: Architect · Review: Security re-approval on revised diff, CEO sign-off required — touches protected path `src/routes.ts`.
 
 ## Problem
 
@@ -37,12 +37,29 @@ existing attempt limiter and a `admin_login_{ok|denied}` security event cover
 brute force and audit. The JSON endpoint keeps its Bearer-key auth unchanged
 (scripts keep working; no behavior change to its callers).
 
+**Limiter scope (B1).** The strict `adminAttemptLimiter` (10/IP/hr) meters
+**only the three state-changing POSTs** — login, resolve, reveal.
+Authenticated page GETs (`/admin/disputes`, `/admin/disputes/:id`) run under a
+separate, higher GET limit (e.g. 120/IP/hr) so operator browsing can never eat
+the action bucket — the secure default must not be widened later for
+usability.
+
 **CSRF.** `POST /admin/disputes/:id/resolve` (form) requires a CSRF token
 embedded in the detail page, bound to the session (HMAC of `"csrf|" + exp`,
 same secret) and checked server-side. SameSite=Strict is defense-in-depth,
 not the control.
 
 **Pages.**
+
+**Output encoding (B2).** Every interpolated field — item titles, handles,
+message bodies, event payloads, and error re-renders — is contextually
+escaped via the existing `escapeHtml` discipline in both body and attribute
+contexts; pages render only through the `page()` helper. This pins the named
+stored-XSS→admin-session-takeover threat shut.
+
+**Caching (B3).** All `/admin` pages send `Cache-Control: no-store` — they can
+render revealed PII; the JSON endpoint already sets it.
+
 1. `GET /admin/disputes` — table of `status = 'disputed'` orders: order id,
    item title, price, buyer/seller handles, disputed since. Newest first.
    Empty state says so, plainly.
@@ -89,7 +106,9 @@ None (no schema change). Deploy is code-only.
   change.
 - Pages: disputed list content and empty state; detail 404s for non-disputed
   and non-existent ids (uniform); address masked until reveal; reveal logs
-  the security event.
+  the security event; every interpolated field asserts escaped output (B2);
+  `/admin` GETs carry `Cache-Control: no-store` (B3); action POSTs consume
+  the strict limiter while page GETs consume the separate GET limit (B1).
 - Resolve: refund path and release path produce the same transitions/events
   as the JSON endpoint (shared-core test), note length validation, re-render
   on error.

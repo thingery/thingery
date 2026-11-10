@@ -1,6 +1,6 @@
 # Spec: buy shipping labels through the product — EasyPost live (THI-562 work item 2)
 
-Status: proposed (2026-11-10) · Owner: Architect · Review: Security (spend + external API + addresses), CEO sign-off required — touches protected paths `db/schema.sql`, `src/tools.ts`.
+Status: revised 2026-11-10 — THI-566 verdict amendments A1–A3 landed (spend gates + reconcile audit) · Owner: Architect · Review: Security re-approval on revised diff, CEO sign-off required — touches protected paths `db/schema.sql`, `src/tools.ts`.
 
 ## Problem
 
@@ -38,10 +38,28 @@ New seller tool `buy_shipping_label` on a `sold`, shippable order:
    buyer address schema, F16 rules: max lengths, unknown keys rejected);
    parcel = `weight_grams` + `dimensions_mm` from the item, overridable.
 3. Create shipment → fetch rates → pick the lowest-cost rate, or the cheapest
-   rate matching an optional `carrier_preference` (e.g. `"DHL"`).
-4. Buy the label (EasyPost `/v2/shipments/:id/buy`). Result gives
+   rate matching an optional `carrier_preference` (e.g. `"DHL"`). Rates quoted
+   in a currency other than the EasyPost account base currency (EUR) are
+   **skipped at selection** — not selectable in v1 — so every stored
+   `cost_cents` is comparable by plain integer (fail-securely).
+4. **Spend gate (server-side, before `/buy`)** — THI-566 A1/A2:
+   - **A1 per-label cap:** the chosen rate's `cost_cents` must be
+     ≤ `LABEL_MAX_COST_CENTS` (default 3000 ≈ €30). Above → clear
+     `label_cost_exceeds_cap` error naming the cap; **no EasyPost buy call is
+     made**.
+   - **A2 platform daily budget:** the sum of the current UTC day's
+     `cost_cents` across all `label_purchase` rows plus the chosen rate's cost
+     must be ≤ `LABEL_DAILY_BUDGET_CENTS` (default 20000 ≈ €200;
+     **0 = kill switch** — every purchase refused). Above → refuse with a
+     clear `label_budget_exceeded` error and emit a `label_budget_exceeded`
+     security event on every attempt while over budget (alert path).
+   Both checks read env + DB only — no client-supplied input can widen them.
+   Concurrent purchases can overshoot the budget by the in-flight count; the
+   overshoot is bounded and accepted (same boundary reasoning as the
+   order-message cap).
+5. Buy the label (EasyPost `/v2/shipments/:id/buy`). Result gives
    `label_url` (https), `tracker.id`, `tracking_code`, `carrier`.
-5. Persist `carrier, tracking_code, tracker_id, label_url` and a
+6. Persist `carrier, tracking_code, tracker_id, label_url` and a
    `label_purchase` snapshot, **in the same transaction** as the state
    transition `sold → label_issued` via a **new trigger `label_purchased`**
    (transition #5b, actor `seller`, both payment modes — off_platform sellers
@@ -55,13 +73,40 @@ event with the order id and shipment id, and the operator reconciles manually
 accepted; alternatives (CAS-then-buy leaves orders labeled but unbuyable, or
 two-phase EasyPost holds) add state for no v1 benefit (Simplicity lens).
 
+**Crash-window orphans + periodic audit (A3, runbook):** a crash between the
+EasyPost `/buy` call and the persist transaction leaves no code path to fire
+`label_bought_orphan` — the same orphan exposure, silently. Fold a periodic
+**EasyPost-shipments-vs-`label_purchase` audit** into the same
+manual-reconcile runbook, run daily alongside backups: list recent EasyPost
+shipments, diff against `label_purchase` rows by `shipment_id`, refund
+unexplained/unused labels, file findings. One reconcile procedure covers both
+the cancel race and the crash window; no extra code path in v1.
+
 **Who pays:** the platform's EasyPost account (labels are Thingery-borne
-cost, consistent with "free for buyers and sellers"). Cost exposure is capped
-by a durable daily quota.
+cost, consistent with "free for buyers and sellers"). Cost exposure is
+capped three ways: per-seller quota, per-label cap, platform daily budget.
 
 **Quota (durable, DB-backed):** `seller_label_quota` mirrors the
 `seller_upload_quota` pattern — 10 label purchases per seller per UTC day.
 Over-quota returns `rate_limited` with the reset time.
+
+**Spend controls in detail (A1/A2):** enforcement lives in the service layer
+(`buyShippingLabel` in `src/fulfillment.ts`), attaching at the
+`pickEasyPostRate` seam introduced by PR-A (#227): rate selection returns the
+cheapest eligible rate, then the gate (cap → budget) runs before any EasyPost
+`/buy` call. The daily budget is **derived, not counted**: aggregate
+`SUM((label_purchase->>'cost_cents')::int)` over rows whose
+`(label_purchase->>'bought_at')::date` is the current UTC day. Deriving from
+the persisted source of truth means no secondary counter can drift and the
+check is replay-safe (Webhook idempotency lens). v1 label volume is bounded by
+the caps themselves, so the aggregate scan is cheap; an index is a follow-up
+if volume ever justifies it (Simplicity lens). Env vars (no code change to
+tune): `LABEL_MAX_COST_CENTS` (default `3000`), `LABEL_DAILY_BUDGET_CENTS`
+(default `20000`; `0` = kill switch — the tool refuses with the budget error
+while tracker-only flows continue unchanged). Worst case after A1+A2: spend
+abuse is bounded, alerted, reversible; the watch signal (repeated off_platform
+sold→label_issued between the same account pairs) is derivable from
+`order_events` and belongs in the abuse notes.
 
 ## Data model changes (protected: `db/schema.sql`)
 
@@ -112,6 +157,12 @@ required (nothing is removed or narrowed).
 - Unit: easypost client (fetch seam: rate list, buy, error mapping),
   address zod (F16 parity with buyer address), quota increment/reset,
   transition #5b legality matrix.
+- Spend gate: chosen rate above `LABEL_MAX_COST_CENTS` → `label_cost_exceeds_cap`,
+  no `/buy` call issued; non-base-currency rate skipped at selection; day
+  aggregation sums only the current UTC day; refusal above budget emits
+  `label_budget_exceeded` on every attempt; `LABEL_DAILY_BUDGET_CENTS=0`
+  refuses all purchases (kill switch) while existing tools stay green;
+  concurrent-purchase overshoot bounded by in-flight count.
 - Integration: happy path sold → label_issued with persisted tracker + label
   snapshot; off_platform without consent → error naming `share_shipping_address`;
   cancel-race (order moves between validate and CAS) → orphan alert fired,
@@ -125,8 +176,13 @@ required (nothing is removed or narrowed).
   `payments_not_configured`-style `easypost_not_configured` (degraded mode,
   zero behavior change for existing tools). DevOps then sets prod keys +
   webhook secret (separate child issue) and buys the first production label.
-- Rollback: unset the key (tool degrades), revert code. Bought labels remain
-  real and tracked — same semantics as the Stripe key rollback documented in
+  Spend-gate env vars ship with the defaults above (`LABEL_MAX_COST_CENTS=3000`,
+  `LABEL_DAILY_BUDGET_CENTS=20000`) — no deployment change needed to be
+  protected from day one.
+- Rollback: unset the key (tool degrades), revert code, or set
+  `LABEL_DAILY_BUDGET_CENTS=0` as an **instant spend kill switch** that keeps
+  the rest of the service healthy. Bought labels remain real and tracked —
+  same semantics as the Stripe key rollback documented in
   `docs/deploy-vps.md` §5.
 
 ## Open questions
@@ -143,7 +199,8 @@ required (nothing is removed or narrowed).
 1. **PR-A (unprotected):** `src/easypost.ts` shipment/buy client + unit tests.
 2. **PR-B (protected):** schema (`label_purchase`, `seller_label_quota`) +
    transition #5b + `buyShippingLabel` service in `src/fulfillment.ts` +
-   quota + tests.
+   quota + **A1/A2 spend gate** (per-label cap, platform daily budget, kill
+   switch — enforced at the `pickEasyPostRate` seam before `/buy`) + tests.
 3. **PR-C (protected):** `buy_shipping_label` MCP tool + docs sync + contract
    tests.
 4. **DevOps child issue (parallel after PR-C merges):** prod keys, webhook

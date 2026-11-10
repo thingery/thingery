@@ -276,6 +276,13 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_mode TEXT NOT NULL DEFAULT '
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_price_cents INTEGER NOT NULL DEFAULT 0
                       CHECK (shipping_price_cents >= 0);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_address_shared_at TIMESTAMPTZ;
+-- Label purchase (spec docs/specs/label-purchase.md, THI-562 work item 2): the
+-- platform-bought EasyPost label snapshot, persisted in the same transaction as
+-- transition #5b (sold → label_issued). NULL for every order that reached
+-- label_issued via record_tracking — old rows and existing tool outputs are
+-- unchanged. bought_at (ISO UTC) is the A2 daily-budget aggregation key.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS label_purchase JSONB;
+-- {shipment_id, rate_id, carrier, service, cost_cents, currency, bought_at}
 DO $$
 BEGIN
   -- Widen the status CHECK with 'completed' (off_platform terminal state, §11.2).
@@ -340,6 +347,17 @@ CREATE TABLE IF NOT EXISTS seller_upload_quota (
   day       DATE NOT NULL,
   uploads   INT NOT NULL DEFAULT 0,
   bytes     BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (seller_id, day)
+);
+
+-- Seller label quota (spec docs/specs/label-purchase.md): per-seller daily
+-- count of platform-bought labels (10/day). Same atomic upsert-increment
+-- pattern as seller_upload_quota above; quota resets naturally per UTC day
+-- (no sweep). The day is UTC, matching the A2 budget aggregation.
+CREATE TABLE IF NOT EXISTS seller_label_quota (
+  seller_id UUID NOT NULL REFERENCES sellers(id),
+  day       DATE NOT NULL,
+  used      INT NOT NULL DEFAULT 0,
   PRIMARY KEY (seller_id, day)
 );
 
@@ -503,3 +521,28 @@ CREATE TABLE IF NOT EXISTS wanted_buyer_quota (
 DROP TRIGGER IF EXISTS wanted_items_set_updated_at ON wanted_items;
 CREATE TRIGGER wanted_items_set_updated_at BEFORE UPDATE ON wanted_items
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- ---------------------------------------------------------------------------
+-- THI-567 (order messaging, spec docs/specs/order-messaging.md): party-to-
+-- party text messages scoped to one order. Additive only — nothing reads the
+-- table until the tools PR wires it. Reads stay available in every order
+-- status (history); sends are cut off at terminal statuses by the service,
+-- which also derives sender_role from the order row (never client-supplied).
+-- Messages are NOT written to order_events — that table is the transition
+-- audit log; message rows are their own record (spec: volume discipline).
+
+CREATE TABLE IF NOT EXISTS order_messages (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id    UUID NOT NULL REFERENCES orders(id),
+  sender_id   UUID NOT NULL REFERENCES sellers(id),  -- sellers IS the accounts table
+  sender_role TEXT NOT NULL CHECK (sender_role IN ('buyer','seller')),  -- denormalized from the order row at insert
+  body        TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 2000),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Keyset pagination on (order_id, created_at) — list_order_messages pages
+-- newest-first through one order's thread.
+CREATE INDEX IF NOT EXISTS order_messages_order_created_idx
+  ON order_messages (order_id, created_at);
+-- Per-account abuse review / retention sweeps scan by sender.
+CREATE INDEX IF NOT EXISTS order_messages_sender_created_idx
+  ON order_messages (sender_id, created_at);

@@ -80,9 +80,12 @@ export const TOOL_PAGES: ToolPage[] = [
       "confirm_payment",
       "share_shipping_address",
       "record_tracking",
+      "buy_shipping_label",
       "confirm_receipt",
       "open_dispute",
       "release_funds",
+      "send_order_message",
+      "list_order_messages",
     ],
   },
   {

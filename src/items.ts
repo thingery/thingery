@@ -1,7 +1,7 @@
 import { pool, type ItemRow } from "./db.js";
 import { embedText, itemEmbeddingText } from "./embed.js";
 import { evaluateListingForIntents } from "./intents.js";
-import { logSecurityEvent } from "./security-events.js";
+import { logSecurityEvent, type ListingWriteLimit } from "./security-events.js";
 import { markWantedResponsesPublished } from "./wanted.js";
 import {
   attributeShapeErrors,
@@ -37,18 +37,39 @@ export interface CreateItemInput {
 export const MAX_LISTING_CREATES_PER_SELLER_PER_DAY = 100;
 export const MAX_ACTIVE_LISTINGS_PER_SELLER = 200;
 
-/** Thrown by createItem when the seller is over either velocity cap. `code`
+// New-account write ramp (GH #212 / THI-542, spec docs/specs/account-write-ramp.md):
+// sellers younger than NEW_SELLER_RAMP_DAYS write under tighter caps until the
+// account ages out — per-account caps alone do not bound total write volume
+// because farmed accounts are cheap (signup is one limiter hit). Regime is a
+// pure function of sellers.created_at at call time: no stored state, nothing
+// to migrate, every account older than the ramp at deploy is grandfathered
+// into the full caps automatically. Numbers confirmed by the THI-543 Security
+// design review — Security owns tuning, do not adjust here.
+export const NEW_SELLER_RAMP_DAYS = 7;
+export const NEW_SELLER_MAX_LISTING_CREATES_PER_DAY = 10;
+export const NEW_SELLER_MAX_ACTIVE_LISTINGS = 20;
+
+/** Thrown by createItem when the seller is over either cap. `code`
  *  is the MCP error code create_listing reports — `rate_limited`, the
  *  documented choice (THI-113): the rejection is quota-shaped, and agents
- *  already treat that code as back-off-and-retry-later. */
+ *  already treat that code as back-off-and-retry-later. `limit` says which
+ *  regime rejected (it mirrors the listing_write security-event field), and
+ *  both messages interpolate the cap constants above — THI-543 Q2: never a
+ *  hardcoded string that can drift from the numbers. */
 export class ListingLimitError extends Error {
   readonly code = "rate_limited";
-  constructor() {
+  readonly limit: ListingWriteLimit;
+  constructor(limit: ListingWriteLimit) {
     super(
-      `Listing limit reached (max ${MAX_LISTING_CREATES_PER_SELLER_PER_DAY} creates/day, ` +
-        `${MAX_ACTIVE_LISTINGS_PER_SELLER} active). Contact support if you need more.`,
+      limit === "new_seller_ramp"
+        ? `New-account limit reached (max ${NEW_SELLER_MAX_LISTING_CREATES_PER_DAY} creates/day, ` +
+          `${NEW_SELLER_MAX_ACTIVE_LISTINGS} active during your first ${NEW_SELLER_RAMP_DAYS} days). ` +
+          `Full limits unlock automatically after ${NEW_SELLER_RAMP_DAYS} days.`
+        : `Listing limit reached (max ${MAX_LISTING_CREATES_PER_SELLER_PER_DAY} creates/day, ` +
+          `${MAX_ACTIVE_LISTINGS_PER_SELLER} active). Contact support if you need more.`,
     );
     this.name = "ListingLimitError";
+    this.limit = limit;
   }
 }
 
@@ -104,24 +125,47 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
   // Caps run BEFORE the embeddings call: every create costs an embeddings-API
   // request (the cost-DoS in security doc §6 H4), so rejecting after embedding
   // would still pay the abuser's bill. One indexed COUNT round trip
-  // (items_seller_idx) covers both caps. Check-then-insert is not atomic —
-  // concurrent creates can overshoot by the width of the race; that is the
-  // documented pragmatic-90% posture, not a strict quota.
-  const { rows: capRows } = await pool.query<{ creates_24h: string; active: string }>(
+  // (items_seller_idx) covers both caps and — GH #212 write ramp — also fetches
+  // the seller's created_at in the same round trip (scalar subselect on the
+  // sellers PK), so the regime costs no extra query. Check-then-insert is not
+  // atomic — concurrent creates can overshoot by the width of the race; that is
+  // the documented pragmatic-90% posture, not a strict quota.
+  const { rows: capRows } = await pool.query<{
+    creates_24h: string;
+    active: string;
+    seller_created_at: Date | null;
+  }>(
     `SELECT COUNT(*) FILTER (WHERE created_at > now() - interval '24 hours') AS creates_24h,
-            COUNT(*) FILTER (WHERE status = 'active') AS active
+            COUNT(*) FILTER (WHERE status = 'active') AS active,
+            (SELECT created_at FROM sellers WHERE id = $1) AS seller_created_at
      FROM items WHERE seller_id = $1`,
     [input.seller_id],
   );
-  if (
-    Number(capRows[0].creates_24h) >= MAX_LISTING_CREATES_PER_SELLER_PER_DAY ||
-    Number(capRows[0].active) >= MAX_ACTIVE_LISTINGS_PER_SELLER
-  ) {
+  // GH #212 / THI-542: effective caps are computed here, in TypeScript — age
+  // < 7 days (GH #212 ramp) → 10/day + 20 active, else the full 100/200; the
+  // comparison below proceeds exactly as before. A missing created_at cannot
+  // happen (NOT NULL, and the row is the authenticated seller) — it fails
+  // strict into the ramp rather than granting the full caps.
+  const sellerAgeMs = capRows[0].seller_created_at
+    ? Date.now() - new Date(capRows[0].seller_created_at).getTime()
+    : Number.NaN;
+  const ramped = !(sellerAgeMs >= NEW_SELLER_RAMP_DAYS * 24 * 60 * 60 * 1000);
+  const maxCreatesPerDay = ramped
+    ? NEW_SELLER_MAX_LISTING_CREATES_PER_DAY
+    : MAX_LISTING_CREATES_PER_SELLER_PER_DAY;
+  const maxActive = ramped ? NEW_SELLER_MAX_ACTIVE_LISTINGS : MAX_ACTIVE_LISTINGS_PER_SELLER;
+  if (Number(capRows[0].creates_24h) >= maxCreatesPerDay || Number(capRows[0].active) >= maxActive) {
     // THI-112 × THI-113 merge synthesis: the cap rejection is the create path's
     // "rejected" listing_write outcome (shape already in SecurityEvent; updateItem
-    // logs its rejections the same way). Seller id only — no-payload rule, §6.
-    logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: input.seller_id });
-    throw new ListingLimitError();
+    // logs its rejections the same way). `limit` names the regime (THI-543 Q4):
+    // new_seller_ramp vs seller_cap — three states, no null-handling ambiguity
+    // in monitoring queries. Seller id only — no-payload rule, §6.
+    const limit: ListingWriteLimit = ramped ? "new_seller_ramp" : "seller_cap";
+    logSecurityEvent(
+      { type: "listing_write", action: "create", outcome: "rejected", limit },
+      { sellerId: input.seller_id },
+    );
+    throw new ListingLimitError(limit);
   }
 
   const embedding = await embedText(

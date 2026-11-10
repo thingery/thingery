@@ -25,6 +25,7 @@ import {
   ListingLimitError,
   MAX_ACTIVE_LISTINGS_PER_SELLER,
   MAX_LISTING_CREATES_PER_SELLER_PER_DAY,
+  NEW_SELLER_MAX_LISTING_CREATES_PER_DAY,
 } from "../src/items.js";
 import * as embed from "../src/embed.js";
 import { addItemImage } from "../src/images.js";
@@ -233,20 +234,29 @@ describe("call sites emit their events (THI-112)", () => {
     expect(events(spy)[2]).toMatchObject({ type: "listing_write", action: "update", outcome: "rejected", sellerId: "seller-upd" });
   });
 
-  it("listing create over a cap (THI-233 N1): ListingLimitError rejection logs listing_write/create/rejected", async () => {
+  it("listing create over a cap (THI-233 N1, GH #212 ramp): rejection logs listing_write/create/rejected with the regime in `limit`", async () => {
     const spy = spyLog();
-    const rejected = (sellerId: string) => ({
+    const rejected = (sellerId: string, limit: "new_seller_ramp" | "seller_cap") => ({
       ts: expect.any(String),
       type: "listing_write",
       action: "create",
       outcome: "rejected",
+      limit,
       sellerId,
       ip: null,
     });
-    // Velocity cap: creates_24h at the boundary (>= rejects), active 0 so
-    // only the first cap fires. COUNT strings, as Postgres returns them.
+    // Full velocity cap: an 8-day-old seller (past the GH #212 ramp) at the
+    // 100/day boundary, active 0 so only the first cap fires. COUNT strings,
+    // as Postgres returns them; created_at rides the same row (same round
+    // trip as the COUNTs).
     vi.spyOn(pool, "query").mockResolvedValueOnce({
-      rows: [{ creates_24h: String(MAX_LISTING_CREATES_PER_SELLER_PER_DAY), active: "0" }],
+      rows: [
+        {
+          creates_24h: String(MAX_LISTING_CREATES_PER_SELLER_PER_DAY),
+          active: "0",
+          seller_created_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000),
+        },
+      ],
     } as never);
     await expect(
       createItem({
@@ -261,11 +271,17 @@ describe("call sites emit their events (THI-112)", () => {
         images: [],
       }),
     ).rejects.toBeInstanceOf(ListingLimitError);
-    expect(events(spy)).toEqual([rejected("seller-cap-vel")]);
+    expect(events(spy)).toEqual([rejected("seller-cap-vel", "seller_cap")]);
 
-    // Active cap: same rejection shape from the other branch (velocity 0).
+    // Full active cap: same rejection shape from the other branch (velocity 0).
     vi.spyOn(pool, "query").mockResolvedValueOnce({
-      rows: [{ creates_24h: "0", active: String(MAX_ACTIVE_LISTINGS_PER_SELLER) }],
+      rows: [
+        {
+          creates_24h: "0",
+          active: String(MAX_ACTIVE_LISTINGS_PER_SELLER),
+          seller_created_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000),
+        },
+      ],
     } as never);
     await expect(
       createItem({
@@ -280,7 +296,37 @@ describe("call sites emit their events (THI-112)", () => {
         images: [],
       }),
     ).rejects.toThrow(/200 active/);
-    expect(events(spy)).toEqual([rejected("seller-cap-vel"), rejected("seller-cap-act")]);
+    expect(events(spy)).toEqual([rejected("seller-cap-vel", "seller_cap"), rejected("seller-cap-act", "seller_cap")]);
+
+    // Ramp cap (GH #212 / THI-542): a day-0 seller over the 10/day ramp cap
+    // rejects with the ramp class in `limit` and the ramp message.
+    vi.spyOn(pool, "query").mockResolvedValueOnce({
+      rows: [
+        {
+          creates_24h: String(NEW_SELLER_MAX_LISTING_CREATES_PER_DAY),
+          active: "0",
+          seller_created_at: new Date(),
+        },
+      ],
+    } as never);
+    await expect(
+      createItem({
+        seller_id: "seller-cap-ramp",
+        title: "Vintage sneakers",
+        description: "over the new-account ramp",
+        category: "sneakers",
+        condition: "good",
+        price_cents: 12500,
+        currency: "EUR",
+        shipping_tier: "locker",
+        images: [],
+      }),
+    ).rejects.toThrow(/New-account limit reached/);
+    expect(events(spy)).toEqual([
+      rejected("seller-cap-vel", "seller_cap"),
+      rejected("seller-cap-act", "seller_cap"),
+      rejected("seller-cap-ramp", "new_seller_ramp"),
+    ]);
   });
 
   it("upload reject: unsupported media type logs image_upload/rejected with a slug reason (no media type echoed)", async () => {
@@ -343,7 +389,13 @@ describe("cap rejection skips the embeddings call (THI-233 N2)", () => {
   it("createItem rejects over the cap without ever calling embedText", async () => {
     const embedSpy = vi.spyOn(embed, "embedText");
     vi.spyOn(pool, "query").mockResolvedValue({
-      rows: [{ creates_24h: String(MAX_LISTING_CREATES_PER_SELLER_PER_DAY), active: "0" }],
+      rows: [
+        {
+          creates_24h: String(NEW_SELLER_MAX_LISTING_CREATES_PER_DAY),
+          active: "0",
+          seller_created_at: new Date(),
+        },
+      ],
     } as never);
     await expect(createItem(overCapInput())).rejects.toBeInstanceOf(ListingLimitError);
     expect(embedSpy).not.toHaveBeenCalled();
@@ -354,7 +406,15 @@ describe("cap rejection skips the embeddings call (THI-233 N2)", () => {
     // cap, createItem reaches the embeddings call exactly once.
     const embedSpy = vi.spyOn(embed, "embedText").mockResolvedValue([0.1, 0.2]);
     vi.spyOn(pool, "query")
-      .mockResolvedValueOnce({ rows: [{ creates_24h: "0", active: "0" }] } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            creates_24h: "0",
+            active: "0",
+            seller_created_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000),
+          },
+        ],
+      } as never)
       .mockResolvedValueOnce({ rows: [{ id: "item-cap-order-ok", status: "active" }] } as never);
     const item = await createItem(overCapInput());
     expect(item.id).toBe("item-cap-order-ok");
@@ -424,6 +484,9 @@ describe("create-time validation rejects emit listing_write/create/rejected (THI
     expect(JSON.parse(invalid.content![0].text!).code).toBe("invalid_attributes");
 
     expect(events(spy)).toEqual([rejectedEvent, rejectedEvent]);
+    // GH #212: validation rejects carry no `limit` — the key is structurally
+    // absent (not null, not undefined) from the emitted line.
+    expect("limit" in events(spy)[0]).toBe(false);
   });
 
   it("chat create_listing (src/chat.ts): unknown category and invalid attributes both log the reject", async () => {

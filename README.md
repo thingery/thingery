@@ -72,7 +72,7 @@ Machine discovery: [`llms.txt`](website/llms.txt) · [`agents.json`](website/.we
 
 ## Roadmap
 
-1. ~~**Order state machine**~~ — **shipped**: orders with Stripe Connect payouts, carrier webhooks, disputes, and deadline sweeps ([ADR 0003](docs/adr/0003-order-state-machine.md)). Next: live-mode Stripe after legal/ToS sign-off.
+1. ~~**Order state machine**~~ — **shipped in code; payments not live yet**: orders with Stripe Connect payouts, carrier webhooks, disputes, and deadline sweeps ([ADR 0003](docs/adr/0003-order-state-machine.md)). thingery.dev runs orders off-platform only — no Stripe keys are configured in production — until legal/ToS sign-off flips payments on.
 2. **Seller skill upgrade** — **photo capture shipped**: frictionless item-page capture, placeholder art, and photo-gated publishing ([ADR 0005](docs/adr/0005-photo-gated-visibility.md)). Comparable-based pricing is deferred until listings are numerous enough to be real comparables.
 3. **Buyer alerts** — **next up**: "new match for your intent" event stream.
 4. **Federation protocol** — instance-to-instance sync so anyone can host a node of the Item Graph. **Deferred**.

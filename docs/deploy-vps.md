@@ -30,7 +30,7 @@ echo '/swapfile none swap sw 0 0' >> /etc/fstab
 curl -fsSL https://get.docker.com | sh
 ```
 
-## 2. DNS (at Infomaniak)
+## 2. DNS (at your domain provider)
 
 Point the domain at the server before starting Caddy (it needs to solve the ACME challenge):
 
@@ -242,7 +242,7 @@ RCLONE_PRUNE=off                                 # no-delete creds (THI-120 F2):
                                                   # skip client-side prune entirely
 # remote defined inline via env vars (no rclone.conf needed):
 RCLONE_CONFIG_OFFSITE_TYPE=s3
-RCLONE_CONFIG_OFFSITE_PROVIDER=Other             # e.g. Infomaniak public cloud
+RCLONE_CONFIG_OFFSITE_PROVIDER=Other             # any S3-compatible object storage
 RCLONE_CONFIG_OFFSITE_ENDPOINT=https://<s3-endpoint>
 RCLONE_CONFIG_OFFSITE_ACCESS_KEY_ID=<access-key>
 RCLONE_CONFIG_OFFSITE_SECRET_ACCESS_KEY=<secret-key>
@@ -488,7 +488,7 @@ Setup:
    passwordless root.
 
    ```bash
-   ssh thingery-vps
+   ssh <vps>
    sudo adduser --disabled-password --gecos '' deploy   # no sudo, no other keys
    sudo usermod -aG docker deploy                       # just enough to run compose
    sudo chown -R deploy:deploy /opt/thingery            # app tree owner

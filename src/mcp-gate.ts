@@ -102,6 +102,7 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   "my_orders",
   "cancel_order",
   "record_tracking",
+  "buy_shipping_label",
   "confirm_payment",
   "confirm_receipt",
   "open_dispute",

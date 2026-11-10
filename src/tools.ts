@@ -12,7 +12,7 @@ import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStri
 import { orderFlowConfig } from "./config.js";
 import { cancelOrder, createOrder, getOrderView, listOrdersForAccount, MAX_ORDER_LIST_LIMIT, ORDER_ROLES, OrderFlowError, shareShippingAddress, shippingAddressConsent, shippingAddressForSeller, type OrderRole } from "./order-flow.js";
 import { ORDER_STATUSES, type OrderStatus } from "./orders.js";
-import { confirmPayment, confirmReceipt, openDispute, recordTracking, releaseFunds } from "./fulfillment.js";
+import { buyShippingLabel, confirmPayment, confirmReceipt, openDispute, recordTracking, releaseFunds } from "./fulfillment.js";
 import { DEFAULT_MESSAGE_LIST_LIMIT, listOrderMessages, OrderMessageError, sendOrderMessage } from "./order-messages.js";
 import { logSecurityEvent } from "./security-events.js";
 
@@ -42,6 +42,7 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   "my_orders",
   "cancel_order",
   "record_tracking",
+  "buy_shipping_label",
   "confirm_payment",
   "confirm_receipt",
   "open_dispute",
@@ -1231,6 +1232,71 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
       } catch (e) {
         if (e instanceof OrderFlowError) return err(e.message, e.code);
         return err(`record_tracking failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "buy_shipping_label",
+    {
+      title: "Buy shipping label",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      description:
+        "Seller buys a shipping label through the platform on a sold, shippable order (sold → label_issued): " +
+        "the platform quotes EasyPost rates, buys the cheapest EUR one (or the cheapest matching " +
+        "carrier_preference), and stores carrier + tracking + label URL and a purchase snapshot. " +
+        "Weight and parcel dimensions default to the listing's estimates when present. Spend is guarded " +
+        "server-side: a per-label cap, a platform daily budget, and 10 purchases per seller per day — " +
+        "over-limit calls fail with a clear error before anything is bought. Off_platform orders need the " +
+        "buyer's address consent first (share_shipping_address); Stripe orders are ready as soon as they " +
+        "are sold. Replaying the call on the same label-issued order returns the stored label without a " +
+        "second purchase. Without EASYPOST_API_KEY the deployment is in degraded mode: the call fails " +
+        "with easypost_not_configured and the seller ships manually via record_tracking instead.",
+      inputSchema: {
+        order_id: z.string().uuid(),
+        from_address: z.object({
+          name: z.string().min(1).max(120),
+          line1: z.string().min(1).max(200),
+          line2: z.string().max(200).optional(),
+          city: z.string().min(1).max(80),
+          postal_code: z.string().min(1).max(20),
+          country: z.string().length(2).describe("ISO 3166-1 alpha-2, e.g. 'IT'"),
+          phone: z.string().min(1).max(30).optional(),
+        }).strict().describe("The seller's origin address (never persisted; re-sent per call)"),
+        weight_grams: z.number().int().min(1).max(70000).optional()
+          .describe("Parcel weight; defaults to the listing's estimate, else required"),
+        dimensions_mm: z.object({
+          length: z.number().int().min(1).max(2000),
+          width: z.number().int().min(1).max(2000),
+          height: z.number().int().min(1).max(2000),
+        }).strict().optional().describe("Parcel box size; defaults to the listing's estimate"),
+        carrier_preference: z.string().min(1).max(40).optional()
+          .describe("Optional carrier name substring, e.g. 'DHL' — picks the cheapest matching rate"),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const result = await buyShippingLabel(args.order_id as string, seller.id, {
+          fromAddress: args.from_address as Parameters<typeof buyShippingLabel>[2]["fromAddress"],
+          weightGrams: args.weight_grams as number | undefined,
+          dimensionsMm: args.dimensions_mm as Parameters<typeof buyShippingLabel>[2]["dimensionsMm"],
+          carrierPreference: args.carrier_preference as string | undefined,
+        });
+        return ok({
+          order: orderToPublic(result.order),
+          label: result.label,
+          ...(result.note ? { note: result.note } : {}),
+        });
+      } catch (e) {
+        if (e instanceof OrderFlowError) return err(e.message, e.code);
+        return err(`buy_shipping_label failed: ${describeError(e)}`);
       }
     },
   );

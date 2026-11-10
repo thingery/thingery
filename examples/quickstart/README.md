@@ -14,7 +14,7 @@ included; no clone, no `npm install`).
 
 - **Node 18 or newer** (`node --version`).
 - A free Thingery account + API key (below). No other setup.
-- Optional: `curl` to poke the endpoint by hand — see [docs/integrations.md](../../docs/integrations.md).
+- Optional: `curl` to poke the endpoint by hand — see [Connect a client](https://docs.thingery.dev/connect#plain-http).
 
 ## 1. Get an API key (30 seconds)
 
@@ -91,10 +91,10 @@ MCP_URL=http://localhost:3000/mcp THINGERY_API_KEY=thg_YOUR_KEY node quickstart.
 | Listing created but not in search | No photo yet — `add_item_image` publishes it |
 | `HTTP 429` | Rate limit (10 signups per IP per hour; per-seller write caps) — wait a bit and retry |
 
-More: [docs/integrations.md → Troubleshooting](../../docs/integrations.md#troubleshooting).
+More: [Troubleshooting](https://docs.thingery.dev/reference/troubleshooting).
 
 ## Next steps
 
-- Client configs (Claude Desktop, Cursor, VS Code, Inspector, curl): [docs/integrations.md](../../docs/integrations.md)
+- Client configs (Claude Desktop, Cursor, VS Code, Inspector, curl): [Connect a client](https://docs.thingery.dev/connect)
 - Framework examples (LangChain, LlamaIndex, Composio): [examples/integrations/](../integrations/)
-- Buying workflow + order tools: the README's [Order flow](../../README.md#order-flow) section
+- Buying workflow + order tools: [Buying](https://docs.thingery.dev/guides/buying) and [Orders](https://docs.thingery.dev/guides/orders)

@@ -21,134 +21,22 @@ proposes the best one. Thingery is the shared database and the MCP tools underne
 
 Chinese-market name: 物坊 (Wùfāng).
 
-## MCP tools
-
-| Tool | Auth | Purpose |
-|---|---|---|
-| `describe_category` | public | List categories and their declared attribute fields — the self-describing schema for agents. Declared fields get validated on create; undeclared keys are allowed, searchable, and their real use is surfaced via `undeclared_in_use` |
-| `search_items` | public | Hybrid semantic + keyword search with price/category/condition/attribute filters (any attribute key, declared or not). Page with `offset` (0-450, so at most 500 results per query); `count` is the page length, not a total, and `has_more` says whether the next offset returns more. Pages are separate searches, so de-duplicate by `id` |
-| `get_item` | public | Fetch one listing by id. Pending (photoless) listings are returned too — they carry `needs_photo: true` |
-| `create_listing` | seller | Publish an item — core fields plus a flexible `attributes` object (declared keys validated, extras pass through and stay searchable). **Listings are hidden from search until they have at least one photo**: a zero-image create succeeds but stays pending (`visible: false` + `next_steps` in the result) until a photo lands. Optional `shipping_price_cents` (0–100000, default 0 = free shipping) is what the buyer pays on top of the price; pickup-only (`local`) listings reject a non-zero value |
-| `add_item_image` | seller | Attach a photo to a listing (base64 in, stored server-side — no URLs needed; max 5 MB decoded). The first photo publishes a pending listing — the result's `visible` tells you. Images are re-encoded at ingest: metadata (EXIF/GPS/XMP) stripped, downscaled to ≤ 2000 px, animated GIFs stored as stills; large PNGs may be rejected — prefer JPEG |
-| `my_listings` | seller | Your listings by status |
-| `update_listing` | seller | Mark reserved/sold, adjust price or `shipping_price_cents` (future orders only; existing orders keep their snapshot), edit text or attributes |
-
-### Order flow
-
-| Tool | Auth | Purpose |
-|---|---|---|
-| `get_payout_setup` | seller | Stripe Express onboarding URL + status — optional, enables platform payment |
-| `create_order` | account | Order an item — returns a Stripe Checkout URL (stripe mode) or tracks an off-platform order |
-| `get_order` | account | One of your orders (buyer or seller side): status, tracking, deadlines. The seller also gets `shipping_address` while a shipped order is `sold` or `label_issued`; off-platform, only after the buyer shares it |
-| `my_orders` | account | Your orders, newest first — filter by `role` (buyer, seller, or both) and `status`; limit 1–100 (default 20), page with `next_cursor` |
-| `share_shipping_address` | buyer | Agree to show the seller the address of an off-platform order (`sold` or `label_issued`) |
-| `cancel_order` | account | Cancel while cancellable; paid orders refund instead |
-| `record_tracking` | seller | Record carrier + tracking code; auto carrier tracker when EasyPost is configured |
-| `confirm_payment` | seller | Confirm an off-platform payment (pending → sold) |
-| `confirm_receipt` | buyer | Confirm delivery — dispute window opens |
-| `open_dispute` | buyer | Dispute a delivered order; seller payout is held |
-| `release_funds` | buyer | Waive the dispute window, release the seller's payout now |
-
-Orders close a deal on-platform. **Stripe mode** (buyer protection: platform charges the
-buyer, holds funds, pays the seller after delivery + dispute window) runs when the deployment
-has Stripe configured *and* the seller finished payout onboarding; otherwise orders run in
-**off-platform mode** — Thingery tracks state and deadlines, parties settle payment themselves.
-States: `pending → sold → label_issued → in_transit → delivered → payout_pending → paid_out`
-with `disputed`/`cancelled`/`refunded` off-ramps; deadlines are enforced by a server-side sweep
-(unpaid cancels 24h, dispute window 48h, never-shipped disputes auto-refund 72h — defaults,
-env-tunable). Design record: [ADR 0003](docs/adr/0003-order-state-machine.md).
-
-Sellers authenticate with **OAuth** (one-click sign-in from any MCP host — see below) or a
-`thg_...` API key (`Authorization: Bearer`); search is anonymous. First-party web clients can
-call `/mcp` as the signed-in user with `Authorization: Bearer thgs_<session cookie value>` —
-see [Connect an MCP client](#connect-an-mcp-client).
-
-### Buyer alerts (saved searches)
-
-A buyer who finds nothing good can save the search as an intent; when a matching listing
-publishes later, their agent reads it as a match on the next session — no email, the
-buyer's agent pulls `my_matches` (design record: [ADR 0006](docs/adr/0006-buyer-alert-channel.md)).
-Fan-out is bounded: each match is inserted at most once per (intent, item), at most 10 new
-matches per buyer per day, at most 100 per published listing, and a seller never matches
-their own listing.
-
-| Tool | Auth | Purpose |
-|---|---|---|
-| `save_intent` | account | Save what the buyer is looking for — a query and/or the same filters as `search_items` (at least one of the two; max 25 saved intents, 50 saves/day) |
-| `my_intents` | account | Your saved searches, newest first, each with its unread-match count and muted state |
-| `update_intent` | account | Mute or unmute a saved search — muting stops future matches; existing matches stay readable |
-| `delete_intent` | account | Delete a saved search; its matches go with it |
-| `my_matches` | account | New listings matching a saved search — `unread_only`, `mark_read`, limit 1–50 (default 10). Items carry `content_provenance: "user_generated"` |
-
-### Wanted board
-
-Buyers post what they are looking for on the public [/wanted](https://thingery.dev/wanted)
-board; sellers answer a post with a real listing (`respond_to_wanted`). Post text is
-user-generated and marked `content_provenance: "user_generated"`.
-
-| Tool | Auth | Purpose |
-|---|---|---|
-| `search_wanted` | public | Search active wanted posts — free text plus category, condition, currency and `budget_max_cents_gte` filters, limit 1–50 (default 10), offset |
-| `get_wanted` | public | One active wanted post by id |
-| `respond_to_wanted` | seller | Answer a wanted post by creating a listing linked to it |
-| `create_wanted` | account | Publish what the buyer is looking for, with an optional budget range (max 10 active posts, 10 creates/day, 20 changes/hour). Also saves a buyer alert unless `alert_me` is false. Contact details are rejected |
-| `my_wanted` | account | Your wanted posts, every status, each with response counts and a `renewable` flag |
-| `update_wanted` | account | Edit an active post; only the fields sent change (20 edits/day) |
-| `expire_wanted` | account | End an active post now; renewable for 30 days after its expiry date |
-| `renew_wanted` | account | Extend a post 30 days — in its final 7 days or within 30 days after expiry |
-
-### Photo-required publishing
-
-New listings need **at least one photo** to be visible to buyers — browse, `search_items`, and
-category counts all exclude photoless listings (a single derived predicate; design record:
-[ADR 0005](docs/adr/0005-photo-gated-visibility.md)). What that means in practice:
-
-- `create_listing` with zero images **succeeds** — the listing is created but **pending**: hidden
-  from feeds, its item page shows placeholder art and is `noindex`. The result carries
-  `photo_required`, `visible: false`, and `next_steps` pointing at `add_item_image` (or the item
-  page, where the owner can snap a photo in two taps).
-- **The first photo publishes it** — no second call needed. `add_item_image` returns
-  `visible: true`; pending items carry `needs_photo: true` everywhere items are returned
-  (`get_item`, `my_listings`, …).
-- Deleting the **last** photo returns the listing to pending (hidden again); pre-rollout
-  listings are grandfathered and stay live without photos — on thingery.dev that means
-  created before 2026-10-27; a self-hosted instance grandfathers whatever exists when it
-  first deploys this version.
-- Owners manage photos on the item page (upload, delete, reorder) via the session-cookie routes
-  documented in [docs/item-images.md](docs/item-images.md).
-
-## Two ways to use it
-
-- **Zero-config (everyone):** open **`/chat.html`** on any deployment and talk to the Thingery
-  assistant — describe an item to sell or to find. Searching needs no account; publishing needs a
-  free one (`/login.html`, email + password; your MCP API key is shown after signup).
-  The chat uses an LLM configured on the server (`LLM_*` env vars) — you bring the key, any
-  OpenAI-compatible endpoint works; without it, chat is disabled while MCP and signup still work.
-- **Bring your own agent (power users):** point any MCP client at `/mcp` and **sign in with
-  OAuth** — Claude Desktop, ChatGPT connectors, VS Code and Inspector discover the sign-in
-  flow automatically (RFC 9728 resource metadata + RFC 7591 dynamic client registration);
-  you approve once on a consent screen and the host gets a rotating `thgo_` token, with
-  revoke-anytime at [`/apps`](https://thingery.dev/apps). Prefer a key? The manual `thg_...`
-  API key still works, and self-hosting is below (`npx thingery` over stdio).
+**Documentation: [docs.thingery.dev](https://docs.thingery.dev)** — connecting clients, guides,
+the full MCP tool reference, and self-hosting.
 
 ## Quickstart
 
-Pick your mode first — hosted and self-hosted expose the **same MCP tools** but **not the same
-data**: listings you create on the hosted service are visible to everyone; listings on your
-self-hosted instance live only in your database.
+The hosted MCP server is **`https://thingery.dev/mcp`**. Add it to your client and sign in when
+it asks:
 
-| Mode | Endpoint | Data | Best for |
-|---|---|---|---|
-| **Hosted** | `https://thingery.dev/mcp` | the shared public marketplace | first success in under a minute — nothing to install |
-| **Self-hosted** | your own `/mcp`, or stdio | your Postgres, your data | private deployments, full control, hacking on it |
+```bash
+# Claude Code
+claude mcp add --transport http thingery https://thingery.dev/mcp
+```
 
-### Mode A — hosted: search in one minute
-
-No install. Add `https://thingery.dev/mcp` as a remote HTTP server in your MCP client
-(Claude Desktop, ChatGPT connectors, VS Code, Inspector — see [Connect an MCP client](#connect-an-mcp-client)
-below) and sign in with OAuth, or grab an API key at [`/login.html`](https://thingery.dev/login.html)
-(free account; the `thg_...` key is shown after signup). Searching needs no account at all —
-verify the wire format with curl:
+Claude, ChatGPT, Cursor, VS Code and other clients: see
+[Connect a client](https://docs.thingery.dev/connect). Searching needs no account — try it
+with curl:
 
 ```bash
 curl -s https://thingery.dev/mcp \
@@ -158,233 +46,29 @@ curl -s https://thingery.dev/mcp \
        "params":{"name":"search_items","arguments":{"q":"Air Max"}}}'
 ```
 
-Responses come back as Server-Sent Events; the JSON-RPC result is on the `data:` line.
+To run your own server on your own Postgres (`npm install thingery`, or from source), see
+[Self-hosting](https://docs.thingery.dev/self-hosting/install).
 
-### Mode B — self-hosted: the npm package
+## Documentation
 
-The [`thingery` npm package](https://www.npmjs.com/package/thingery) runs the whole server
-against your own Postgres. No git clone needed:
-
-```bash
-mkdir my-thingery && cd my-thingery
-npm install thingery
-
-# 1. a Postgres with the pgvector extension (Docker: `docker run -d -p 5432:5432 \
-#    -e POSTGRES_PASSWORD=thingery pgvector/pgvector:pg16`; Homebrew: see below)
-# 2. apply the shipped schema (idempotent, safe to re-run):
-psql "postgres://postgres:thingery@localhost:5432/postgres" \
-  -f node_modules/thingery/db/schema.sql
-
-# 3. run it (DATABASE_URL is the only required env var):
-DATABASE_URL="postgres://postgres:thingery@localhost:5432/postgres" \
-PORT=3000 node node_modules/thingery/dist/index.js
-```
-
-The server boots at `http://localhost:3000` — `/mcp`, `/browse`, `/healthz`, and the HTTP
-API. Create your account by opening [`/login.html`](http://localhost:3000/login.html) —
-your `thg_...` MCP key is shown right after signup. (You can also create the account
-through the API — the key is returned exactly once, in the signup response:)
-
-```bash
-curl -s -X POST http://localhost:3000/api/signup \
-  -H 'content-type: application/json' \
-  -d '{"email":"you@example.com","password":"at-least-8-chars"}'
-# → {"seller":{"name":"you","email":"…","api_key":"thg_…"}}
-```
-
-Then point any MCP client at `http://localhost:3000/mcp` with
-`Authorization: Bearer thg_...` — or spawn it over stdio with the
-[`npx` config below](#run-locally-over-stdio-npx).
-
-> Note: the npm package publishes at release cadence and can lag `main` on thingery.dev
-> by days. Every release bumps the version, so comparing your `/healthz` `version` with
-> [thingery.dev/healthz](https://thingery.dev/healthz) tells you how far behind you are.
-> If you need today's features, self-host from source instead:
-
-### Self-hosted from source (development)
-
-```bash
-git clone https://github.com/thingery/thingery
-cd thingery
-npm install
-docker compose up -d db          # Postgres 16 + pgvector
-cp .env.example .env
-npm run db:migrate
-npm run db:seed                  # demo seller + 3 listings; prints an API key
-npm run dev                      # http://localhost:3000
-```
-
-### No Docker? Local Postgres
-
-`npm run db:migrate` needs a Postgres with the `vector` extension — the schema creates it
-unconditionally, even in keyword-only search mode. On macOS, Homebrew's `pgvector` bottle
-supports PostgreSQL 17 and 18 (not 16, the version the Docker setup uses — any of them works
-for Thingery):
-
-```bash
-brew install postgresql@18 pgvector
-brew services start postgresql@18
-psql postgres -c "CREATE ROLE thingery LOGIN PASSWORD 'thingery';" \
-              -c "CREATE DATABASE thingery OWNER thingery;"
-psql -d thingery -c "CREATE EXTENSION vector;"   # run as the Postgres superuser
-```
-
-The default `DATABASE_URL` in `.env.example` already matches this setup. On any other
-Postgres, run the same two SQL statements as the superuser and point `DATABASE_URL` at it.
-
-### Connect an MCP client
-
-Fastest path: the **zero-dependency quickstart** —
-[`node examples/quickstart/quickstart.mjs`](examples/quickstart/quickstart.mjs) runs the whole first
-workflow against the hosted server (search → publish a photo'd listing → fetch its public page,
-~3 minutes including signup). Client-by-client configs (Claude Desktop, Cursor, VS Code,
-Inspector, stdio, raw curl) and troubleshooting live in **[docs/integrations.md](docs/integrations.md)**.
-
-Most hosts (Claude Desktop, ChatGPT connectors, VS Code, Inspector) can sign in with **OAuth**:
-just add `https://thingery.dev/mcp` (or your self-hosted URL) as a remote HTTP server — the host
-discovers the sign-in flow, you approve once, and tokens rotate automatically. On thingery.dev
-you can review and revoke connected applications at `/apps`.
-
-Hosts without OAuth support use a `thg_...` API key (from `/login.html`) as a static bearer
-token instead:
-
-```json
-{
-  "mcpServers": {
-    "thingery": {
-      "type": "http",
-      "url": "http://localhost:3000/mcp",
-      "headers": { "Authorization": "Bearer thg_YOUR_KEY" }
-    }
-  }
-}
-```
-
-Omit the `Authorization` header for buyer-only (public search) usage — anonymous access to the
-public read tools is always available. Design note: the decision record for the OAuth flow is
-[docs/adr/0002-mcp-oauth-onboarding.md](docs/adr/0002-mcp-oauth-onboarding.md); set
-`OAUTH_DISABLED=1` to turn OAuth routes off entirely (hosts then fall back to keys).
-
-First-party web clients call `/mcp` as the signed-in user with
-`Authorization: Bearer thgs_<value of the thingery_session cookie>`. The value has exactly the
-session's lifetime and revocation (30 days, ended by an API key rotation) and is as sensitive as
-the cookie, so keep it server-side and never hand it to third-party hosts — those use OAuth or an
-API key. `/mcp` never reads the cookie itself.
-
-### Run locally over stdio (`npx`)
-
-Self-host without any web server — the package is [`thingery` on npm](https://www.npmjs.com/package/thingery)
-and runs as a local stdio MCP server against your own Postgres, spawnable by Claude Desktop and
-similar clients:
-
-```json
-{
-  "mcpServers": {
-    "thingery": {
-      "command": "npx",
-      "args": ["-y", "thingery"],
-      "env": {
-        "DATABASE_URL": "postgres://thingery:thingery@localhost:5432/thingery",
-        "THINGERY_API_KEY": "thg_YOUR_KEY"
-      }
-    }
-  }
-}
-```
-
-`THINGERY_API_KEY` is optional; without it the server runs read-only (search + get). The
-stdio server needs the same prerequisites as Mode B: a Postgres with the schema applied
-(`psql -f node_modules/thingery/db/schema.sql`) and, for write tools, a key that exists in
-*that* database (from that deployment's `/login.html` or `/api/signup`).
-
-### Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `search_items` returns 0 for a common word like "sneakers" | thingery.dev runs keyword-only search (no embeddings configured): it matches literal words in titles/descriptions — and no live listing contains the word "sneakers" | search brand/product words (`"Air Max"`, `"Samba"`), or filter by `category` instead |
-| `create_listing` returns `visible: false` | photo-required publishing: zero-image listings stay pending and hidden | call `add_item_image` — the first photo publishes the listing |
-| HTTP 401 `authentication required` | protected tool called without a credential | sign in with OAuth, or send `Authorization: Bearer thg_...` |
-| HTTP 406 from `/mcp` | the MCP Streamable HTTP transport requires the SSE Accept header | send `accept: application/json, text/event-stream` |
-| `npm run db:migrate` fails inside an installed package | `scripts/` isn't published — the schema ships as `db/schema.sql` | `psql "$DATABASE_URL" -f node_modules/thingery/db/schema.sql` |
-| stdio warning: `THINGERY_API_KEY set but not found in the database` | the key belongs to a different deployment's database | get a key from *this* deployment (`/login.html` or `/api/signup`) |
-| Self-hosted behaves differently from thingery.dev | the npm release can lag `main` | compare your `/healthz` `version` with [thingery.dev/healthz](https://thingery.dev/healthz) (the `commit` field identifies the exact build); self-host from source for today's `main` |
-
-### Try it with curl or a 5-line script
-
-No client needed — plain JSON-RPC over HTTP works (the [quickstart](examples/quickstart/) is a
-single zero-dependency Node file built on this):
-
-```bash
-# List tools (the Accept header is required by the MCP Streamable HTTP transport)
-curl -s http://localhost:3000/mcp \
-  -H 'content-type: application/json' \
-  -H 'accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-
-# Search (finds the seeded Nike Air Max: €85 is within the €100 filter)
-curl -s http://localhost:3000/mcp \
-  -H 'content-type: application/json' \
-  -H 'accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
-       "params":{"name":"search_items","arguments":{"q":"air max","max_price_cents":10000}}}'
-```
-
-Responses come back as Server-Sent Events; the JSON-RPC result is on the `data:` line.
-
-### Use an agent framework (LangChain, LlamaIndex, Composio)
-
-Framework toolkits reach the same `/mcp` endpoint over streamable HTTP — copy-paste
-quickstarts with verified end-to-end tool calls live in
-[examples/integrations/](examples/integrations/). Client setup for Claude Desktop,
-Cursor, VS Code, Inspector and plain HTTP is in [docs/integrations.md](docs/integrations.md).
-
-## Configuration
-
-Copy `.env.example` to `.env`. Key variables:
-
-| Variable | Purpose |
+| Topic | Where |
 |---|---|
-| `DATABASE_URL` | Postgres connection string |
-| `PORT` / `PUBLIC_BASE_URL` | HTTP port and base URL used in item links |
-| `EMBED_API_URL` / `EMBED_API_KEY` / `EMBED_MODEL` | Any OpenAI-compatible embeddings endpoint; leave the key empty for keyword-only search |
-| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | Order flow payments (Stripe Connect). Empty key = platform payment off (orders run off-platform); key without webhook secret = payments stay pending until the webhook is configured (fail-closed) |
-| `EASYPOST_API_KEY` / `EASYPOST_WEBHOOK_SECRET` | Optional automatic carrier tracking; without it, buyers/sellers confirm delivery manually |
-| `ADMIN_API_KEY` | Admin dispute-resolution route; disabled unless ≥32 chars |
+| First search and first listing | [Quickstart](https://docs.thingery.dev/quickstart) |
+| Claude, ChatGPT, Cursor, VS Code, stdio, plain HTTP | [Connect a client](https://docs.thingery.dev/connect) |
+| OAuth and API keys | [Authentication](https://docs.thingery.dev/authentication) |
+| Selling, buying, orders, alerts, wanted board | [Guides](https://docs.thingery.dev/guides/selling) |
+| Every MCP tool and its parameters | [MCP tools](https://docs.thingery.dev/tools/overview) |
+| Self-hosting and environment variables | [Self-hosting](https://docs.thingery.dev/self-hosting/install) |
+| Prices, conditions, the flexible item schema | [Data conventions](https://docs.thingery.dev/reference/data-conventions) |
+| Common errors | [Troubleshooting](https://docs.thingery.dev/reference/troubleshooting) |
 
-Order-flow windows and abuse caps (`PAYMENT_DEADLINE_HOURS`, `DISPUTE_WINDOW_HOURS`,
-`PICKUP_AUTOCONFIRM_DAYS`, `MAX_PENDING_ORDERS_PER_BUYER`, …) are documented inline in
-[`.env.example`](.env.example) with their defaults.
+The docs live in [`docs-site/`](docs-site/) and publish with Mintlify. The tool reference is
+generated from `src/tools.ts` (`npm run docs:tools`), and a test fails when it falls out of date.
+Design records are in [`docs/adr/`](docs/adr/).
 
-## Agent skills
-
-- [`skills/sell-item`](skills/sell-item/SKILL.md) — the seller pipeline: photos → identified item → priced listing
-- [`skills/find-item`](skills/find-item/SKILL.md) — the buyer pipeline: intent → scored matches → one best proposal → saved-search alerts
-
-## Data conventions
-
-- Prices are **integer cents**: `12500` = EUR 125.00
-- Conditions: `new`, `like_new`, `good`, `fair`, `poor`
-- Shipping tiers: `locker` (shoebox-sized), `parcel` (≤30kg), `bulky` (furniture), `local` (pickup)
-- Machine discovery: [`llms.txt`](website/llms.txt) · [`agents.json`](website/.well-known/agents.json)
-
-### Flexible schema
-
-No fixed column set can cover sneakers, cameras and sofas at once, so the Item Graph is a hybrid:
-
-- **Rigid core columns** for what every item shares: identity, price, condition, status, category, shipping estimation, embedding. These drive indexing and business logic.
-- **`attributes JSONB`** for category-specific fields (`size_eu`, `colorway`, `shutter_count`, `ISBN`...), GIN-indexed for containment filters (`{"size_eu": 43}`) and flattened into the semantic embedding so they're meaning-searchable too.
-- **A `categories` registry** that declares expected attribute definitions per category. `create_listing` validates declared keys (types, required, enums) but **unknown keys pass through** — flexible by design, and federation-friendly since instances can diverge on attributes without breaking sync. Agents self-serve the schema via `describe_category`.
-- **`sellers.profile JSONB`** for user-side flexibility (locale, currency, notification prefs, negotiation mandates) — reserved for upcoming features.
-
-Growth path: when an attribute becomes a hot filter, promote it to a Postgres generated column + index — no API change needed.
-
-Which undeclared keys are *actually* in use is discoverable too: `describe_category` returns `undeclared_in_use` — undeclared attribute keys observed on active listings from multiple sellers, with item and distinct-seller counts. These keys are never validated (they pass through as-is), so treat them as search hints, not contracts — a signal of what buyers can filter on today.
-
-Reading `undeclared_in_use` as an agent:
-
-- It lists at most 20 keys, and only keys carried by ≥2 active listings from ≥2 distinct sellers. The field is omitted entirely when no key qualifies.
-- Values are free-form: the same undeclared key can hold different values (even different types) on each listing. Use the key in `search_items` attribute filters — they match any key, declared or not — but never treat one listing's value as the category's contract.
-- Writes are shape-capped on `create_listing` and `update_listing`: at most 64 attribute entries, keys up to 128 chars, string values up to 500 chars. Over the cap, the call fails with `invalid_attributes`.
+Agent skills: [`skills/sell-item`](skills/sell-item/SKILL.md) (photos → priced listing) and
+[`skills/find-item`](skills/find-item/SKILL.md) (intent → one best proposal → saved-search alerts).
+Machine discovery: [`llms.txt`](website/llms.txt) · [`agents.json`](website/.well-known/agents.json).
 
 ## Roadmap
 

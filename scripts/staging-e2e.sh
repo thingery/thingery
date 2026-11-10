@@ -9,7 +9,7 @@
 # expiry sweep, and party-only get_order (F14).
 #
 # Stripe money paths (checkout, transfers, refunds) need real Stripe test
-# keys + `stripe listen` — see README "Order flow" and the THI-3 §7.2
+# keys + `stripe listen` — see https://docs.thingery.dev/guides/orders and the THI-3 §7.2
 # DevOps checklist. This script proves everything that does not require
 # provider accounts, against any deployment (local rig, staging, or prod
 # while it still answers off_platform orders).

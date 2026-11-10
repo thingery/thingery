@@ -156,6 +156,7 @@ describe.skipIf(!available)("/apps connected-applications page + kill switch (HT
     expect(html).toContain("Apps Client &lt;test&gt;"); // escaped DCR name
     expect(html).toContain("/apps/revoke");
     expect(res.headers.get("x-frame-options")).toBe("DENY");
+    expect(res.headers.get("content-security-policy")).toMatch(/style-src 'sha256-[A-Za-z0-9+/]+=*'/);
   });
 
   it("rejects a forged CSRF on revoke (F10) without touching the grant", async () => {

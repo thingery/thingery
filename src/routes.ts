@@ -10,6 +10,7 @@ import {
   sellerFromSession,
   sessionCookieOptions,
   signSession,
+  SESSION_SECRET,
   verifyPassword,
   SESSION_COOKIE,
   type SignupRow,
@@ -69,6 +70,7 @@ import { pool } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
 import { applyTransition, IllegalTransitionError, type OrderRow } from "./orders.js";
 import { logSecurityEvent } from "./security-events.js";
+import { page, escapeHtml } from "./web-pages.js";
 import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer } from "./stripe.js";
 
 const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/logins per IP per hour
@@ -1117,6 +1119,195 @@ api.post("/admin/orders/:id/resolve-dispute", asyncHandler(async (req: Request, 
   res.json({ order_id: order.id, status: after.status, refund_id: after.refund_id, transfer_id: after.transfer_id });
 }));
 
+// --- admin UI: session, login/logout, CSRF (spec docs/specs/admin-dispute-ui.md,
+// THI-562 work item 3, PR-A) ----------------------------------------------
+//
+// Session, not per-request key: the operator submits the admin key once at
+// POST /admin/login; on timing-safe match the server sets an HMAC cookie
+// `admin_session = exp + "." + HMAC_SHA256(SESSION_SECRET, "admin|" + exp)` —
+// httpOnly, Secure, SameSite=Strict, 8h TTL. The JSON endpoint above keeps
+// its Bearer-key auth unchanged (scripts keep working).
+//
+// CSRF (PR-C uses it for the resolve form): token = HMAC_SHA256(
+// SESSION_SECRET, "csrf|" + exp) — bound to the session by the shared exp,
+// not derivable from the session cookie without SESSION_SECRET. SameSite=
+// Strict is defense-in-depth, not the control.
+//
+// Fail-closed boot gate: adminUiEnabled (config.ts) = ADMIN_API_KEY ≥32 chars
+// AND an explicit SESSION_SECRET ≥32 chars. Key unset/short or secret
+// unset/short ⇒ every /admin route 404s, login included — a disabled admin
+// surface is indistinguishable from an absent one.
+
+const ADMIN_SESSION_COOKIE = "admin_session";
+const ADMIN_SESSION_TTL_S = 8 * 3600; // 8-hour session (spec)
+
+/** THI-566 minor: constant-time compares everywhere a secret is checked —
+ * the adminKeyMatches pattern, reused for both HMACs. */
+function hmacMatches(presented: string | undefined, expected: string): boolean {
+  if (!presented) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function adminSessionMac(exp: number): string {
+  return crypto.createHmac("sha256", SESSION_SECRET).update(`admin|${exp}`).digest("base64url");
+}
+
+function adminCsrfMac(exp: number): string {
+  return crypto.createHmac("sha256", SESSION_SECRET).update(`csrf|${exp}`).digest("base64url");
+}
+
+export interface AdminSession {
+  /** Expiry, unix seconds — the session and its CSRF token share it. */
+  exp: number;
+}
+
+/** Signs a fresh admin session. `nowMs` injectable for tests. */
+export function signAdminSession(nowMs = Date.now()): AdminSession & { cookie: string; csrf: string } {
+  const exp = Math.floor(nowMs / 1000) + ADMIN_SESSION_TTL_S;
+  return { exp, cookie: `${exp}.${adminSessionMac(exp)}`, csrf: adminCsrfMac(exp) };
+}
+
+/** Structure + expiry + constant-time MAC check for a cookie value. */
+export function verifyAdminSession(cookieValue: string | undefined, nowMs = Date.now()): AdminSession | null {
+  if (!cookieValue) return null;
+  const dot = cookieValue.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const exp = Number(cookieValue.slice(0, dot));
+  if (!Number.isInteger(exp) || exp <= Math.floor(nowMs / 1000)) return null; // expired or malformed
+  return hmacMatches(cookieValue.slice(dot + 1), adminSessionMac(exp)) ? { exp } : null;
+}
+
+/** CSRF check for a form-submitted token against the authenticated session. */
+export function adminCsrfMatches(presented: string | undefined, session: AdminSession): boolean {
+  return hmacMatches(presented, adminCsrfMac(session.exp));
+}
+
+function readAdminCookie(req: Request): string | undefined {
+  const header = req.headers.cookie;
+  if (!header) return undefined;
+  for (const part of header.split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (k === ADMIN_SESSION_COOKIE) return rest.join("=");
+  }
+  return undefined;
+}
+
+const adminCookieOptions = {
+  httpOnly: true,
+  secure: true,
+  sameSite: "strict" as const,
+  maxAge: ADMIN_SESSION_TTL_S * 1000,
+  path: "/admin",
+};
+
+/** B1 (THI-566, required amendment): the strict 10/IP/hr adminAttemptLimiter
+ * meters only the sensitive POSTs (login, resolve, reveal) — browsing pages
+ * gets this separate, higher limit so an operator working a dispute queue
+ * never eats the brute-force bucket (the insecure path must not become the
+ * easy path). */
+export const adminPageLimiter = new RateLimiter(300, 60 * 60_000); // 300 admin page GETs per IP per hour
+
+/** Uniform, admin-agnostic 404 page — used by every /admin route whenever the
+ * boot gate is closed, so a disabled surface is indistinguishable from an
+ * absent one (same discipline as the JSON endpoint above). */
+function adminNotFound(res: Response): void {
+  res.status(404).set("Cache-Control", "no-store").type("html").send(
+    page("Not found — Thingery", "Page not found", `<h1>Not found</h1><p class="meta">This page does not exist.</p>`),
+  );
+}
+
+/** Boot gate for every admin UI route. Returns false after responding. */
+function adminUiGate(res: Response): boolean {
+  if (orderFlowConfig().adminUiEnabled) return true;
+  adminNotFound(res);
+  return false;
+}
+
+/** Session gate: every /admin page and action requires a valid cookie;
+ * failures redirect to the login page (spec). Returns the session, or null
+ * after redirecting. */
+function requireAdminSession(req: Request, res: Response): AdminSession | null {
+  const session = verifyAdminSession(readAdminCookie(req));
+  if (session) return session;
+  res.redirect(303, "/admin/login");
+  return null;
+}
+
+function adminLoginPage(res: Response, error?: string): void {
+  // B3: no-store on every admin page; OQ1 (THI-566): unlinked + noindex.
+  res.set("Cache-Control", "no-store");
+  const body = `
+  <h1>Admin login</h1>
+  ${error ? `<p class="banner-warn" role="alert">${escapeHtml(error)}</p>` : ""}
+  <form method="post" action="/admin/login">
+    <p><label for="key">Admin key</label><br>
+    <input type="password" id="key" name="key" autocomplete="off" autofocus required></p>
+    <button type="submit">Sign in</button>
+  </form>`;
+  res.status(error ? 401 : 200).type("html").send(page("Admin login — Thingery", "Admin login", body, undefined, true));
+}
+
+export const adminPages = express.Router();
+
+adminPages.get("/admin", (req, res) => {
+  if (!adminUiGate(res)) return;
+  if (!adminPageLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).type("html").send(page("Too many requests — Thingery", "Too many requests", `<h1>Too many requests</h1><p class="meta">Try again later.</p>`));
+    return;
+  }
+  res.redirect(301, "/admin/disputes");
+});
+
+adminPages.get("/admin/login", (req, res) => {
+  if (!adminUiGate(res)) return;
+  if (!adminPageLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).type("html").send(page("Too many requests — Thingery", "Too many requests", `<h1>Too many requests</h1><p class="meta">Try again later.</p>`));
+    return;
+  }
+  if (verifyAdminSession(readAdminCookie(req))) {
+    res.redirect(303, "/admin/disputes");
+    return;
+  }
+  adminLoginPage(res);
+});
+
+adminPages.post("/admin/login", asyncHandler(async (req: Request, res: Response) => {
+  if (!adminUiGate(res)) return;
+  // Spec: the existing attempt limiter covers brute force — a login POST
+  // consumes the same strict 10/IP/hr bucket as the JSON endpoint (B1).
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    logSecurityEvent({ type: "admin_login", outcome: "denied" }, { ip: clientIp(req) });
+    res.status(429).type("html").send(page("Too many attempts — Thingery", "Too many attempts", `<h1>Too many attempts</h1><p class="meta">Try again later.</p>`));
+    return;
+  }
+  const presented = typeof req.body?.key === "string" ? req.body.key.trim() : undefined;
+  // Same timing-safe compare + envValue read as the JSON endpoint (A2).
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
+    logSecurityEvent({ type: "admin_login", outcome: "denied" }, { ip: clientIp(req) });
+    adminLoginPage(res, "That key is not valid.");
+    return;
+  }
+  logSecurityEvent({ type: "admin_login", outcome: "ok" }, { ip: clientIp(req) });
+  res.cookie(ADMIN_SESSION_COOKIE, signAdminSession().cookie, adminCookieOptions);
+  res.redirect(303, "/admin/disputes");
+}));
+
+adminPages.post("/admin/logout", (req, res) => {
+  if (!adminUiGate(res)) return;
+  const session = requireAdminSession(req, res);
+  if (!session) return;
+  const token = typeof req.body?.csrf === "string" ? req.body.csrf : undefined;
+  if (!adminCsrfMatches(token, session)) {
+    res.status(400).type("html").send(page("Bad request — Thingery", "Bad request", `<h1>Bad request</h1><p class="meta">Invalid request.</p>`));
+    return;
+  }
+  res.clearCookie(ADMIN_SESSION_COOKIE, { path: "/admin", httpOnly: true, secure: true, sameSite: "strict" });
+  res.redirect(303, "/admin/login");
+});
+
+
 /**
  * Mounts the browser API and its terminal error middleware (spec THI-58 §2
  * D2, PR-1). The middleware is app-level and registered AFTER the router
@@ -1126,6 +1317,12 @@ api.post("/admin/orders/:id/resolve-dispute", asyncHandler(async (req: Request, 
  */
 export function mountApiRoutes(app: Express): void {
   app.use("/api", api);
+  // Admin UI pages (THI-569): mounted at the app root (/admin/...), inside
+  // this protected file so the whole admin route surface stays under the
+  // THI-36 gate. Form transport: scoped urlencoded body parser for /admin
+  // only — the global JSON parser above never sees form posts.
+  app.use("/admin", express.urlencoded({ limit: "64kb", extended: false }));
+  app.use(adminPages);
   // THI-58: terminal error middleware for the /api surface. asyncHandler
   // forwards handler rejections here; they degrade to a generic JSON 500 —
   // no error detail, no stack (F5). Body-parser 4xx statuses are preserved

@@ -184,7 +184,7 @@ def draw_title(t):
     def col(c, a):  # fade-in
         return tuple(int(v * (0.4 + 0.6 * a)) for v in c)
     d.text((W//2, 300), "thingery.dev", font=F_TITLE, fill=col(FG, fade), anchor="mm")
-    d.text((W//2, 380), "the open item database and MCP server for AI agents",
+    d.text((W//2, 380), "the open database and MCP server for AI agents",
            font=F_SUB, fill=col(CYAN, fade * min(1, max(0, (t - 0.8) / 0.6))), anchor="mm")
     d.text((W//2, 430), "…to list, find, and trade second-hand goods — live production, every step a scriptable MCP call",
            font=font(22), fill=col(DIM, fade * min(1, max(0, (t - 1.4) / 0.6))), anchor="mm")

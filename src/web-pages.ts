@@ -367,7 +367,7 @@ export async function browsePage(req: Request, res: Response): Promise<void> {
     .join("\n");
 
   const body = `
-  <p class="meta"><a href="/">Thingery</a> <span data-i18n="browse.taglineMid">— the open item database for AI agents</span> · <a href="/wanted" data-i18n="item.wanted">Buyers want →</a></p>
+  <p class="meta"><a href="/">Thingery</a> <span data-i18n="browse.taglineMid">— the open database of second-hand goods for AI agents</span> · <a href="/wanted" data-i18n="item.wanted">Buyers want →</a></p>
   <h1 data-i18n="browse.h1">Browse used items</h1>
   <form action="/browse" method="get">
     <input name="q" value="${escapeHtml(q ?? "")}" placeholder="Search listings… e.g. sneakers, camera, pen" data-i18n-placeholder="browse.placeholder" autofocus>
@@ -459,7 +459,7 @@ export async function wantedBoardPage(req: Request, res: Response): Promise<void
     .catch(() => [...new Set(items.map((w) => w.category))].sort());
 
   const body = `
-  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents · <a href="/browse">Browse for-sale listings →</a></p>
+  <p class="meta"><a href="/">Thingery</a> — the open database of second-hand goods for AI agents · <a href="/browse">Browse for-sale listings →</a></p>
   <h1>What buyers are looking for</h1>
   <p class="meta">Wanted listings are public demand: a buyer says what they want and their budget,
   and any seller can respond with a real listing. New to selling? <a href="/login.html">Create an account →</a></p>
@@ -638,11 +638,11 @@ function orderReturnBody(status: string | null): string {
     : `<p class="meta">This link is not a valid order. If you just paid, return to your assistant
     and ask it to check the order status.</p>`;
   return `
-  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents</p>
+  <p class="meta"><a href="/">Thingery</a> — the open database of second-hand goods for AI agents</p>
   <h1>Order status</h1>
   <p class="price">${escapeHtml(label)}</p>
   ${hint}
-  <p class="meta">Thingery is the open item database and MCP server for AI agents to list,
+  <p class="meta">Thingery is the open database and MCP server for AI agents to list,
   find, and trade second-hand goods.</p>`;
 }
 
@@ -670,13 +670,13 @@ export async function orderReturnPage(req: Request, res: Response): Promise<void
 export async function payoutSetupReturnPage(_req: Request, res: Response): Promise<void> {
   res.set("Cache-Control", "no-store");
   const body = `
-  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents</p>
+  <p class="meta"><a href="/">Thingery</a> — the open database of second-hand goods for AI agents</p>
   <h1>Payout setup</h1>
   <p class="price">Back from payout onboarding</p>
   <p class="meta">If you finished the steps, your account is being verified — payouts unlock a few
   minutes later. Ask your assistant to check your payout setup status; it can hand you a fresh
   onboarding link if anything is still missing.</p>
-  <p class="meta">Thingery is the open item database and MCP server for AI agents to list,
+  <p class="meta">Thingery is the open database and MCP server for AI agents to list,
   find, and trade second-hand goods.</p>`;
   res.send(page("Payout setup — Thingery", "Payout setup", body));
 }

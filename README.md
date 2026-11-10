@@ -4,7 +4,7 @@
 
 # Thingery
 
-> **Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.**
+> **Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.**
 
 Say *"sell this"* to your AI assistant — it identifies the item, writes the listing, prices it,
 and publishes it. Say *"find me a used camera under €300"* — it searches every listing and

@@ -1,6 +1,6 @@
 # Thingery MCP quickstart
 
-> **Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.**
+> **Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.**
 
 A minimal, runnable example against the hosted MCP server at `https://thingery.dev/mcp`.
 One file, **zero dependencies** — plain Node 18+ using the standard-library `fetch`.

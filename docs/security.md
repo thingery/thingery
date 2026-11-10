@@ -1,6 +1,6 @@
 # Thingery Security — Threat Model & Hardening Backlog
 
-> Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+> Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.
 
 This document is the security baseline for the flagship instance at
 `https://thingery.dev` and for anyone self-hosting. It covers what we protect, where the

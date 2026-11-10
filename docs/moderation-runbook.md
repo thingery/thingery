@@ -1,6 +1,6 @@
 # Moderation Runbook v1 — SQL takedowns
 
-> Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+> Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.
 
 This is the v1 stopgap for security hardening item [H4](security.md#h4--spam-and-fake-seller-controls--security-event-logging):
 Thingery has no admin surface yet, so removing a spam or illegal listing or cutting off an

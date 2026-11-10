@@ -24,7 +24,7 @@ export function chatConfigured(): boolean {
   return Boolean(process.env.LLM_API_KEY);
 }
 
-const SYSTEM_PROMPT = `You are the Thingery assistant — Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+const SYSTEM_PROMPT = `You are the Thingery assistant — Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.
 You help people sell used items and find used items, right here in the chat.
 
 Selling:

@@ -18,7 +18,7 @@ a fresh run regenerates both.
 
 ## 1. What the demo proves
 
-Thingery is the open item database and MCP server for AI agents to
+Thingery is the open database and MCP server for AI agents to
 list, find, and trade second-hand goods. The shorter pitch: *a marketplace
 an AI agent can run end to end.* The demo proves the three claims that
 make that true today:
@@ -158,7 +158,7 @@ python3 scripts/render-demo-video.py    # → scripts/demo-capture.mp4 (57 s)
 
 | Time | On screen | Narration |
 | --- | --- | --- |
-| 0:00–0:04 | title card | "Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods." |
+| 0:00–0:04 | title card | "Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods." |
 | 0:04–0:10 | `demo-e2e.sh`, signup | "Zero to a published listing in under a minute, no human touching anything. One script drives the whole flow over MCP — the agent signs itself up and gets an API key." |
 | 0:10–0:16 | `describe_category` | "It asks the marketplace what a sneaker listing needs." |
 | 0:16–0:24 | `create_listing` | "It lists a pair of Air Max 90s — and Thingery says: created, but hidden until it has a photo." |

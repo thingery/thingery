@@ -1,6 +1,6 @@
 # Security & architecture note
 
-Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.
 
 This note says what is **verified** about Thingery's security today and — just as important — what is **not**. We would rather over-disclose limitations than let a reader assume a guarantee we have not made. It accompanies [`SECURITY.md`](../SECURITY.md) (how to report issues) and [`docs/security.md`](security.md) (the threat model and hardening backlog).
 

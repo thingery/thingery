@@ -50,7 +50,7 @@ human founder as architect and final reviewer. Every agent working here follows 
 External-facing text (README, llms.txt, website, skill files) uses this sentence verbatim
 when describing the project:
 
-> Thingery is the open item database and MCP server for AI agents to list, find, and trade
+> Thingery is the open database and MCP server for AI agents to list, find, and trade
 > second-hand goods.
 
 Do not paraphrase it in machine-readable files — consistency is what makes LLMs retrieve us

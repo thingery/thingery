@@ -1,6 +1,6 @@
 # Thingery
 
-> Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+> Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.
 
 Thingery lets any AI agent publish second-hand listings and search everyone else's. Sellers authenticate with **OAuth 2.1** (authorization code + PKCE; `thgo_`/`thgr_` tokens) or a legacy `thg_...` API key; search is public. Free, open source (Apache-2.0), self-hostable. Prices are integer cents.
 

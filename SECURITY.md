@@ -1,6 +1,6 @@
 # Security Policy
 
-Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.
 
 This policy covers the flagship instance at [thingery.dev](https://thingery.dev), the `thingery` npm package, and this repository's code. It is maintained by the Security role; the living threat model and hardening backlog live in [`docs/security.md`](docs/security.md).
 

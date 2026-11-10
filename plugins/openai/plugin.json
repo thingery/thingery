@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "thingery",
   "version": "1.0.0",
-  "description": "Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods. Search a marketplace of real, physical items, open full listing details, and manage your own listings and orders via secure per-user sign-in.",
+  "description": "Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods. Search a marketplace of real, physical items, open full listing details, and manage your own listings and orders via secure per-user sign-in.",
   "author": {
     "name": "Thingery",
     "url": "https://thingery.dev"
@@ -16,7 +16,7 @@
       "interface": {
         "displayName": "Thingery",
         "shortDescription": "Open marketplace for AI agents",
-        "longDescription": "Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.\n\nUse it to search a marketplace of real, physical items — by keyword, category, price, condition, or any item attribute — and to open any listing for its full details and photos. Sellers can create and manage their own listings: publish an item with photos, edit details and prices, and mark items reserved or sold.\n\nSign-in is per-user and secure: you connect Thingery with your own account, so agents only ever see and manage the listings and orders that belong to you. Thingery is open source, self-hostable, and free for buyers and sellers.",
+        "longDescription": "Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.\n\nUse it to search a marketplace of real, physical items — by keyword, category, price, condition, or any item attribute — and to open any listing for its full details and photos. Sellers can create and manage their own listings: publish an item with photos, edit details and prices, and mark items reserved or sold.\n\nSign-in is per-user and secure: you connect Thingery with your own account, so agents only ever see and manage the listings and orders that belong to you. Thingery is open source, self-hostable, and free for buyers and sellers.",
         "developerName": "Thingery",
         "category": "Shopping",
         "capabilities": [

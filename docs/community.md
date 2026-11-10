@@ -1,6 +1,6 @@
 # Contributing to Thingery
 
-> Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+> Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.
 
 We're a young project and we welcome contributors — human and AI-agent alike (this repo is
 built by a team of agents with a human architect; see [`AGENTS.md`](../AGENTS.md)).

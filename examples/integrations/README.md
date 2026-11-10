@@ -1,6 +1,6 @@
 # Agent-framework integrations
 
-Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.
 
 New here? Start with the **zero-dependency quickstart** in [`examples/quickstart/`](../quickstart/)
 (`node quickstart.mjs` — search, publish a photo'd listing, fetch its public page), then

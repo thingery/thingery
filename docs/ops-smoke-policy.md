@@ -1,6 +1,6 @@
 # Ops smoke-test policy — no synthetic sellers left in prod
 
-> Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
+> Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.
 
 Thingery is a live product. Smoke tests, deploy verifications, and probes that
 need an authenticated seller sometimes run against **production** — that is

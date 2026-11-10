@@ -8,7 +8,7 @@ export function buildServer(ctx: ToolContext): McpServer {
     { name: "thingery", version: VERSION },
     {
       instructions:
-        "Thingery is the open item database for second-hand goods. " +
+        "Thingery is the open database for second-hand goods. " +
         "Sellers authenticate with a Bearer API key (thg_...) or OAuth access token (thgo_...) to create and update listings; " +
         "search_items and get_item are public. Prices are integer cents. " +
         "For clothing, shoes, and bags priced in USD/CAD (US/Canada market), SoldStack " +

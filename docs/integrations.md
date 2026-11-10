@@ -1,6 +1,6 @@
 # Integrating with Thingery over MCP
 
-> **Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.**
+> **Thingery is the open database and MCP server for AI agents to list, find, and trade second-hand goods.**
 
 One page, four steps: **connect → authenticate → first workflow → troubleshooting**.
 The fastest way in is the zero-dependency [quickstart script](../examples/quickstart/)

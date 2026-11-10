@@ -63,7 +63,7 @@
     // --- homepage (/) -------------------------------------------------------
     "home.title": "Thingery — trova, vendi e scambia oggetti di seconda mano con la tua AI",
     "home.hero.h1": "Trova, vendi e scambia oggetti di seconda mano — <em>basta parlare con la tua AI</em>",
-    "home.hero.sub": "Thingery è il database aperto di oggetti usati e il server MCP che permette agli agenti AI di pubblicare, trovare e scambiare articoli di seconda mano.",
+    "home.hero.sub": "Thingery è il database aperto e il server MCP che permette agli agenti AI di pubblicare, trovare e scambiare articoli di seconda mano.",
     "home.hero.sub2": "Sfoglia il catalogo come in un qualsiasi marketplace, oppure collegalo al tuo assistente e vai a mani libere.",
     "home.cta.find": "Trova un articolo",
     "home.cta.sell": "Vendi un articolo",
@@ -100,7 +100,7 @@
     "home.sell.cta": "Pubblica il tuo primo annuncio",
     "home.build2.tag": "COSTRUISCI CON THINGERY",
     "home.build2.h3": "Costruisci con Thingery",
-    "home.build2.p": "Ogni funzionalità è uno strumento MCP su un database di oggetti aperto. Collega qualsiasi client MCP — oppure ospita tu l'intero marketplace.",
+    "home.build2.p": "Ogni funzionalità è uno strumento MCP su un database aperto. Collega qualsiasi client MCP — oppure ospita tu l'intero marketplace.",
     "home.build2.li1": "MCP Streamable HTTP standard + OAuth in un clic (PKCE)",
     "home.build2.li2": "Superficie dati aperta: <code>llms.txt</code>, <code>agents.json</code>, ricerca pubblica",
     "home.build2.li3": "Apache-2.0 · self-host con un comando: <code>npx thingery</code>",
@@ -113,7 +113,7 @@
     "home.why.lead": "I marketplace intrappolano i tuoi oggetti dietro i loro moduli e le loro app. Thingery è infrastruttura: un catalogo aperto in cui <em>qualsiasi</em> agente AI può pubblicare e cercare — quelli di oggi e quelli di domani, dal tuo telefono o self-hosted. Le tue cose diventano raggiungibili con un URL.",
     "home.roadmap.h2": "Sinceri oggi, cresiamo allo scoperto",
     "home.roadmap.lead": "Già attivi: pubblicazione, ricerca, pagine oggetto, account. In roadmap: pagamenti e spedizioni (l'agente prenota il corriere e sblocca il pagamento alla consegna), negoziazione tra agenti e federazione — così chiunque può ospitare un nodo del catalogo. Apache-2.0, sviluppato in pubblico su <a class=\"inline\" href=\"https://github.com/thingery/thingery\">GitHub</a>.",
-    "home.foot.tagline": "<strong>Thingery</strong> è il database aperto di oggetti usati e il server MCP che permette agli agenti AI di pubblicare, trovare e scambiare articoli di seconda mano.",
+    "home.foot.tagline": "<strong>Thingery</strong> è il database aperto e il server MCP che permette agli agenti AI di pubblicare, trovare e scambiare articoli di seconda mano.",
     "home.foot.chinese": "Nome cinese: 物坊 (Wùfāng) — il marketplace aperto per le cose inutilizzate.",
 
     // --- browse + item pages (src/web-pages.ts + share.js) ------------------
@@ -137,7 +137,7 @@
     "item.nfH1": "Non trovato",
     "item.nfP": "Questo oggetto non esiste o è stato rimosso.",
     "item.nfBack": "← Sfoglia gli annunci",
-    "browse.taglineMid": "— il database aperto di oggetti per agenti AI",
+    "browse.taglineMid": "— il database aperto di oggetti usati per agenti AI",
     "browse.h1": "Sfoglia gli oggetti usati",
     "browse.placeholder": "Cerca negli annunci… es. scarpe, macchina fotografica, penna",
     "browse.search": "Cerca",
@@ -268,7 +268,7 @@
     // --- privacy policy (/privacy) -------------------------------------------
     "pv.title": "Informativa sulla privacy — Thingery",
     "pv.h1": "Informativa sulla privacy",
-    "pv.updated": "Thingery è il database aperto di oggetti usati e il server MCP che permette agli agenti AI di pubblicare, trovare e scambiare articoli di seconda mano.\n  Questa informativa riguarda il servizio su <strong>thingery.dev</strong>. Ultimo aggiornamento: 16 ottobre 2026.",
+    "pv.updated": "Thingery è il database aperto e il server MCP che permette agli agenti AI di pubblicare, trovare e scambiare articoli di seconda mano.\n  Questa informativa riguarda il servizio su <strong>thingery.dev</strong>. Ultimo aggiornamento: 16 ottobre 2026.",
     "pv.short.h2": "In breve",
     "pv.short.li1": "<strong>Vendi e cerca articoli di seconda mano col tuo assistente AI.</strong> Per farlo conserviamo il tuo account, i tuoi annunci con le foto e — se colleghi un'app come ChatGPT — un record di connessione revocabile.",
     "pv.short.li2": "<strong>Gli annunci sono pubblici per scelta di progetto.</strong> Chiunque può sfogliarli e cercarli. Non inserire dati personali in un annuncio.",
@@ -319,7 +319,7 @@
     // --- terms of service (/terms) -------------------------------------------
     "tm.title": "Termini di servizio — Thingery",
     "tm.h1": "Termini di servizio",
-    "tm.updated": "Thingery è il database aperto di oggetti usati e il server MCP che permette agli agenti AI di pubblicare, trovare e scambiare articoli di seconda mano.\n  Questi termini riguardano il servizio su <strong>thingery.dev</strong>. In vigore dal 16 ottobre 2026.",
+    "tm.updated": "Thingery è il database aperto e il server MCP che permette agli agenti AI di pubblicare, trovare e scambiare articoli di seconda mano.\n  Questi termini riguardano il servizio su <strong>thingery.dev</strong>. In vigore dal 16 ottobre 2026.",
     "tm.short.h2": "In breve",
     "tm.short.li1": "<strong>Thingery è una piazza, non un venditore.</strong> Gli annunci appartengono a chi li pubblica. Compri e vendi con altre persone — Thingery mette a disposizione il catalogo, il tracciamento degli ordini e (facoltativamente) il circuito di pagamento.",
     "tm.short.li2": "<strong>Gli annunci sono pubblici per scelta di progetto.</strong> Non pubblicare in un annuncio nulla che vuoi restare privato.",

@@ -75,14 +75,14 @@
 
   <h1 data-i18n="tm.h1">Terms of Service</h1>
   <p class="updated" data-i18n-html="tm.updated">Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
-  These terms cover the service at <strong>thingery.dev</strong>. Effective: 16 October 2026.</p>
+  These terms cover the service at <strong>thingery.dev</strong>. Effective: 16 October 2026; the on-platform payment and EU-consumer-rights sections take effect when card payments are enabled on thingery.dev.</p>
   <p class="legal-note" data-i18n-html="legal.note">This Italian translation is provided for convenience. If the two versions differ, the <strong>English original</strong> — always reachable with the EN switch above — is the canonical text.</p>
 
   <section id="short-version">
     <h2 data-i18n="tm.short.h2">The short version</h2>
     <div class="card">
       <ul>
-        <li data-i18n-html="tm.short.li1"><strong>Thingery is a venue, not a seller.</strong> Listings belong to their sellers. You buy from and sell to other people — Thingery provides the catalog, the order tracking, and (optionally) the payment plumbing.</li>
+        <li data-i18n-html="tm.short.li1"><strong>Off-platform, Thingery is a venue; on-platform, we are the seller of record for your payment.</strong> Listings belong to their sellers. When you pay on-platform, Thingery charges your card, holds the money until the item is delivered and the dispute window has passed, and carries the duties of a reseller — including card chargebacks. When you pay the seller directly, Thingery only tracks the order.</li>
         <li data-i18n-html="tm.short.li2"><strong>Listings are public by design.</strong> Don't publish anything in a listing you want to keep private.</li>
         <li data-i18n-html="tm.short.li3"><strong>You are responsible for your account</strong> — including what you (or an AI app you connected) list, buy, and agree to.</li>
         <li data-i18n-html="tm.short.li4"><strong>Play straight:</strong> describe items honestly, sell only what you may sell, and follow the law.</li>
@@ -94,7 +94,12 @@
   <section id="what-thingery-is">
     <h2 data-i18n="tm.what.h2">What Thingery is — and is not</h2>
     <p data-i18n="tm.what.p1">Thingery is a free, open-source service for listing and finding second-hand goods, designed to be used by people directly and by AI assistants acting for them. Browsing and searching needs no account; listing and ordering need one.</p>
-    <p data-i18n-html="tm.what.p2">Thingery is a <em>venue</em>. We host listings, track orders between buyers and sellers, and can process payments (see below). We do not own, inspect, or warrant the goods, and we are not a party to the contract of sale between buyer and seller — that contract is between the two of you.</p>
+    <p data-i18n-html="tm.what.p2">Thingery hosts the catalog and tracks orders; we never own or inspect the goods, and listings belong to their sellers. Our role in a sale depends on how the order is paid:</p>
+    <ul>
+      <li data-i18n-html="tm.what.li1"><strong>Off-platform orders</strong> (you pay the seller directly): Thingery is a venue. The contract of sale is between buyer and seller — Thingery is not a party to it.</li>
+      <li data-i18n-html="tm.what.li2"><strong>On-platform orders</strong> (card payment through Thingery): Thingery is the merchant of record for the payment. We charge the buyer, hold the funds until delivery plus the dispute window, then pay the seller's connected Stripe account. In law, you buy from Thingery as a reseller even though the item ships from the individual seller — with the consumer rights that follow (see <a href="#eu-consumer-rights">EU consumer rights</a>).</li>
+    </ul>
+    <p data-i18n-html="tm.what.p3">On-platform payment is <strong>not yet enabled</strong> on thingery.dev; it will be switched on when these revised terms take effect. Until then, every order runs off-platform.</p>
   </section>
 
   <section id="accounts">
@@ -128,9 +133,20 @@
     <p data-i18n="tm.pay.p1">A buyer and a seller make an order together, and its status is tracked until it is paid out, refunded, or cancelled. Payment works in one of two ways:</p>
     <ul>
       <li data-i18n-html="tm.pay.li1"><strong>Direct (off-platform).</strong> The two of you agree on payment yourselves — cash at pickup, a bank transfer, whatever you choose. The seller confirms receipt in Thingery, and the order completes. Thingery cannot reverse an off-platform payment; sort problems out between yourselves.</li>
-      <li data-i18n-html="tm.pay.li2"><strong>On-platform (Stripe).</strong> Checkout runs on <a href="https://stripe.com">Stripe's</a> payment page: your card details go to Stripe and never touch Thingery's servers. The payment is held by the platform's Stripe account until the item is delivered and the dispute window has passed, then paid out to the seller's connected Stripe account (minus Stripe's fees). Cancelling a paid order refunds the buyer through Stripe.</li>
+      <li data-i18n-html="tm.pay.li2"><strong>On-platform (Stripe).</strong> Checkout runs on <a href="https://stripe.com">Stripe's</a> payment page: your card details go to Stripe and never touch Thingery's servers. Thingery is the merchant of record: the charge is made by Thingery, the funds are held until the item is delivered and the dispute window has passed, then paid out to the seller's connected Stripe account minus Stripe's processing fee (the seller bears the fee; Thingery takes no cut). Cancelling a paid order — or a card chargeback — refunds the buyer in full; refunds are funded first from funds still held and, where the law allows, recovered from the seller's payout.</li>
     </ul>
     <p data-i18n-html="tm.pay.p2"><strong>If something goes wrong</strong> with an on-platform order, the buyer can open a dispute during the dispute window (48 hours after delivery by default). Payout is held while a Thingery operator looks at the order and decides the outcome. Unpaid orders are cancelled automatically after 24 hours; delivered orders pay out automatically after the dispute window.</p>
+  </section>
+
+  <section id="eu-consumer-rights">
+    <h2 data-i18n="tm.eu.h2">Your EU consumer rights (on-platform orders)</h2>
+    <p data-i18n-html="tm.eu.p1">When you pay on-platform you buy from Thingery as a reseller, so EU consumer law applies to that sale on top of the dispute process above:</p>
+    <ul>
+      <li data-i18n-html="tm.eu.li1"><strong>Withdrawal.</strong> You have 14 days from receiving the item to withdraw from the purchase without giving a reason. Tell us within that window (the dispute and contact routes above work), send the item back within 14 days of telling us, and you are refunded in full — item price and standard shipping. You cover return shipping unless the item was not as described. Sealed items unsealed for health or hygiene reasons cannot be withdrawn from.</li>
+      <li data-i18n-html="tm.eu.li2"><strong>Guarantee.</strong> On-platform purchases carry the legal guarantee of conformity: Thingery, as reseller, is liable for defects present at delivery. For second-hand goods this guarantee is agreed at one year from delivery, as EU law allows.</li>
+      <li data-i18n-html="tm.eu.li3"><strong>Off-platform orders are different.</strong> They are sales between you and the seller — often a private individual — so these consumer rights against Thingery do not apply to them; the law between buyer and seller governs.</li>
+      <li data-i18n-html="tm.eu.li4">Nothing in these terms limits rights that cannot be limited by law.</li>
+    </ul>
   </section>
 
   <section id="fair-use">
@@ -147,7 +163,7 @@
   <section id="no-warranty">
     <h2 data-i18n="tm.warr.h2">No warranty; limit of liability</h2>
     <p data-i18n-html="tm.warr.p1">The service is provided “as is” and “as available”, without warranties of any kind. To the fullest extent the law allows, Thingery is not liable for indirect or consequential damages, and our total liability for anything connected with the service is limited to the amounts you paid through the platform in the twelve months before the event. Nothing in these terms limits liability that cannot be limited by law, and it does not remove rights you have as a consumer.</p>
-    <p data-i18n="tm.warr.p2">Disputes between a buyer and a seller are yours to resolve — use the dispute process above for on-platform payment questions. We are not a party to your transactions.</p>
+    <p data-i18n="tm.warr.p2">Disputes between a buyer and a seller are yours to resolve — with two exceptions where Thingery steps in: the dispute process above for on-platform payments, and your statutory consumer rights when you buy from us as reseller. For off-platform orders we are not a party to your transaction.</p>
   </section>
 
   <section id="changes">

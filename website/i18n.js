@@ -87,7 +87,7 @@
     "home.find.tag": "TROVA UN ARTICOLO",
     "home.find.h3": "Trova un articolo",
     "home.find.p": "Chiediglielo a parole. Il tuo assistente cerca in tutto il catalogo e ti propone la corrispondenza migliore — prezzo, condizioni, specifiche.",
-    "home.find.li1": "Ricerca semantica — «macchina fotografica usata sotto i 300 €» funziona e basta",
+    "home.find.li1": "Ricerca per parole chiave su titoli e descrizioni — «macchina fotografica» funziona e basta; il ranking semantico è in arrivo",
     "home.find.li2": "Una pagina pubblica e condivisibile per ogni oggetto",
     "home.find.li3": "Chat senza configurazione su <code>/chat</code> — per cercare non serve un account",
     "home.find.cta": "Sfoglia gli annunci",
@@ -112,7 +112,7 @@
     "home.why.h2": "Perché un database, e non l'ennesima app di marketplace?",
     "home.why.lead": "I marketplace intrappolano i tuoi oggetti dietro i loro moduli e le loro app. Thingery è infrastruttura: un catalogo aperto in cui <em>qualsiasi</em> agente AI può pubblicare e cercare — quelli di oggi e quelli di domani, dal tuo telefono o self-hosted. Le tue cose diventano raggiungibili con un URL.",
     "home.roadmap.h2": "Sinceri oggi, cresiamo allo scoperto",
-    "home.roadmap.lead": "Già attivi: pubblicazione, ricerca, pagine oggetto, account. In roadmap: pagamenti e spedizioni (l'agente prenota il corriere e sblocca il pagamento alla consegna), negoziazione tra agenti e federazione — così chiunque può ospitare un nodo del catalogo. Apache-2.0, sviluppato in pubblico su <a class=\"inline\" href=\"https://github.com/thingery/thingery\">GitHub</a>.",
+    "home.roadmap.lead": "Già attivi: pubblicazione, ricerca, pagine oggetto, account. I pagamenti sono pronti ma non ancora attivi — su thingery.dev gli ordini si saldano fuori piattaforma (contanti, bonifico) finché i nuovi termini e l'attivazione dei pagamenti non sono approvati. Sempre in roadmap: spedizioni (l'agente prenota il corriere e sblocca il pagamento alla consegna), negoziazione tra agenti e federazione — così chiunque può ospitare un nodo del catalogo. Apache-2.0, sviluppato in pubblico su <a class=\"inline\" href=\"https://github.com/thingery/thingery\">GitHub</a>.",
     "home.foot.tagline": "<strong>Thingery</strong> è il database aperto di oggetti usati e il server MCP che permette agli agenti AI di pubblicare, trovare e scambiare articoli di seconda mano.",
     "home.foot.chinese": "Nome cinese: 物坊 (Wùfāng) — il marketplace aperto per le cose inutilizzate.",
 

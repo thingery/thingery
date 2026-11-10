@@ -83,6 +83,8 @@ export const TOOL_PAGES: ToolPage[] = [
       "confirm_receipt",
       "open_dispute",
       "release_funds",
+      "send_order_message",
+      "list_order_messages",
     ],
   },
   {

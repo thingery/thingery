@@ -33,6 +33,11 @@ const EXPECTED: Record<
   confirm_receipt: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   open_dispute: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   release_funds: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  // THI-567 (order messaging): sending a message is a plain write (it
+  // creates, deletes nothing); list_order_messages is a pure read of the
+  // caller's own thread — same posture as my_orders.
+  send_order_message: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  list_order_messages: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   // THI-360 spec rev 2 PR 2 (buyer alerts): my_intents is a pure read;
   // save/update are plain writes; delete_intent removes the intent and its
   // match records — destructiveHint, same posture as cancel_order.

@@ -662,7 +662,7 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
     expect((buyerErr as OrderFlowError).code).toBe("not_found");
   });
 
-  it("tool surface: fulfillment tools registered, anonymous callers get unauthorized", async () => {
+  it("tool surface: six tools registered, anonymous callers get unauthorized", async () => {
     const registered: string[] = [];
     const fakeServer = {
       registerTool: (name: string) => registered.push(name),

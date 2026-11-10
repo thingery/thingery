@@ -1053,6 +1053,61 @@ async function releaseWithReconcile(order: OrderRow): Promise<void> {
   await pool.query("UPDATE orders SET transfer_id = $2 WHERE id = $1", [order.id, transfer.id]);
 }
 
+/** Shared dispute-resolution core (spec admin-dispute-ui.md, THI-569 PR-C):
+ *  one code path, two transports — the JSON endpoint (Bearer key, scripts)
+ *  and the admin form POST (session + CSRF, humans). Returns a typed result;
+ *  callers own status codes and response shape per transport. */
+interface ResolveCoreOk {
+  kind: "ok";
+  order: OrderRow; // post-resolution row (status, refund_id, transfer_id)
+}
+interface ResolveCoreNotFound {
+  kind: "not_found";
+}
+interface ResolveCoreConflict {
+  kind: "conflict";
+  message: string;
+}
+type ResolveCoreResult = ResolveCoreOk | ResolveCoreNotFound | ResolveCoreConflict;
+
+async function resolveDisputeCore(
+  orderId: string,
+  outcome: "refund" | "release",
+  note: string,
+): Promise<ResolveCoreResult> {
+  // Malformed ids must 404 (no uuid parse error, no oracle).
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orderId)) {
+    return { kind: "not_found" };
+  }
+  const { rows } = await pool.query<OrderRow>("SELECT * FROM orders WHERE id = $1", [orderId]);
+  const order = rows[0];
+  if (!order) {
+    return { kind: "not_found" };
+  }
+  if (order.status !== "disputed") {
+    return { kind: "conflict", message: `Order is ${order.status}; only disputed orders can be resolved.` };
+  }
+  try {
+    if (outcome === "refund") {
+      const refundId =
+        order.payment_mode === "stripe" && order.payment_intent_id
+          ? (await refundAfterTransfer(order)).refundId
+          : null; // null → refund already in flight (reconcile) or off_platform
+      await applyTransition({ orderId: order.id, trigger: "admin_refund", actor: ADMIN, reason: note, ...(refundId ? { sets: { refund_id: refundId } } : {}) });
+    } else {
+      await applyTransition({ orderId: order.id, trigger: "admin_release", actor: ADMIN, reason: note });
+      await releaseWithReconcile(order);
+    }
+  } catch (err) {
+    if (err instanceof IllegalTransitionError) {
+      return { kind: "conflict", message: err.message };
+    }
+    throw err;
+  }
+  const after = (await pool.query<OrderRow>("SELECT * FROM orders WHERE id = $1", [order.id])).rows[0];
+  return { kind: "ok", order: after };
+}
+
 api.post("/admin/orders/:id/resolve-dispute", asyncHandler(async (req: Request, res: Response) => {
   // F1/F7: boot validation disables the route entirely when the key is unset
   // or short — a disabled admin surface is indistinguishable from absent.
@@ -1080,43 +1135,17 @@ api.post("/admin/orders/:id/resolve-dispute", asyncHandler(async (req: Request, 
     res.status(400).json({ error: "outcome (refund|release) and note (1-500 chars) required." });
     return;
   }
-  // Malformed ids must 404 (no uuid parse error, no oracle).
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) {
+  const result = await resolveDisputeCore(String(req.params.id), parsed.data.outcome, parsed.data.note);
+  if (result.kind === "not_found") {
     res.status(404).json({ error: "Order not found." });
     return;
   }
-  const { outcome, note } = parsed.data;
-  const { rows } = await pool.query<OrderRow>("SELECT * FROM orders WHERE id = $1", [req.params.id]);
-  const order = rows[0];
-  if (!order) {
-    res.status(404).json({ error: "Order not found." });
+  if (result.kind === "conflict") {
+    res.status(409).json({ error: result.message });
     return;
   }
-  if (order.status !== "disputed") {
-    res.status(409).json({ error: `Order is ${order.status}; only disputed orders can be resolved.` });
-    return;
-  }
-  try {
-    if (outcome === "refund") {
-      const refundId =
-        order.payment_mode === "stripe" && order.payment_intent_id
-          ? (await refundAfterTransfer(order)).refundId
-          : null; // null → refund already in flight (reconcile) or off_platform
-      await applyTransition({ orderId: order.id, trigger: "admin_refund", actor: ADMIN, reason: note, ...(refundId ? { sets: { refund_id: refundId } } : {}) });
-    } else {
-      await applyTransition({ orderId: order.id, trigger: "admin_release", actor: ADMIN, reason: note });
-      await releaseWithReconcile(order);
-    }
-  } catch (err) {
-    if (err instanceof IllegalTransitionError) {
-      res.status(409).json({ error: err.message });
-      return;
-    }
-    throw err;
-  }
-  const after = (await pool.query<OrderRow>("SELECT * FROM orders WHERE id = $1", [order.id])).rows[0];
   res.set("Cache-Control", "no-store");
-  res.json({ order_id: order.id, status: after.status, refund_id: after.refund_id, transfer_id: after.transfer_id });
+  res.json({ order_id: result.order.id, status: result.order.status, refund_id: result.order.refund_id, transfer_id: result.order.transfer_id });
 }));
 
 // --- admin UI: session, login/logout, CSRF (spec docs/specs/admin-dispute-ui.md,
@@ -1366,6 +1395,16 @@ interface DisputeListRow {
   seller_name: string;
 }
 
+/** PRG (spec: no double-submit): after a successful form resolve the list
+ *  renders a confirmation line for ?resolved=<orderId>. The value is a
+ *  server-generated uuid echoed from the DB row, and is escaped anyway (B2). */
+function resolvedNote(req: Request): string {
+  const raw = typeof req.query.resolved === "string" ? req.query.resolved : "";
+  return raw && ADMIN_UUID_RE.test(raw)
+    ? `<p class="meta">Resolved order ${escapeHtml(raw.slice(0, 8))}… — it has left the dispute queue.</p>`
+    : "";
+}
+
 adminPages.get("/admin/disputes", asyncHandler(async (req: Request, res: Response) => {
   if (!adminUiGate(res)) return;
   if (!adminPageLimiter.allow(`ip:${clientIp(req)}`)) {
@@ -1404,6 +1443,7 @@ adminPages.get("/admin/disputes", asyncHandler(async (req: Request, res: Respons
   const body = `
   <p class="meta"><a href="/admin/disputes">Disputes</a> · <strong>Thingery admin</strong> · ${signOutForm(session)}</p>
   <h1>Disputed orders</h1>
+  ${resolvedNote(req)}
   ${list.length === 0 ? `<p class="meta">No disputed orders right now.</p>` : `
   <table>
     <thead><tr><th>Order</th><th>Item</th><th>Total</th><th>Buyer</th><th>Seller</th><th>Disputed since</th></tr></thead>
@@ -1440,8 +1480,19 @@ interface OrderMessageRow {
  * non-existent and non-disputed ids — this UI is a dispute workspace, not an
  * order browser (spec). Returns null after responding. */
 async function loadDisputedOrderOr404(id: string, res: Response): Promise<DisputeDetailRow | null> {
-  if (!ADMIN_UUID_RE.test(id)) {
+  const order = await loadDisputedOrder(id);
+  if (!order) {
     adminNotFound(res);
+    return null;
+  }
+  return order;
+}
+
+/** Non-responding variant: null without touching the response (PR-C's 409
+ *  re-render path falls back to an error page when the order left the
+ *  disputed queue concurrently). */
+async function loadDisputedOrder(id: string): Promise<DisputeDetailRow | null> {
+  if (!ADMIN_UUID_RE.test(id)) {
     return null;
   }
   const { rows } = await pool.query<DisputeDetailRow>(
@@ -1456,7 +1507,6 @@ async function loadDisputedOrderOr404(id: string, res: Response): Promise<Disput
   );
   const order = rows[0];
   if (!order || order.status !== "disputed") {
-    adminNotFound(res);
     return null;
   }
   return order;
@@ -1483,7 +1533,7 @@ async function renderDisputeDetail(
   res: Response,
   order: DisputeDetailRow,
   session: AdminSession,
-  opts: { revealedAddress?: boolean } = {},
+  opts: { revealedAddress?: boolean; error?: string } = {},
 ): Promise<void> {
   const revealed = opts.revealedAddress === true;
   const events = (
@@ -1522,6 +1572,7 @@ async function renderDisputeDetail(
   const body = `
   <p class="meta"><a href="/admin/disputes">← All disputes</a> · <strong>Thingery admin</strong> · ${signOutForm(session)}</p>
   <h1>Dispute — order ${escapeHtml(order.id.slice(0, 8))}…</h1>
+  ${opts.error ? `<p class="price" style="color:#b00">${escapeHtml(opts.error)}</p>` : ""}
   <p class="meta">Item: <strong>${escapeHtml(order.item_title)}</strong> · Status: <span class="badge">${escapeHtml(order.status)}</span></p>
   <p class="meta">Buyer: <strong>${escapeHtml(order.buyer_name)}</strong> · Seller: <strong>${escapeHtml(order.seller_name)}</strong></p>
   <p class="price">${escapeHtml(adminMoney(order.price_cents + order.shipping_price_cents, order.currency))}
@@ -1547,7 +1598,18 @@ async function renderDisputeDetail(
     <tbody>${eventsHtml}</tbody>
   </table>
 
-  ${messagesHtml}`;
+  ${messagesHtml}
+
+  <h2>Resolve dispute</h2>
+  ${opts.error ? `<p class="meta">${escapeHtml(opts.error)}</p>` : ""}
+  <form method="post" action="/admin/disputes/${escapeHtml(order.id)}/resolve">
+    <input type="hidden" name="csrf" value="${escapeHtml(adminCsrfValue(session))}">
+    <p><label><input type="radio" name="outcome" value="refund" required> Refund buyer${order.payment_mode === "off_platform" ? " (status-only: no Stripe refund to move)" : ""}</label></p>
+    <p><label><input type="radio" name="outcome" value="release"> Release to seller${order.payment_mode === "off_platform" ? " (status-only: no Stripe payout to move)" : ""}</label></p>
+    <p><label>Decision note (1–500 chars — stored on the audit row)
+      <textarea name="note" maxlength="500" required rows="3" cols="60"></textarea></label></p>
+    <button type="submit">Resolve dispute</button>
+  </form>`;
   res.set("Cache-Control", "no-store").type("html").send(
     page(`Dispute ${order.id.slice(0, 8)} — Thingery admin`, `Dispute workspace for order ${order.id}`, body, undefined, true),
   );
@@ -1589,6 +1651,54 @@ adminPages.post("/admin/disputes/:id/reveal", asyncHandler(async (req: Request, 
   // a fresh GET shows the masked view again.
   logSecurityEvent({ type: "admin_pii_reveal", orderId: order.id }, { ip: clientIp(req) });
   await renderDisputeDetail(res, order, session, { revealedAddress: true });
+}));
+
+adminPages.post("/admin/disputes/:id/resolve", asyncHandler(async (req: Request, res: Response) => {
+  if (!adminUiGate(res)) return;
+  // B1: resolve is a sensitive POST — strict limiter, not the page bucket.
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    admin429(res);
+    return;
+  }
+  const session = requireAdminSession(req, res);
+  if (!session) return;
+  const token = typeof req.body?.csrf === "string" ? req.body.csrf : undefined;
+  if (!adminCsrfMatches(token, session)) {
+    res.status(400).set("Cache-Control", "no-store").type("html").send(
+      page("Bad request — Thingery", "Bad request", `<h1>Bad request</h1><p class="meta">Invalid request.</p>`),
+    );
+    return;
+  }
+  const parsed = resolveDisputeSchema.safeParse({ outcome: req.body?.outcome, note: req.body?.note });
+  if (!parsed.success) {
+    // Re-render the form with the field error (no state change yet).
+    const order = await loadDisputedOrderOr404(String(req.params.id ?? ""), res);
+    if (!order) return;
+    await renderDisputeDetail(res, order, session, {
+      error: "Pick an outcome (refund or release) and write a 1–500 char note.",
+    });
+    return;
+  }
+  const result = await resolveDisputeCore(String(req.params.id ?? ""), parsed.data.outcome, parsed.data.note);
+  if (result.kind === "not_found") {
+    adminNotFound(res);
+    return;
+  }
+  if (result.kind === "conflict") {
+    // 409-class: if the order is still disputed (race), re-render its detail
+    // with the error; otherwise it has already left the queue — plain error page.
+    const order = await loadDisputedOrder(String(req.params.id ?? ""));
+    if (order) {
+      await renderDisputeDetail(res, order, session, { error: result.message });
+      return;
+    }
+    res.status(409).set("Cache-Control", "no-store").type("html").send(
+      page("Cannot resolve — Thingery", "Cannot resolve", `<h1>Cannot resolve</h1><p class="meta">${escapeHtml(result.message)}</p><p><a href="/admin/disputes">← All disputes</a></p>`),
+    );
+    return;
+  }
+  // PRG: redirect after success so a refresh never re-submits the resolution.
+  res.redirect(303, `/admin/disputes?resolved=${encodeURIComponent(result.order.id)}`);
 }));
 
 

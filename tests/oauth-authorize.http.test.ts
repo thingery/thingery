@@ -124,10 +124,18 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     expect(res.headers.get("content-type")).toContain("text/html");
     expect(res.headers.get("x-frame-options")).toBe("DENY");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
-    expect(res.headers.get("content-security-policy")).toBe(
-      "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
-    );
     const html = await res.text();
+    // The only thing the CSP lets through is the page's own stylesheet, by its exact hash.
+    const css = /<style>([\s\S]*?)<\/style>/.exec(html)?.[1] ?? "";
+    const cssHash = crypto.createHash("sha256").update(css).digest("base64");
+    expect(res.headers.get("content-security-policy")).toBe(
+      `default-src 'none'; style-src 'sha256-${cssHash}'; form-action 'self'; frame-ancestors 'none'`,
+    );
+    expect(html.match(/<style>/g)).toHaveLength(1);
+    expect(html).not.toMatch(/\sstyle="/);
+    expect(html).not.toContain("<script");
+    // Deny stays first in the markup, so pressing Enter never grants access.
+    expect(html.indexOf('value="deny"')).toBeLessThan(html.indexOf('value="allow"'));
     expect(html).toContain("Authorize Test Inspector");
     expect(html).toContain(email);
     expect(html).toContain("read and manage your listings and orders");
@@ -262,8 +270,8 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     expect(res.status).toBe(400);
     expect(res.headers.get("location")).toBeNull();
     // error page carries the hardened page CSP (default-src 'none' rider)
-    expect(res.headers.get("content-security-policy")).toBe(
-      "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
+    expect(res.headers.get("content-security-policy")).toMatch(
+      /^default-src 'none'; style-src 'sha256-[A-Za-z0-9+/]+=*'; form-action 'self'; frame-ancestors 'none'$/,
     );
     await res.text();
 

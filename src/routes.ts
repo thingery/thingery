@@ -1307,6 +1307,291 @@ adminPages.post("/admin/logout", (req, res) => {
   res.redirect(303, "/admin/login");
 });
 
+// --- admin UI: dispute list + detail pages (spec admin-dispute-ui.md, PR-B) ---
+
+const ADMIN_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ADMIN_DISPUTE_LIST_CAP = 50; // OQ2: no pagination in v1 — cap + note
+
+const fmtUtc = (value: Date | string): string =>
+  `${new Date(value).toISOString().replace("T", " ").slice(0, 16)} UTC`;
+
+const adminMoney = (cents: number, currency: string): string => `${(cents / 100).toFixed(2)} ${currency}`;
+
+/** CSRF token for a live session (embedded in every admin form). */
+function adminCsrfValue(session: AdminSession): string {
+  return adminCsrfMac(session.exp);
+}
+
+/** Inline sign-out form for the admin page headers (POST + CSRF). */
+function signOutForm(session: AdminSession): string {
+  return `<form method="post" action="/admin/logout" style="display:inline"><input type="hidden" name="csrf" value="${escapeHtml(adminCsrfValue(session))}"><button type="submit">Sign out</button></form>`;
+}
+
+function admin429(res: Response): void {
+  res.status(429).set("Cache-Control", "no-store").type("html").send(
+    page("Too many requests — Thingery", "Too many requests", `<h1>Too many requests</h1><p class="meta">Try again later.</p>`),
+  );
+}
+
+/** B2 (THI-566, required amendment): every interpolated field is contextually
+ *  escaped via escapeHtml — item titles, handles, event reasons and message
+ *  bodies are attacker-controlled and aggregate into this authenticated
+ *  admin page (stored-XSS → admin session takeover class). The page()
+ *  helper only; no raw interpolation anywhere below. */
+function addressRowsHtml(addr: Record<string, unknown>, revealed: boolean): string {
+  const row = (label: string, value: unknown) =>
+    `<tr><th scope="row">${escapeHtml(label)}</th><td>${escapeHtml(value ?? "")}</td></tr>`;
+  const mask = "\u2022\u2022\u2022"; // ••• — full mask for identifying lines
+  const lines: string[] = [
+    row("Name", revealed ? addr.name : mask),
+    row("Address line 1", revealed ? addr.line1 : mask),
+    row("Address line 2", revealed ? addr.line2 || "" : addr.line2 ? mask : ""),
+    // City + country stay visible masked-out: coarse context for adjudication
+    // without identifying the street door.
+    row("City", addr.city),
+    row("Postal code", revealed ? addr.postal_code : mask),
+    row("Country", addr.country),
+  ];
+  return `<table>${lines.join("")}</table>`;
+}
+
+interface DisputeListRow {
+  id: string;
+  price_cents: number;
+  shipping_price_cents: number;
+  currency: string;
+  status_changed_at: Date;
+  item_title: string;
+  buyer_name: string;
+  seller_name: string;
+}
+
+adminPages.get("/admin/disputes", asyncHandler(async (req: Request, res: Response) => {
+  if (!adminUiGate(res)) return;
+  if (!adminPageLimiter.allow(`ip:${clientIp(req)}`)) {
+    admin429(res);
+    return;
+  }
+  const session = requireAdminSession(req, res);
+  if (!session) return;
+  // 51 fetched so the cap note appears exactly when more than 50 exist (OQ2).
+  const { rows } = await pool.query<DisputeListRow>(
+    `SELECT o.id, o.price_cents, o.shipping_price_cents, o.currency, o.status_changed_at,
+            i.title AS item_title,
+            buyer.display_name AS buyer_name, seller.display_name AS seller_name
+     FROM orders o
+     JOIN items i ON i.id = o.item_id
+     JOIN sellers buyer ON buyer.id = o.buyer_id
+     JOIN sellers seller ON seller.id = o.seller_id
+     WHERE o.status = 'disputed'
+     ORDER BY o.status_changed_at DESC
+     LIMIT ${ADMIN_DISPUTE_LIST_CAP + 1}`,
+  );
+  const overflow = rows.length > ADMIN_DISPUTE_LIST_CAP;
+  const list = overflow ? rows.slice(0, ADMIN_DISPUTE_LIST_CAP) : rows;
+  const table = list
+    .map(
+      (o) => `<tr>
+      <td><a href="/admin/disputes/${escapeHtml(o.id)}">${escapeHtml(o.id.slice(0, 8))}…</a></td>
+      <td>${escapeHtml(o.item_title)}</td>
+      <td>${escapeHtml(adminMoney(o.price_cents + o.shipping_price_cents, o.currency))}</td>
+      <td>${escapeHtml(o.buyer_name)}</td>
+      <td>${escapeHtml(o.seller_name)}</td>
+      <td>${escapeHtml(fmtUtc(o.status_changed_at))}</td>
+    </tr>`,
+    )
+    .join("\n");
+  const body = `
+  <p class="meta"><a href="/admin/disputes">Disputes</a> · <strong>Thingery admin</strong> · ${signOutForm(session)}</p>
+  <h1>Disputed orders</h1>
+  ${list.length === 0 ? `<p class="meta">No disputed orders right now.</p>` : `
+  <table>
+    <thead><tr><th>Order</th><th>Item</th><th>Total</th><th>Buyer</th><th>Seller</th><th>Disputed since</th></tr></thead>
+    <tbody>${table}</tbody>
+  </table>`}
+  ${overflow ? `<p class="meta">More than ${ADMIN_DISPUTE_LIST_CAP} disputed orders — showing the ${ADMIN_DISPUTE_LIST_CAP} most recent.</p>` : ""}`;
+  res.set("Cache-Control", "no-store").type("html").send(page("Disputed orders — Thingery admin", "Disputed orders", body, undefined, true));
+}));
+
+interface DisputeDetailRow extends OrderRow {
+  item_title: string;
+  buyer_name: string;
+  seller_name: string;
+}
+
+interface OrderEventRow {
+  event_type: string;
+  from_status: string | null;
+  to_status: string | null;
+  actor_type: string;
+  actor_id: string | null;
+  reason: string | null;
+  created_at: Date;
+}
+
+interface OrderMessageRow {
+  body: string;
+  sender_role: string;
+  sender_name: string;
+  created_at: Date;
+}
+
+/** Loads the order for the dispute workspace. Uniform 404 for malformed,
+ * non-existent and non-disputed ids — this UI is a dispute workspace, not an
+ * order browser (spec). Returns null after responding. */
+async function loadDisputedOrderOr404(id: string, res: Response): Promise<DisputeDetailRow | null> {
+  if (!ADMIN_UUID_RE.test(id)) {
+    adminNotFound(res);
+    return null;
+  }
+  const { rows } = await pool.query<DisputeDetailRow>(
+    `SELECT o.*, i.title AS item_title,
+            buyer.display_name AS buyer_name, seller.display_name AS seller_name
+     FROM orders o
+     JOIN items i ON i.id = o.item_id
+     JOIN sellers buyer ON buyer.id = o.buyer_id
+     JOIN sellers seller ON seller.id = o.seller_id
+     WHERE o.id = $1`,
+    [id],
+  );
+  const order = rows[0];
+  if (!order || order.status !== "disputed") {
+    adminNotFound(res);
+    return null;
+  }
+  return order;
+}
+
+/** Order messages (THI-562 work item 1) are read-only evidence here. The
+ *  table may not exist yet on a deployment that has not picked up work item
+ *  1 — degrade to an absent section instead of a 500. */
+async function loadOrderMessages(orderId: string): Promise<OrderMessageRow[]> {
+  const exists = await pool.query<{ t: string | null }>("SELECT to_regclass('public.order_messages') AS t");
+  if (!exists.rows[0]?.t) return [];
+  const { rows } = await pool.query<OrderMessageRow>(
+    `SELECT m.body, m.sender_role, s.display_name AS sender_name, m.created_at
+     FROM order_messages m
+     JOIN sellers s ON s.id = m.sender_id
+     WHERE m.order_id = $1
+     ORDER BY m.created_at ASC`,
+    [orderId],
+  );
+  return rows;
+}
+
+async function renderDisputeDetail(
+  res: Response,
+  order: DisputeDetailRow,
+  session: AdminSession,
+  opts: { revealedAddress?: boolean } = {},
+): Promise<void> {
+  const revealed = opts.revealedAddress === true;
+  const events = (
+    await pool.query<OrderEventRow>(
+      `SELECT event_type, from_status, to_status, actor_type, actor_id, reason, created_at
+       FROM order_events WHERE order_id = $1 ORDER BY created_at ASC, id ASC`,
+      [order.id],
+    )
+  ).rows;
+  const messages = await loadOrderMessages(order.id);
+
+  const eventsHtml = events
+    .map(
+      (e) => `<tr>
+      <td>${escapeHtml(fmtUtc(e.created_at))}</td>
+      <td>${escapeHtml(e.event_type)}${e.from_status || e.to_status ? ` (${escapeHtml(e.from_status ?? "—")} → ${escapeHtml(e.to_status ?? "—")})` : ""}</td>
+      <td>${escapeHtml(e.actor_type)}${e.actor_id ? `:${escapeHtml(e.actor_id)}` : ""}</td>
+      <td>${escapeHtml(e.reason ?? "")}</td>
+    </tr>`,
+    )
+    .join("\n");
+
+  const messagesHtml =
+    messages.length === 0
+      ? ""
+      : `<h2>Messages between the parties</h2>
+  ${messages
+    .map(
+      (m) => `<div class="card">
+    <p class="meta"><strong>${escapeHtml(m.sender_name)}</strong> (${escapeHtml(m.sender_role)}) · ${escapeHtml(fmtUtc(m.created_at))}</p>
+    <p class="desc">${escapeHtml(m.body)}</p>
+  </div>`,
+    )
+    .join("\n")}`;
+
+  const body = `
+  <p class="meta"><a href="/admin/disputes">← All disputes</a> · <strong>Thingery admin</strong> · ${signOutForm(session)}</p>
+  <h1>Dispute — order ${escapeHtml(order.id.slice(0, 8))}…</h1>
+  <p class="meta">Item: <strong>${escapeHtml(order.item_title)}</strong> · Status: <span class="badge">${escapeHtml(order.status)}</span></p>
+  <p class="meta">Buyer: <strong>${escapeHtml(order.buyer_name)}</strong> · Seller: <strong>${escapeHtml(order.seller_name)}</strong></p>
+  <p class="price">${escapeHtml(adminMoney(order.price_cents + order.shipping_price_cents, order.currency))}
+    <span class="meta">(${escapeHtml(adminMoney(order.price_cents, order.currency))} + ${escapeHtml(adminMoney(order.shipping_price_cents, order.currency))} shipping)</span></p>
+  <p class="meta">Payment mode: <strong>${escapeHtml(order.payment_mode)}</strong>${order.payment_mode === "off_platform" ? " — off-platform: the parties settle payment themselves; resolving only sets the order status, no Stripe refund or payout is moved." : ""}</p>
+  ${order.carrier || order.tracking_code ? `<p class="meta">Carrier: ${escapeHtml(order.carrier ?? "—")} · Tracking: ${escapeHtml(order.tracking_code ?? "—")}</p>` : ""}
+  ${order.refund_id ? `<p class="meta">Stripe refund: ${escapeHtml(order.refund_id)}</p>` : ""}
+  ${order.transfer_id ? `<p class="meta">Stripe transfer: ${escapeHtml(order.transfer_id)}</p>` : ""}
+
+  <h2>Shipping address</h2>
+  ${addressRowsHtml(order.shipping_address, revealed)}
+  ${revealed
+    ? `<p class="meta">Address revealed for this view — a fresh page load masks it again.</p>`
+    : `<form method="post" action="/admin/disputes/${escapeHtml(order.id)}/reveal">
+      <input type="hidden" name="csrf" value="${escapeHtml(adminCsrfValue(session))}">
+      <button type="submit">Reveal address</button>
+      <p class="meta">The address is masked by default; revealing it is logged.</p>
+    </form>`}
+
+  <h2>Order history</h2>
+  <table>
+    <thead><tr><th>When</th><th>Event</th><th>Actor</th><th>Note</th></tr></thead>
+    <tbody>${eventsHtml}</tbody>
+  </table>
+
+  ${messagesHtml}`;
+  res.set("Cache-Control", "no-store").type("html").send(
+    page(`Dispute ${order.id.slice(0, 8)} — Thingery admin`, `Dispute workspace for order ${order.id}`, body, undefined, true),
+  );
+}
+
+adminPages.get("/admin/disputes/:id", asyncHandler(async (req: Request, res: Response) => {
+  if (!adminUiGate(res)) return;
+  if (!adminPageLimiter.allow(`ip:${clientIp(req)}`)) {
+    admin429(res);
+    return;
+  }
+  const session = requireAdminSession(req, res);
+  if (!session) return;
+  const order = await loadDisputedOrderOr404(String(req.params.id ?? ""), res);
+  if (!order) return;
+  await renderDisputeDetail(res, order, session);
+}));
+
+adminPages.post("/admin/disputes/:id/reveal", asyncHandler(async (req: Request, res: Response) => {
+  if (!adminUiGate(res)) return;
+  // B1: reveal is a sensitive POST — strict limiter, not the page bucket.
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    admin429(res);
+    return;
+  }
+  const session = requireAdminSession(req, res);
+  if (!session) return;
+  const token = typeof req.body?.csrf === "string" ? req.body.csrf : undefined;
+  if (!adminCsrfMatches(token, session)) {
+    res.status(400).set("Cache-Control", "no-store").type("html").send(
+      page("Bad request — Thingery", "Bad request", `<h1>Bad request</h1><p class="meta">Invalid request.</p>`),
+    );
+    return;
+  }
+  const order = await loadDisputedOrderOr404(String(req.params.id ?? ""), res);
+  if (!order) return;
+  // PII minimization audit: one line per reveal, order id only (never the
+  // address). POST-response render keeps reveal stateless (THI-566 minor):
+  // a fresh GET shows the masked view again.
+  logSecurityEvent({ type: "admin_pii_reveal", orderId: order.id }, { ip: clientIp(req) });
+  await renderDisputeDetail(res, order, session, { revealedAddress: true });
+}));
+
+
 
 /**
  * Mounts the browser API and its terminal error middleware (spec THI-58 §2

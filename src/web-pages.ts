@@ -187,6 +187,8 @@ function page(title: string, description: string, body: string, og?: OgMeta, noi
 <div class="lang-bar"><div class="lang-switch" data-lang-switch></div></div>
 ${body}
 <script src="/i18n.js"></script>
+<script src="/chat-store.js" defer></script>
+<script src="/chat-widget.js" defer></script>
 </body>
 </html>`;
 }
@@ -299,7 +301,7 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
   // open an attribute-injection hole.
   const body = `
   <p class="meta"><a href="/browse" data-i18n="item.back">← Browse</a> · <a href="/wanted" data-i18n="item.wanted">Buyers want →</a> · <a href="/">Thingery</a></p>
-  <h1>${escapeHtml(item.title)}</h1>
+  <h1 data-chat-subject="item" data-chat-id="${escapeHtml(item.id)}">${escapeHtml(item.title)}</h1>
   <p class="price ${sold ? "sold" : ""}">${escapeHtml(money(item.price_cents, item.currency))}${sold ? ` · <span data-i18n-status="${item.status}">${escapeHtml(item.status)}</span>` : ""}</p>
   ${shippingCents > 0 ? `<p class="meta"><span data-i18n="item.plusShipping">+ shipping:</span> ${escapeHtml(money(shippingCents, item.currency))} · <span data-i18n="item.total">total:</span> ${escapeHtml(money(item.price_cents + shippingCents, item.currency))}</p>` : ""}
   ${ctaHtml}
@@ -520,7 +522,7 @@ export async function wantedDetailPage(req: Request, res: Response): Promise<voi
     </div>`;
   const body = `
   <p class="meta"><a href="/wanted">← Wanted</a> · <a href="/browse">Browse for-sale listings</a> · <a href="/">Thingery</a></p>
-  <h1>${escapeHtml(w.title)}</h1>
+  <h1 data-chat-subject="wanted" data-chat-id="${escapeHtml(w.id)}">${escapeHtml(w.title)}</h1>
   <p><span class="wanted-chip">WANTED</span><span class="wanted-budget">${escapeHtml(budgetRange(w.budget_min_cents, w.budget_max_cents, w.currency))}</span></p>
   <p class="fresh ${fresh.expiringSoon ? "expiring" : ""}">${escapeHtml(fresh.text)}</p>
   ${respondCta}

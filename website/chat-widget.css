@@ -1,0 +1,115 @@
+/* Floating assistant (chat-widget.js). Everything is prefixed .tcw- and the
+   tokens are local, so the widget looks the same on the static pages and on
+   the server-rendered ones (which do not share the landing page's :root).
+   Palette and radii follow the live site (website/index.html). */
+.tcw {
+  --tcw-ink: #1a1d23;
+  --tcw-muted: #5c6470;
+  --tcw-line: rgba(127, 127, 127, .28);
+  --tcw-surface: #ffffff;
+  --tcw-raised: #f3f4f5;
+  --tcw-accent: #0f7b6c;
+  --tcw-accent-fg: #ffffff;
+  --tcw-shadow: 0 10px 30px rgba(20, 24, 31, .18);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  color: var(--tcw-ink);
+}
+@media (prefers-color-scheme: dark) {
+  .tcw {
+    --tcw-ink: #e8eaee;
+    --tcw-muted: #9aa3af;
+    --tcw-surface: #16191f;
+    --tcw-raised: #22262e;
+    --tcw-accent: #2dd4bf;
+    --tcw-accent-fg: #0d1a18;
+    --tcw-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+  }
+}
+.tcw *, .tcw *::before, .tcw *::after { box-sizing: border-box; }
+
+.tcw-bubble {
+  position: fixed; right: 20px; bottom: calc(20px + env(safe-area-inset-bottom)); z-index: 1001;
+  display: inline-flex; align-items: center; gap: .5rem;
+  min-height: 56px; padding: 0 1.15rem 0 .95rem; margin: 0;
+  border: 0; border-radius: 999px; cursor: pointer;
+  background: var(--tcw-accent); color: var(--tcw-accent-fg);
+  font: 600 .98rem/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  box-shadow: var(--tcw-shadow);
+}
+.tcw-bubble:hover { filter: brightness(1.08); }
+.tcw-bubble:focus-visible { outline: 3px solid var(--tcw-ink); outline-offset: 3px; }
+.tcw-bubble-icon { display: inline-flex; }
+.tcw-open .tcw-bubble { width: 56px; padding: 0; justify-content: center; }
+.tcw-open .tcw-bubble-label { display: none; }
+
+.tcw-svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round; display: block; }
+
+.tcw-panel {
+  position: fixed; right: 20px; bottom: calc(88px + env(safe-area-inset-bottom)); z-index: 1001;
+  width: 400px; max-width: calc(100vw - 40px);
+  height: 560px; max-height: calc(100dvh - 120px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--tcw-surface); color: var(--tcw-ink);
+  border: 1px solid var(--tcw-line); border-radius: 16px; box-shadow: var(--tcw-shadow);
+}
+.tcw-panel[hidden], .tcw-scrim[hidden] { display: none; }
+
+.tcw-head { display: flex; align-items: center; gap: .25rem; min-height: 56px;
+  padding: 0 .35rem 0 1rem; border-bottom: 1px solid var(--tcw-line); }
+.tcw-title { flex: 1; font-weight: 650; font-size: .98rem; }
+.tcw-icon-btn { width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 10px; background: transparent; color: var(--tcw-ink); cursor: pointer; padding: 0; }
+.tcw-icon-btn:hover { background: var(--tcw-raised); }
+.tcw-icon-btn:focus-visible { outline: 2px solid var(--tcw-accent); outline-offset: 1px; }
+
+.tcw-log { flex: 1; min-height: 0; overflow-y: auto; padding: .9rem; display: flex; flex-direction: column; gap: .6rem; }
+.tcw-chip { align-self: flex-start; max-width: 100%; padding: .2rem .6rem; border: 1px solid var(--tcw-line);
+  border-radius: 999px; font-size: .8rem; color: var(--tcw-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tcw-chip-lead { font-weight: 650; }
+.tcw-msg { max-width: 88%; padding: .55rem .85rem; border-radius: 14px; font-size: .94rem;
+  white-space: pre-wrap; overflow-wrap: break-word; }
+.tcw-bot { align-self: flex-start; background: var(--tcw-raised); border-bottom-left-radius: 5px; }
+.tcw-user { align-self: flex-end; background: var(--tcw-accent); color: var(--tcw-accent-fg); border-bottom-right-radius: 5px; }
+.tcw-typing { color: var(--tcw-muted); letter-spacing: .25em; }
+.tcw-confirm { align-self: stretch; max-width: none; background: var(--tcw-raised); border: 1px solid #b7791f; }
+.tcw-confirm-q { font-weight: 600; }
+.tcw-confirm-actions { display: flex; gap: .5rem; margin-top: .5rem; }
+.tcw-confirm-actions button { min-height: 40px; padding: 0 .8rem; font: inherit; font-size: .88rem; cursor: pointer;
+  border-radius: 10px; border: 1px solid var(--tcw-line); background: var(--tcw-surface); color: inherit; }
+
+.tcw-form { display: flex; gap: .5rem; margin: 0; padding: .7rem; border-top: 1px solid var(--tcw-line); }
+.tcw-input { flex: 1; min-width: 0; height: 46px; padding: 0 .8rem; font: inherit; font-size: 1rem;
+  border-radius: 12px; border: 1px solid var(--tcw-line); background: var(--tcw-surface); color: inherit; }
+.tcw-input:focus { outline: 2px solid var(--tcw-accent); outline-offset: 1px; }
+.tcw-input::placeholder { color: var(--tcw-muted); }
+.tcw-send { height: 46px; padding: 0 1rem; font: inherit; font-weight: 600; cursor: pointer;
+  border: 0; border-radius: 12px; background: var(--tcw-accent); color: var(--tcw-accent-fg); }
+.tcw-send:disabled { opacity: .5; cursor: wait; }
+
+.tcw-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+.tcw-scrim { display: none; }
+
+/* Phones: icon-only bubble; the panel becomes a bottom sheet over a scrim
+   (modal there, since it covers the page) and the header close replaces
+   the bubble. */
+@media (max-width: 40rem) {
+  .tcw-bubble { width: 56px; padding: 0; justify-content: center; }
+  .tcw-bubble-label { display: none; }
+  .tcw-open .tcw-bubble { display: none; }
+  .tcw-panel { left: 0; right: 0; bottom: 0; width: auto; max-width: none;
+    height: 85dvh; max-height: none; border-radius: 16px 16px 0 0; border-bottom: 0;
+    padding-bottom: env(safe-area-inset-bottom); }
+  .tcw-scrim:not([hidden]) { display: block; position: fixed; inset: 0; z-index: 1000; background: rgba(20, 21, 26, .5); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tcw-panel:not([hidden]) { animation: tcw-in .16s ease-out; }
+  @keyframes tcw-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+}
+
+@media print { .tcw { display: none; } }

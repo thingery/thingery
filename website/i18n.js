@@ -174,6 +174,19 @@
     "chat.noReply": "(nessuna risposta)",
     "chat.errNetwork": "⚠️ Errore di rete — riprova.",
 
+    // --- floating assistant (chat-widget.js) ------------------------------
+    "widget.ask": "Chiedi all'assistente",
+    "widget.askThis": "Chiedi su questo",
+    "widget.title": "Assistente Thingery",
+    "widget.expand": "Apri la chat completa",
+    "widget.close": "Chiudi l'assistente",
+    "widget.lookingAt": "Stai guardando",
+    "widget.message": "Messaggio",
+    "widget.placeholder": "Trova o vendi qualcosa",
+    "widget.placeholderThis": "Chiedi su questo",
+    "widget.welcome": "Chiedimi di trovare qualcosa di usato, o dimmi cosa vorresti vendere.",
+    "widget.welcomeThis": "Chiedimi qualsiasi cosa su questo — prezzo, condizioni, come comprarlo.",
+
     // --- account page (/login.html + account.js) -----------------------------
     "acct.title": "Account — Thingery",
     "acct.h1": "Account",

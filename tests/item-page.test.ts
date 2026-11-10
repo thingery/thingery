@@ -257,3 +257,17 @@ describe("item page shipping price", () => {
     expect(pickup).not.toContain("item.plusShipping");
   });
 });
+
+describe("item page floating assistant", () => {
+  it("marks the title as the assistant's subject and loads the widget scripts", async () => {
+    const html = await renderWith(item, null);
+    expect(html).toContain(`<h1 data-chat-subject="item" data-chat-id="itm-1">${item.title}</h1>`);
+    expect(html).toContain(`<script src="/chat-store.js" defer></script>`);
+    expect(html).toContain(`<script src="/chat-widget.js" defer></script>`);
+  });
+
+  it("escapes a hostile item id in the subject marker", async () => {
+    const html = await renderWith({ ...item, id: `x" onclick="alert(1)` }, null);
+    expect(html).toContain(`data-chat-id="x&quot; onclick=&quot;alert(1)"`);
+  });
+});

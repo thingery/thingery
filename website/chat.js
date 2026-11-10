@@ -4,6 +4,16 @@
 const t = globalThis.__thingeryT || ((key, fallback) => fallback);
 const $ = (id) => document.getElementById(id);
 const history = [];
+// Shared with the floating widget (chat-store.js): a conversation started
+// there continues here after "open in full chat". Optional so this file
+// still runs standalone (e.g. under the DOM-shim test).
+const chatStore = globalThis.ThingeryChatStore || null;
+const saved = chatStore ? chatStore.load() : { history: [], log: [], contextKey: null };
+const log = saved.log.slice();
+history.push(...saved.history);
+const persist = () => {
+  if (chatStore) chatStore.save({ history, log, contextKey: saved.contextKey });
+};
 
 // THI-278: assistant replies reveal letter-by-letter (typewriter) unless the
 // user prefers reduced motion, in which case the full text lands instantly.
@@ -96,6 +106,8 @@ function addBot(text) {
   requestAnimationFrame(step);
 }
 
+for (const entry of saved.log) add(entry.role, entry.text);
+
 fetch("/api/me").then(r => r.json()).then(data => {
   if (data.seller) {
     const account = document.createElement("a");
@@ -167,7 +179,8 @@ async function send(message, displayText) {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message, history }),
+      // The server accepts at most MAX_HISTORY turns; older ones drop off.
+      body: JSON.stringify({ message, history: history.slice(-(chatStore ? chatStore.MAX_HISTORY : 24)) }),
     });
     const data = await res.json();
     // The reply is either a plain string (old shape) or { text, confirm? }.
@@ -183,6 +196,8 @@ async function send(message, displayText) {
     if (streamed) addBot(reply);
     else add("bot", reply);
     history.push({ role: "user", content: displayText }, { role: "assistant", content: reply });
+    log.push({ role: "user", text: displayText }, { role: "bot", text: reply });
+    persist();
     if (res.ok && data.reply && typeof data.reply === "object" && data.reply.confirm) {
       addConfirmCard(data.reply.confirm);
     }

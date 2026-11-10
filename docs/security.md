@@ -501,12 +501,23 @@ worst-case damage, "Exploitability" is how practical the attack is today.
   (free accounts, trivial automation — contingent on H1 for the IP-throttling part).
 - **Fix (pragmatic 90%):**
   1. ~~Per-seller listing velocity limit (e.g. 50 active listings / 100 creates per day).~~
-     **Done — shipped with PR #62 / THI-113** (verdict in THI-231 confirmed the numbers).
-     Shipped at **100 creates/day, 200 active**: `MAX_LISTING_CREATES_PER_SELLER_PER_DAY` /
-     `MAX_ACTIVE_LISTINGS_PER_SELLER` in `src/items.ts`, enforced in `createItem` *before*
-     the embeddings call so an over-cap create never pays the embedding bill; the rejection
-     is `ListingLimitError` → MCP code `rate_limited`, logged as a rejected `listing_write`
-     security event. Fixes 3–4 below remain open.
+     **Done — shipped with PR #62 / THI-113** (verdict in THI-231 confirmed the numbers),
+     **extended by the new-account write ramp (GH #212 / THI-542, spec
+     `docs/specs/account-write-ramp.md`; Security verdict THI-543 APPROVE WITH NOTES,
+     CEO acceptance THI-544)**: sellers younger than 7 days write under ramp caps —
+     `NEW_SELLER_MAX_LISTING_CREATES_PER_DAY = 10`, `NEW_SELLER_MAX_ACTIVE_LISTINGS = 20`
+     (module constants in `src/items.ts`, deliberately not env-configurable; **Security
+     owns tuning**) — before the shipped full caps of **100 creates/day, 200 active** take
+     over automatically at day 7 (regime derived from `sellers.created_at` in the same
+     COUNT round trip, still enforced *before* the embeddings call). The rejection stays
+     `ListingLimitError` → MCP code `rate_limited`; the rejected `listing_write` security
+     event carries `limit: "new_seller_ramp" | "seller_cap"` so monitoring distinguishes
+     the regimes. Recorded residuals (THI-543): (a) aged-account patience — a farmer
+     willing to wait 7 days per account gets full caps; the `limit` telemetry is the
+     detector, progressive ramp/reputation is the follow-up lever, not now; (b)
+     proxy-rotated farming is only IP-rate-limited — the ramp is what makes each farmed
+     account expensive; (c) signup 409 email enumeration remains an open API2 item, out of
+     scope here. Fixes 3–4 below remain open.
   2. Security event logging as structured JSON lines (signup, login success/failure,
      rate-limit rejections, listing create/update/delete, image upload, intent writes) — never logging
      secrets or full payloads. Ship to stdout; Caddy/Docker capture is enough for now.

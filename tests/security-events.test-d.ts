@@ -92,6 +92,36 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
   });
 });
 
+describe("listing_write limit field (GH #212 / THI-542, THI-543 Q4)", () => {
+  it("accepts only the two regime literals, optional, on the listing_write family only", () => {
+    const ramp: SecurityEvent = { type: "listing_write", action: "create", outcome: "rejected", limit: "new_seller_ramp" };
+    const full: SecurityEvent = { type: "listing_write", action: "create", outcome: "rejected", limit: "seller_cap" };
+    const none: SecurityEvent = { type: "listing_write", action: "create", outcome: "rejected" };
+    expectTypeOf(ramp).toBeObject();
+    expectTypeOf(full).toBeObject();
+    expectTypeOf(none).toBeObject();
+    // SecurityEventReason is NOT extended by the ramp slugs (separate unions
+    // per event family — the whole point of the THI-543 Q4 field shape).
+    // @ts-expect-error a ramp slug is not an image-upload reason
+    const asReason: SecurityEventReason = "new_seller_ramp";
+    expectTypeOf(asReason).toBeString();
+  });
+
+  it("a dynamic (request-derived) string is a compile error for limit", () => {
+    // The regime comes from the seller's account age, never request data —
+    // but the union keeps attacker-derived strings out regardless.
+    const dynamic: string = "new_seller_ramp"; // type is string; value is irrelevant
+    // @ts-expect-error listing_write.limit is a literal union — dynamic strings must not typecheck
+    logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected", limit: dynamic });
+  });
+
+  it("a non-slug literal is still rejected", () => {
+    // @ts-expect-error image-cap or any invented slug is a reviewed type change away
+    const event: SecurityEvent = { type: "listing_write", action: "create", outcome: "rejected", limit: "image_cap" };
+    expectTypeOf(event).toBeObject();
+  });
+});
+
 describe("chatgpt_oauth_error reason union (THI-193 §3.3)", () => {
   it("accepts only the fixed terminal-refresh slugs", () => {
     expectTypeOf<ChatgptOauthErrorReason>().toEqualTypeOf<

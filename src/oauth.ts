@@ -348,7 +348,7 @@ export function revokeCsrfToken(sellerId: string, grantId: string): string {
     .digest("base64url");
 }
 
-interface AppsGrantRow {
+export interface AppsGrantRow {
   id: string;
   client_name: string;
   created_at: Date;
@@ -356,29 +356,38 @@ interface AppsGrantRow {
   csrf: string;
 }
 
-function appsPageHtml(grants: AppsGrantRow[], revoked: boolean): string {
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "3 Nov 2026" in UTC: fixed English, so the page reads the same on every server locale. */
+function shortDate(d: Date): string {
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+/** Exported for render tests that need no database. */
+export function appsPageHtml(grants: AppsGrantRow[], revoked: boolean): string {
   const rows = grants
     .map(
       (g) => `
 <article class="row">
   <div>
     <h2>${htmlEscape(g.client_name)}</h2>
-    <p class="ticket">Authorized ${htmlEscape(g.created_at.toISOString().slice(0, 10))} · Last used ${g.last_used_at ? htmlEscape(g.last_used_at.toISOString().slice(0, 10)) : "never"} · Scope mcp</p>
+    <p class="ticket">Connected ${htmlEscape(shortDate(g.created_at))} · ${g.last_used_at ? `Used ${htmlEscape(shortDate(g.last_used_at))}` : "Never used"}</p>
   </div>
   <form method="post" action="/apps/revoke">
     <input type="hidden" name="grant_id" value="${htmlEscape(g.id)}">
     <input type="hidden" name="csrf" value="${htmlEscape(g.csrf)}">
-    <button type="submit" class="small">Revoke</button>
+    <button type="submit" class="compact">Disconnect</button>
   </form>
 </article>`,
     )
     .join("");
   return pageDocument(
-    "Connected applications",
-    `<h1>Connected applications</h1>
-${revoked ? `<p class="notice" role="status"><strong>Application disconnected.</strong> Its access has been revoked.</p>` : ""}
-${grants.length === 0 ? `<p>No applications are connected to your account. Applications you authorize through an MCP host will appear here.</p>` : `<div class="rows">${rows}</div>`}
-<p><a href="/login.html">Back to your account</a></p>`,
+    "Connected apps",
+    `<a class="back" href="/login.html">Your account</a>
+<h1>Connected apps.</h1>
+<p>These apps can act as you. Disconnect one and it loses access right away.</p>
+${revoked ? `<p class="notice" role="status">App disconnected. It no longer has access.</p>` : ""}
+${grants.length === 0 ? `<p class="muted">No apps are connected. Apps you sign in to Thingery from will show up here.</p>` : `<div class="rows">${rows}</div>`}`,
     { wide: true },
   );
 }
@@ -530,32 +539,44 @@ export function sha256Hex(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-// Brand colours and shapes, copied from the website's design tokens on purpose: this server renders
-// these pages on its own, for self-hosters too, so it cannot depend on the website's stylesheet.
-// System fonts, like the rest of the public site.
+// Brand colours and shapes, copied from the brand's colour roles on purpose: this server renders
+// these pages on its own, for self-hosters too, so it cannot depend on the web app's stylesheet.
+// The brand typefaces are not served from here (the CSP allows no font source), so the pages use
+// the system stack, monospace included.
 const PAGE_CSS = [
-  ":root{--page:#F6F6F3;--ink:#14151A;--muted:#565A63;--line:#D9DAD6;--surface:#FFFFFF;--accent:#FFCE1F;--link:#2438D6;color-scheme:light}",
+  ":root{--page:#F6F6F3;--ink:#14151A;--muted:#565A63;--line:#D9DAD6;--line-strong:#14151A;--surface:#FFFFFF;--accent:#FFCE1F;--on-accent:#14151A;--link:#2438D6;color-scheme:light dark}",
+  // The sticker yellow and the ink on it stay the same in dark mode.
+  "@media (prefers-color-scheme:dark){:root{--page:#14151A;--ink:#F6F6F3;--muted:#C3C5CB;--line:#373A44;--line-strong:#F6F6F3;--surface:#22242B;--link:#7E8BFF}}",
   "*{box-sizing:border-box}",
-  'body{margin:0;background:var(--page);color:var(--ink);font:400 17px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}',
-  "main{max-width:34rem;margin:0 auto;padding:24px 20px 48px;display:flex;flex-direction:column;gap:18px}",
-  "main.wide{max-width:44rem}",
+  'body{margin:0;background:var(--page);color:var(--ink);font:400 16px/1.4 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}',
+  "main{max-width:34rem;margin:0 auto;padding:16px 20px 48px;display:flex;flex-direction:column;gap:18px}",
+  "main.wide{max-width:44rem;gap:12px}",
   ".brand{display:flex;align-items:center;gap:6px;color:var(--ink);font-weight:800;font-size:22px;letter-spacing:-.04em;text-decoration:none}",
   ".brand svg{width:26px;height:26px}",
-  "h1{margin:12px 0 0;font-size:clamp(34px,8vw,44px);line-height:1;letter-spacing:-.04em;font-weight:800;overflow-wrap:anywhere}",
-  "p{margin:0}a{color:var(--link)}strong{overflow-wrap:anywhere}",
+  "h1{margin:12px 0 0;font-size:clamp(36px,10vw,44px);line-height:1;letter-spacing:-.04em;font-weight:800;overflow-wrap:anywhere}",
+  "main.wide h1{margin:0;font-size:clamp(40px,13vw,54px);line-height:.95;letter-spacing:-.045em}",
+  "h2{margin:0;font-size:17px;font-weight:600;overflow-wrap:anywhere}",
+  "p,ul{margin:0}ul{padding:0 0 0 20px;display:flex;flex-direction:column;gap:6px}",
+  "a{color:var(--ink)}a:hover{color:var(--link)}strong{overflow-wrap:anywhere}",
+  ".back{font-weight:500;font-size:15px}",
   ".muted{color:var(--muted);font-size:15px}",
+  ".small{font-size:14px}",
+  ".center{text-align:center}",
   ".panel{background:var(--surface);padding:16px;display:flex;flex-direction:column;gap:10px}",
   ".notice{background:var(--surface);padding:12px 14px;font-weight:600}",
+  ".ticket{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--muted);overflow-wrap:anywhere}",
   // Deny comes first in the markup so Enter never grants access; the column is reversed so Allow sits on top.
   ".actions{display:flex;flex-direction:column-reverse;gap:10px}",
-  "button{min-height:52px;padding:0 20px;border:2px solid var(--ink);border-radius:6px;background:transparent;color:var(--ink);font-family:inherit;font-size:18px;font-weight:600;cursor:pointer}",
-  "button.primary{border-color:var(--accent);background:var(--accent)}",
-  "button.small{min-height:44px;font-size:16px}",
+  "button{min-height:54px;padding:0 20px;border:2px solid var(--ink);border-radius:6px;background:transparent;color:var(--ink);font-family:inherit;font-size:18px;font-weight:600;cursor:pointer}",
+  "button.primary{border-color:var(--accent);background:var(--accent);color:var(--on-accent)}",
+  "button.compact{min-height:44px;font-size:16px}",
   "button:focus-visible,a:focus-visible{outline:3px solid var(--link);outline-offset:2px}",
-  ".rows{border-top:2px solid var(--ink)}",
-  ".row{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px 16px;padding:12px 0;border-bottom:1px solid var(--line)}",
-  ".row h2{margin:0;font-size:17px;font-weight:600;overflow-wrap:anywhere}",
-  ".ticket{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--muted)}",
+  ".rows{display:flex;flex-direction:column;border-top:2px solid var(--line-strong)}",
+  ".row{display:flex;flex-direction:column;gap:8px;padding:12px 0;border-bottom:1px solid var(--line)}",
+  ".row>div{display:flex;flex-direction:column;gap:1px}",
+  ".row button{width:100%}",
+  // From tablet width up, each app sits on one line with its button on the right.
+  "@media (min-width:600px){.row{flex-direction:row;justify-content:space-between;align-items:center;gap:12px}.row button{width:auto;padding:0 16px}}",
 ].join("\n");
 
 // Lets exactly this stylesheet through the CSP, so no inline style or script is allowed.
@@ -685,7 +706,7 @@ function checkAuthorizeParams(q: AuthorizeQuery, issuer: string): ParamCheck {
  * merge of PR 3). client_name is attacker-suppliable DCR text — rendered as
  * text only (htmlEscape), never as HTML or an attribute link.
  */
-function consentPageHtml(opts: {
+export function consentPageHtml(opts: {
   clientName: string;
   clientUri: string | null;
   accountLabel: string;
@@ -696,24 +717,28 @@ function consentPageHtml(opts: {
   const hidden = (name: string, value: string | undefined) =>
     value === undefined ? "" : `<input type="hidden" name="${name}" value="${htmlEscape(value)}">`;
   const q = opts.query;
+  // The redirect URI is validated before this renders (https, or http on loopback), so it always has a host.
+  const returnHost = q.redirect_uri === undefined ? null : new URL(q.redirect_uri).host;
   return pageDocument(
-    `Authorize ${htmlEscape(opts.clientName)}`,
-    `<h1>Authorize ${htmlEscape(opts.clientName)}</h1>
-<p><strong>${htmlEscape(opts.clientName)}</strong>${opts.clientUri === null ? "" : ` (${htmlEscape(opts.clientUri)})`} wants to connect to your Thingery account
-<strong>${htmlEscape(opts.accountLabel)}</strong>.</p>
-<div class="panel"><p>It will be able to read and manage your listings and orders, acting as you.</p></div>
-<form method="post" action="/oauth/authorize">
+    `Connect ${htmlEscape(opts.clientName)}`,
+    `<h1>Let ${htmlEscape(opts.clientName)} use your account?</h1>
+<p class="muted">Signed in as <strong>${htmlEscape(opts.accountLabel)}</strong>. <a href="/login.html">Not you?</a></p>
+<div class="panel">
+<h2>It will act as you</h2>
+<ul><li>Read and change your listings</li><li>Read and manage your orders</li></ul>
+<p class="muted small">Only allow apps you trust.</p>
+</div>
+${opts.clientUri === null ? "" : `<p class="ticket"><strong>${htmlEscape(opts.clientName)}</strong> says it is from ${htmlEscape(opts.clientUri)}</p>\n`}${returnHost === null ? "" : `<p class="ticket">Sends you back to ${htmlEscape(returnHost)}</p>\n`}<form method="post" action="/oauth/authorize">
 ${hidden("client_id", q.client_id)}${hidden("redirect_uri", q.redirect_uri)}${hidden("response_type", q.response_type)}
 ${hidden("scope", q.scope)}${hidden("state", q.state)}${hidden("code_challenge", q.code_challenge)}
 ${hidden("code_challenge_method", q.code_challenge_method)}${hidden("resource", q.resource)}
 ${hidden("csrf", opts.csrf)}${hidden("nonce", opts.nonce)}
 <div class="actions">
-<button type="submit" name="action" value="deny">Deny</button>
+<button type="submit" name="action" value="deny">Don't allow</button>
 <button type="submit" name="action" value="allow" class="primary">Allow</button>
 </div>
 </form>
-<p class="muted">Only allow applications you trust. You can review and disconnect connected applications
-anytime from your account page.</p>`,
+<p class="muted small center">You can disconnect it any time from Connected apps in your account.</p>`,
   );
 }
 

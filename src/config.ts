@@ -62,6 +62,14 @@ export interface OrderFlowConfig {
   easypostWebhookSecretPrevious: string | undefined;
   // Admin dispute route (PR-9): disabled unless the key is long enough (F7).
   adminRouteEnabled: boolean;
+  // Admin UI (THI-562 work item 3, spec docs/specs/admin-dispute-ui.md):
+  // the session-cookie surface additionally requires an explicit, strong
+  // SESSION_SECRET — not auth.ts's ephemeral random fallback (THI-566 minor:
+  // silently-churning sessions on restart) and not a short string (the cookie
+  // + CSRF HMACs are only as strong as the secret). Fail-closed: unset or
+  // short ⇒ every /admin page 404s, indistinguishable from absent. The JSON
+  // endpoint keeps its own adminRouteEnabled gate (Bearer-key transport).
+  adminUiEnabled: boolean;
   // Deadline / abuse-cap windows (spec §4.4; rev 3 §11.3 adds 8–9).
   paymentDeadlineHours: number;          // 24
   disputeWindowHours: number;            // 48 (buyer/carrier-confirmed)
@@ -101,6 +109,7 @@ export function orderFlowConfig(): OrderFlowConfig {
   const easypostWebhookSecret = envValue("EASYPOST_WEBHOOK_SECRET");
   const easypostWebhookSecretPrevious = envValue("EASYPOST_WEBHOOK_SECRET_PREVIOUS");
   const adminKey = envValue("ADMIN_API_KEY");
+  const sessionSecret = envValue("SESSION_SECRET");
 
   if (stripeKey !== undefined && !/^(sk_test_|sk_live_)/.test(stripeKey)) {
     console.error(
@@ -120,6 +129,9 @@ export function orderFlowConfig(): OrderFlowConfig {
     easypostWebhookSecret,
     easypostWebhookSecretPrevious: easypostWebhookSecret !== undefined ? easypostWebhookSecretPrevious : undefined,
     adminRouteEnabled: adminKey !== undefined && adminKey.length >= 32,
+    adminUiEnabled:
+      adminKey !== undefined && adminKey.length >= 32 &&
+      sessionSecret !== undefined && sessionSecret.length >= 32,
     paymentDeadlineHours: envInt("PAYMENT_DEADLINE_HOURS", 24),
     disputeWindowHours: envInt("DISPUTE_WINDOW_HOURS", 48),
     systemConfirmedDisputeWindowHours: envInt("SYSTEM_CONFIRMED_DISPUTE_WINDOW_HOURS", 336),
@@ -159,6 +171,12 @@ export function logConfigBootReport(cfg: OrderFlowConfig = orderFlowConfig()): O
   }
   if (!cfg.adminRouteEnabled) {
     console.log("[config] Admin dispute route disabled (ADMIN_API_KEY unset or shorter than 32 chars)");
+  } else if (!cfg.adminUiEnabled) {
+    console.error(
+      "[config] SESSION_SECRET unset or shorter than 32 chars — the admin UI stays disabled " +
+        "(all /admin pages 404). The JSON admin endpoint is unaffected. Set SESSION_SECRET " +
+        "explicitly (`openssl rand -hex 32`) so admin sessions survive restarts.",
+    );
   }
   // THI-296: presence-only signal — the challenge token value is public-by-design
   // but still never printed (logs stay clean of verbatim operator input).

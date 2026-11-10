@@ -139,6 +139,15 @@ export type SecurityEvent =
    *  persisting CAS — the label is real, unused platform spend pending the
    *  operator's reconcile runbook (spec A3). Ids only, never payloads. */
   | { type: "label_bought_orphan"; order_id: string; shipment_id: string };
+  /** THI-569 (spec docs/specs/admin-dispute-ui.md, PR-A): admin UI session
+   *  login attempts — one line per POST /admin/login, ok and denied alike.
+   *  Outcome + ip only; never the submitted key or any request payload. */
+  | { type: "admin_login"; outcome: "ok" | "denied" }
+  /** THI-569 (PR-B): PII minimization audit — one line per shipping-address
+   *  reveal in the admin dispute workspace. `orderId` is the server-generated
+   *  order uuid (not request payload text); the address itself is never
+   *  logged. */
+  | { type: "admin_pii_reveal"; orderId: string };
 
 export interface SecurityEventContext {
   sellerId?: string;
@@ -170,6 +179,7 @@ export function logSecurityEvent(event: SecurityEvent, ctx: SecurityEventContext
       : {}),
     ...(event.type === "wanted_response" && event.count !== undefined ? { count: event.count } : {}),
     ...(event.type === "listing_write" && event.limit !== undefined ? { limit: event.limit } : {}),
+    ...(event.type === "admin_pii_reveal" ? { orderId: event.orderId } : {}),
     ...(event.type === "chat_usage"
       ? {
           model: event.model,

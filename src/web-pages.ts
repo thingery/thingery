@@ -17,7 +17,11 @@ import {
 import { orderFlowConfig } from "./config.js";
 import { classifyVisitOrigin, logPageView } from "./analytics.js";
 
-const escapeHtml = (value: unknown): string =>
+/** Contextual HTML escaping for every interpolated value (text + attribute
+ *  contexts). Exported since THI-569: the admin pages (src/routes.ts §admin
+ *  UI) render through the same discipline — B2 in the THI-566 review makes
+ *  output encoding a named requirement for server-rendered admin HTML. */
+export const escapeHtml = (value: unknown): string =>
   String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -87,7 +91,10 @@ function baseUrlFromRequest(req: Request): string {
   return `${req.protocol}://${req.get("host") ?? "localhost"}`;
 }
 
-function page(title: string, description: string, body: string, og?: OgMeta, noindex = false): string {
+/** Minimal server-rendered page shell shared by every website page (and, since
+ *  THI-569, the admin dispute pages — spec docs/specs/admin-dispute-ui.md
+ *  PR-B: the admin pages reuse this helper; no client framework). */
+export function page(title: string, description: string, body: string, og?: OgMeta, noindex = false): string {
   return `<!doctype html>
 <html lang="en">
 <head>

@@ -7,6 +7,12 @@ name: Publish to npm and MCP Registry
 #   - workflow_dispatch: same checks but publishes nothing by default
 #     (dry_run=true). Use it to rehearse a release without touching npm or
 #     the registry, e.g. after changing this workflow (THI-335).
+#
+# Release practice (GH #210): every release bumps "version" in package.json
+# (+ server.json, package-lock.json) on main *before* tagging, so a
+# self-hoster's /healthz version can be compared against npm to detect lag
+# (thingery.dev deploys every push to main and reports the same version).
+# The tag must match the bumped version (v0.2.0 -> thingery@0.2.0).
 on:
   push:
     tags: ["v*"]

@@ -182,8 +182,7 @@ PORT=3000 node node_modules/thingery/dist/index.js
 
 The server boots at `http://localhost:3000` — `/mcp`, `/browse`, `/healthz`, and the HTTP
 API. Create your account by opening [`/login.html`](http://localhost:3000/login.html) —
-your `thg_...` MCP key is shown right after signup. (On the pre-fix 0.1.2 release the
-page 404'd — a packaging gap fixed after it; there you can still create the account
+your `thg_...` MCP key is shown right after signup. (You can also create the account
 through the API — the key is returned exactly once, in the signup response:)
 
 ```bash
@@ -198,8 +197,9 @@ Then point any MCP client at `http://localhost:3000/mcp` with
 [`npx` config below](#run-locally-over-stdio-npx).
 
 > Note: the npm package publishes at release cadence and can lag `main` on thingery.dev
-> by days — `/healthz` reports the running version. If you need today's features,
-> self-host from source instead:
+> by days. Every release bumps the version, so comparing your `/healthz` `version` with
+> [thingery.dev/healthz](https://thingery.dev/healthz) tells you how far behind you are.
+> If you need today's features, self-host from source instead:
 
 ### Self-hosted from source (development)
 
@@ -307,7 +307,7 @@ stdio server needs the same prerequisites as Mode B: a Postgres with the schema 
 | HTTP 406 from `/mcp` | the MCP Streamable HTTP transport requires the SSE Accept header | send `accept: application/json, text/event-stream` |
 | `npm run db:migrate` fails inside an installed package | `scripts/` isn't published — the schema ships as `db/schema.sql` | `psql "$DATABASE_URL" -f node_modules/thingery/db/schema.sql` |
 | stdio warning: `THINGERY_API_KEY set but not found in the database` | the key belongs to a different deployment's database | get a key from *this* deployment (`/login.html` or `/api/signup`) |
-| Self-hosted behaves differently from thingery.dev | the npm release can lag `main` (e.g. photo-gating) | compare `/healthz` versions; self-host from source for today's `main` |
+| Self-hosted behaves differently from thingery.dev | the npm release can lag `main` | compare your `/healthz` `version` with [thingery.dev/healthz](https://thingery.dev/healthz) (the `commit` field identifies the exact build); self-host from source for today's `main` |
 
 ### Try it with curl or a 5-line script
 

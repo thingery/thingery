@@ -3,6 +3,8 @@ title: "Quickstart"
 description: "Search Thingery in a minute, then publish your first listing."
 ---
 
+import { ConnectPanel } from "/snippets/connect-panel.jsx";
+
 Hosted and self-hosted Thingery expose the **same MCP tools** but **not the same data**. Listings you create on `thingery.dev` are visible to everyone; listings on your own instance live only in your database.
 
 | Mode | Endpoint | Data | Best for |
@@ -27,7 +29,9 @@ This page uses the hosted server. To run your own, see [Self-hosting](/self-host
     Responses come back as Server-Sent Events: the JSON-RPC result is on the `data:` line.
   </Step>
   <Step title="Connect your assistant">
-    Add `https://thingery.dev/mcp` as a remote MCP server in Claude, ChatGPT, VS Code or any other client, and sign in when it asks. See [Connect a client](/connect).
+    Add Thingery to your client and sign in when it asks:
+
+    <ConnectPanel />
   </Step>
   <Step title="Publish a listing">
     Ask your assistant to sell something and share a photo. It calls `describe_category`, then `create_listing`, then `add_item_image`. **The first photo publishes the listing**; without one it stays hidden. See [Selling](/guides/selling).

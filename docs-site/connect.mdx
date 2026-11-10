@@ -1,81 +1,39 @@
 ---
 title: "Connect a client"
-description: "Add Thingery to Claude, Claude Code, ChatGPT, VS Code, Cursor, the MCP Inspector or your own code."
+description: "Add Thingery to Claude, Claude Code, ChatGPT, Cursor, VS Code or any MCP client."
 ---
 
-The hosted server is **`https://thingery.dev/mcp`**: Streamable HTTP, JSON-RPC 2.0, POST-only and stateless, so every request stands alone. A self-hosted instance exposes the same endpoint at its own URL.
+import { ConnectPanel } from "/snippets/connect-panel.jsx";
 
-## Clients that sign in with OAuth
+The hosted server is **`https://thingery.dev/mcp`**. Pick your client: it finds the sign-in flow on its own, you approve once in the browser, and its tokens rotate automatically.
 
-Add the URL as a remote HTTP server. The client finds the sign-in flow on its own, you approve once in the browser, and its tokens rotate automatically. You can review and revoke connected apps at [thingery.dev/apps](https://thingery.dev/apps).
+<ConnectPanel />
 
-<Tabs>
-  <Tab title="Claude">
-    Settings → Connectors → **Add custom connector** → `https://thingery.dev/mcp`
-  </Tab>
-  <Tab title="Claude Code">
-    ```bash
-    claude mcp add --transport http thingery https://thingery.dev/mcp
-    ```
+You can review and revoke connected apps at [thingery.dev/apps](https://thingery.dev/apps). A self-hosted instance works the same way at its own URL.
 
-    Then run `/mcp` inside Claude Code, choose **thingery** and sign in. Add `--scope project` to share the server with your team through `.mcp.json`.
-  </Tab>
-  <Tab title="ChatGPT">
-    Add `https://thingery.dev/mcp` as a connector and sign in when ChatGPT asks.
-  </Tab>
-  <Tab title="VS Code">
-    In `.vscode/mcp.json`:
+## MCP Inspector
 
-    ```json
-    {
-      "servers": {
-        "thingery": { "type": "http", "url": "https://thingery.dev/mcp" }
-      }
+```bash
+npx @modelcontextprotocol/inspector
+```
+
+Choose the **Streamable HTTP** transport, enter `https://thingery.dev/mcp` and connect. The Inspector offers the sign-in.
+
+## Use an API key instead
+
+Scripts, CI and clients without OAuth send an API key as a bearer token. See [Authentication](/authentication) to get one.
+
+```json
+{
+  "mcpServers": {
+    "thingery": {
+      "type": "http",
+      "url": "https://thingery.dev/mcp",
+      "headers": { "Authorization": "Bearer thg_YOUR_KEY" }
     }
-    ```
-  </Tab>
-  <Tab title="MCP Inspector">
-    ```bash
-    npx @modelcontextprotocol/inspector
-    ```
-
-    Choose the **Streamable HTTP** transport, enter `https://thingery.dev/mcp` and connect. The Inspector offers the sign-in.
-  </Tab>
-</Tabs>
-
-## Clients that use an API key
-
-Clients without OAuth, such as Cursor, scripts and CI, send an API key as a bearer token. See [Authentication](/authentication) to get one.
-
-<Tabs>
-  <Tab title="Cursor">
-    In `.cursor/mcp.json`:
-
-    ```json
-    {
-      "mcpServers": {
-        "thingery": {
-          "url": "https://thingery.dev/mcp",
-          "headers": { "Authorization": "Bearer thg_YOUR_KEY" }
-        }
-      }
-    }
-    ```
-  </Tab>
-  <Tab title="Any client">
-    ```json
-    {
-      "mcpServers": {
-        "thingery": {
-          "type": "http",
-          "url": "https://thingery.dev/mcp",
-          "headers": { "Authorization": "Bearer thg_YOUR_KEY" }
-        }
-      }
-    }
-    ```
-  </Tab>
-</Tabs>
+  }
+}
+```
 
 Leave out the `Authorization` header to use only the public tools, such as search.
 

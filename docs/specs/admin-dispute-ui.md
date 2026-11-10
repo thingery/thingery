@@ -1,6 +1,6 @@
 # Spec: minimal admin dispute UI (THI-562 work item 3)
 
-Status: revised 2026-11-10 — THI-566 verdict pins B1–B3 landed (limiter scope, output encoding, no-store) · Owner: Architect · Review: Security re-approval on revised diff, CEO sign-off required — touches protected path `src/routes.ts`.
+Status: revised 2026-11-10 (rev 2) — THI-566 B1–B3 and both minors normative (limiter split 10/300 per IP/hr, constant-time secret compares, explicit `SESSION_SECRET` ≥32 with fail-closed 404 gate) · Owner: Architect · Review: Security re-approval per revision, CEO sign-off required — touches protected path `src/routes.ts`.
 
 ## Problem
 
@@ -40,14 +40,20 @@ brute force and audit. The JSON endpoint keeps its Bearer-key auth unchanged
 **Limiter scope (B1).** The strict `adminAttemptLimiter` (10/IP/hr) meters
 **only the three state-changing POSTs** — login, resolve, reveal.
 Authenticated page GETs (`/admin/disputes`, `/admin/disputes/:id`) run under a
-separate, higher GET limit (e.g. 120/IP/hr) so operator browsing can never eat
-the action bucket — the secure default must not be widened later for
-usability.
+separate, higher GET limit — a distinct `adminPageLimiter` at 300/IP/hr — so
+operator browsing can never eat the action bucket; the secure default must
+not be widened later for usability.
 
 **CSRF.** `POST /admin/disputes/:id/resolve` (form) requires a CSRF token
 embedded in the detail page, bound to the session (HMAC of `"csrf|" + exp`,
 same secret) and checked server-side. SameSite=Strict is defense-in-depth,
 not the control.
+
+**Constant-time secret compares (THI-566 minor).** Every check of a secret
+value — the login key match, the session cookie MAC, and the CSRF token —
+uses a constant-time compare (`crypto.timingSafeEqual`, the existing
+`adminKeyMatches` pattern). No plain string equality on derived secrets
+anywhere in the admin path.
 
 **Pages.**
 
@@ -80,8 +86,14 @@ render revealed PII; the JSON endpoint already sets it.
    the error.
 
 **No new env vars.** Reuses `ADMIN_API_KEY` (login proof) and
-`SESSION_SECRET` (cookie + CSRF HMAC). Boot validation stays fail-closed:
-admin key unset/short → all `/admin` routes 404, login included.
+`SESSION_SECRET` (cookie + CSRF HMAC). Boot validation stays fail-closed for
+**both**: admin key unset/short, or `SESSION_SECRET` unset or shorter than
+32 chars, → all `/admin` routes 404, login included (the JSON admin endpoint
+is unaffected). `SESSION_SECRET` must be **explicitly set** — the admin
+session must not silently run on auth.ts's ephemeral random fallback, which
+would churn every session on restart. Rotation note: rotating
+`ADMIN_API_KEY` does not invalidate live cookies — rotate `SESSION_SECRET`
+to kill admin sessions (this also drops user website sessions).
 
 ## Data model changes
 
@@ -101,7 +113,9 @@ None (no schema change). Deploy is code-only.
 
 - Auth: no cookie → redirect; forged/expired cookie → redirect; wrong key →
   re-render + `admin_login_denied` event + limiter; right key → cookie set,
-  Secure/httpOnly/SameSite flags asserted; 8h expiry.
+  Secure/httpOnly/SameSite flags asserted; 8h expiry; fail-closed boot gate —
+  `SESSION_SECRET` unset or <32 chars → all `/admin` pages 404 while the JSON
+  endpoint keeps working.
 - CSRF: resolve without token or with mismatched token → 400, no state
   change.
 - Pages: disputed list content and empty state; detail 404s for non-disputed

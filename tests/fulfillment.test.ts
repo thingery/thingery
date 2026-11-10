@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import type Stripe from "stripe";
+import { z } from "zod";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { setStripeForTests } from "../src/stripe.js";
 import { applyTransition } from "../src/orders.js";
@@ -70,6 +71,26 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
     (await db.query<{ id: string }>("SELECT id FROM sellers WHERE email = $1", [email])).rows[0].id;
 
   /** Seeds seller+buyer+buyer-ordered item; returns the created order. */
+  // Tool-capture harness (same pattern as tests/wanted-tools.test.ts) for
+  // contract tests that exercise the registered MCP handlers directly.
+  type Handler = (args: Record<string, unknown>) => Promise<unknown>;
+  interface Captured {
+    config: { description?: string; inputSchema: z.ZodRawShape };
+    handler: Handler;
+  }
+  function captureTools(seller: { id: string } | null): Map<string, Captured> {
+    const tools = new Map<string, Captured>();
+    registerTools(
+      { registerTool(name: string, config: Captured["config"], handler: Handler) { tools.set(name, { config, handler }); } },
+      { seller: seller as never },
+    );
+    return tools;
+  }
+  async function call(tools: Map<string, Captured>, name: string, args: Record<string, unknown> = {}) {
+    const result = (await tools.get(name)!.handler(args)) as { isError?: boolean; content: { text: string }[] };
+    return { isError: result.isError === true, body: JSON.parse(result.content[0].text) as Record<string, any> };
+  }
+
   async function seedOrder(opts: { tier?: "standard" | "local"; mode?: "stripe" | "off_platform"; onboarded?: boolean } = {}) {
     n += 1;
     const s = `fs${n}`, b = `fb${n}`;
@@ -641,18 +662,61 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
     expect((buyerErr as OrderFlowError).code).toBe("not_found");
   });
 
-  it("tool surface: five tools registered, anonymous callers get unauthorized", async () => {
+  it("tool surface: fulfillment tools registered, anonymous callers get unauthorized", async () => {
     const registered: string[] = [];
     const fakeServer = {
       registerTool: (name: string) => registered.push(name),
     };
     registerTools(fakeServer as never, { seller: null });
-    for (const t of ["record_tracking", "confirm_payment", "confirm_receipt", "open_dispute", "release_funds"]) {
+    for (const t of ["record_tracking", "buy_shipping_label", "confirm_payment", "confirm_receipt", "open_dispute", "release_funds"]) {
       expect(registered).toContain(t);
     }
     const { PROTECTED_TOOLS } = await import("../src/tools.js");
-    for (const t of ["record_tracking", "confirm_payment", "confirm_receipt", "open_dispute", "release_funds"]) {
+    for (const t of ["record_tracking", "buy_shipping_label", "confirm_payment", "confirm_receipt", "open_dispute", "release_funds"]) {
       expect(PROTECTED_TOOLS.has(t)).toBe(true);
     }
+  });
+
+  it("buy_shipping_label tool: seller-only surface, F16-strict address, degraded mode surfaces easypost_not_configured", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = easypostFetch([]).fetch; // would quote — must never be reached
+    const anon = captureTools(null);
+    const anonCall = await call(anon, "buy_shipping_label", {
+      order_id: "33333333-3333-4333-8333-333333333333",
+      from_address: { name: "S", line1: "1 Main St", city: "Milan", postal_code: "20122", country: "IT" },
+    });
+    expect(anonCall.isError).toBe(true);
+    expect(anonCall.body.code).toBe("unauthorized");
+    globalThis.fetch = realFetch;
+
+    // F16 parity: the from_address rejects unknown keys; schema mirrors the buyer's.
+    const schema = z.object(captureTools(null).get("buy_shipping_label")!.config.inputSchema);
+    const good = { order_id: "33333333-3333-4333-8333-333333333333", from_address: { name: "S", line1: "1 Main St", city: "Milan", postal_code: "20122", country: "IT" } };
+    expect(schema.safeParse(good).success).toBe(true);
+    expect(schema.safeParse({ ...good, from_address: { ...good.from_address, phone: "+39 333 1112223" } }).success).toBe(true);
+    for (const evil of [
+      { ...good, from_address: { ...good.from_address, extra: "no" } },
+      { ...good, weight_grams: 0 },
+      { ...good, weight_grams: 100.5 },
+      { ...good, dimensions_mm: { length: 10, width: 10 } },
+      { ...good, from_address: { ...good.from_address, country: "ITA" } },
+    ]) {
+      expect(schema.safeParse(evil).success, JSON.stringify(evil)).toBe(false);
+    }
+
+    // Degraded deployment (no EASYPOST_API_KEY): the tool surfaces the
+    // service's degraded error, not a generic failure.
+    const order = await seedOrder();
+    await confirmPayment(order.id, sellerId);
+    await shareShippingAddress(order.id, buyerId);
+    const authed = captureTools({ id: sellerId } as never);
+    const degraded = await call(authed, "buy_shipping_label", {
+      order_id: order.id,
+      from_address: { name: "S", line1: "1 Main St", city: "Milan", postal_code: "20122", country: "IT" },
+      weight_grams: 800,
+    });
+    expect(degraded.isError).toBe(true);
+    expect(degraded.body.code).toBe("easypost_not_configured");
+    expect(String(degraded.body.error)).toContain("record_tracking");
   });
 });

@@ -109,7 +109,7 @@ describe("TOOL_NAMES drift check (registration capture)", () => {
       },
       { seller: null },
     );
-    expect(registered.size).toBe(31); // +4 intent tools, +my_matches, +respond_to_wanted, +search_wanted/get_wanted, +2 public and +5 account wanted tools, +my_orders, +share_shipping_address
+    expect(registered.size).toBe(32); // +4 intent tools, +my_matches, +respond_to_wanted, +search_wanted/get_wanted, +2 public and +5 account wanted tools, +my_orders, +share_shipping_address, +buy_shipping_label
     expect([...TOOL_NAMES].sort()).toEqual([...registered].sort());
   });
 });

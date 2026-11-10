@@ -198,7 +198,7 @@ function runHttp(): void {
     console.log(`Thingery MCP server listening on http://localhost:${PORT}`);
     console.log(`  MCP endpoint:     http://localhost:${PORT}/mcp`);
     console.log(`  Health check:     http://localhost:${PORT}/healthz`);
-    console.log(`  Embeddings:       ${process.env.EMBED_API_KEY ? "enabled" : "keyword-only mode"}`);
+    console.log(`  Embeddings:       ${process.env.EMBED_API_KEY ? "configured (keyword fallback if the provider fails)" : "keyword-only mode"}`);
   });
 }
 

@@ -1,0 +1,44 @@
+name: no-private-paths
+
+# Repo-boundary guardrail (THI-565): company-private material must never land
+# in the public repo (thingery/thingery holds the open-source core only; the
+# company side lives in thingery/platform). Fails any PR that adds or modifies
+# deny-listed paths. CODEOWNERS cannot express "must not exist"; a path check
+# can. Deny-list from the THI-573 proposal (§5):
+#   apps/ deploy/ billing/ ops/      — active now (prophylactic)
+#   website/                          — NOT denied yet: joins the deny-list when
+#                                       Phase 2 of the repo split removes the
+#                                       consumer pages from this repo.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  no-private-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the merge-base with the base branch
+      - name: Deny company-private paths (THI-565)
+        run: |
+          set -euo pipefail
+          base="origin/${{ github.base_ref }}"
+          deny=("apps/" "deploy/" "billing/" "ops/")
+          rc=0
+          while IFS= read -r f; do
+            for d in "${deny[@]}"; do
+              if [[ "$f" == "$d"* ]]; then
+                echo "::error file=${f}::company-private path '${d}**' must not live in the public repo (THI-565)"
+                rc=1
+              fi
+            done
+          done < <(git diff --name-only --diff-filter=ACMRT "$base"...HEAD)
+          if [[ $rc -ne 0 ]]; then
+            echo "This pull request touches company-private paths."
+            echo "Company-side work (website, apps, deploy, billing, ops) belongs in thingery/platform (THI-565)."
+          fi
+          exit $rc

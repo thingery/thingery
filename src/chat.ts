@@ -361,9 +361,19 @@ function orderToPublic(order: {
   };
 }
 
+/** The chat order-read tools (THI-603, THI-602 review item 1): routed
+ *  through normalizeOrderArgs in chatTurn exactly like the writes, so junk
+ *  model args are rejected model-side — counted in toolArgErrors, answered
+ *  with the same manifest-parity error the MCP surface gives — instead of
+ *  falling through to the service layer's defensive clamps, and the
+ *  executor receives canonical arg types (trimmed ids, defaulted role and
+ *  limit). list_order_messages joins this set when it lands (THI-570 PR-C). */
+const ORDER_READ_TOOLS: ReadonlySet<string> = new Set(["my_orders", "get_order"]);
+
 /** Arg validation for the chat order tools, mirroring the MCP tools' zod
  *  schemas (manifest parity): same rejects for the same input. Exported for
- *  the parity table test. Business validation (ownership, state machine,
+ *  the parity table test, and wired into chatTurn for the read tools
+ *  (THI-603). Business validation (ownership, state machine,
  *  caps) is NOT here — it lives in the service modules and runs on execute. */
 // zod v4's .uuid() is RFC 9562-strict (version nibble 1-8, variant 8/9/a/b,
 // plus the nil and max special forms) — the parity test pins chat to the
@@ -1542,9 +1552,15 @@ export async function chatTurn(
         // string price_cents ("1000") would otherwise skip the >20% gate and
         // Postgres would cast it to INTEGER — executing a destructive drop
         // with no confirmation card. Non-canonical values fail closed.
+        // THI-603 (THI-602 review item 1): the order READ tools route through
+        // the same normalization as the writes — junk args are rejected here
+        // (model-facing error + toolArgErrors accounting, the parity function
+        // is no longer test-only) and the executor gets canonical args.
         const orderVerbTool = ORDER_WRITE_VERBS.has(call.function.name);
+        const orderReadTool = ORDER_READ_TOOLS.has(call.function.name);
         const norm = call.function.name === "update_listing" ? normalizeUpdateArgs(args)
-          : orderVerbTool ? normalizeOrderArgs(call.function.name, args)
+          : orderVerbTool || orderReadTool ? normalizeOrderArgs(call.function.name, args)
+          : null;
           : null;
         if (norm && !norm.ok) {
           toolArgErrors++; // THI-185: model-arg rejection, not an execution error

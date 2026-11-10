@@ -333,6 +333,151 @@ describe.skipIf(!available)("chat vs MCP order reads (DB)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Pure: chatTurn normalization wiring (THI-603, THI-602 review item 1).
+// Before the fix the read tools executed with raw model args; junk was
+// absorbed by the service layer's defensive clamps and never counted in
+// toolArgErrors. Now the same manifest-parity rejection the writes get
+// happens in-turn: model-facing error, no executor run, accounted.
+
+/** Scripted LLM (same pattern as tests/chat.test.ts): each fetch returns
+ *  script[i] and records every request body for assertions. */
+function mockLlm(script: unknown[]) {
+  const bodies: Array<{ messages: Array<{ role: string; content: string | null }> }> = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      const step = Math.min(bodies.length - 1, script.length - 1);
+      return new Response(JSON.stringify({ choices: [{ message: script[step] }] }), { status: 200 });
+    }),
+  );
+  return bodies;
+}
+
+function toolCallMsg(id: string, name: string, args: Record<string, unknown>): unknown {
+  return {
+    role: "assistant",
+    content: null,
+    tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }],
+  };
+}
+
+const FINAL = { role: "assistant", content: "Done." };
+
+/** Captures the chat_turn_usage console lines emitted during fn(). */
+async function withUsageLog(fn: () => Promise<unknown>): Promise<Array<Record<string, unknown>>> {
+  const lines: string[] = [];
+  const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+    lines.push(String(line));
+  });
+  try {
+    await fn();
+  } finally {
+    spy.mockRestore();
+  }
+  return lines
+    .map((l) => {
+      try {
+        return JSON.parse(l) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })
+    .filter((o): o is Record<string, unknown> => o !== null && o.type === "chat_turn_usage");
+}
+
+const toolResults = (bodies: Array<{ messages: Array<{ role: string; content: string | null }> }>) =>
+  bodies.flatMap((b) => b.messages.filter((m) => m.role === "tool").map((m) => m.content ?? "")).join("\n");
+
+describe("chatTurn order-read normalization wiring (THI-603, pure)", () => {
+  it("my_orders junk role: parity error to the model, no execution, counted in toolArgErrors", async () => {
+    const bodies = mockLlm([toolCallMsg("c1", "my_orders", { role: "admin" }), FINAL]);
+    const usage = await withUsageLog(() => chatTurn([], "show my orders", sellerA));
+    const content = toolResults(bodies);
+    expect(content).toContain("my_orders: role must be one of");
+    // Rejected args never reach the executor — no orders payload came back.
+    expect(content).not.toContain("\"count\"");
+    expect(usage.length).toBe(1);
+    expect(usage[0].tool_arg_errors).toBe(1);
+    expect(usage[0].tool_names).toContain("my_orders");
+  });
+
+  it("get_order malformed id: UUID parity error (not a raw Postgres cast error), accounted", async () => {
+    const bodies = mockLlm([toolCallMsg("c1", "get_order", { order_id: "not-a-uuid" }), FINAL]);
+    const usage = await withUsageLog(() => chatTurn([], "show the order", sellerA));
+    const content = toolResults(bodies);
+    expect(content).toContain("get_order: order_id must be a UUID string");
+    expect(content).not.toContain("invalid input syntax"); // no executor/DB path was taken
+    expect(usage[0].tool_arg_errors).toBe(1);
+  });
+
+  it("my_orders junk limit is a model-arg rejection, not a service-layer clamp", async () => {
+    const bodies = mockLlm([toolCallMsg("c1", "my_orders", { limit: "10" }), FINAL]);
+    const usage = await withUsageLog(() => chatTurn([], "show my orders", sellerA));
+    expect(toolResults(bodies)).toContain("my_orders: limit must be an integer from 1 to");
+    expect(usage[0].tool_arg_errors).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DB-backed: valid read calls through the turn — canonical args reach the
+// executor (whitespace-trimmed ids, defaulted role/limit) and execute.
+
+describe.skipIf(!available)("chatTurn order-read canonical args reach the executor (THI-603, DB)", () => {
+  let client: pg.Client;
+  let orderId = "";
+
+  beforeAll(async () => {
+    client = new pg.Client({ connectionString });
+    await client.connect();
+    await client.query(readFileSync(schemaPath, "utf8"));
+    await client.query("TRUNCATE order_events, webhook_events, orders, items, sellers RESTART IDENTITY CASCADE");
+    await client.query(
+      `INSERT INTO sellers (id, api_key_hash, display_name, email) VALUES
+        ($1, 'thg_a', 'chat-a', 'chat-a@t.dev'),
+        ($2, 'thg_b', 'chat-b', 'chat-b@t.dev')`,
+      [sellerA.id, sellerB.id],
+    );
+    const item = await client.query(
+      `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, attributes, status, shipping_tier)
+       VALUES ($1, 'Canonic Lamp', 3000, 200, 'furniture', '{}'::jsonb, 'active', 'parcel') RETURNING id`,
+      [sellerA.id],
+    );
+    const { order } = await createOrder({
+      buyerId: sellerB.id,
+      itemId: item.rows[0].id,
+      shippingAddress: { name: "Bee Buyer", line1: "Via Roma 1", city: "Milan", postal_code: "20121", country: "IT" },
+      paymentMode: "off_platform",
+    });
+    orderId = order.id as string;
+  });
+
+  afterAll(async () => {
+    await client.end();
+  });
+
+  it("valid my_orders executes through the turn with canonical defaults (no arg errors)", async () => {
+    const bodies = mockLlm([toolCallMsg("c1", "my_orders", {}), FINAL]);
+    const usage = await withUsageLog(() => chatTurn([], "my orders please", sellerA));
+    const content = toolResults(bodies);
+    expect(content).toContain("\"count\":1"); // executed — role both / limit 20 defaults
+    expect(usage[0].tool_arg_errors).toBe(0);
+  });
+
+  it("a whitespace-padded order_id is canonicalized (trimmed) before the executor", async () => {
+    const bodies = mockLlm([toolCallMsg("c1", "get_order", { order_id: ` ${orderId} ` }), FINAL]);
+    const usage = await withUsageLog(() => chatTurn([], "that order", sellerA));
+    const content = toolResults(bodies);
+    // The pad would fail the ::uuid cast in the executor — only the trim
+    // makes this read succeed.
+    expect(content).toContain("\"order\"");
+    expect(content).not.toContain("not found");
+    expect(content).not.toContain("invalid input syntax");
+    expect(usage[0].tool_arg_errors).toBe(0);
+  });
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
   // Defensive: restore the real DB read if a test died before consuming

@@ -276,6 +276,13 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_mode TEXT NOT NULL DEFAULT '
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_price_cents INTEGER NOT NULL DEFAULT 0
                       CHECK (shipping_price_cents >= 0);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_address_shared_at TIMESTAMPTZ;
+-- Label purchase (spec docs/specs/label-purchase.md, THI-562 work item 2): the
+-- platform-bought EasyPost label snapshot, persisted in the same transaction as
+-- transition #5b (sold → label_issued). NULL for every order that reached
+-- label_issued via record_tracking — old rows and existing tool outputs are
+-- unchanged. bought_at (ISO UTC) is the A2 daily-budget aggregation key.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS label_purchase JSONB;
+-- {shipment_id, rate_id, carrier, service, cost_cents, currency, bought_at}
 DO $$
 BEGIN
   -- Widen the status CHECK with 'completed' (off_platform terminal state, §11.2).
@@ -340,6 +347,17 @@ CREATE TABLE IF NOT EXISTS seller_upload_quota (
   day       DATE NOT NULL,
   uploads   INT NOT NULL DEFAULT 0,
   bytes     BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (seller_id, day)
+);
+
+-- Seller label quota (spec docs/specs/label-purchase.md): per-seller daily
+-- count of platform-bought labels (10/day). Same atomic upsert-increment
+-- pattern as seller_upload_quota above; quota resets naturally per UTC day
+-- (no sweep). The day is UTC, matching the A2 budget aggregation.
+CREATE TABLE IF NOT EXISTS seller_label_quota (
+  seller_id UUID NOT NULL REFERENCES sellers(id),
+  day       DATE NOT NULL,
+  used      INT NOT NULL DEFAULT 0,
   PRIMARY KEY (seller_id, day)
 );
 

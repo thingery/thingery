@@ -124,6 +124,21 @@ export type SecurityEvent =
    *  error and the row was deleted. `reason` is a fixed slug (never provider
    * text, never token material). */
   | { type: "chatgpt_oauth_error"; reason: ChatgptOauthErrorReason }
+  /** Label purchase spend gate (docs/specs/label-purchase.md; THI-566 A2):
+   *  one line per REFUSED attempt while the platform daily label budget is
+   *  exhausted or kill-switched (LABEL_DAILY_BUDGET_CENTS=0) — the alert
+   *  path. Numbers only — never the address, carrier payload or rate ids. */
+  | {
+      type: "label_budget_exceeded";
+      cost_cents: number;
+      daily_total_cents: number;
+      budget_cents: number;
+    }
+  /** Label purchase cancel race (label-purchase spec §“Blast radius”): a label
+   *  was bought at EasyPost but the order had already left `sold` before the
+   *  persisting CAS — the label is real, unused platform spend pending the
+   *  operator's reconcile runbook (spec A3). Ids only, never payloads. */
+  | { type: "label_bought_orphan"; order_id: string; shipment_id: string }
   /** THI-569 (spec docs/specs/admin-dispute-ui.md, PR-A): admin UI session
    *  login attempts — one line per POST /admin/login, ok and denied alike.
    *  Outcome + ip only; never the submitted key or any request payload. */
@@ -156,6 +171,12 @@ export function logSecurityEvent(event: SecurityEvent, ctx: SecurityEventContext
     ...("route" in event ? { route: event.route } : {}),
     ...(event.type === "image_upload" && event.reason !== undefined ? { reason: event.reason } : {}),
     ...(event.type === "chatgpt_oauth_error" ? { reason: event.reason } : {}),
+    ...(event.type === "label_budget_exceeded"
+      ? { cost_cents: event.cost_cents, daily_total_cents: event.daily_total_cents, budget_cents: event.budget_cents }
+      : {}),
+    ...(event.type === "label_bought_orphan"
+      ? { order_id: event.order_id, shipment_id: event.shipment_id }
+      : {}),
     ...(event.type === "wanted_response" && event.count !== undefined ? { count: event.count } : {}),
     ...(event.type === "listing_write" && event.limit !== undefined ? { limit: event.limit } : {}),
     ...(event.type === "admin_pii_reveal" ? { orderId: event.orderId } : {}),

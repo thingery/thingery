@@ -34,6 +34,17 @@ export function envInt(name: string, fallback: number): number {
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
+/** Non-negative-integer env with a spec default (label-purchase spec, THI-566
+ *  A2): 0 is a MEANINGFUL value — LABEL_DAILY_BUDGET_CENTS=0 is the spend kill
+ *  switch — so envInt's positive-only rule must not swallow it. Malformed
+ *  values still fall back (fail toward the documented default, never wider). */
+export function envNonNegativeInt(name: string, fallback: number): number {
+  const raw = envValue(name);
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : fallback;
+}
+
 export type StripeMode = "test" | "live";
 
 export interface OrderFlowConfig {
@@ -72,6 +83,10 @@ export interface OrderFlowConfig {
   sweepIntervalMinutes: number;          // 10 (sweep cadence, §4.5)
   maxPendingOrdersPerBuyer: number;      // 3  (F8)
   reorderCooldownMinutes: number;        // 60 (F8)
+  // Label purchase spend gates (docs/specs/label-purchase.md; THI-566 A1/A2).
+  // Both read env + defaults only — no client input can widen them.
+  labelMaxCostCents: number;             // 3000 ≈ €30 per label (A1)
+  labelDailyBudgetCents: number;         // 20000 ≈ €200/day platform-wide; 0 = kill switch (A2)
 }
 
 function stripeModeFor(key: string | undefined): StripeMode | null {
@@ -129,6 +144,8 @@ export function orderFlowConfig(): OrderFlowConfig {
     sweepIntervalMinutes: envInt("SWEEP_INTERVAL_MINUTES", 10),
     maxPendingOrdersPerBuyer: envInt("MAX_PENDING_ORDERS_PER_BUYER", 3),
     reorderCooldownMinutes: envInt("REORDER_COOLDOWN_MINUTES", 60),
+    labelMaxCostCents: envInt("LABEL_MAX_COST_CENTS", 3000),
+    labelDailyBudgetCents: envNonNegativeInt("LABEL_DAILY_BUDGET_CENTS", 20000),
   };
 }
 

@@ -1,0 +1,67 @@
+---
+title: "Configuration"
+description: "The environment variables a self-hosted server reads."
+---
+
+Copy `.env.example` to `.env` and adjust it. Only `DATABASE_URL` is required; everything else has a default or turns a feature off when empty. The full list, with comments, is in [`.env.example`](https://github.com/thingery/thingery/blob/main/.env.example).
+
+<Warning>
+Never commit `.env`.
+</Warning>
+
+## Core
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | Postgres connection string. Required |
+| `PORT` | HTTP port. Default `3000` |
+| `PUBLIC_BASE_URL` | Base URL used in item links |
+| `SESSION_SECRET` | Signs login cookies. Generate one with `openssl rand -hex 32`; without it, logins reset on every restart |
+
+## Search
+
+| Variable | Purpose |
+|---|---|
+| `EMBED_API_URL`, `EMBED_API_KEY`, `EMBED_MODEL` | Any OpenAI-compatible embeddings endpoint. Leave the key empty for keyword-only search |
+
+## Chat
+
+The built-in chat at `/chat.html` runs on a model you configure.
+
+| Variable | Purpose |
+|---|---|
+| `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL` | Any OpenAI-compatible chat completions endpoint. Leave the key empty to turn chat off; MCP and signup keep working |
+| `CHAT_TURNS_HOURLY_AUTHED`, `CHAT_TURNS_HOURLY_ANON` | Chat turns per hour, per account and per IP. Defaults `60` and `10` |
+| `CHAT_DAILY_TOKEN_BUDGET` | Daily token budget for the whole server. Default `2000000`; `0` removes it |
+
+## OAuth
+
+| Variable | Purpose |
+|---|---|
+| `OAUTH_DISABLED` | Set to `1` to turn OAuth off. Clients then fall back to API keys |
+| `OAUTH_ACCESS_TTL_S`, `OAUTH_REFRESH_TTL_S` | Token lifetimes in seconds. Defaults 30 minutes and 30 days |
+
+## Payments and shipping
+
+| Variable | Purpose |
+|---|---|
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Stripe Connect payments. With no key, orders run off-platform. With a key but no webhook secret, payments stay pending until the webhook is set up |
+| `EASYPOST_API_KEY`, `EASYPOST_WEBHOOK_SECRET` | Optional automatic carrier tracking. Without it, buyers confirm delivery |
+| `ADMIN_API_KEY` | Turns on the admin route for resolving disputes. Must be at least 32 characters |
+
+## Order windows
+
+Positive integers; the defaults are shown.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PAYMENT_DEADLINE_HOURS` | `24` | An unpaid order is cancelled after this |
+| `DISPUTE_WINDOW_HOURS` | `48` | How long a buyer can dispute after delivery |
+| `PICKUP_AUTOCONFIRM_DAYS` | `14` | A local pickup is marked delivered after this |
+| `DISPUTE_AUTOREFUND_HOURS` | `72` | A disputed order that never shipped is refunded after this |
+| `MAX_PENDING_ORDERS_PER_BUYER` | `3` | Unpaid orders a buyer can hold at once |
+| `REORDER_COOLDOWN_MINUTES` | `60` | After cancelling an order, how long a buyer waits before ordering the same item again |
+
+## Production
+
+`docker-compose.prod.yml` runs the server behind Caddy and also reads `SITE_DOMAIN` and `POSTGRES_PASSWORD`. See the [deployment runbook](https://github.com/thingery/thingery/blob/main/docs/deploy-vps.md).

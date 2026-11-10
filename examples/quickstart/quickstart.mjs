@@ -191,11 +191,11 @@ async function main() {
     const updated = await callTool("update_listing", { id: item.id, status: "deleted" }, { auth: true });
     say(`7. update_listing(status='deleted') → listing status: ${updated.item.status} (removed from search)`);
   }
-  say("\nDone. Full workflow reference: docs/integrations.md · framework examples: examples/integrations/");
+  say("\nDone. Full workflow reference: https://docs.thingery.dev · framework examples: examples/integrations/");
 }
 
 main().catch((e) => {
   console.error(`Failed: ${e.message}`);
-  console.error("Troubleshooting: docs/integrations.md#troubleshooting");
+  console.error("Troubleshooting: https://docs.thingery.dev/reference/troubleshooting");
   process.exit(1);
 });

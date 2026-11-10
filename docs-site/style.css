@@ -1,0 +1,150 @@
+/* Brand rule: carbon text on Sticker yellow. Mintlify draws the topbar button text in white. */
+#topbar-cta-button .text-white,
+#topbar-cta-button svg {
+  color: #14151a;
+}
+
+/* Connect panel (snippets/connect-panel.jsx). Light values first, then Mintlify's .dark class. */
+.tg-connect {
+  --tg-panel: #ffffff;
+  --tg-line: rgba(20, 21, 26, 0.1);
+  --tg-muted: #565a63;
+  --tg-text: #14151a;
+  --tg-well: #ecece8;
+  --tg-code: #f6f6f3;
+
+  margin: 1.5rem 0;
+  overflow: hidden;
+  border: 1px solid var(--tg-line);
+  border-radius: 1rem;
+  background: var(--tg-panel);
+  color: var(--tg-text);
+}
+
+.dark .tg-connect {
+  --tg-panel: #22242b;
+  --tg-line: rgba(246, 246, 243, 0.1);
+  --tg-muted: #c3c5cb;
+  --tg-text: #f6f6f3;
+  --tg-well: #14151a;
+  --tg-code: #14151a;
+}
+
+.tg-connect-tabs {
+  display: flex;
+  max-width: calc(100% - 2rem);
+  overflow-x: auto;
+  gap: 0.25rem;
+  margin: 1rem;
+  padding: 0.25rem;
+  width: fit-content;
+  border-radius: 0.75rem;
+  background: var(--tg-well);
+}
+
+.tg-connect-tab {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  color: var(--tg-muted);
+  font-weight: 500;
+}
+
+.tg-connect-tab svg {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.tg-connect-tab[aria-selected="true"] {
+  border-color: #ffce1f;
+  background: var(--tg-panel);
+  color: var(--tg-text);
+}
+
+.tg-connect-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1.25rem 1rem;
+  border-top: 1px solid var(--tg-line);
+}
+
+.tg-connect-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tg-connect-head > div {
+  flex: 1 1 18rem;
+}
+
+.tg-connect-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.tg-connect-body {
+  margin: 0.25rem 0 0;
+  color: var(--tg-muted);
+}
+
+.tg-connect-action {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  border-radius: 0.6rem;
+  background: #ffce1f;
+  color: #14151a !important;
+  font-weight: 600;
+  text-decoration: none !important;
+  white-space: nowrap;
+}
+
+.tg-connect-action:hover {
+  background: #ffd94d;
+}
+
+.tg-connect-code {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  padding: 0.5rem;
+  border-radius: 0.75rem;
+  background: var(--tg-well);
+}
+
+.tg-connect-code pre {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  overflow-x: auto;
+  border: 1px solid var(--tg-line);
+  border-radius: 0.5rem;
+  background: var(--tg-code);
+  font-size: 0.85rem;
+}
+
+.tg-connect-code code {
+  background: none;
+  white-space: pre;
+}
+
+.tg-connect-copy {
+  padding: 0.5rem 0.6rem;
+  border-radius: 0.5rem;
+  color: var(--tg-muted);
+  font-size: 0.8rem;
+}
+
+.tg-connect-copy:hover {
+  color: var(--tg-text);
+}

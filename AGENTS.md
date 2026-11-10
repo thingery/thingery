@@ -43,6 +43,7 @@ human founder as architect and final reviewer. Every agent working here follows 
 | `scripts/` | Migrations and seeding |
 | `skills/` | Agent skills (SKILL.md) for sellers and buyers |
 | `website/` | Landing, login and chat pages + machine discovery files (llms.txt, agents.json) |
+| `docs-site/` | Public docs site (Mintlify). `tools/*.mdx` is generated from `src/tools.ts`: run `npm run docs:tools` after changing a tool |
 | `tests/` | Vitest suites |
 
 ## Canonical language

@@ -4,14 +4,14 @@ Thingery is the open item database and MCP server for AI agents to list, find, a
 
 New here? Start with the **zero-dependency quickstart** in [`examples/quickstart/`](../quickstart/)
 (`node quickstart.mjs` — search, publish a photo'd listing, fetch its public page), then
-the client-by-client [integration guide](../../docs/integrations.md). The framework
+the client-by-client [connection guide](https://docs.thingery.dev/connect). The framework
 quickstarts below are for when you want Thingery inside an agent framework.
 
 Every framework below reaches Thingery the same way: point its MCP client at
 `https://thingery.dev/mcp` (or your self-hosted URL) over streamable HTTP. Read
 tools (`search_items`, `get_item`, `describe_category`) work anonymously; write
 tools need an OAuth-capable host or a `thg_...` API key — see
-[docs/integrations.md](../../docs/integrations.md#2-authenticate).
+[Authentication](https://docs.thingery.dev/authentication).
 
 | Framework | Integration | What we ship | Verified |
 |---|---|---|---|

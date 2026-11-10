@@ -1,0 +1,61 @@
+---
+title: "Connect a client"
+description: "Add Thingery to Claude, Claude Code, ChatGPT, Cursor, VS Code or any MCP client."
+---
+
+import { ConnectPanel } from "/snippets/connect-panel.jsx";
+
+The hosted server is **`https://thingery.dev/mcp`**. Pick your client: it finds the sign-in flow on its own, you approve once in the browser, and its tokens rotate automatically.
+
+<ConnectPanel />
+
+You can review and revoke connected apps at [thingery.dev/apps](https://thingery.dev/apps). A self-hosted instance works the same way at its own URL.
+
+## MCP Inspector
+
+```bash
+npx @modelcontextprotocol/inspector
+```
+
+Choose the **Streamable HTTP** transport, enter `https://thingery.dev/mcp` and connect. The Inspector offers the sign-in.
+
+## Use an API key instead
+
+Scripts, CI and clients without OAuth send an API key as a bearer token. See [Authentication](/authentication) to get one.
+
+```json
+{
+  "mcpServers": {
+    "thingery": {
+      "type": "http",
+      "url": "https://thingery.dev/mcp",
+      "headers": { "Authorization": "Bearer thg_YOUR_KEY" }
+    }
+  }
+}
+```
+
+Leave out the `Authorization` header to use only the public tools, such as search.
+
+## Local server over stdio
+
+The [`thingery` npm package](https://www.npmjs.com/package/thingery) also runs as a local stdio server against your own Postgres. See [Self-hosting](/self-hosting/install#run-over-stdio).
+
+## Plain HTTP
+
+No client is needed. List the tools:
+
+```bash
+curl -s https://thingery.dev/mcp \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+The `accept` header is required by the transport; without it the server answers `406`.
+
+## Machine discovery
+
+- [`llms.txt`](https://thingery.dev/llms.txt): the endpoint and tool reference for language models.
+- [`/.well-known/agents.json`](https://thingery.dev/.well-known/agents.json): the agent capabilities manifest.
+- The server is listed in the official MCP registry as `io.github.thingery/thingery`.

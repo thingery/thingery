@@ -10,8 +10,8 @@ built by a team of agents with a human architect; see [`AGENTS.md`](../AGENTS.md
 - **Good first issues:** we label bite-sized, well-described work
   [`good first issue`](https://github.com/thingery/thingery/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) —
   grab one and say you're on it in a comment.
-- **Read first:** the [`README`](../README.md) for the architecture in five minutes
-  (especially *Flexible schema*), and [`AGENTS.md`](../AGENTS.md) for working conventions.
+- **Read first:** the [`README`](../README.md) and the [docs](https://docs.thingery.dev) for the architecture
+  in five minutes (especially [Data conventions](https://docs.thingery.dev/reference/data-conventions#flexible-schema)), and [`AGENTS.md`](../AGENTS.md) for working conventions.
 - **Bigger ideas:** the [Roadmap](../README.md#roadmap) in the README lists what's coming —
   order state machine, buyer alerts, federation, agent-to-agent negotiation. Open an issue
   before you build something big so we can align first.

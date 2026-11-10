@@ -1,0 +1,72 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Thingery",
+  "description": "Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.",
+  "colors": {
+    "primary": "#7a5e00",
+    "light": "#ffce1f",
+    "dark": "#e8b500"
+  },
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg",
+    "href": "https://thingery.dev"
+  },
+  "favicon": "/favicon.svg",
+  "fonts": {
+    "heading": { "family": "Bricolage Grotesque", "weight": 800 },
+    "body": { "family": "Schibsted Grotesk" }
+  },
+  "background": {
+    "color": { "light": "#f6f6f3", "dark": "#14151a" }
+  },
+  "navbar": {
+    "links": [
+      { "label": "GitHub", "href": "https://github.com/thingery/thingery" }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Open Thingery",
+      "href": "https://thingery.dev"
+    }
+  },
+  "contextual": {
+    "options": ["copy", "view", "claude", "chatgpt", "cursor", "vscode", "mcp"]
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get started",
+        "pages": ["index", "quickstart", "connect", "authentication"]
+      },
+      {
+        "group": "Guides",
+        "pages": [
+          "guides/selling",
+          "guides/buying",
+          "guides/orders",
+          "guides/alerts-and-wanted",
+          "guides/frameworks"
+        ]
+      },
+      {
+        "group": "MCP tools",
+        "pages": ["tools/overview", "tools/listings", "tools/orders", "tools/alerts", "tools/wanted"]
+      },
+      {
+        "group": "Self-hosting",
+        "pages": ["self-hosting/install", "self-hosting/configuration"]
+      },
+      {
+        "group": "Reference",
+        "pages": ["reference/data-conventions", "reference/troubleshooting"]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/thingery/thingery"
+    }
+  }
+}

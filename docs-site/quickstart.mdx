@@ -1,0 +1,51 @@
+---
+title: "Quickstart"
+description: "Search Thingery in a minute, then publish your first listing."
+---
+
+import { ConnectPanel } from "/snippets/connect-panel.jsx";
+
+Hosted and self-hosted Thingery expose the **same MCP tools** but **not the same data**. Listings you create on `thingery.dev` are visible to everyone; listings on your own instance live only in your database.
+
+| Mode | Endpoint | Data | Best for |
+|---|---|---|---|
+| **Hosted** | `https://thingery.dev/mcp` | The shared public marketplace | A first result in under a minute, with nothing to install |
+| **Self-hosted** | Your own `/mcp`, or stdio | Your Postgres, your data | Private deployments and full control |
+
+This page uses the hosted server. To run your own, see [Self-hosting](/self-hosting/install).
+
+<Steps>
+  <Step title="Search, with no account">
+    The server speaks JSON-RPC over HTTP, so curl is enough:
+
+    ```bash
+    curl -s https://thingery.dev/mcp \
+      -H 'content-type: application/json' \
+      -H 'accept: application/json, text/event-stream' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+           "params":{"name":"search_items","arguments":{"q":"Air Max"}}}'
+    ```
+
+    Responses come back as Server-Sent Events: the JSON-RPC result is on the `data:` line.
+  </Step>
+  <Step title="Connect your assistant">
+    Add Thingery to your client and sign in when it asks:
+
+    <ConnectPanel />
+  </Step>
+  <Step title="Publish a listing">
+    Ask your assistant to sell something and share a photo. It calls `describe_category`, then `create_listing`, then `add_item_image`. **The first photo publishes the listing**; without one it stays hidden. See [Selling](/guides/selling).
+  </Step>
+</Steps>
+
+## Run the whole flow from a script
+
+The [quickstart script](https://github.com/thingery/thingery/tree/main/examples/quickstart) is one file with no dependencies, for Node 18 or newer. It searches, publishes a demo listing with a photo, fetches its public page, and deletes the listing again. It takes about three minutes, signup included. Get an API key first (see [Authentication](/authentication)):
+
+```bash
+curl -L -O https://raw.githubusercontent.com/thingery/thingery/main/examples/quickstart/quickstart.mjs
+export THINGERY_API_KEY=thg_YOUR_KEY
+node quickstart.mjs
+```
+
+Without a key it runs only the public search steps. Pass `--keep` to keep the demo listing, and set `MCP_URL=http://localhost:3000/mcp` to run it against your own server.

@@ -1,0 +1,34 @@
+---
+title: "Troubleshooting"
+description: "Common errors and how to fix them."
+---
+
+## HTTP errors
+
+| Symptom | Cause and fix |
+|---|---|
+| `405` on GET | `/mcp` accepts POST only. Send JSON-RPC bodies with POST |
+| `406` | Add `Accept: application/json, text/event-stream`, which the transport requires |
+| `401` on a public tool | You sent an invalid or expired credential. Fix it or drop the header: an invalid credential never falls back to anonymous |
+| `401` on `create_listing` and other account tools | No credential, or an invalid one. Sign in with OAuth or send a `thg_...` key |
+| `413` | `/mcp` accepts bodies up to 8 MiB. A photo of up to 5 MB, base64-encoded, fits |
+| `429` | A rate limit, such as signups and logins per IP or listing and upload caps. Wait and retry |
+
+## Results
+
+| Symptom | Cause and fix |
+|---|---|
+| The response is `event: message` and `data: {...}` | That is Server-Sent Events. Parse the `data:` line for the JSON-RPC result |
+| `search_items` finds nothing for a common word | `thingery.dev` runs keyword-only search, which matches words in titles and descriptions. Search brand or model names, or filter by `category` |
+| `create_listing` returns `visible: false` | The listing has no photo yet. Call `add_item_image`; the first photo publishes it |
+
+## Self-hosting
+
+| Symptom | Cause and fix |
+|---|---|
+| `connection refused` | The server or Postgres is not running. Start the database, apply the schema, and check `/healthz` |
+| `npm run db:migrate` fails inside an installed package | `scripts/` is not published. Run `psql "$DATABASE_URL" -f node_modules/thingery/db/schema.sql` |
+| stdio warning: `THINGERY_API_KEY set but not found in the database` | The key belongs to another server's database. Create one on this server |
+| A self-hosted server behaves differently from `thingery.dev` | The npm release can lag behind. Compare the `/healthz` versions, or run from source |
+
+Still stuck? [Open an issue](https://github.com/thingery/thingery/issues).

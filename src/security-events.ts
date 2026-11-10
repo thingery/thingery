@@ -138,7 +138,7 @@ export type SecurityEvent =
    *  was bought at EasyPost but the order had already left `sold` before the
    *  persisting CAS — the label is real, unused platform spend pending the
    *  operator's reconcile runbook (spec A3). Ids only, never payloads. */
-  | { type: "label_bought_orphan"; order_id: string; shipment_id: string };
+  | { type: "label_bought_orphan"; order_id: string; shipment_id: string }
   /** THI-569 (spec docs/specs/admin-dispute-ui.md, PR-A): admin UI session
    *  login attempts — one line per POST /admin/login, ok and denied alike.
    *  Outcome + ip only; never the submitted key or any request payload. */

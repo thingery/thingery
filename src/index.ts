@@ -21,14 +21,11 @@ import { startSweepScheduler } from "./orders-sweep.js";
 import { statsHandler } from "./stats.js";
 import { homeSearchHandler } from "./home-search.js";
 import {
-  browsePage,
   itemPage,
   orderReturnPage,
   payoutSetupReturnPage,
-  wantedBoardPage,
+  rootRedirect,
   wantedDetailPage,
-  wantedMinePage,
-  wantedNewPage,
   websiteErrorMiddleware,
 } from "./web-pages.js";
 import { wantedDemandHandler } from "./wanted-feed.js";
@@ -150,20 +147,17 @@ function runHttp(): void {
   // outside the protected src/routes.ts router. See src/home-search.ts.
   app.get("/search.json", asyncHandler(homeSearchHandler));
 
+  // The public website (landing, browse, wanted board, chat, legal pages)
+  // lives in the private web app. This server keeps only what self-hosters
+  // need: the account page at "/", and the pages MCP tools and Stripe link to.
+  app.get("/", rootRedirect);
   app.get("/item/:id", asyncHandler(itemPage));
-  app.get("/browse", asyncHandler(browsePage));
-  // THI-441 (B2+B3, spec THI-439 §6): wanted listings UX — public demand
-  // board, detail page, zero-result funnel form, my-wanted management.
-  // Server-rendered in web-pages.ts; data flows through src/wanted-feed.ts,
-  // the seam the backend sibling (THI-440) plugs into. Literal paths must
-  // register before /wanted/:id. demand.json is a read-only website asset
-  // consumed by the account page demand strip — mounted at the app root on
-  // the /stats.json + /search.json precedent (THI-389), outside the
-  // protected src/routes.ts router.
+  // THI-441 (spec THI-439 §6): wanted detail page — MCP wanted tools return
+  // /wanted/<id> links. demand.json is a read-only website asset consumed by
+  // the account page demand strip — mounted at the app root on the
+  // /stats.json + /search.json precedent (THI-389), outside the protected
+  // src/routes.ts router. The literal path registers before /wanted/:id.
   app.get("/wanted/demand.json", asyncHandler(wantedDemandHandler));
-  app.get("/wanted/new", asyncHandler(wantedNewPage));
-  app.get("/wanted/mine", asyncHandler(wantedMinePage));
-  app.get("/wanted", asyncHandler(wantedBoardPage));
   app.get("/wanted/:id", asyncHandler(wantedDetailPage));
   // Order return pages (spec THI-3 §4.3 F15). The literal payout-setup route
   // must be registered before the :id pattern to not be captured as an id.
@@ -173,7 +167,8 @@ function runHttp(): void {
   // Uploaded item images (files under UPLOADS_DIR, served at /img/...)
   app.use("/img", express.static(uploadsDir(), { maxAge: "30d", immutable: true }));
 
-  // Static website + discovery files (llms.txt, robots.txt, .well-known/)
+  // Account page, its scripts and assets + discovery files (llms.txt,
+  // robots.txt, .well-known/)
   const websiteDir = path.resolve(__dirname, "..", "website");
   app.use(express.static(websiteDir, { extensions: ["html"] }));
 

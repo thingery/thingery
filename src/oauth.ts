@@ -324,12 +324,13 @@ export function mountOauthRoutes(app: Express): void {
         ? (err as { status: number }).status
         : 500;
     pageHeaders(res);
-    res.status(status).type("html").send(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Something went wrong — Thingery</title>
-<style>body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:32rem;margin:2rem auto;padding:0 1rem;line-height:1.6}</style></head>
-<body><h1>Something went wrong</h1><p>Your request could not be completed. Please try again.</p>
-<p><a href="/">Back to Thingery</a></p></body></html>`);
+    res.status(status).type("html").send(
+      pageDocument(
+        "Something went wrong",
+        `<h1>Something went wrong</h1><p>Your request could not be completed. Please try again.</p>
+<p><a href="/">Back to Thingery</a></p>`,
+      ),
+    );
   });
 }
 
@@ -359,36 +360,27 @@ function appsPageHtml(grants: AppsGrantRow[], revoked: boolean): string {
   const rows = grants
     .map(
       (g) => `
-        <tr>
-          <td>${htmlEscape(g.client_name)}</td>
-          <td>${htmlEscape(g.created_at.toISOString().slice(0, 10))}</td>
-          <td>${g.last_used_at ? htmlEscape(g.last_used_at.toISOString().slice(0, 10)) : "never"}</td>
-          <td>mcp</td>
-          <td>
-            <form method="post" action="/apps/revoke">
-              <input type="hidden" name="grant_id" value="${htmlEscape(g.id)}">
-              <input type="hidden" name="csrf" value="${htmlEscape(g.csrf)}">
-              <button type="submit">Revoke</button>
-            </form>
-          </td>
-        </tr>`,
+<article class="row">
+  <div>
+    <h2>${htmlEscape(g.client_name)}</h2>
+    <p class="ticket">Authorized ${htmlEscape(g.created_at.toISOString().slice(0, 10))} · Last used ${g.last_used_at ? htmlEscape(g.last_used_at.toISOString().slice(0, 10)) : "never"} · Scope mcp</p>
+  </div>
+  <form method="post" action="/apps/revoke">
+    <input type="hidden" name="grant_id" value="${htmlEscape(g.id)}">
+    <input type="hidden" name="csrf" value="${htmlEscape(g.csrf)}">
+    <button type="submit" class="small">Revoke</button>
+  </form>
+</article>`,
     )
     .join("");
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Connected applications — Thingery</title>
-<style>body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:44rem;margin:2rem auto;padding:0 1rem;line-height:1.6}
-table{border-collapse:collapse;width:100%}td,th{padding:.4rem .6rem;border-bottom:1px solid #ddd;text-align:left}
-button{cursor:pointer}</style></head>
-<body><h1>Connected applications</h1>
-${revoked ? `<p><strong>Application disconnected.</strong> Its access has been revoked.</p>` : ""}
-${grants.length === 0 ? `<p>No applications are connected to your account. Applications you authorize through an MCP host will appear here.</p>` : `
-<table>
-  <thead><tr><th>Application</th><th>Authorized</th><th>Last used</th><th>Scope</th><th></th></tr></thead>
-  <tbody>${rows}</tbody>
-</table>`}
-<p><a href="/login.html">Back to your account</a></p>
-</body></html>`;
+  return pageDocument(
+    "Connected applications",
+    `<h1>Connected applications</h1>
+${revoked ? `<p class="notice" role="status"><strong>Application disconnected.</strong> Its access has been revoked.</p>` : ""}
+${grants.length === 0 ? `<p>No applications are connected to your account. Applications you authorize through an MCP host will appear here.</p>` : `<div class="rows">${rows}</div>`}
+<p><a href="/login.html">Back to your account</a></p>`,
+    { wide: true },
+  );
 }
 
 function mountApps(app: Express): void {
@@ -538,27 +530,74 @@ export function sha256Hex(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+// Brand colours and shapes, copied from the website's design tokens on purpose: this server renders
+// these pages on its own, for self-hosters too, so it cannot depend on the website's stylesheet.
+// System fonts, like the rest of the public site.
+const PAGE_CSS = [
+  ":root{--page:#F6F6F3;--ink:#14151A;--muted:#565A63;--line:#D9DAD6;--surface:#FFFFFF;--accent:#FFCE1F;--link:#2438D6;color-scheme:light}",
+  "*{box-sizing:border-box}",
+  'body{margin:0;background:var(--page);color:var(--ink);font:400 17px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}',
+  "main{max-width:34rem;margin:0 auto;padding:24px 20px 48px;display:flex;flex-direction:column;gap:18px}",
+  "main.wide{max-width:44rem}",
+  ".brand{display:flex;align-items:center;gap:6px;color:var(--ink);font-weight:800;font-size:22px;letter-spacing:-.04em;text-decoration:none}",
+  ".brand svg{width:26px;height:26px}",
+  "h1{margin:12px 0 0;font-size:clamp(34px,8vw,44px);line-height:1;letter-spacing:-.04em;font-weight:800;overflow-wrap:anywhere}",
+  "p{margin:0}a{color:var(--link)}strong{overflow-wrap:anywhere}",
+  ".muted{color:var(--muted);font-size:15px}",
+  ".panel{background:var(--surface);padding:16px;display:flex;flex-direction:column;gap:10px}",
+  ".notice{background:var(--surface);padding:12px 14px;font-weight:600}",
+  // Deny comes first in the markup so Enter never grants access; the column is reversed so Allow sits on top.
+  ".actions{display:flex;flex-direction:column-reverse;gap:10px}",
+  "button{min-height:52px;padding:0 20px;border:2px solid var(--ink);border-radius:6px;background:transparent;color:var(--ink);font-family:inherit;font-size:18px;font-weight:600;cursor:pointer}",
+  "button.primary{border-color:var(--accent);background:var(--accent)}",
+  "button.small{min-height:44px;font-size:16px}",
+  "button:focus-visible,a:focus-visible{outline:3px solid var(--link);outline-offset:2px}",
+  ".rows{border-top:2px solid var(--ink)}",
+  ".row{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px 16px;padding:12px 0;border-bottom:1px solid var(--line)}",
+  ".row h2{margin:0;font-size:17px;font-weight:600;overflow-wrap:anywhere}",
+  ".ticket{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--muted)}",
+].join("\n");
+
+// Lets exactly this stylesheet through the CSP, so no inline style or script is allowed.
+const PAGE_CSS_HASH = crypto.createHash("sha256").update(PAGE_CSS).digest("base64");
+
+const BRAND_MARK =
+  '<svg viewBox="0 0 128 128" aria-hidden="true"><path d="M26 48H86C104 48 104 20 84 20C66 20 58 34 58 52V92C58 108 68 114 82 114H102" fill="none" stroke="currentColor" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+/** The document around every page in this file. `title` and `body` must already be escaped. */
+function pageDocument(title: string, body: string, opts: { wide?: boolean } = {}): string {
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title} — Thingery</title>
+<style>${PAGE_CSS}</style></head>
+<body><main${opts.wide ? ' class="wide"' : ""}>
+<a class="brand" href="/">${BRAND_MARK}thingery</a>
+${body}
+</main></body></html>`;
+}
+
 /** Page/redirect hardening headers (F10): no-store, no-referrer, anti-framing.
- * CSP note: default-src 'none' also blocks the pages' inline <style> blocks
- * (pages render unstyled by design trade-off — no remote subresource, form,
- * or framing vector is allowed); revisit with nonces if styling must return. */
+ * CSP: default-src 'none' still blocks every remote subresource, script, inline
+ * style attribute and framing vector. The one exception is PAGE_CSS, allowed by
+ * its hash: it is a fixed constant, so a hash does what a per-request nonce would. */
 function pageHeaders(res: Response): void {
   res.set({
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
+    "Content-Security-Policy": `default-src 'none'; style-src 'sha256-${PAGE_CSS_HASH}'; form-action 'self'; frame-ancestors 'none'`,
   });
 }
 
 function errorPage(res: Response, title: string, detail: string): void {
   pageHeaders(res);
-  res.status(400).type("html").send(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Authorization error — Thingery</title>
-<style>body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:32rem;margin:2rem auto;padding:0 1rem;line-height:1.6}</style></head>
-<body><h1>Authorization error</h1><p><strong>${htmlEscape(title)}</strong></p><p>${htmlEscape(detail)}</p>
-<p><a href="/">Back to Thingery</a></p></body></html>`);
+  res.status(400).type("html").send(
+    pageDocument(
+      "Authorization error",
+      `<h1>Authorization error</h1><p><strong>${htmlEscape(title)}</strong></p><p>${htmlEscape(detail)}</p>
+<p><a href="/">Back to Thingery</a></p>`,
+    ),
+  );
 }
 
 /** Appends OAuth response parameters to a validated redirect URI (RFC 9207 `iss` included). */
@@ -657,28 +696,25 @@ function consentPageHtml(opts: {
   const hidden = (name: string, value: string | undefined) =>
     value === undefined ? "" : `<input type="hidden" name="${name}" value="${htmlEscape(value)}">`;
   const q = opts.query;
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Authorize ${htmlEscape(opts.clientName)} — Thingery</title>
-<style>:root{color-scheme:light dark}body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:30rem;margin:2rem auto;padding:0 1rem;line-height:1.6}
-h1{font-size:1.35rem}button{padding:.6rem 1.2rem;font:inherit;border-radius:8px;cursor:pointer;border:1px solid rgba(127,127,127,.5);margin-right:.5rem}
-.allow{background:#2563eb;color:#fff;border-color:#2563eb}.hint{font-size:.9rem;opacity:.8}</style></head>
-<body>
-<h1>Authorize ${htmlEscape(opts.clientName)}</h1>
+  return pageDocument(
+    `Authorize ${htmlEscape(opts.clientName)}`,
+    `<h1>Authorize ${htmlEscape(opts.clientName)}</h1>
 <p><strong>${htmlEscape(opts.clientName)}</strong>${opts.clientUri === null ? "" : ` (${htmlEscape(opts.clientUri)})`} wants to connect to your Thingery account
 <strong>${htmlEscape(opts.accountLabel)}</strong>.</p>
-<p>It will be able to read and manage your listings and orders, acting as you.</p>
+<div class="panel"><p>It will be able to read and manage your listings and orders, acting as you.</p></div>
 <form method="post" action="/oauth/authorize">
 ${hidden("client_id", q.client_id)}${hidden("redirect_uri", q.redirect_uri)}${hidden("response_type", q.response_type)}
 ${hidden("scope", q.scope)}${hidden("state", q.state)}${hidden("code_challenge", q.code_challenge)}
 ${hidden("code_challenge_method", q.code_challenge_method)}${hidden("resource", q.resource)}
 ${hidden("csrf", opts.csrf)}${hidden("nonce", opts.nonce)}
+<div class="actions">
 <button type="submit" name="action" value="deny">Deny</button>
-<button type="submit" name="action" value="allow" class="allow">Allow</button>
+<button type="submit" name="action" value="allow" class="primary">Allow</button>
+</div>
 </form>
-<p class="hint">Only allow applications you trust. You can review and disconnect connected applications
-anytime from your account page.</p>
-</body></html>`;
+<p class="muted">Only allow applications you trust. You can review and disconnect connected applications
+anytime from your account page.</p>`,
+  );
 }
 
 function mountAuthorize(app: Express): void {

@@ -100,6 +100,22 @@ describe("payment-mode splits (rev 3 §11.2)", () => {
     expect(transitionsFrom("refunding", "stripe").find((t) => t.trigger === "chargeback")).toBeUndefined();
     expect(transitionsFrom("pending", "off_platform").find((t) => t.trigger === "chargeback")).toBeUndefined();
   });
+
+  // #5b (label-purchase spec docs/specs/label-purchase.md): the platform-bought
+  // label transition — legality matrix.
+  it("label_purchased #5b: seller-only, sold → label_issued, both payment modes, nowhere else", () => {
+    const t5b = TRANSITIONS.find((t) => t.id === "5b");
+    expect(t5b).toEqual({ id: "5b", from: ["sold"], to: "label_issued", trigger: "label_purchased", actors: ["seller"] });
+    for (const mode of ["stripe", "off_platform"] as const) {
+      expect(transitionsFrom("sold", mode).map((t) => t.trigger)).toContain("label_purchased");
+      for (const s of ORDER_STATUSES) {
+        if (s !== "sold") {
+          expect(transitionsFrom(s, mode).map((x) => x.trigger), `${s}/${mode}`).not.toContain("label_purchased");
+        }
+      }
+      expect(transitionsFrom("sold", mode).find((t) => t.trigger === "label_purchased")?.actors).toEqual(["seller"]);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -723,11 +723,14 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         `Page with offset (0-${SEARCH_MAX_OFFSET}): count is the number of results in this page, not a total; ` +
         "has_more says whether the next offset (offset + count) would return more. Each page is a fresh search, " +
         "so listings can shift between pages: de-duplicate by id. " +
+        "To accept several conditions, pass conditions (e.g. [\"new\", \"like_new\"]); condition and conditions combine as one list. " +
         CONTENT_PROVENANCE_NOTE,
       inputSchema: {
         q: z.string().max(400).optional().describe("Free-text query, e.g. 'running shoes size 43'"),
         category: z.string().min(2).max(40).optional().describe("Category slug; see describe_category"),
         condition: z.enum(CONDITIONS).optional(),
+        conditions: z.array(z.enum(CONDITIONS)).min(1).max(CONDITIONS.length).optional()
+          .describe("Match any of these conditions (values as for condition), e.g. [\"new\", \"like_new\"]. If condition is also set, it is added to this list."),
         min_price_cents: z.number().int().min(0).optional(),
         max_price_cents: z.number().int().min(0).optional(),
         currency: z.string().length(3).default("EUR"),
@@ -747,6 +750,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
           q: args.q as string | undefined,
           category: args.category as string | undefined,
           condition: args.condition as string | undefined,
+          conditions: args.conditions as string[] | undefined,
           min_price_cents: args.min_price_cents as number | undefined,
           max_price_cents: args.max_price_cents as number | undefined,
           currency: (args.currency as string) ?? "EUR",

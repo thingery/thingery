@@ -10,8 +10,10 @@
 //   2. `?profile=directory` must register exactly those 15 tools — a new
 //      money-touching tool added to src/tools.ts cannot silently leak into
 //      the directory listing because it is not on the include list.
-//   3. The canonical /mcp (no param) is unchanged: all 34 tools, every
-//      excluded order/payment/payout/intent tool still present.
+//   3. The canonical /mcp (no param) is unchanged: the full surface (34
+//      registered tools for anonymous/API-key/OAuth callers, plus 3 more
+//      session-only account tools under the web session — #249/#250), with
+//      every excluded order/payment/payout/intent/account tool still present.
 //
 // Also covers the profile plumbing: parseToolProfile semantics, the fail-closed
 // 400 on unknown profile values, and — over real HTTP — that the method-aware
@@ -22,9 +24,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
+import crypto from "node:crypto";
+import pg from "pg";
 import { mcpRoutes, TOOL_NAMES } from "../src/mcp-gate.js";
 import { RateLimiter } from "../src/rate-limit.js";
-import { registerTools, parseToolProfile, DIRECTORY_PROFILE_TOOLS, PROTECTED_TOOLS } from "../src/tools.js";
+import { registerTools, parseToolProfile, DIRECTORY_PROFILE_TOOLS, PROTECTED_TOOLS, SESSION_ONLY_TOOLS } from "../src/tools.js";
+import { apiKeyHash } from "../src/auth.js";
 
 /** THE PIN (THI-614 include list). Sorted alphabetically. Any change here is
  *  a product decision, not a drive-by — it edits the Claude directory
@@ -47,8 +52,10 @@ const DIRECTORY_PIN: readonly string[] = [
   "update_wanted",
 ];
 
-/** The money/order/PII/intent surface that must NEVER appear in the
- *  directory listing (THI-614 exclude list — the other 19 of the 34). */
+/** The money/order/PII/intent/account surface that must NEVER appear in
+ *  the directory listing (THI-614 exclude list — everything except the 15;
+ *  grew 19→22 when #249/#250 added session-only account tools, which stay
+ *  excluded here deliberately). */
 const EXCLUDED_PIN: readonly string[] = [
   "buy_shipping_label",
   "cancel_order",
@@ -56,8 +63,10 @@ const EXCLUDED_PIN: readonly string[] = [
   "confirm_receipt",
   "create_order",
   "delete_intent",
+  "get_api_key_info",
   "get_order",
   "get_payout_setup",
+  "list_connected_apps",
   "list_order_messages",
   "my_intents",
   "my_matches",
@@ -65,6 +74,7 @@ const EXCLUDED_PIN: readonly string[] = [
   "open_dispute",
   "record_tracking",
   "release_funds",
+  "revoke_connected_app",
   "save_intent",
   "send_order_message",
   "share_shipping_address",
@@ -130,17 +140,23 @@ describe("directory profile pin (registration-time gating)", () => {
     }
   });
 
-  it("default registration (no profile arg) is unchanged: all 34 tools incl. every excluded one", () => {
+  it("default registration (no profile arg) is unchanged: all 34 base tools incl. every excluded one", () => {
     const { server, registered } = captureServer();
     registerTools(server, { seller: null });
     expect(registered.size).toBe(34);
-    for (const name of EXCLUDED_PIN) {
+    // The base surface carries every non-session excluded tool; the 3
+    // session-only ones join only under a web session (next test).
+    const baseExcluded = EXCLUDED_PIN.filter((n) => !SESSION_ONLY_TOOLS.has(n));
+    expect(baseExcluded.length).toBe(19);
+    for (const name of baseExcluded) {
       expect(registered.has(name)).toBe(true);
     }
-    // Cross-drift with the funnel instrumentation set: the full registration
-    // is still exactly what mcp-gate logs (same invariant as
-    // tests/tool-call-events.test.ts, from the directory side).
-    expect([...registered.keys()].sort()).toEqual([...TOOL_NAMES].sort());
+    // Cross-drift with the funnel instrumentation set (same invariant as
+    // tests/tool-call-events.test.ts, from the directory side): the anonymous
+    // registration is exactly TOOL_NAMES minus the session-only tools.
+    expect([...registered.keys()].sort()).toEqual(
+      [...TOOL_NAMES].filter((n) => !SESSION_ONLY_TOOLS.has(n)).sort(),
+    );
   });
 
   it("the directory subset is a strict subset of the full surface", () => {
@@ -149,6 +165,24 @@ describe("directory profile pin (registration-time gating)", () => {
     for (const name of DIRECTORY_PROFILE_TOOLS) {
       expect(full.registered.has(name)).toBe(true);
     }
+  });
+
+  it("session-only account tools (#249/#250) register on full but NEVER on directory", () => {
+    // The web session adds 3 account-settings tools to the full profile (34
+    // → 37); on the directory profile the same session still gets exactly
+    // the 15 — account management cannot leak into the directory listing.
+    const fakeSeller = { id: "11111111-1111-1111-1111-111111111111" } as import("../src/db.js").SellerRow;
+    const full = captureServer();
+    registerTools(full.server, { seller: fakeSeller, credential: "session" });
+    expect(full.registered.size).toBe(37);
+    for (const name of SESSION_ONLY_TOOLS) {
+      expect(full.registered.has(name)).toBe(true);
+    }
+    const dir = captureServer();
+    registerTools(dir.server, { seller: fakeSeller, credential: "session" }, "directory");
+    expect([...dir.registered.keys()].sort()).toEqual([...DIRECTORY_PIN]);
+    // And the full session surface is exactly the funnel set (37).
+    expect([...full.registered.keys()].sort()).toEqual([...TOOL_NAMES].sort());
   });
 
   it("included per-account tools keep their 401-gate annotation (THI-11 §2.10c)", () => {
@@ -215,10 +249,10 @@ describe("/mcp?profile=directory (HTTP, DB-free)", () => {
     expect(names.sort()).toEqual([...DIRECTORY_PIN]);
   });
 
-  it("default /mcp (no param) still serves all 34 tools", async () => {
+  it("default /mcp (no param) still serves the full surface (34 tools for a non-session caller)", async () => {
     const names = await toolNames("/mcp");
     expect(names.length).toBe(34);
-    for (const name of EXCLUDED_PIN) {
+    for (const name of EXCLUDED_PIN.filter((n) => !SESSION_ONLY_TOOLS.has(n))) {
       expect(names).toContain(name);
     }
   });
@@ -266,5 +300,114 @@ describe("/mcp?profile=directory (HTTP, DB-free)", () => {
   it("repeated ?profile= params → 400 (array is not a valid profile)", async () => {
     const res = await post("/mcp?profile=directory&profile=full", rpc("tools/list"));
     expect(res.status).toBe(400);
+  });
+});
+
+// Authenticated behavior on the profile URL needs Postgres (a real seller
+// row for the thg_ key) — same skip-if-unavailable pattern as
+// tests/mcp-auth.http.test.ts. Verifies the security-relevant edge: a valid
+// credential must NOT resurrect an excluded tool on the profile URL — the
+// call is rejected as unknown, cleanly, never executed.
+const connectionString =
+  process.env.DATABASE_URL ?? "postgres://thingery:thingery@localhost:5432/thingery";
+
+async function dbAvailable(): Promise<boolean> {
+  const client = new pg.Client({ connectionString, connectionTimeoutMillis: 1500 });
+  try {
+    await client.connect();
+    await client.end();
+    return true;
+  } catch {
+    await client.end().catch(() => {});
+    return false;
+  }
+}
+
+const dbUp = await dbAvailable();
+
+describe.skipIf(!dbUp)("/mcp?profile=directory with a valid seller key (HTTP + DB)", () => {
+  let server: Server;
+  let baseUrl: string;
+  let db: pg.Client;
+  let apiKey: string;
+  let sellerId: string;
+
+  beforeAll(async () => {
+    const app = express();
+    app.use(
+      mcpRoutes({ authedLimiter: new RateLimiter(1000, 60_000), anonLimiter: new RateLimiter(1000, 60_000) }),
+    );
+    server = app.listen(0);
+    const address = server.address();
+    if (typeof address === "object" && address) baseUrl = `http://127.0.0.1:${address.port}`;
+
+    db = new pg.Client({ connectionString });
+    await db.connect();
+    const runTag = crypto.randomBytes(4).toString("hex");
+    apiKey = `thg_dir_${runTag}`;
+    const seller = await db.query<{ id: string }>(
+      `INSERT INTO sellers (api_key_hash, display_name, email, password_hash)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [apiKeyHash(apiKey), "Directory Tester", `dir-test-${runTag}@example.com`, "x"],
+    );
+    sellerId = seller.rows[0].id;
+  });
+
+  afterAll(async () => {
+    await db.query(`DELETE FROM items WHERE seller_id = $1`, [sellerId]);
+    await db.query(`DELETE FROM sellers WHERE id = $1`, [sellerId]);
+    await db.end();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  function rpc(method: string, params: Record<string, unknown> = {}, id: number | string = 1): string {
+    return JSON.stringify({ jsonrpc: "2.0", id, method, params });
+  }
+
+  async function postAuthed(path: string, body: string): Promise<Response> {
+    return fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${apiKey}`,
+      },
+      body,
+    });
+  }
+
+  function rpcBody(text: string): any {
+    const dataLine = text.split("\n").find((l) => l.startsWith("data: "));
+    return JSON.parse(dataLine ? dataLine.slice("data: ".length) : text);
+  }
+
+  it("an included tool stays callable with a valid key on the profile URL", async () => {
+    const res = await postAuthed("/mcp?profile=directory", rpc("tools/list"));
+    expect(res.status).toBe(200);
+    const body = rpcBody(await res.text());
+    expect((body.result?.tools as { name: string }[]).map((t) => t.name).sort()).toEqual([...DIRECTORY_PIN]);
+  });
+
+  it("a valid key must NOT resurrect an excluded tool: clean unknown-tool rejection, no execution", async () => {
+    for (const excluded of ["release_funds", "create_order", "get_payout_setup"]) {
+      const res = await postAuthed(
+        "/mcp?profile=directory",
+        rpc("tools/call", { name: excluded, arguments: { order_id: "00000000-0000-0000-0000-000000000000" } }),
+      );
+      expect(res.status).toBe(200); // JSON-RPC level rejection, not an HTTP failure
+      const body = rpcBody(await res.text());
+      // The SDK's unknown-tool rejection: a CallToolResult with isError and a
+      // message naming the tool — never a handler execution, never a 500.
+      expect(body.result?.isError).toBe(true);
+      expect(body.result?.content?.[0]?.text).toContain(`Tool ${excluded} not found`);
+      expect(body.error).toBeUndefined();
+    }
+  });
+
+  it("the same excluded tool still resolves on the canonical /mcp (unchanged surface)", async () => {
+    const res = await postAuthed("/mcp", rpc("tools/list"));
+    expect(res.status).toBe(200);
+    const body = rpcBody(await res.text());
+    expect((body.result?.tools as { name: string }[]).map((t) => t.name)).toContain("release_funds");
   });
 });

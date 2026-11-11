@@ -299,7 +299,8 @@ export function registerTools(
   // THI-614 registration-time profile gating: in `directory` mode every
   // registration call for a tool outside DIRECTORY_PROFILE_TOOLS is dropped
   // before it reaches the (analytics-proxied) server, so the directory
-  // listing's tools/list is exactly the include list. The 34 registrations
+  // listing's tools/list is exactly the include list — this also covers the
+  // session-only account-settings tools at the bottom. The registrations
   // below are untouched — same code path, same behavior in `full` mode —
   // which is what keeps "no behavior change to any existing tool" true.
   const server: { registerTool: Function } =

@@ -283,6 +283,8 @@ export interface SearchFilters {
   q?: string;
   category?: string;
   condition?: string;
+  /** Any of these conditions. Combined with `condition` as one allowed set (union). */
+  conditions?: string[];
   min_price_cents?: number;
   max_price_cents?: number;
   currency?: string;
@@ -321,7 +323,10 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
   };
 
   if (filters.category) where.push(`i.category = ${add(filters.category.toLowerCase())}`);
-  if (filters.condition) where.push(`i.condition = ${add(filters.condition)}`);
+  // `condition` and `conditions` form one allowed set, so a caller that sends both
+  // widens the match instead of intersecting to nothing.
+  const conditions = [...new Set([...(filters.condition ? [filters.condition] : []), ...(filters.conditions ?? [])])];
+  if (conditions.length > 0) where.push(`i.condition = ANY(${add(conditions)}::text[])`);
   if (filters.shipping_tier) where.push(`i.shipping_tier = ${add(filters.shipping_tier)}`);
   if (filters.currency) where.push(`i.currency = ${add(filters.currency)}`);
   if (filters.min_price_cents !== undefined) where.push(`i.price_cents >= ${add(filters.min_price_cents)}`);

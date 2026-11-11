@@ -18,7 +18,8 @@ The Thingery MCP server must be connected. `search_items` and `get_item` are pub
    acceptable conditions, budget (convert to cents), and location if the user cares.
    Ask ONE compact question only if a must-have is missing and unguessable.
 2. **Search** — Call `search_items` with the query text and filters
-   (`max_price_cents`, `category`, `condition`, and `attributes` for exact matches like
+   (`max_price_cents`, `category`, `condition` — or `conditions` to accept several, e.g.
+   `["new", "like_new"]` — and `attributes` for exact matches like
    `{"size_eu": 43}` — the filter matches any attribute key, not just declared ones).
    For must-have attributes the category doesn't declare, check `describe_category`:
    its `undeclared_in_use` section lists undeclared keys in real use — a hint for filters

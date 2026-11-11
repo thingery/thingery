@@ -49,6 +49,22 @@ curl -s https://thingery.dev/mcp \
 To run your own server on your own Postgres (`npm install thingery`, or from source), see
 [Self-hosting](https://docs.thingery.dev/self-hosting/install).
 
+### Directory profile
+
+Connector directories whose policies exclude money-transfer tools (e.g. the Claude
+Connectors Directory) should use the directory profile instead of the canonical URL:
+
+```text
+https://thingery.dev/mcp?profile=directory
+```
+
+It registers only the 15 item-discovery, listing-authoring, and wanted-board tools;
+ordering and payments complete on thingery.dev. The canonical `/mcp` (no parameter)
+keeps the full tool surface for self-hosters, registries, and direct clients.
+Authentication is identical on both URLs — included seller tools keep the OAuth
+onboarding challenge, public reads stay anonymous. Unknown `profile` values are
+rejected with `400` rather than silently falling back to the full tool set.
+
 ## Documentation
 
 | Topic | Where |

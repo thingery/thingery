@@ -7,6 +7,13 @@
 // to PROTECTED_TOOLS (and present-but-invalid credentials) get a proper
 // RFC 6750 + RFC 9728 Bearer challenge instead of a silent downgrade or a
 // confusing tool-level error.
+//
+// THI-614: the same routes serve the optional ?profile= param — absent/
+// "full" registers every tool (canonical /mcp, unchanged), "directory"
+// registers only the DIRECTORY_PROFILE_TOOLS subset for the Claude
+// Connectors Directory listing, and any other value fails closed with 400
+// BEFORE auth or body handling. The 401 gate, rate limits, caps, and OAuth
+// below apply identically in both profiles.
 
 import express, { type Request, type Response, type Router } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -14,7 +21,7 @@ import { authenticateRequest } from "./auth.js";
 import { buildServer } from "./server.js";
 import { issuerFromRequest } from "./oauth.js";
 import { logSecurityEvent } from "./security-events.js";
-import { PROTECTED_TOOLS } from "./tools.js";
+import { PROTECTED_TOOLS, parseToolProfile } from "./tools.js";
 import type { RateLimiter } from "./rate-limit.js";
 
 /** Single body cap for every /mcp request (spec §2.10c, F4): the tool being
@@ -190,6 +197,21 @@ export function mcpRoutes(limiters: McpLimiters): Router {
     // take down the whole service. Unexpected failures degrade to 503
     // (retry-later), never a silent anonymous downgrade and never a crash.
     try {
+      // THI-614: resolve ?profile= first and fail closed — an unknown value is
+      // a misconfigured directory/registry URL, and 400 is loud where a
+      // silent full-set fallback would be a policy violation (money tools
+      // leaking into a directory listing). Checked before auth so garbage
+      // URLs cost nothing (no DB roundtrip, no body read).
+      const profile = parseToolProfile(req.query.profile);
+      if (profile === null) {
+        res.status(400).json({
+          error: `unknown profile '${String(req.query.profile)}'`,
+          supported_profiles: ["full", "directory"],
+          hint: "omit ?profile= for the full tool surface, or use ?profile=directory",
+        });
+        return;
+      }
+
       const auth = await authenticateRequest(req);
 
       // Rate limits first (§2.12): same buckets as today; the limiter key is the
@@ -252,7 +274,10 @@ export function mcpRoutes(limiters: McpLimiters): Router {
       try {
         // credentialKind mirrors authenticateRequest's prefix dispatch, so with
         // a resolved seller, "session" means the thgs_ path authenticated it.
-        const server = buildServer({ seller: auth.seller, credential: auth.seller ? credential : "none" });
+        const server = buildServer(
+          { seller: auth.seller, credential: auth.seller ? credential : "none" },
+          profile,
+        );
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         res.on("close", () => {
           transport.close();

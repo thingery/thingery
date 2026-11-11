@@ -460,6 +460,7 @@ export interface ItemUpdate {
   shipping_price_cents?: number;
   title?: string;
   description?: string;
+  condition?: string;
   attributes?: Attributes;
 }
 
@@ -493,6 +494,9 @@ export async function updateItem(
   }
   if (update.title !== undefined) sets.push(`title = ${add(update.title)}`);
   if (update.description !== undefined) sets.push(`description = ${add(update.description)}`);
+  // The items.condition CHECK constraint is the backstop; both callers
+  // (MCP zod enum, chat normalizeUpdateArgs) reject unknown values first.
+  if (update.condition !== undefined) sets.push(`condition = ${add(update.condition)}`);
   // Attributes are replaced wholesale (not merged) — agents should read,
   // modify, write. Keeps the semantics predictable. Shape caps (THI-83 §3.5)
   // are enforced here: update_listing historically validated nothing, and

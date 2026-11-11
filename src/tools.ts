@@ -887,7 +887,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
       },
       description:
         "Update one of your own listings: mark it reserved or sold (or delist it), adjust the " +
-        "asking price or shipping price, or edit title/description. Changing shipping_price_cents only " +
+        "asking price or shipping price, or edit title/description/condition. Changing shipping_price_cents only " +
         "affects future orders; existing orders keep the price they snapshotted. Requires API key.",
       inputSchema: {
         id: z.string().uuid(),
@@ -896,6 +896,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         shipping_price_cents: SHIPPING_PRICE_INPUT,
         title: z.string().min(3).max(200).optional(),
         description: z.string().max(5000).optional(),
+        condition: z.enum(CONDITIONS).optional(),
         attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
           .describe("Replaces the whole attributes object (read-modify-write)"),
       },
@@ -910,6 +911,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
           shipping_price_cents: args.shipping_price_cents as number | undefined,
           title: args.title as string | undefined,
           description: args.description as string | undefined,
+          condition: args.condition as string | undefined,
           attributes: args.attributes as Attributes | undefined,
         });
         if (!item) return err("Item not found or not owned by this seller", "not_found");

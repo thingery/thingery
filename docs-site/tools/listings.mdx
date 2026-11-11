@@ -157,7 +157,7 @@ List your own second-hand listings (the authenticated seller's items for sale). 
 
 **Update listing** · Needs an account · Writes
 
-Update one of your own listings: mark it reserved or sold (or delist it), adjust the asking price or shipping price, or edit title/description. Changing shipping_price_cents only affects future orders; existing orders keep the price they snapshotted. Requires API key.
+Update one of your own listings: mark it reserved or sold (or delist it), adjust the asking price or shipping price, or edit title/description/condition. Changing shipping_price_cents only affects future orders; existing orders keep the price they snapshotted. Requires API key.
 
 **Parameters**
 
@@ -176,6 +176,9 @@ Update one of your own listings: mark it reserved or sold (or delist it), adjust
 </ParamField>
 <ParamField body="description" type="string">
   Up to 5000 characters.
+</ParamField>
+<ParamField body="condition" type="string">
+  One of `new`, `like_new`, `good`, `fair`, `poor`.
 </ParamField>
 <ParamField body="attributes" type="object">
   Replaces the whole attributes object (read-modify-write).

@@ -3,7 +3,7 @@
 // calling, and executes Thingery's own functions directly against the
 // database — the same code paths the MCP tools use.
 
-import type { SellerRow } from "./db.js";
+import { CONDITIONS, type SellerRow } from "./db.js";
 import { getCategory, getItem, createItem, listCategories, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
@@ -178,7 +178,7 @@ export const TOOLS: ToolDef[] = [
     type: "function",
     function: {
       name: "update_listing",
-      description: "Update one of your listings: status (active/reserved/sold/deleted), price_cents, shipping_price_cents, title, description.",
+      description: "Update one of your listings: status (active/reserved/sold/deleted), price_cents, shipping_price_cents, title, description, condition.",
       parameters: {
         type: "object",
         properties: {
@@ -188,6 +188,7 @@ export const TOOLS: ToolDef[] = [
           shipping_price_cents: SHIPPING_PRICE_PARAM,
           title: { type: "string" },
           description: { type: "string" },
+          condition: { type: "string", enum: [...CONDITIONS] },
         },
         required: ["id"],
       },
@@ -770,6 +771,7 @@ export async function executeTool(
         shipping_price_cents: args.shipping_price_cents as number | undefined,
         title: args.title as string | undefined,
         description: args.description as string | undefined,
+        condition: args.condition as string | undefined,
       });
       return item ? { updated: true } : { error: "not found or not yours" };
     }
@@ -1307,6 +1309,12 @@ export function normalizeUpdateArgs(
           return { ok: false, error: `update_listing: ${key} must be a string` };
         }
         out[key] = value;
+        break;
+      case "condition":
+        if (typeof value !== "string" || !(CONDITIONS as readonly string[]).includes(value)) {
+          return { ok: false, error: `update_listing: condition must be one of ${CONDITIONS.join("/")}` };
+        }
+        out.condition = value;
         break;
       default:
         // Unknown keys are dropped; the executor's own allowlist ignores them.

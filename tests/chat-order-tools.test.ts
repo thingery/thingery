@@ -489,31 +489,6 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 // DB-backed: the confirm gate around buyer order writes (spec §Confirm gate)
 
-/** Scripted LLM (same pattern as tests/chat.test.ts): each fetch returns
- *  script[i] and records every request body for assertions. */
-function mockLlm(script: unknown[]) {
-  const bodies: Array<{ messages: Array<{ role: string; content: string | null }> }> = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (_url: string, init: RequestInit) => {
-      bodies.push(JSON.parse(String(init.body)));
-      const step = Math.min(bodies.length - 1, script.length - 1);
-      return new Response(JSON.stringify({ choices: [{ message: script[step] }] }), { status: 200 });
-    }),
-  );
-  return bodies;
-}
-
-function toolCallMsg(id: string, name: string, args: Record<string, unknown>): unknown {
-  return {
-    role: "assistant",
-    content: null,
-    tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }],
-  };
-}
-
-const FINAL = { role: "assistant", content: "Done." };
-
 describe.skipIf(!available)("chat buyer order writes behind the confirm gate (DB)", () => {
   let client: pg.Client;
 

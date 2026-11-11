@@ -1561,7 +1561,6 @@ export async function chatTurn(
         const norm = call.function.name === "update_listing" ? normalizeUpdateArgs(args)
           : orderVerbTool || orderReadTool ? normalizeOrderArgs(call.function.name, args)
           : null;
-          : null;
         if (norm && !norm.ok) {
           toolArgErrors++; // THI-185: model-arg rejection, not an execution error
           result = { error: norm.error };

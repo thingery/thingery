@@ -90,6 +90,7 @@
     @keyframes typing-pulse { 50% { opacity: .35; } }
 
     footer { border-top: 1px solid var(--line); background: rgba(127,127,127,.04); }
+    .parity-note { font-size: .72rem; color: var(--muted); text-align: center; margin: 0; padding: .35rem 1rem .5rem; }
     #plan-indicator { font-size: .8rem; color: var(--muted); padding: .3rem 1.2rem .15rem;
       max-width: 50rem; margin-inline: auto; width: 100%; }
     #plan-indicator img { width: .95rem; height: .95rem; vertical-align: -0.15rem; }
@@ -147,6 +148,10 @@ Or ask me to find something used. <em>(Searching works without an account; publi
       <input id="message" placeholder="e.g. Sell my Diplomat fountain pen, good condition, 120 euros" data-i18n-placeholder="chat.placeholder" autocomplete="off" autofocus>
       <button id="send" type="submit" data-i18n="chat.send">Send</button>
     </form>
+    <!-- THI-570 (spec docs/specs/chat-order-parity.md): the parity line —
+         kept truthful by that spec. The chat runs the full order flow for
+         buyers and sellers; payments happen on the Stripe payment page. -->
+    <p class="parity-note" data-i18n="chat.parity">The assistant runs the full order flow for buyers and sellers — orders, payment links, shipping and payouts. Payments happen on the Stripe payment page; it never asks for card details.</p>
   </footer>
 
   <script src="/i18n.js"></script>

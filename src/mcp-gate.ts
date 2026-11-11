@@ -132,6 +132,7 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   // First-party session-only account settings (SESSION_ONLY_TOOLS).
   "list_connected_apps",
   "revoke_connected_app",
+  "get_api_key_info",
 ]);
 
 /** Credential kind from the Authorization header prefix — mirrors the token

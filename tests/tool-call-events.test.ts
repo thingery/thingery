@@ -110,7 +110,7 @@ describe("TOOL_NAMES drift check (registration capture)", () => {
       // A login-session context registers every tool, the session-only ones included.
       { seller: { id: "11111111-1111-4111-8111-111111111111", display_name: "Web User" }, credential: "session" },
     );
-    expect(registered.size).toBe(36); // +4 intent tools, +my_matches, +respond_to_wanted, +search_wanted/get_wanted, +2 public and +5 account wanted tools, +my_orders, +share_shipping_address, +2 order-messaging tools, +buy_shipping_label, +2 session-only connected-apps tools
+    expect(registered.size).toBe(37); // +4 intent tools, +my_matches, +respond_to_wanted, +search_wanted/get_wanted, +2 public and +5 account wanted tools, +my_orders, +share_shipping_address, +2 order-messaging tools, +buy_shipping_label, +2 session-only connected-apps tools, +get_api_key_info
     expect([...TOOL_NAMES].sort()).toEqual([...registered].sort());
   });
 });

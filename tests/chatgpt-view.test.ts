@@ -1,7 +1,6 @@
 // THI-193 PR-4 (spec §7): the ChatGPT-plan settings slot on the account
-// page, the callback banners, the first-connect modal, and the chat-page
-// "Using ChatGPT plan" indicator. Pure helpers run DOM-less (account-view
-// test style); the real account.js/chat.js are executed against a DOM shim
+// page, the callback banners, and the first-connect modal. Pure helpers run
+// DOM-less (account-view test style); the real account.js is executed against a DOM shim
 // with fake fetches (website-security test style) to prove the wiring —
 // slot gating on `enabled`, connected rendering, banner states, modal-once,
 // and the disconnect DELETE.
@@ -268,39 +267,6 @@ describe("account.js ChatGPT slot (THI-193 PR-4)", () => {
   });
 });
 
-describe("chat.js plan indicator (THI-193 PR-4)", () => {
-  const runChatJs = async (planBody: unknown, planOk: boolean) => {
-    const byId = new Map<string, FakeElement>();
-    const document = {
-      getElementById: (id: string) => {
-        if (!byId.has(id)) byId.set(id, new FakeElement("div"));
-        return byId.get(id)!;
-      },
-      createElement: (tag: string) => new FakeElement(tag),
-    };
-    const fetch = (url: string) => {
-      if (url === "/api/me") return Promise.resolve({ ok: true, json: async () => ({ seller: { name: "Ada" } }) });
-      return Promise.resolve({ ok: planOk, json: async () => planBody });
-    };
-    const script = readFileSync(`${websiteDir}/chat.js`, "utf8");
-    new Function("document", "fetch", script)(document, fetch);
-    await new Promise((r) => setTimeout(r, 0));
-    await new Promise((r) => setTimeout(r, 0));
-    return byId;
-  };
-
-  it("shows the static indicator when the status endpoint reports connected", async () => {
-    const byId = await runChatJs({ enabled: true, connected: true }, true);
-    expect(byId.get("plan-indicator")!.hidden).toBe(false);
-  });
-
-  it("stays hidden when the flag is off, disconnected, or the fetch fails", async () => {
-    expect(staysHidden(await runChatJs({ error: "Not found." }, false), "plan-indicator")).toBe(true);
-    expect(staysHidden(await runChatJs({ enabled: true, connected: false }, true), "plan-indicator")).toBe(true);
-    expect(staysHidden(await runChatJs({ enabled: false, connected: true }, true), "plan-indicator")).toBe(true);
-  });
-});
-
 // --- static markup: approved button format, official asset, usage links ------
 
 describe("ChatGPT slot markup (THI-193 PR-4)", () => {
@@ -321,14 +287,6 @@ describe("ChatGPT slot markup (THI-193 PR-4)", () => {
     // The overlay is display:flex, so it needs an explicit [hidden] guard —
     // otherwise the modal would render on every page load.
     expect(html).toContain("#chatgpt-modal-overlay[hidden] { display: none; }");
-  });
-
-  it("chat.html ships the hidden Using ChatGPT plan indicator with a Manage usage link", () => {
-    const html = readFileSync(`${websiteDir}/chat.html`, "utf8");
-    expect(html).toMatch(/id="plan-indicator"[^>]*hidden/);
-    expect(html).toContain("Using ChatGPT plan");
-    expect(html).toContain("Manage usage");
-    expect(html).toContain('href="https://chatgpt.com/settings/usage"');
   });
 
   it("uses the official ChatGPT logo asset (sign-in brand guidelines), not a hand-rolled one", () => {

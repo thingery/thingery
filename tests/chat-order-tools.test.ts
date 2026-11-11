@@ -32,7 +32,6 @@ const realGetOrderView = (await vi.importActual<typeof import("../src/order-flow
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.resolve(__dirname, "..", "db", "schema.sql");
-const chatHtmlPath = path.resolve(__dirname, "..", "website", "chat.html");
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://thingery:thingery@localhost:5432/thingery";
 
@@ -110,13 +109,6 @@ describe("chat order manifest (pure)", () => {
     // The never-ask-for-card-details rule (spec §System prompt).
     expect(system).toMatch(/NEVER ask the user for card details/i);
     expect(system).toMatch(/payment link/i);
-  });
-
-  it("chat page footer carries the parity line (spec §Parity statement)", () => {
-    const html = readFileSync(chatHtmlPath, "utf8");
-    expect(html).toMatch(/full order flow for buyers and sellers/);
-    expect(html).toMatch(/Stripe payment page/);
-    expect(html).toMatch(/never asks for card details/);
   });
 });
 

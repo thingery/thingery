@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ItemRow, SellerRow } from "./db.js";
 import { CONDITIONS, SHIPPING_TIERS, STATUSES } from "./db.js";
-import { buyerShippingCents, getCategory, getItem, createItem, listCategories, ListingLimitError, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, SEARCH_MAX_OFFSET, ShippingPriceError, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
+import { buyerShippingCents, getCategory, getItem, createItem, listCategories, ListingLimitError, listingQuota, type ListingQuota, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, SEARCH_MAX_OFFSET, ShippingPriceError, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, AttributeValidationError, attributeShapeErrors, type Attributes } from "./attributes.js";
 import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
 import { addItemImageBase64 } from "./images.js";
@@ -205,6 +205,23 @@ function wantedToTool(wanted: WantedRow) {
   return { ...wantedToPublic(wanted), content_provenance: "user_generated" as const };
 }
 
+/** Shared by create_listing and my_listings, which both return listing_quota. */
+const LISTING_QUOTA_NOTE =
+  "listing_quota.remaining is how many more listings can be created right now: the tighter of the " +
+  "daily limit (rolling 24 hours) and the active-listing limit. New accounts have lower limits for " +
+  "their first 7 days (new_account_ramp, full_limits_at).";
+
+/** The quota after a create. The listing already exists, so a failed read
+ *  leaves listing_quota out instead of failing the create. */
+async function quotaAfterCreate(sellerId: string): Promise<ListingQuota | undefined> {
+  try {
+    return await listingQuota(sellerId);
+  } catch (e) {
+    console.error("listing quota read failed after create (create unaffected):", describeError(e));
+    return undefined;
+  }
+}
+
 const err = (message: string, code = "error") => ({
   content: [{ type: "text" as const, text: JSON.stringify({ error: message, code }, null, 2) }],
   isError: true,
@@ -323,7 +340,8 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         "Category-specific fields go in `attributes` " +
         "(call describe_category first to see what's declared — undeclared keys are allowed " +
         "and searchable). Generates the item's embedding for semantic search. " +
-        "Listings are hidden from search until they have at least one photo.",
+        "Listings are hidden from search until they have at least one photo. " +
+        LISTING_QUOTA_NOTE,
       inputSchema: {
         title: z.string().min(3).max(200).describe("Short item title, e.g. 'Nike Air Max 90, size 43'"),
         description: z.string().max(5000).default("").describe("Honest description incl. flaws"),
@@ -404,6 +422,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
           item,
           photo_required: item.photo_required,
           visible,
+          listing_quota: await quotaAfterCreate(seller.id),
           next_steps: visible
             ? [
                 "Share the item URL with potential buyers",
@@ -837,7 +856,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         openWorldHint: false,
       },
       description: "List your own second-hand listings (the authenticated seller's items for sale). " +
-        "Requires API key.",
+        "Requires API key. " + LISTING_QUOTA_NOTE,
       inputSchema: {
         status: z.enum(STATUSES).optional(),
         limit: z.number().int().min(1).max(100).default(50),
@@ -846,8 +865,11 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
     async (args: Record<string, unknown>) => {
       const seller = requireSeller();
       if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
-      const items = await myItems(seller.id, args.status as string | undefined, (args.limit as number) ?? 50);
-      return ok({ seller: seller.display_name, count: items.length, items: items.map(itemToPublic) });
+      const [items, quota] = await Promise.all([
+        myItems(seller.id, args.status as string | undefined, (args.limit as number) ?? 50),
+        listingQuota(seller.id),
+      ]);
+      return ok({ seller: seller.display_name, count: items.length, items: items.map(itemToPublic), listing_quota: quota });
     },
   );
 

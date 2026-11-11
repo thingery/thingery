@@ -74,7 +74,7 @@ List the marketplace's categories for second-hand items, or discover one categor
 
 **Create listing** · Needs an account · Writes
 
-Sell a used item: create a second-hand listing in this marketplace. Requires seller authentication (Bearer API key). Prices are in integer cents (EUR 12.50 = 1250). Set shipping_price_cents to charge the buyer for shipping (unset = free shipping; local-tier pickup listings cannot charge it). Category-specific fields go in `attributes` (call describe_category first to see what's declared — undeclared keys are allowed and searchable). Generates the item's embedding for semantic search. Listings are hidden from search until they have at least one photo.
+Sell a used item: create a second-hand listing in this marketplace. Requires seller authentication (Bearer API key). Prices are in integer cents (EUR 12.50 = 1250). Set shipping_price_cents to charge the buyer for shipping (unset = free shipping; local-tier pickup listings cannot charge it). Category-specific fields go in `attributes` (call describe_category first to see what's declared — undeclared keys are allowed and searchable). Generates the item's embedding for semantic search. Listings are hidden from search until they have at least one photo. listing_quota.remaining is how many more listings can be created right now: the tighter of the daily limit (rolling 24 hours) and the active-listing limit. New accounts have lower limits for their first 7 days (new_account_ramp, full_limits_at).
 
 **Parameters**
 
@@ -142,7 +142,7 @@ Attach a photo to one of your listings — the first photo publishes a pending l
 
 **My listings** · Needs an account · Read-only
 
-List your own second-hand listings (the authenticated seller's items for sale). Requires API key.
+List your own second-hand listings (the authenticated seller's items for sale). Requires API key. listing_quota.remaining is how many more listings can be created right now: the tighter of the daily limit (rolling 24 hours) and the active-listing limit. New accounts have lower limits for their first 7 days (new_account_ramp, full_limits_at).
 
 **Parameters**
 

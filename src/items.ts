@@ -114,6 +114,63 @@ function writeAction(status: string | undefined): "update" | "delete" {
   return status === "deleted" ? "delete" : "update";
 }
 
+/** How many more listings a seller may create right now, under the regime
+ *  createItem enforces. Every field is derived from the same counts the cap
+ *  check uses, so a client showing `remaining` never disagrees with a create. */
+export interface ListingQuota {
+  /** Creates allowed now: the tighter of the daily and the active headroom. */
+  remaining: number;
+  daily_limit: number;
+  /** Creates in the rolling 24 hours the daily limit counts, deleted listings included. */
+  created_last_24h: number;
+  active_limit: number;
+  active: number;
+  /** True during the first NEW_SELLER_RAMP_DAYS days of an account (GH #212). */
+  new_account_ramp: boolean;
+  /** When the ramp ends and the full limits apply; null when not on the ramp. */
+  full_limits_at: Date | null;
+}
+
+export async function listingQuota(sellerId: string): Promise<ListingQuota> {
+  // One indexed COUNT round trip (items_seller_idx) covers both caps and —
+  // GH #212 write ramp — also fetches the seller's created_at in the same
+  // round trip (scalar subselect on the sellers PK), so the regime costs no
+  // extra query.
+  const { rows } = await pool.query<{
+    creates_24h: string;
+    active: string;
+    seller_created_at: Date | null;
+  }>(
+    `SELECT COUNT(*) FILTER (WHERE created_at > now() - interval '24 hours') AS creates_24h,
+            COUNT(*) FILTER (WHERE status = 'active') AS active,
+            (SELECT created_at FROM sellers WHERE id = $1) AS seller_created_at
+     FROM items WHERE seller_id = $1`,
+    [sellerId],
+  );
+  // GH #212 / THI-542: effective caps are computed here, in TypeScript — age
+  // < 7 days (GH #212 ramp) → 10/day + 20 active, else the full 100/200. A
+  // missing created_at cannot happen (NOT NULL, and the row is the
+  // authenticated seller) — it fails strict into the ramp rather than
+  // granting the full caps.
+  const createdAt = rows[0].seller_created_at ? new Date(rows[0].seller_created_at) : null;
+  const rampMs = NEW_SELLER_RAMP_DAYS * 24 * 60 * 60 * 1000;
+  const sellerAgeMs = createdAt ? Date.now() - createdAt.getTime() : Number.NaN;
+  const ramped = !(sellerAgeMs >= rampMs);
+  const dailyLimit = ramped ? NEW_SELLER_MAX_LISTING_CREATES_PER_DAY : MAX_LISTING_CREATES_PER_SELLER_PER_DAY;
+  const activeLimit = ramped ? NEW_SELLER_MAX_ACTIVE_LISTINGS : MAX_ACTIVE_LISTINGS_PER_SELLER;
+  const createdLast24h = Number(rows[0].creates_24h);
+  const active = Number(rows[0].active);
+  return {
+    remaining: Math.max(0, Math.min(dailyLimit - createdLast24h, activeLimit - active)),
+    daily_limit: dailyLimit,
+    created_last_24h: createdLast24h,
+    active_limit: activeLimit,
+    active,
+    new_account_ramp: ramped,
+    full_limits_at: ramped && createdAt ? new Date(createdAt.getTime() + rampMs) : null,
+  };
+}
+
 export async function createItem(input: CreateItemInput): Promise<ItemRow> {
   try {
     assertValidShippingPrice(input.shipping_price_cents ?? 0, input.shipping_tier);
@@ -124,43 +181,17 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
 
   // Caps run BEFORE the embeddings call: every create costs an embeddings-API
   // request (the cost-DoS in security doc §6 H4), so rejecting after embedding
-  // would still pay the abuser's bill. One indexed COUNT round trip
-  // (items_seller_idx) covers both caps and — GH #212 write ramp — also fetches
-  // the seller's created_at in the same round trip (scalar subselect on the
-  // sellers PK), so the regime costs no extra query. Check-then-insert is not
-  // atomic — concurrent creates can overshoot by the width of the race; that is
-  // the documented pragmatic-90% posture, not a strict quota.
-  const { rows: capRows } = await pool.query<{
-    creates_24h: string;
-    active: string;
-    seller_created_at: Date | null;
-  }>(
-    `SELECT COUNT(*) FILTER (WHERE created_at > now() - interval '24 hours') AS creates_24h,
-            COUNT(*) FILTER (WHERE status = 'active') AS active,
-            (SELECT created_at FROM sellers WHERE id = $1) AS seller_created_at
-     FROM items WHERE seller_id = $1`,
-    [input.seller_id],
-  );
-  // GH #212 / THI-542: effective caps are computed here, in TypeScript — age
-  // < 7 days (GH #212 ramp) → 10/day + 20 active, else the full 100/200; the
-  // comparison below proceeds exactly as before. A missing created_at cannot
-  // happen (NOT NULL, and the row is the authenticated seller) — it fails
-  // strict into the ramp rather than granting the full caps.
-  const sellerAgeMs = capRows[0].seller_created_at
-    ? Date.now() - new Date(capRows[0].seller_created_at).getTime()
-    : Number.NaN;
-  const ramped = !(sellerAgeMs >= NEW_SELLER_RAMP_DAYS * 24 * 60 * 60 * 1000);
-  const maxCreatesPerDay = ramped
-    ? NEW_SELLER_MAX_LISTING_CREATES_PER_DAY
-    : MAX_LISTING_CREATES_PER_SELLER_PER_DAY;
-  const maxActive = ramped ? NEW_SELLER_MAX_ACTIVE_LISTINGS : MAX_ACTIVE_LISTINGS_PER_SELLER;
-  if (Number(capRows[0].creates_24h) >= maxCreatesPerDay || Number(capRows[0].active) >= maxActive) {
+  // would still pay the abuser's bill. Check-then-insert is not atomic —
+  // concurrent creates can overshoot by the width of the race; that is the
+  // documented pragmatic-90% posture, not a strict quota.
+  const quota = await listingQuota(input.seller_id);
+  if (quota.remaining === 0) {
     // THI-112 × THI-113 merge synthesis: the cap rejection is the create path's
     // "rejected" listing_write outcome (shape already in SecurityEvent; updateItem
     // logs its rejections the same way). `limit` names the regime (THI-543 Q4):
     // new_seller_ramp vs seller_cap — three states, no null-handling ambiguity
     // in monitoring queries. Seller id only — no-payload rule, §6.
-    const limit: ListingWriteLimit = ramped ? "new_seller_ramp" : "seller_cap";
+    const limit: ListingWriteLimit = quota.new_account_ramp ? "new_seller_ramp" : "seller_cap";
     logSecurityEvent(
       { type: "listing_write", action: "create", outcome: "rejected", limit },
       { sellerId: input.seller_id },

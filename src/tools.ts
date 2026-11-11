@@ -524,7 +524,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
         "Find what buyers are looking for: search the public wanted board's active posts " +
         "(free text works, e.g. 'nintendo switch'). Public (no API key needed). Same hybrid " +
         "search as search_items; newest first without a query. Sellers answer a post with " +
-        "respond_to_wanted. " + CONTENT_PROVENANCE_NOTE,
+        "respond_to_wanted; response_count is how many published answers a post has. " + CONTENT_PROVENANCE_NOTE,
       inputSchema: {
         q: z.string().max(400).optional().describe("Free-text query, e.g. 'road bike 56cm'"),
         category: z.string().min(2).max(40).optional().describe("Category slug; see describe_category"),
@@ -566,7 +566,7 @@ export function registerTools(server: { registerTool: Function }, ctx: ToolConte
       },
       description:
         "Fetch one active wanted post (what a buyer is looking for, budget range, reference " +
-        "images) by id. Public. Ended and unknown posts are both not_found. " + CONTENT_PROVENANCE_NOTE,
+        "images, response_count of published answers) by id. Public. Ended and unknown posts are both not_found. " + CONTENT_PROVENANCE_NOTE,
       inputSchema: { wanted_id: z.string().uuid().describe("The wanted's id, e.g. from search_wanted") },
     },
     async (args: Record<string, unknown>) => {

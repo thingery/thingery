@@ -154,7 +154,9 @@ describe("withToolResultLogging proxy", () => {
         names.push(name);
       },
     };
-    registerTools(withToolResultLogging(target, { seller: null } as never), { seller: null } as never);
+    // A login-session context registers every tool, the session-only ones included.
+    const ctx = { seller: { id: "11111111-1111-4111-8111-111111111111", display_name: "Web User" }, credential: "session" as const };
+    registerTools(withToolResultLogging(target, ctx), ctx);
     expect(new Set(names)).toEqual(TOOL_NAMES);
   });
 });

@@ -33,6 +33,10 @@ beforeEach(() => {
     if (sql.includes("session_epoch FROM sellers WHERE id") && params[0] === SELLER_ID) {
       return { rows: [{ id: SELLER_ID, display_name: "Web User", session_epoch: EPOCH }] };
     }
+    // my_listings reads the listing quota: an aggregate always returns one row.
+    if (sql.includes("AS creates_24h")) {
+      return { rows: [{ creates_24h: "0", active: "0", seller_created_at: new Date() }] };
+    }
     if (sql.includes("FROM oauth_clients")) {
       return { rows: [{ client_id: "thgc_web", client_name: "C", client_uri: null, redirect_uris: [REDIRECT_URI] }] };
     }

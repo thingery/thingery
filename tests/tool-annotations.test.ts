@@ -29,10 +29,19 @@ const EXPECTED: Record<
   create_order: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   cancel_order: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   record_tracking: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  // THI-568 (label-purchase spec): spends platform money, but destroys nothing;
+  // a same-args replay on a label_issued order returns the stored label
+  // without a second purchase, hence idempotentHint.
+  buy_shipping_label: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   confirm_payment: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   confirm_receipt: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   open_dispute: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   release_funds: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  // THI-567 (order messaging): sending a message is a plain write (it
+  // creates, deletes nothing); list_order_messages is a pure read of the
+  // caller's own thread — same posture as my_orders.
+  send_order_message: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  list_order_messages: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   // THI-360 spec rev 2 PR 2 (buyer alerts): my_intents is a pure read;
   // save/update are plain writes; delete_intent removes the intent and its
   // match records — destructiveHint, same posture as cancel_order.
@@ -57,6 +66,15 @@ const EXPECTED: Record<
   update_wanted: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   expire_wanted: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   renew_wanted: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+};
+
+// Session-only tools (registered for the first-party web session alone, so
+// absent from the anonymous registration below and from the plugin portal's
+// scan). Revoking ends an app's access: destructive, and a repeat changes
+// nothing more.
+const SESSION_ONLY_EXPECTED: typeof EXPECTED = {
+  list_connected_apps: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  revoke_connected_app: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
 };
 
 const READ_TOOLS = new Set(Object.entries(EXPECTED).filter(([, a]) => a.readOnlyHint).map(([n]) => n));
@@ -108,6 +126,31 @@ describe("MCP tool annotations (THI-296 AC5 audit table)", () => {
     for (const [name, { config }] of registered) {
       expect(typeof config.title, `${name} title`).toBe("string");
       expect((config.title ?? "").length, `${name} title non-empty`).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("session-only tool annotations", () => {
+  const sessionRegistered = new Map<string, Captured>();
+  registerTools(
+    {
+      registerTool(name: string, config: Captured["config"]) {
+        sessionRegistered.set(name, { config });
+      },
+    },
+    { seller: { id: "11111111-1111-4111-8111-111111111111", display_name: "Web User" }, credential: "session" },
+  );
+
+  it("adds exactly the session-only tools to the audited set", () => {
+    const extra = [...sessionRegistered.keys()].filter((name) => !(name in EXPECTED));
+    expect(extra.sort()).toEqual(Object.keys(SESSION_ONLY_EXPECTED).sort());
+  });
+
+  it("annotations and titles match", () => {
+    for (const [name, expected] of Object.entries(SESSION_ONLY_EXPECTED)) {
+      const config = sessionRegistered.get(name)!.config;
+      expect(config.annotations).toEqual(expected);
+      expect((config.title ?? "").length).toBeGreaterThan(0);
     }
   });
 });

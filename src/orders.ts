@@ -45,6 +45,7 @@ export type TransitionTrigger =
   | "cancel_order" // #3/#8/#8b/#11/#11b
   | "payment_expired" // #4
   | "record_tracking" // #5
+  | "label_purchased" // #5b — platform-bought EasyPost label (label-purchase spec)
   | "pickup_autoconfirm" // #7
   | "carrier_update" // #10/#12
   | "carrier_failure" // #14/#14b — lost / return-to-sender
@@ -107,6 +108,11 @@ export const TRANSITIONS: readonly TransitionSpec[] = [
   { id: "3", from: ["pending"], to: "cancelled", trigger: "cancel_order", actors: BUYER_SELLER, itemStatus: "active" },
   { id: "4", from: ["pending"], to: "cancelled", trigger: "payment_expired", actors: ["system"], itemStatus: "active" },
   { id: "5", from: ["sold"], to: "label_issued", trigger: "record_tracking", actors: ["seller"] },
+  // #5b (label-purchase spec docs/specs/label-purchase.md): the seller bought a
+  // label through the platform (buyShippingLabel); same target as #5 but the
+  // tracker/label fields come from the EasyPost purchase and label_purchase is
+  // persisted in the same transaction. Seller-only, both payment modes.
+  { id: "5b", from: ["sold"], to: "label_issued", trigger: "label_purchased", actors: ["seller"] },
   { id: "6", from: ["sold"], to: "delivered", trigger: "confirm_receipt", actors: ["buyer"] },
   { id: "7", from: ["sold"], to: "delivered", trigger: "pickup_autoconfirm", actors: ["system"] },
   { id: "8", from: ["sold"], to: "refunding", trigger: "cancel_order", actors: BUYER_SELLER, mode: "stripe", itemStatus: "active" },
@@ -162,6 +168,9 @@ export interface OrderRow {
   tracking_code: string | null;
   tracker_id: string | null;
   label_url: string | null;
+  /** EasyPost purchase snapshot (#5b) — NULL on record_tracking-originated rows.
+   *  {shipment_id, rate_id, carrier, service, cost_cents, currency, bought_at} */
+  label_purchase: Record<string, unknown> | null;
   shipping_address_shared_at: Date | null;
   checkout_session_id: string | null;
   payment_intent_id: string | null;
@@ -176,7 +185,7 @@ export interface OrderRow {
 
 /** Columns applyTransition may set alongside the status change (allowlist). */
 export type TransitionSet =
-  | "carrier" | "tracking_code" | "tracker_id" | "label_url"
+  | "carrier" | "tracking_code" | "tracker_id" | "label_url" | "label_purchase"
   | "checkout_session_id" | "payment_intent_id" | "transfer_id" | "refund_id"
   | "payment_deadline" | "dispute_deadline" | "shipping_address";
 

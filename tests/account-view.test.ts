@@ -3,7 +3,7 @@
 // (signup/login/regenerate moments) or the masked placeholder.
 
 import { describe, expect, it } from "vitest";
-import { MASKED_KEY_HINT, MASKED_KEY_PLACEHOLDER, mcpConfigText } from "../website/account-view.js";
+import { MASKED_KEY_HINT, MASKED_KEY_PLACEHOLDER, mcpConfigText } from "../public/account-view.js";
 
 const URL_ = "https://thingery.dev/mcp";
 

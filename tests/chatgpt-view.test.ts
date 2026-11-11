@@ -15,9 +15,9 @@ import {
   chatgptSlotVisible,
   chatgptStatusText,
   rememberChatgptModal,
-} from "../website/chatgpt-view.js";
+} from "../public/chatgpt-view.js";
 
-const websiteDir = fileURLToPath(new URL("../website", import.meta.url));
+const websiteDir = fileURLToPath(new URL("../public", import.meta.url));
 
 // --- pure helpers -----------------------------------------------------------
 
@@ -139,7 +139,7 @@ async function runAccountJs(env: ChatgptEnv) {
   });
 
   vi.resetModules();
-  await import("../website/account.js");
+  await import("../public/account.js");
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
   return { byId, element, storage, replacedUrls };

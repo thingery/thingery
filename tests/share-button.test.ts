@@ -1,14 +1,14 @@
 // THI-396: share.js — one-tap share/copy of the canonical listing URL.
 // Executes the real script against a minimal DOM shim (same pattern as the
 // photos.js tests in website-security.test.ts). website-security.test.ts
-// separately scans every website/*.js file for HTML-string sinks, so this
+// separately scans every public/*.js file for HTML-string sinks, so this
 // suite only proves behavior: share-sheet, clipboard, and legacy paths.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const websiteDir = fileURLToPath(new URL("../website", import.meta.url));
+const websiteDir = fileURLToPath(new URL("../public", import.meta.url));
 const src = readFileSync(`${websiteDir}/share.js`, "utf8");
 
 class FakeElement {

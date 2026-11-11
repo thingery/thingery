@@ -42,7 +42,7 @@ human founder as architect and final reviewer. Every agent working here follows 
 | `src/chat.ts` | Server-side chat agent (LLM tool-loop) behind `/api/chat` |
 | `scripts/` | Migrations and seeding |
 | `skills/` | Agent skills (SKILL.md) for sellers and buyers |
-| `website/` | Account page (login.html) + its scripts, item-page scripts, and machine discovery files (llms.txt, agents.json) |
+| `public/` | Account page (login.html) + its scripts, item-page scripts, and machine discovery files (llms.txt, agents.json) |
 | `docs-site/` | Public docs site (Mintlify). `tools/*.mdx` is generated from `src/tools.ts`: run `npm run docs:tools` after changing a tool |
 | `tests/` | Vitest suites |
 

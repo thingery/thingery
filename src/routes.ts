@@ -174,7 +174,7 @@ api.post("/login", asyncHandler(async (req: Request, res: Response) => {
   res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
   // THI-125 verdict / THI-158 contract: login no longer returns the API key —
   // the key is show-once (signup + regenerate only), and the plaintext column
-  // it used to be read from no longer exists. website/account.js renders the
+  // it used to be read from no longer exists. public/account.js renders the
   // masked key hint + regenerate path when the field is absent.
   res.json({ seller: { name: account.display_name, email: account.email } });
 }));
@@ -735,7 +735,7 @@ api.put("/items/:id/images/order", asyncHandler(async (req: Request, res: Respon
 
 // --- wanted listings, browser CRUD (spec THI-439 §6.3 — protected path) ------
 // Session-authed browser surface for the funnel form + my-wanted management
-// (website/wanted.js). Every body routes through src/wanted.ts only — caps,
+// (public/wanted.js). Every body routes through src/wanted.ts only — caps,
 // quota, scrub and events are the module's, never bypassed (same layering
 // note as THI-360 §5). 20 writes/hour per seller; 429s log rate_limit events
 // (THI-144 convention). Field shapes and the limiter live in

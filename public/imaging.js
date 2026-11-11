@@ -1,4 +1,4 @@
-// website/imaging.js — client-side photo compression (THI-308 PR 3).
+// public/imaging.js — client-side photo compression (THI-308 PR 3).
 // Pure helpers (dimensions, quality ladder, size budget, GIF pass-through)
 // are exported for unit tests; compressImage() drives the browser pipeline.
 // Bandwidth optimization only — the server pipeline stays the security and

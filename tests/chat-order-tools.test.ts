@@ -144,6 +144,15 @@ describe("manifest parity table (chat vs MCP arg validation)", () => {
     { tool: "confirm_receipt", args: {}, why: "missing order_id (receipt)" },
     { tool: "release_funds", args: { order_id: 7 }, why: "non-string order_id (release)" },
     { tool: "share_shipping_address", args: { order_id: "nope" }, why: "malformed uuid (address)" },
+    { tool: "confirm_payment", args: { order_id: "11111111-1111-4111-8111-111111111111", note: "x".repeat(501) }, why: "note over 500 chars" },
+    { tool: "record_tracking", args: { order_id: "11111111-1111-4111-8111-111111111111" }, why: "missing carrier/tracking" },
+    { tool: "record_tracking", args: { order_id: "11111111-1111-4111-8111-111111111111", carrier: "", tracking_code: "X" }, why: "empty carrier" },
+    { tool: "record_tracking", args: { order_id: "11111111-1111-4111-8111-111111111111", carrier: "DHL", tracking_code: "x".repeat(65) }, why: "tracking_code over 64 chars" },
+    { tool: "record_tracking", args: { order_id: "11111111-1111-4111-8111-111111111111", carrier: "DHL", tracking_code: "X", label_url: "http://insecure/x" }, why: "non-https label_url" },
+    { tool: "send_order_message", args: { order_id: "11111111-1111-4111-8111-111111111111" }, why: "missing body" },
+    { tool: "send_order_message", args: { order_id: "11111111-1111-4111-8111-111111111111", body: "x".repeat(2001) }, why: "body over 2000 chars" },
+    { tool: "list_order_messages", args: { order_id: "11111111-1111-4111-8111-111111111111", limit: 51 }, why: "limit above 50" },
+    { tool: "list_order_messages", args: { order_id: "11111111-1111-4111-8111-111111111111", cursor: "zzz" }, why: "malformed cursor uuid" },
   ];
 
   for (const c of cases) {
@@ -175,6 +184,15 @@ describe("manifest parity table (chat vs MCP arg validation)", () => {
     expect(normalizeOrderArgs("release_funds", okArgs).ok).toBe(true);
     expect(mcp.shape("share_shipping_address").safeParse(okArgs).success).toBe(true);
     expect(normalizeOrderArgs("share_shipping_address", okArgs).ok).toBe(true);
+    expect(mcp.shape("confirm_payment").safeParse({ order_id: okArgs.order_id, note: "cash" }).success).toBe(true);
+    expect(normalizeOrderArgs("confirm_payment", { order_id: okArgs.order_id, note: "cash" }).ok).toBe(true);
+    const tracking = { order_id: okArgs.order_id, carrier: "DHL", tracking_code: "TRACK1" };
+    expect(mcp.shape("record_tracking").safeParse(tracking).success).toBe(true);
+    expect(normalizeOrderArgs("record_tracking", tracking).ok).toBe(true);
+    expect(mcp.shape("send_order_message").safeParse({ order_id: okArgs.order_id, body: "hi" }).success).toBe(true);
+    expect(normalizeOrderArgs("send_order_message", { order_id: okArgs.order_id, body: "hi" }).ok).toBe(true);
+    expect(mcp.shape("list_order_messages").safeParse({ order_id: okArgs.order_id, limit: 10 }).success).toBe(true);
+    expect(normalizeOrderArgs("list_order_messages", { order_id: okArgs.order_id, limit: 10 }).ok).toBe(true);
   });
 });
 
@@ -187,14 +205,14 @@ describe("order confirm-op verbs (pure)", () => {
   const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
 
   it("round-trips every buyer-write verb through a token", () => {
-    for (const op of ["receipt", "release", "address", `dispute=${encoded}`, `cancel=${encoded}`, "order=eyJwYXltZW50X21vZGUiOiJvZmZfcGxhdGZvcm0ifQ"]) {
+    for (const op of ["receipt", "release", "address", "payment", `dispute=${encoded}`, `cancel=${encoded}`, "order=eyJwYXltZW50X21vZGUiOiJvZmZfcGxhdGZvcm0ifQ", `tracking=${encoded}`, `message=${Buffer.from(JSON.stringify({ body: "shipping tomorrow" }), "utf8").toString("base64url")}`]) {
       const token = signChatConfirmToken("11111111-1111-4111-8111-111111111111", op, (NOW + 60_000) / 1000);
       expect(verifyChatConfirmToken(token, NOW)).toEqual({ itemId: "11111111-1111-4111-8111-111111111111", op });
     }
   });
 
   it("rejects unknown or malformed order ops", () => {
-    for (const op of ["message", "payment", "tracking", "label", "order=has spaces!", "order=", "dispute==x", "refund"]) {
+    for (const op of ["label", "order=has spaces!", "order=", "dispute==x", "refund", "message=", "tracking=%2B"]) {
       const token = signChatConfirmToken("a", op, (NOW + 60_000) / 1000);
       expect(verifyChatConfirmToken(token, NOW)).toBeNull();
     }
@@ -504,5 +522,70 @@ describe.skipIf(!available)("chat buyer order writes behind the confirm gate (DB
     expect(turn.confirm).toBeUndefined();
     const row = await client.query("SELECT status FROM orders WHERE id = $1", [orderId]);
     expect(row.rows[0].status).toBe("sold");
+  });
+
+  it("seller writes hold first too (confirm_payment, record_tracking, send_order_message)", async () => {
+    const orderId = await soldOrder();
+    const cases: Array<{ name: string; args: Record<string, unknown> }> = [
+      { name: "confirm_payment", args: { order_id: orderId, note: "cash received" } },
+      { name: "record_tracking", args: { order_id: orderId, carrier: "DHL", tracking_code: "TRACK9" } },
+      { name: "send_order_message", args: { order_id: orderId, body: "shipping tomorrow morning" } },
+    ];
+    for (const c of cases) {
+      mockLlm([toolCallMsg("c1", c.name, c.args), FINAL]);
+      const turn = await chatTurn([], `do it: ${c.name}`, sellerA);
+      expect(turn.confirm, c.name).toBeDefined();
+      expect(turn.confirm!.summary, c.name).toMatch(/.+/);
+    }
+    // nothing executed: still sold, no tracking, empty thread
+    const row = await client.query("SELECT status, carrier, tracking_code FROM orders WHERE id = $1", [orderId]);
+    expect(row.rows[0].status).toBe("sold");
+    expect(row.rows[0].carrier).toBeNull();
+    const thread = await client.query("SELECT count(*)::int AS n FROM order_messages WHERE order_id = $1", [orderId]);
+    expect(thread.rows[0].n).toBe(0);
+  });
+
+  it("confirm_payment executes via chat-confirm (pending → sold)", async () => {
+    // fresh PENDING off-platform order (no confirmPayment yet)
+    const item = await client.query(
+      `INSERT INTO items (seller_id, title, description, price_cents, shipping_price_cents, currency, shipping_tier, status)
+       VALUES ($1, 'Pay Cash Desk', 'd', 4000, 0, 'EUR', 'local', 'active') RETURNING id`,
+      [sellerA.id],
+    );
+    const { order } = await createOrder({ itemId: item.rows[0].id, buyerId: sellerB.id, paymentMode: "off_platform" });
+    mockLlm([toolCallMsg("c1", "confirm_payment", { order_id: order.id, note: "cash received" }), FINAL]);
+    const turn = await chatTurn([], "payment arrived", sellerA);
+    expect(turn.confirm!.op).toMatch(/^payment(=|$)/);
+    const done = await chatTurn([], `chat-confirm ${turn.confirm!.token}`, sellerA);
+    expect(done.text).toMatch(/✅ Payment confirmed/s);
+    const row = await client.query("SELECT status FROM orders WHERE id = $1", [order.id]);
+    expect(row.rows[0].status).toBe("sold");
+  });
+
+  it("record_tracking executes via chat-confirm (sold → label_issued, args bound)", async () => {
+    const orderId = await soldOrder();
+    mockLlm([toolCallMsg("c1", "record_tracking", { order_id: orderId, carrier: "DPD", tracking_code: "XYZ123" }), FINAL]);
+    const turn = await chatTurn([], "shipped it", sellerA);
+    expect(decodeOrderPayload(turn.confirm!.op)).toEqual({ carrier: "DPD", tracking_code: "XYZ123" });
+    const done = await chatTurn([], `chat-confirm ${turn.confirm!.token}`, sellerA);
+    expect(done.text).toMatch(/✅ Tracking recorded — .*DPD.*XYZ123/s);
+    const row = await client.query("SELECT status, carrier, tracking_code FROM orders WHERE id = $1", [orderId]);
+    expect(row.rows[0].status).toBe("label_issued");
+    expect(row.rows[0].carrier).toBe("DPD");
+    expect(row.rows[0].tracking_code).toBe("XYZ123");
+  });
+
+  it("send_order_message executes via chat-confirm and list_order_messages reads it back identically to MCP", async () => {
+    const orderId = await soldOrder();
+    mockLlm([toolCallMsg("c1", "send_order_message", { order_id: orderId, body: "Package goes out today." }), FINAL]);
+    const turn = await chatTurn([], "tell the buyer", sellerA);
+    expect(turn.confirm!.summary).toContain("Package goes out today.");
+    const done = await chatTurn([], `chat-confirm ${turn.confirm!.token}`, sellerA);
+    expect(done.text).toMatch(/✅ Message sent/);
+    // read parity: chat vs MCP on the same thread (JSON-normalized dates)
+    const viaChat = (await executeTool("list_order_messages", { order_id: orderId }, sellerB)) as { count: number; messages: unknown[]; next_cursor: string | null };
+    const viaMcp = await mcpTools(sellerB).call("list_order_messages", { order_id: orderId });
+    expect(viaChat.count).toBe(1);
+    expect(JSON.parse(JSON.stringify(viaChat))).toEqual(viaMcp.payload);
   });
 });

@@ -71,6 +71,20 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       STRIPE_WEBHOOK_SECRET_PREVIOUS: ${STRIPE_WEBHOOK_SECRET_PREVIOUS:-}
+      # Order flow — EasyPost carrier automation (THI-572). Passthrough only:
+      # values live in the VPS .env. Empty/unset EASYPOST_API_KEY = degraded
+      # mode (no trackers, buy_shipping_label answers easypost_not_configured,
+      # carrier webhook stays a 503 stub). EASYPOST_WEBHOOK_SECRET is required
+      # before the carrier webhook endpoint verifies deliveries;
+      # EASYPOST_WEBHOOK_SECRET_PREVIOUS enables zero-downtime secret rotation.
+      # LABEL_* are the label spend gates (label-purchase spec THI-566: defaults
+      # in code, max €30/label + €200/day); LABEL_DAILY_BUDGET_CENTS=0 is the
+      # instant spend kill switch (restart to apply).
+      EASYPOST_API_KEY: ${EASYPOST_API_KEY:-}
+      EASYPOST_WEBHOOK_SECRET: ${EASYPOST_WEBHOOK_SECRET:-}
+      EASYPOST_WEBHOOK_SECRET_PREVIOUS: ${EASYPOST_WEBHOOK_SECRET_PREVIOUS:-}
+      LABEL_MAX_COST_CENTS: ${LABEL_MAX_COST_CENTS:-}
+      LABEL_DAILY_BUDGET_CENTS: ${LABEL_DAILY_BUDGET_CENTS:-}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}

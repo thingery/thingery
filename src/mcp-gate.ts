@@ -129,6 +129,9 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   "update_wanted",
   "expire_wanted",
   "renew_wanted",
+  // First-party session-only account settings (SESSION_ONLY_TOOLS).
+  "list_connected_apps",
+  "revoke_connected_app",
 ]);
 
 /** Credential kind from the Authorization header prefix — mirrors the token
@@ -242,10 +245,13 @@ export function mcpRoutes(limiters: McpLimiters): Router {
       // THI-371 §3: count this dispatch for the activation funnel (one line
       // per tools/call message, incl. anonymous public reads). Placed after
       // every gate so only requests the transport actually handles log.
-      logToolCallEvents(parsed, credentialKind(req.headers.authorization), auth.seller?.id ?? null);
+      const credential = credentialKind(req.headers.authorization);
+      logToolCallEvents(parsed, credential, auth.seller?.id ?? null);
 
       try {
-        const server = buildServer({ seller: auth.seller });
+        // credentialKind mirrors authenticateRequest's prefix dispatch, so with
+        // a resolved seller, "session" means the thgs_ path authenticated it.
+        const server = buildServer({ seller: auth.seller, credential: auth.seller ? credential : "none" });
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         res.on("close", () => {
           transport.close();

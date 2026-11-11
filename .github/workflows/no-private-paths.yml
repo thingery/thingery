@@ -5,10 +5,8 @@ name: no-private-paths
 # company side lives in thingery/platform). Fails any PR that adds or modifies
 # deny-listed paths. CODEOWNERS cannot express "must not exist"; a path check
 # can. Deny-list from the THI-573 proposal (§5):
-#   apps/ deploy/ billing/ ops/      — active now (prophylactic)
-#   website/                          — NOT denied yet: the consumer pages are
-#                                       gone and the self-host files now live in
-#                                       public/, so it can join the deny-list.
+#   apps/ deploy/ billing/ ops/ website/ — active now (prophylactic);
+#   website/ retired by #237 (→ public/), denied so it can never return.
 on:
   pull_request:
     branches: [main]
@@ -27,7 +25,7 @@ jobs:
         run: |
           set -euo pipefail
           base="origin/${{ github.base_ref }}"
-          deny=("apps/" "deploy/" "billing/" "ops/")
+          deny=("apps/" "deploy/" "billing/" "ops/" "website/")
           rc=0
           while IFS= read -r f; do
             for d in "${deny[@]}"; do

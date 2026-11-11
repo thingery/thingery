@@ -19,7 +19,7 @@
   <style>
     /* THI-278: desktop layout fix — a readable, left-aligned column
        (measure ~70ch) instead of a narrow 26rem strip, on the site design
-       tokens from website/index.html. Mobile keeps the narrow column, which
+       tokens. Mobile keeps the narrow column, which
        reads as intentional there. */
     :root {
       color-scheme: light dark;
@@ -97,7 +97,7 @@
 <body>
   <header class="site-header">
     <a class="brand" href="/"><img class="logo-mark" src="/assets/logo-mark.svg" alt="" width="26" height="26">Thingery</a>
-    <nav aria-label="Site" data-i18n-aria-label="nav.aria"><a href="/browse" data-i18n="nav.browse">Browse</a><a href="/chat.html" data-i18n="nav.chat">Chat</a><a href="https://github.com/thingery/thingery">GitHub</a></nav>
+    <nav aria-label="Site" data-i18n-aria-label="nav.aria"><a href="https://github.com/thingery/thingery">GitHub</a></nav>
     <div class="lang-switch" data-lang-switch></div>
   </header>
   <h1 data-i18n="acct.h1">Account</h1>
@@ -129,7 +129,7 @@
          until the wanted backend, THI-440, lands); account.js fills it from
          /wanted/demand.json. -->
     <div id="wanted-strip" hidden>
-      <h2 style="font-size:1.05rem"><span data-i18n="acct.wanted.h2">Buyers are looking for</span> <small data-i18n-html="acct.wanted.small">(<a href="/wanted">wanted board →</a>)</small></h2>
+      <h2 style="font-size:1.05rem"><span data-i18n="acct.wanted.h2">Buyers are looking for</span></h2>
       <p id="wanted-demand" style="font-size:.9rem;opacity:.9"></p>
     </div>
 
@@ -162,7 +162,7 @@
 
     <!-- Bring-your-own LLM key (spec THI-186 Phase 1 / THI-189): the chat
          assistant can run on the seller's own OpenAI-compatible key. -->
-    <h2 style="font-size:1.05rem"><span data-i18n="acct.byo.h2">Use your own model</span> <small data-i18n-html="acct.byo.small">(for the <a href="/chat.html">chat assistant</a>)</small></h2>
+    <h2 style="font-size:1.05rem"><span data-i18n="acct.byo.h2">Use your own model</span> <small data-i18n="acct.byo.small">(for the chat assistant)</small></h2>
     <p style="font-size:.9rem;opacity:.85" data-i18n="acct.byo.p">Store an OpenAI-compatible API key and the assistant chats on your key instead of Thingery's. The key is encrypted at rest and verified once before saving — it is never shown again.</p>
     <p id="byo-status" style="font-size:.9rem"></p>
     <form id="byo-form" hidden>

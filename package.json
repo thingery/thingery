@@ -22,8 +22,8 @@
   "files": [
     "dist",
     "db",
-    "website",
-    "!website/demos",
+    "public",
+    "!public/demos",
     "README.md",
     "LICENSE"
   ],

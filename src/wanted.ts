@@ -539,6 +539,24 @@ export async function listMyWanted(
   return { wanteds: rows, markedRead };
 }
 
+/** A wanted as the public board shows it: the row plus how many sellers have
+ *  answered it. */
+export interface PublicWantedRow extends WantedRow {
+  response_count: number;
+}
+
+/** Public answer count for the wanted aliased `w`: published responses whose
+ *  listing is not deleted. A response stays out until its listing is visible
+ *  in feeds (published_at), so the count never runs ahead of what buyers can
+ *  find. Only the number leaves the database — never responder or listing ids.
+ *  my_wanted's owner count also includes not-yet-published responses. */
+const PUBLIC_RESPONSE_COUNT = `(SELECT COUNT(*)::int
+     FROM wanted_responses wr
+     JOIN items i ON i.id = wr.item_id
+    WHERE wr.wanted_item_id = w.id
+      AND wr.published_at IS NOT NULL
+      AND i.status <> 'deleted') AS response_count`;
+
 export interface WantedSearchFilters {
   q?: string;
   category?: string;
@@ -570,7 +588,7 @@ function escapeLike(q: string): string {
  *  invariant as it is, not as it ought to be). */
 export async function searchWanted(
   filters: WantedSearchFilters,
-): Promise<Array<WantedRow & { score: number }>> {
+): Promise<Array<PublicWantedRow & { score: number }>> {
   const where: string[] = [`w.status = 'active'`, `w.expires_at > now()`];
   const params: unknown[] = [];
   const add = (value: unknown): string => {
@@ -590,7 +608,8 @@ export async function searchWanted(
   const offset = Math.max(Math.trunc(filters.offset ?? 0), 0);
   const cols = `w.id, w.buyer_id, w.title, w.notes, w.category, w.condition,
                 w.budget_min_cents, w.budget_max_cents, w.currency, w.reference_images,
-                w.status, w.expires_at, w.created_at, w.updated_at`;
+                w.status, w.expires_at, w.created_at, w.updated_at,
+                ${PUBLIC_RESPONSE_COUNT}`;
 
   if (q) {
     const embedding = await embedText(q);
@@ -602,7 +621,7 @@ export async function searchWanted(
       // evaluateListingForIntents asymmetry, N2); the cosine leg requires
       // the wanted to have an embedding (under-notifies, never over-notifies).
       // NULLS LAST: keyword-only wanteds rank after cosine-ranked ones.
-      const { rows } = await pool.query<WantedRow & { score: number }>(
+      const { rows } = await pool.query<PublicWantedRow & { score: number }>(
         `SELECT ${cols}, 1 - (w.embedding <=> ${vecParam}::vector) AS score
          FROM wanted_items w
          WHERE ${where.join(" AND ")}
@@ -615,7 +634,7 @@ export async function searchWanted(
       );
       return rows;
     }
-    const { rows } = await pool.query<WantedRow & { score: number }>(
+    const { rows } = await pool.query<PublicWantedRow & { score: number }>(
       `SELECT ${cols}, 0 AS score
        FROM wanted_items w
        WHERE ${where.join(" AND ")}
@@ -627,7 +646,7 @@ export async function searchWanted(
     return rows;
   }
 
-  const { rows } = await pool.query<WantedRow & { score: number }>(
+  const { rows } = await pool.query<PublicWantedRow & { score: number }>(
     `SELECT ${cols}, 0 AS score
      FROM wanted_items w
      WHERE ${where.join(" AND ")}
@@ -653,10 +672,10 @@ export const WANTED_ROW_COLS = `id, buyer_id, title, notes, category, condition,
  *  guard as searchWanted (§3.4): null for unknown ids AND for ended ones
  *  (expired status or past expires_at), so the page renders one 404 shape
  *  with no existence oracle. */
-export async function getWantedById(id: string): Promise<WantedRow | null> {
-  const { rows } = await pool.query<WantedRow>(
-    `SELECT ${WANTED_ROW_COLS} FROM wanted_items
-     WHERE id = $1 AND status = 'active' AND expires_at > now()`,
+export async function getWantedById(id: string): Promise<PublicWantedRow | null> {
+  const { rows } = await pool.query<PublicWantedRow>(
+    `SELECT ${WANTED_ROW_COLS}, ${PUBLIC_RESPONSE_COUNT} FROM wanted_items w
+     WHERE w.id = $1 AND w.status = 'active' AND w.expires_at > now()`,
     [id],
   );
   return rows[0] ?? null;

@@ -31,7 +31,7 @@ npm run db:seed                  # demo seller + 3 listings; prints an API key
 npm run dev                      # http://localhost:3000
 ```
 
-That's the whole stack: MCP server at `/mcp`, landing page, `/browse`, and `/chat.html`.
+That's the whole stack: MCP server at `/mcp`, the account page at `/login.html`, item pages, and the HTTP API.
 Point any MCP client at `http://localhost:3000/mcp` with the seeded API key to try the
 seller tools. **If your setup takes longer than 10 minutes, open an issue and tell us
 where it stalled — that's our bug, not yours.**

@@ -13,23 +13,79 @@ export function apiKeyHash(key: string): string {
   return crypto.createHash("sha256").update(key, "utf8").digest("hex");
 }
 
+/** Characters of a key kept for display: "thg_" plus 4 base64url characters.
+ * Those 4 reveal 24 of the key's 192 random bits — enough to tell keys apart
+ * at a glance, while the 168 hidden bits keep guessing the rest infeasible. */
+export const API_KEY_PREFIX_LENGTH = 8;
+
+/** The non-secret display form of a key, stored in sellers.api_key_prefix. */
+export function apiKeyPrefix(key: string): string {
+  return key.slice(0, API_KEY_PREFIX_LENGTH);
+}
+
 export async function createSeller(displayName: string, apiKey: string): Promise<SellerRow> {
   // THI-158 contract: hash-only insert — the plaintext column is gone.
   const { rows } = await pool.query<SellerRow>(
-    `INSERT INTO sellers (api_key_hash, display_name) VALUES ($1, $2) RETURNING id, display_name`,
-    [apiKeyHash(apiKey), displayName],
+    `INSERT INTO sellers (api_key_hash, api_key_prefix, api_key_created_at, display_name)
+     VALUES ($1, $2, now(), $3) RETURNING id, display_name`,
+    [apiKeyHash(apiKey), apiKeyPrefix(apiKey), displayName],
   );
   return rows[0];
 }
 
 /** Resolves a seller by API key — hash-only lookup (THI-114 expand, THI-158
  * contract). The expand-phase plaintext fallback was removed together with
- * the column: a key that has no hash match never authenticates. */
+ * the column: a key that has no hash match never authenticates.
+ *
+ * On success, fires a throttled `api_key_last_used_at` stamp for the web
+ * Settings page: only when the stamp is older than an hour (NULL counts as
+ * stale), so the hot path pays at most one tiny UPDATE per key per hour.
+ * The UPDATE re-checks the hash so a use racing a rotation never stamps the
+ * new key. Fire-and-forget, like the OAuth token touch: it never blocks or
+ * fails the request. */
 export async function sellerFromApiKey(key: string): Promise<SellerRow | null> {
   if (!key.startsWith("thg_")) return null;
+  const hash = apiKeyHash(key);
   const { rows } = await pool.query<SellerRow>(
     `SELECT id, display_name FROM sellers WHERE api_key_hash = $1`,
-    [apiKeyHash(key)],
+    [hash],
+  );
+  const seller = rows[0];
+  if (!seller) return null;
+  void Promise.resolve()
+    .then(() =>
+      pool.query(
+        `UPDATE sellers SET api_key_last_used_at = now()
+          WHERE id = $1
+            AND api_key_hash = $2
+            AND (api_key_last_used_at IS NULL OR api_key_last_used_at < now() - interval '1 hour')`,
+        [seller.id, hash],
+      ),
+    )
+    .catch((err: unknown) => {
+      console.error("auth: api_key_last_used_at touch failed (ignored):", err);
+    });
+  return seller;
+}
+
+/** What the web Settings page shows about the seller's active key — never
+ * the secret or its hash. Keys issued before the display columns existed
+ * have NULL prefix and created_at; `has_key` still reports them. */
+export interface ApiKeyInfo {
+  has_key: boolean;
+  prefix: string | null;
+  created_at: Date | null;
+  last_used_at: Date | null;
+}
+
+export async function apiKeyInfo(sellerId: string): Promise<ApiKeyInfo | null> {
+  const { rows } = await pool.query<ApiKeyInfo>(
+    `SELECT api_key_hash IS NOT NULL AS has_key,
+            api_key_prefix AS prefix,
+            api_key_created_at AS created_at,
+            api_key_last_used_at AS last_used_at
+       FROM sellers WHERE id = $1`,
+    [sellerId],
   );
   return rows[0] ?? null;
 }
@@ -341,10 +397,10 @@ export async function createAccount(
   // from this variable — the database stores only its hash.
   const apiKey = newApiKey();
   const { rows } = await pool.query<SellerRow & { email: string; session_epoch: number }>(
-    `INSERT INTO sellers (api_key_hash, display_name, email, password_hash)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO sellers (api_key_hash, api_key_prefix, api_key_created_at, display_name, email, password_hash)
+     VALUES ($1, $2, now(), $3, $4, $5)
      RETURNING id, display_name, email, session_epoch`,
-    [apiKeyHash(apiKey), displayName, email, hashPassword(password)],
+    [apiKeyHash(apiKey), apiKeyPrefix(apiKey), displayName, email, hashPassword(password)],
   );
   return { ...rows[0], api_key: apiKey, password_hash: null };
 }
@@ -368,17 +424,22 @@ export async function accountByEmail(email: string): Promise<AccountRow | null> 
  * returned epoch, so the seller rotating their own key stays logged in while
  * every other session is revoked. Returns the new key (show-once) plus the
  * epoch it was signed at. THI-158: hash-only — there is no plaintext column
- * to rotate anymore. */
+ * to rotate anymore. The display prefix and created_at move with the hash,
+ * and last_used_at resets: the new key has not been used yet. */
 export async function regenerateApiKey(
   sellerId: string,
 ): Promise<{ apiKey: string; sessionEpoch: number } | null> {
   const apiKey = newApiKey();
   const { rows } = await pool.query<{ session_epoch: number }>(
     `UPDATE sellers
-       SET api_key_hash = $2, session_epoch = session_epoch + 1
+       SET api_key_hash = $2,
+           api_key_prefix = $3,
+           api_key_created_at = now(),
+           api_key_last_used_at = NULL,
+           session_epoch = session_epoch + 1
      WHERE id = $1
      RETURNING session_epoch`,
-    [sellerId, apiKeyHash(apiKey)],
+    [sellerId, apiKeyHash(apiKey), apiKeyPrefix(apiKey)],
   );
   return rows[0] ? { apiKey, sessionEpoch: rows[0].session_epoch } : null;
 }

@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
 import { asyncHandler } from "../src/oauth.js";
-import { browsePage, websiteErrorMiddleware } from "../src/web-pages.js";
+import { orderReturnPage, websiteErrorMiddleware } from "../src/web-pages.js";
 import { installProcessSafetyNet, logUnhandledRejection } from "../src/process-safety.js";
 import { pool } from "../src/db.js";
 
@@ -27,7 +27,7 @@ function buildApp(): Server {
   const app = express();
   app.use(express.json({ limit: "256kb" }));
   app.get("/item/:id", asyncHandler(buggyPage));
-  app.get("/browse", asyncHandler(browsePage));
+  app.get("/order/:id", asyncHandler(orderReturnPage));
   app.use(websiteErrorMiddleware);
   return app.listen(0);
 }
@@ -94,7 +94,7 @@ describe("website surface fails as a logged generic 500 on handler bugs (THI-54)
 
   it("T2 genuine body-parser fault on a page path keeps its 4xx (F4), not a 500", async () => {
     await withServer(async (base) => {
-      const res = await fetch(`${base()}/browse`, {
+      const res = await fetch(`${base()}/order/06e5cc2a-1c56-4d7e-8dc7-4f0e0e51b3db`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: "{not json",
@@ -105,14 +105,12 @@ describe("website surface fails as a logged generic 500 on handler bugs (THI-54)
     });
   });
 
-  it("T3 existing page degrade behavior unchanged: DB fault on /browse still renders the empty-results page", async () => {
+  it("T3 existing page degrade behavior unchanged: DB fault on /order/:id still renders the not-found status page", async () => {
     vi.spyOn(pool, "query").mockRejectedValue(new Error("simulated connection reset"));
     await withServer(async (base) => {
-      const res = await fetch(`${base()}/browse`);
+      const res = await fetch(`${base()}/order/06e5cc2a-1c56-4d7e-8dc7-4f0e0e51b3db`);
       expect(res.status).toBe(200);
-      // THI-441: the no-query empty state now points at selling (the q-miss
-      // path renders the wanted funnel instead — see tests/wanted-page.test.ts).
-      expect(await res.text()).toContain("No listings yet");
+      expect(await res.text()).toContain("Order not found");
     });
   });
 });

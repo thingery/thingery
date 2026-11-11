@@ -11,7 +11,7 @@ import type { Request, Response } from "express";
 import * as items from "../src/items.js";
 import * as auth from "../src/auth.js";
 import type { ItemRow } from "../src/db.js";
-import { itemPage } from "../src/web-pages.js";
+import { itemPage, rootRedirect } from "../src/web-pages.js";
 
 const item: ItemRow = {
   id: "itm-1",
@@ -200,13 +200,9 @@ describe("item page sharing (THI-396)", () => {
     expect(html).toContain('<meta name="twitter:card" content="summary_large_image">');
   });
 
-  it("renders the next-action CTA: prefilled chat deep link + share button + share.js", async () => {
+  it("renders the next-action CTA: share button + share.js", async () => {
     const html = await renderWith(item, null);
     expect(html).toContain('id="next-step"');
-    // Deep link prefills a question about this exact listing (URL-encoded:
-    // spaces become %20 under encodeURIComponent).
-    expect(html).toMatch(/href="\/chat\.html\?q=[^"]*Sony%20A6400[^"]*"/);
-    expect(html).toMatch(/href="\/chat\.html\?q=[^"]*itm-1[^"]*"/);
     // Share button carries the canonical URL + title as data attributes.
     expect(html).toContain('id="share-btn"');
     expect(html).toContain('data-share-url="https://thingery.test/item/itm-1"');
@@ -255,5 +251,33 @@ describe("item page shipping price", () => {
     const pickup = await renderWith({ ...item, shipping_tier: "local", shipping_price_cents: 700 }, null);
     expect(free).not.toContain("item.plusShipping");
     expect(pickup).not.toContain("item.plusShipping");
+  });
+});
+
+describe("item page links after the legacy website removal", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("links only to pages this server still serves", async () => {
+    const html = await renderWith(item, null);
+    expect(html).toContain('<a href="/">Thingery</a>');
+    expect(html).not.toContain("/chat.html");
+    expect(html).not.toContain('href="/browse"');
+    expect(html).not.toContain('href="/wanted"');
+  });
+
+  it("the not-found page links home instead of the deleted /browse page", async () => {
+    vi.spyOn(items, "getItem").mockResolvedValue(null);
+    const html = await renderItemPage("missing");
+    expect(html).toContain("Not found");
+    expect(html).toContain('<a href="/">Thingery</a>');
+    expect(html).not.toContain("/browse");
+  });
+
+  it("GET / redirects to the account page", () => {
+    const redirect = vi.fn();
+    rootRedirect({} as Request, { redirect } as unknown as Response);
+    expect(redirect).toHaveBeenCalledWith(302, "/login.html");
   });
 });

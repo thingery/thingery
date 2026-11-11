@@ -14,16 +14,24 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { z } from "zod";
-import { afterEach, beforeAll, afterAll, describe, expect, it, vi } from "vitest";
-import { executeTool, normalizeOrderArgs, TOOLS, chatTurn } from "../src/chat.js";
+import { afterEach, beforeAll, afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { executeTool, normalizeOrderArgs, TOOLS, chatTurn, signChatConfirmToken, verifyChatConfirmToken, decodeOrderPayload, orderOpVerb } from "../src/chat.js";
 import { registerTools } from "../src/tools.js";
-import { confirmPayment } from "../src/fulfillment.js";
-import { createOrder, shareShippingAddress } from "../src/order-flow.js";
+import { confirmPayment, recordTracking } from "../src/fulfillment.js";
+import { createOrder, shareShippingAddress, getOrderView } from "../src/order-flow.js";
 import type { SellerRow } from "../src/db.js";
+
+// Same seam pattern as tests/chat.test.ts: getOrderView mockable so a test
+// can simulate a FAILED read (rejection) — the fail-closed gate path. All
+// other order-flow exports stay real (the wrapper delegates).
+vi.mock("../src/order-flow.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/order-flow.js")>();
+  return { ...actual, getOrderView: vi.fn(actual.getOrderView) };
+});
+const realGetOrderView = (await vi.importActual<typeof import("../src/order-flow.js")>("../src/order-flow.js")).getOrderView;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.resolve(__dirname, "..", "db", "schema.sql");
-const chatHtmlPath = path.resolve(__dirname, "..", "website", "chat.html");
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://thingery:thingery@localhost:5432/thingery";
 
@@ -102,13 +110,6 @@ describe("chat order manifest (pure)", () => {
     expect(system).toMatch(/NEVER ask the user for card details/i);
     expect(system).toMatch(/payment link/i);
   });
-
-  it("chat page footer carries the parity line (spec §Parity statement)", () => {
-    const html = readFileSync(chatHtmlPath, "utf8");
-    expect(html).toMatch(/full order flow for buyers and sellers/);
-    expect(html).toMatch(/Stripe payment page/);
-    expect(html).toMatch(/never asks for card details/);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -130,6 +131,28 @@ describe("manifest parity table (chat vs MCP arg validation)", () => {
     { tool: "get_order", args: { order_id: 42 }, why: "non-string order_id" },
     { tool: "get_order", args: { order_id: "zzz" }, why: "malformed uuid" },
     { tool: "get_order", args: { order_id: "11111111-1111-1111-1111-111111111111" }, why: "uuid without RFC 9562 version/variant nibbles" },
+    { tool: "open_dispute", args: { order_id: "11111111-1111-4111-8111-111111111111" }, why: "missing reason" },
+    { tool: "open_dispute", args: { order_id: "11111111-1111-4111-8111-111111111111", reason: "" }, why: "empty reason" },
+    { tool: "open_dispute", args: { order_id: "11111111-1111-4111-8111-111111111111", reason: "x".repeat(1001) }, why: "reason over 1000 chars" },
+    { tool: "cancel_order", args: { order_id: "11111111-1111-4111-8111-111111111111", reason: "x".repeat(501) }, why: "reason over 500 chars" },
+    { tool: "create_order", args: { item_id: "zzz" }, why: "malformed item uuid" },
+    { tool: "create_order", args: {}, why: "missing item_id" },
+    { tool: "create_order", args: { item_id: "11111111-1111-4111-8111-111111111111", payment_mode: "paypal" }, why: "payment_mode outside the enum" },
+    { tool: "create_order", args: { item_id: "11111111-1111-4111-8111-111111111111", shipping_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "ITA" } }, why: "3-letter country" },
+    { tool: "create_order", args: { item_id: "11111111-1111-4111-8111-111111111111", shipping_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT", phone: "123" } }, why: "unknown key in strict address object" },
+    { tool: "create_order", args: { item_id: "11111111-1111-4111-8111-111111111111", shipping_address: { line1: "B", city: "C", postal_code: "D", country: "IT" } }, why: "address missing name" },
+    { tool: "confirm_receipt", args: {}, why: "missing order_id (receipt)" },
+    { tool: "release_funds", args: { order_id: 7 }, why: "non-string order_id (release)" },
+    { tool: "share_shipping_address", args: { order_id: "nope" }, why: "malformed uuid (address)" },
+    { tool: "confirm_payment", args: { order_id: "11111111-1111-4111-8111-111111111111", note: "x".repeat(501) }, why: "note over 500 chars" },
+    { tool: "record_tracking", args: { order_id: "11111111-1111-4111-8111-111111111111" }, why: "missing carrier/tracking" },
+    { tool: "record_tracking", args: { order_id: "11111111-1111-4111-8111-111111111111", carrier: "", tracking_code: "X" }, why: "empty carrier" },
+    { tool: "record_tracking", args: { order_id: "11111111-1111-4111-8111-111111111111", carrier: "DHL", tracking_code: "x".repeat(65) }, why: "tracking_code over 64 chars" },
+    { tool: "record_tracking", args: { order_id: "11111111-1111-4111-8111-111111111111", carrier: "DHL", tracking_code: "X", label_url: "http://insecure/x" }, why: "non-https label_url" },
+    { tool: "send_order_message", args: { order_id: "11111111-1111-4111-8111-111111111111" }, why: "missing body" },
+    { tool: "send_order_message", args: { order_id: "11111111-1111-4111-8111-111111111111", body: "x".repeat(2001) }, why: "body over 2000 chars" },
+    { tool: "list_order_messages", args: { order_id: "11111111-1111-4111-8111-111111111111", limit: 51 }, why: "limit above 50" },
+    { tool: "list_order_messages", args: { order_id: "11111111-1111-4111-8111-111111111111", cursor: "zzz" }, why: "malformed cursor uuid" },
   ];
 
   for (const c of cases) {
@@ -148,6 +171,64 @@ describe("manifest parity table (chat vs MCP arg validation)", () => {
     expect(normalizeOrderArgs("get_order", okArgs).ok).toBe(true);
     expect(mcp.shape("my_orders").safeParse({ role: "buyer", limit: 5 }).success).toBe(true);
     expect(normalizeOrderArgs("my_orders", { role: "buyer", limit: 5 }).ok).toBe(true);
+    const okAddress = { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT" };
+    expect(mcp.shape("create_order").safeParse({ item_id: "11111111-1111-4111-8111-111111111111", shipping_address: okAddress }).success).toBe(true);
+    expect(normalizeOrderArgs("create_order", { item_id: "11111111-1111-4111-8111-111111111111", shipping_address: okAddress }).ok).toBe(true);
+    expect(mcp.shape("open_dispute").safeParse({ order_id: "11111111-1111-4111-8111-111111111111", reason: "never arrived" }).success).toBe(true);
+    expect(normalizeOrderArgs("open_dispute", { order_id: "11111111-1111-4111-8111-111111111111", reason: "never arrived" }).ok).toBe(true);
+    expect(mcp.shape("cancel_order").safeParse({ order_id: "11111111-1111-4111-8111-111111111111" }).success).toBe(true);
+    expect(normalizeOrderArgs("cancel_order", { order_id: "11111111-1111-4111-8111-111111111111" }).ok).toBe(true);
+    expect(mcp.shape("confirm_receipt").safeParse(okArgs).success).toBe(true);
+    expect(normalizeOrderArgs("confirm_receipt", okArgs).ok).toBe(true);
+    expect(mcp.shape("release_funds").safeParse(okArgs).success).toBe(true);
+    expect(normalizeOrderArgs("release_funds", okArgs).ok).toBe(true);
+    expect(mcp.shape("share_shipping_address").safeParse(okArgs).success).toBe(true);
+    expect(normalizeOrderArgs("share_shipping_address", okArgs).ok).toBe(true);
+    expect(mcp.shape("confirm_payment").safeParse({ order_id: okArgs.order_id, note: "cash" }).success).toBe(true);
+    expect(normalizeOrderArgs("confirm_payment", { order_id: okArgs.order_id, note: "cash" }).ok).toBe(true);
+    const tracking = { order_id: okArgs.order_id, carrier: "DHL", tracking_code: "TRACK1" };
+    expect(mcp.shape("record_tracking").safeParse(tracking).success).toBe(true);
+    expect(normalizeOrderArgs("record_tracking", tracking).ok).toBe(true);
+    expect(mcp.shape("send_order_message").safeParse({ order_id: okArgs.order_id, body: "hi" }).success).toBe(true);
+    expect(normalizeOrderArgs("send_order_message", { order_id: okArgs.order_id, body: "hi" }).ok).toBe(true);
+    expect(mcp.shape("list_order_messages").safeParse({ order_id: okArgs.order_id, limit: 10 }).success).toBe(true);
+    expect(normalizeOrderArgs("list_order_messages", { order_id: okArgs.order_id, limit: 10 }).ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pure: confirm-op verbs for order writes (spec §Confirm gate)
+
+describe("order confirm-op verbs (pure)", () => {
+  const NOW = 1_760_000_000_000;
+  const payload = { order_id: "11111111-1111-4111-8111-111111111111", reason: "never arrived" };
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+
+  it("round-trips every buyer-write verb through a token", () => {
+    for (const op of ["receipt", "release", "address", "payment", `dispute=${encoded}`, `cancel=${encoded}`, "order=eyJwYXltZW50X21vZGUiOiJvZmZfcGxhdGZvcm0ifQ", `tracking=${encoded}`, `message=${Buffer.from(JSON.stringify({ body: "shipping tomorrow" }), "utf8").toString("base64url")}`]) {
+      const token = signChatConfirmToken("11111111-1111-4111-8111-111111111111", op, (NOW + 60_000) / 1000);
+      expect(verifyChatConfirmToken(token, NOW)).toEqual({ itemId: "11111111-1111-4111-8111-111111111111", op });
+    }
+  });
+
+  it("rejects unknown or malformed order ops", () => {
+    for (const op of ["label", "order=has spaces!", "order=", "dispute==x", "refund", "message=", "tracking=%2B"]) {
+      const token = signChatConfirmToken("a", op, (NOW + 60_000) / 1000);
+      expect(verifyChatConfirmToken(token, NOW)).toBeNull();
+    }
+  });
+
+  it("tampering the payload inside a verb breaks the MAC", () => {
+    const token = signChatConfirmToken("a", `dispute=${encoded}`, (NOW + 60_000) / 1000);
+    const other = Buffer.from(JSON.stringify({ ...payload, reason: "different" }), "utf8").toString("base64url");
+    expect(verifyChatConfirmToken(token.replace(encoded, other), NOW)).toBeNull();
+  });
+
+  it("decodeOrderPayload/orderOpVerb split op strings", () => {
+    expect(orderOpVerb(`dispute=${encoded}`)).toBe("dispute");
+    expect(orderOpVerb("receipt")).toBe("receipt");
+    expect(decodeOrderPayload(`dispute=${encoded}`)).toEqual(payload);
+    expect(decodeOrderPayload("receipt")).toEqual({});
   });
 });
 
@@ -270,6 +351,361 @@ describe.skipIf(!available)("chat vs MCP order reads (DB)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Pure: chatTurn normalization wiring (THI-603, THI-602 review item 1).
+// Before the fix the read tools executed with raw model args; junk was
+// absorbed by the service layer's defensive clamps and never counted in
+// toolArgErrors. Now the same manifest-parity rejection the writes get
+// happens in-turn: model-facing error, no executor run, accounted.
+
+/** Scripted LLM (same pattern as tests/chat.test.ts): each fetch returns
+ *  script[i] and records every request body for assertions. */
+function mockLlm(script: unknown[]) {
+  const bodies: Array<{ messages: Array<{ role: string; content: string | null }> }> = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      const step = Math.min(bodies.length - 1, script.length - 1);
+      return new Response(JSON.stringify({ choices: [{ message: script[step] }] }), { status: 200 });
+    }),
+  );
+  return bodies;
+}
+
+function toolCallMsg(id: string, name: string, args: Record<string, unknown>): unknown {
+  return {
+    role: "assistant",
+    content: null,
+    tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }],
+  };
+}
+
+const FINAL = { role: "assistant", content: "Done." };
+
+/** Captures the chat_turn_usage console lines emitted during fn(). */
+async function withUsageLog(fn: () => Promise<unknown>): Promise<Array<Record<string, unknown>>> {
+  const lines: string[] = [];
+  const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+    lines.push(String(line));
+  });
+  try {
+    await fn();
+  } finally {
+    spy.mockRestore();
+  }
+  return lines
+    .map((l) => {
+      try {
+        return JSON.parse(l) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })
+    .filter((o): o is Record<string, unknown> => o !== null && o.type === "chat_turn_usage");
+}
+
+const toolResults = (bodies: Array<{ messages: Array<{ role: string; content: string | null }> }>) =>
+  bodies.flatMap((b) => b.messages.filter((m) => m.role === "tool").map((m) => m.content ?? "")).join("\n");
+
+describe("chatTurn order-read normalization wiring (THI-603, pure)", () => {
+  it("my_orders junk role: parity error to the model, no execution, counted in toolArgErrors", async () => {
+    const bodies = mockLlm([toolCallMsg("c1", "my_orders", { role: "admin" }), FINAL]);
+    const usage = await withUsageLog(() => chatTurn([], "show my orders", sellerA));
+    const content = toolResults(bodies);
+    expect(content).toContain("my_orders: role must be one of");
+    // Rejected args never reach the executor — no orders payload came back.
+    expect(content).not.toContain("\"count\"");
+    expect(usage.length).toBe(1);
+    expect(usage[0].tool_arg_errors).toBe(1);
+    expect(usage[0].tool_names).toContain("my_orders");
+  });
+
+  it("get_order malformed id: UUID parity error (not a raw Postgres cast error), accounted", async () => {
+    const bodies = mockLlm([toolCallMsg("c1", "get_order", { order_id: "not-a-uuid" }), FINAL]);
+    const usage = await withUsageLog(() => chatTurn([], "show the order", sellerA));
+    const content = toolResults(bodies);
+    expect(content).toContain("get_order: order_id must be a UUID string");
+    expect(content).not.toContain("invalid input syntax"); // no executor/DB path was taken
+    expect(usage[0].tool_arg_errors).toBe(1);
+  });
+
+  it("my_orders junk limit is a model-arg rejection, not a service-layer clamp", async () => {
+    const bodies = mockLlm([toolCallMsg("c1", "my_orders", { limit: "10" }), FINAL]);
+    const usage = await withUsageLog(() => chatTurn([], "show my orders", sellerA));
+    expect(toolResults(bodies)).toContain("my_orders: limit must be an integer from 1 to");
+    expect(usage[0].tool_arg_errors).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DB-backed: valid read calls through the turn — canonical args reach the
+// executor (whitespace-trimmed ids, defaulted role/limit) and execute.
+
+describe.skipIf(!available)("chatTurn order-read canonical args reach the executor (THI-603, DB)", () => {
+  let client: pg.Client;
+  let orderId = "";
+
+  beforeAll(async () => {
+    client = new pg.Client({ connectionString });
+    await client.connect();
+    await client.query(readFileSync(schemaPath, "utf8"));
+    await client.query("TRUNCATE order_events, webhook_events, orders, items, sellers RESTART IDENTITY CASCADE");
+    await client.query(
+      `INSERT INTO sellers (id, api_key_hash, display_name, email) VALUES
+        ($1, 'thg_a', 'chat-a', 'chat-a@t.dev'),
+        ($2, 'thg_b', 'chat-b', 'chat-b@t.dev')`,
+      [sellerA.id, sellerB.id],
+    );
+    const item = await client.query(
+      `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, attributes, status, shipping_tier)
+       VALUES ($1, 'Canonic Lamp', 3000, 200, 'furniture', '{}'::jsonb, 'active', 'parcel') RETURNING id`,
+      [sellerA.id],
+    );
+    const { order } = await createOrder({
+      buyerId: sellerB.id,
+      itemId: item.rows[0].id,
+      shippingAddress: { name: "Bee Buyer", line1: "Via Roma 1", city: "Milan", postal_code: "20121", country: "IT" },
+      paymentMode: "off_platform",
+    });
+    orderId = order.id as string;
+  });
+
+  afterAll(async () => {
+    await client.end();
+  });
+
+  it("valid my_orders executes through the turn with canonical defaults (no arg errors)", async () => {
+    const bodies = mockLlm([toolCallMsg("c1", "my_orders", {}), FINAL]);
+    const usage = await withUsageLog(() => chatTurn([], "my orders please", sellerA));
+    const content = toolResults(bodies);
+    expect(content).toContain("\"count\":1"); // executed — role both / limit 20 defaults
+    expect(usage[0].tool_arg_errors).toBe(0);
+  });
+
+  it("a whitespace-padded order_id is canonicalized (trimmed) before the executor", async () => {
+    const bodies = mockLlm([toolCallMsg("c1", "get_order", { order_id: ` ${orderId} ` }), FINAL]);
+    const usage = await withUsageLog(() => chatTurn([], "that order", sellerA));
+    const content = toolResults(bodies);
+    // The pad would fail the ::uuid cast in the executor — only the trim
+    // makes this read succeed.
+    expect(content).toContain("\"order\"");
+    expect(content).not.toContain("not found");
+    expect(content).not.toContain("invalid input syntax");
+    expect(usage[0].tool_arg_errors).toBe(0);
+  });
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  // Defensive: restore the real DB read if a test died before consuming
+  // its mockRejectedValueOnce.
+  vi.mocked(getOrderView).mockReset();
+  vi.mocked(getOrderView).mockImplementation(realGetOrderView);
+});
+
+// ---------------------------------------------------------------------------
+// DB-backed: the confirm gate around buyer order writes (spec §Confirm gate)
+
+describe.skipIf(!available)("chat buyer order writes behind the confirm gate (DB)", () => {
+  let client: pg.Client;
+
+  beforeAll(async () => {
+    client = new pg.Client({ connectionString });
+    await client.connect();
+  });
+
+  afterAll(async () => {
+    await client?.end();
+  });
+
+  beforeEach(async () => {
+    await client.query("TRUNCATE order_events, webhook_events, orders, items, sellers RESTART IDENTITY CASCADE");
+    await client.query(
+      "INSERT INTO sellers (id, api_key_hash, display_name, email) VALUES ($1, 'gate-a', 'chat-a', 'a@x') , ($2, 'gate-b', 'chat-b', 'b@x')",
+      [sellerA.id, sellerB.id],
+    );
+  });
+
+  /** A fresh sold off-platform order: sellerA sells, sellerB buys and pays
+   *  off-platform, seller confirms payment. Ready for the address share. */
+  async function soldOrder(): Promise<string> {
+    const item = await client.query(
+      `INSERT INTO items (seller_id, title, description, price_cents, shipping_price_cents, currency, shipping_tier, status)
+       VALUES ($1, 'Gate Lamp', 'l', 5000, 300, 'EUR', 'parcel', 'active') RETURNING id`,
+      [sellerA.id],
+    );
+    const { order } = await createOrder({
+      itemId: item.rows[0].id,
+      buyerId: sellerB.id,
+      shippingAddress: { name: "Bee Buyer", line1: "1 Way", city: "Town", postal_code: "00000", country: "IT" },
+      paymentMode: "off_platform",
+    });
+    await confirmPayment(order.id, sellerA.id, "cash received");
+    return order.id as string;
+  }
+
+  it("every buyer write holds for a card first and does not mutate the DB", async () => {
+    const orderId = await soldOrder();
+    const item = await client.query("SELECT id FROM items LIMIT 1");
+    const cases: Array<{ name: string; args: Record<string, unknown> }> = [
+      { name: "confirm_receipt", args: { order_id: orderId } },
+      { name: "release_funds", args: { order_id: orderId } },
+      { name: "open_dispute", args: { order_id: orderId, reason: "box is empty" } },
+      { name: "share_shipping_address", args: { order_id: orderId } },
+      { name: "cancel_order", args: { order_id: orderId, reason: "changed my mind" } },
+      { name: "create_order", args: { item_id: item.rows[0].id } },
+    ];
+    for (const c of cases) {
+      mockLlm([toolCallMsg("c1", c.name, c.args), FINAL]);
+      const turn = await chatTurn([], `do it: ${c.name}`, sellerB);
+      expect(turn.confirm, c.name).toBeDefined();
+      expect(turn.confirm!.op, c.name).toMatch(/^(order|receipt|release|dispute|address|cancel)(=|$)/);
+      expect(turn.confirm!.summary, c.name).toMatch(/.+/); // concrete effect, not just a verb
+      const row = await client.query("SELECT status FROM orders WHERE id = $1", [orderId]);
+      expect(row.rows[0].status, c.name).toBe("sold"); // untouched
+      const shared = await client.query("SELECT shipping_address_shared_at IS NOT NULL AS s FROM orders WHERE id = $1", [orderId]);
+      expect(shared.rows[0].s, c.name).toBe(false);
+    }
+  });
+
+  it("confirming the card executes the op (share_shipping_address end-to-end)", async () => {
+    const orderId = await soldOrder();
+    mockLlm([toolCallMsg("c1", "share_shipping_address", { order_id: orderId }), FINAL]);
+    const turn = await chatTurn([], "share my address please", sellerB);
+    expect(turn.confirm!.op).toBe("address");
+    // execute via chat-confirm, as the UI does
+    const done = await chatTurn([], `chat-confirm ${turn.confirm!.token}`, sellerB);
+    expect(done.text).toMatch(/✅ .*address shared/s);
+    // the seller now sees it through the surfaced (allowlisted) path
+    const res = (await executeTool("get_order", { order_id: orderId }, sellerA)) as { order: { shipping_address?: { name: string } } };
+    expect(res.order.shipping_address?.name).toBe("Bee Buyer");
+  });
+
+  it("create_order card carries the price and the payload binds payment mode", async () => {
+    const item = await client.query(
+      `INSERT INTO items (seller_id, title, description, price_cents, shipping_price_cents, currency, shipping_tier, status)
+       VALUES ($1, 'Pay Boat', 'b', 12000, 800, 'EUR', 'parcel', 'active') RETURNING id`,
+      [sellerA.id],
+    );
+    const address = { name: "Bee Buyer", line1: "1 Way", city: "Town", postal_code: "00000", country: "IT" };
+    mockLlm([toolCallMsg("c1", "create_order", { item_id: item.rows[0].id, payment_mode: "off_platform", shipping_address: address }), FINAL]);
+    const turn = await chatTurn([], "buy the boat", sellerB);
+    expect(turn.confirm!.summary).toContain("EUR 128.00");
+    expect(decodeOrderPayload(turn.confirm!.op)).toEqual({ payment_mode: "off_platform", shipping_address: address });
+    const done = await chatTurn([], `chat-confirm ${turn.confirm!.token}`, sellerB);
+    expect(done.text).toMatch(/✅ Order placed/);
+    const row = await client.query("SELECT payment_mode, status FROM orders ORDER BY created_at DESC LIMIT 1");
+    expect(row.rows[0].payment_mode).toBe("off_platform");
+    expect(row.rows[0].status).toBe("pending");
+  });
+
+  it("second order write in the same turn is still_pending (one card per turn)", async () => {
+    const orderId = await soldOrder();
+    const bodies = mockLlm([
+      toolCallMsg("c1", "share_shipping_address", { order_id: orderId }),
+      toolCallMsg("c2", "cancel_order", { order_id: orderId }),
+      FINAL,
+    ]);
+    const turn = await chatTurn([], "share then cancel", sellerB);
+    expect(turn.confirm!.op).toBe("address");
+    // The model was TOLD the second op is still pending (it must guide the
+    // user to settle the first card) — find the cancel's tool result across
+    // the recorded request bodies.
+    const toolResults = bodies.flatMap((b) => b.messages.filter((m) => m.role === "tool").map((m) => m.content ?? ""));
+    expect(toolResults.join("\n")).toContain("still_pending");
+    // and the cancel never ran
+    const row = await client.query("SELECT status FROM orders WHERE id = $1", [orderId]);
+    expect(row.rows[0].status).toBe("sold");
+  });
+
+  it("fail-closed: an unreadable order produces an error, never a card", async () => {
+    const orderId = await soldOrder();
+    vi.mocked(getOrderView).mockRejectedValueOnce(new Error("db down"));
+    mockLlm([toolCallMsg("c1", "cancel_order", { order_id: orderId }), FINAL]);
+    const turn = await chatTurn([], "cancel it", sellerB);
+    expect(turn.confirm).toBeUndefined();
+    const row = await client.query("SELECT status FROM orders WHERE id = $1", [orderId]);
+    expect(row.rows[0].status).toBe("sold");
+  });
+
+  it("unknown order → model-facing not-found error, no card", async () => {
+    mockLlm([toolCallMsg("c1", "cancel_order", { order_id: "99999999-9999-4999-8999-999999999999" }), FINAL]);
+    const turn = await chatTurn([], "cancel it", sellerB);
+    expect(turn.confirm).toBeUndefined();
+  });
+
+  it("anonymous callers get the login error for order writes", async () => {
+    const orderId = await soldOrder();
+    mockLlm([toolCallMsg("c1", "cancel_order", { order_id: orderId }), FINAL]);
+    const turn = await chatTurn([], "cancel it", null);
+    expect(turn.confirm).toBeUndefined();
+    const row = await client.query("SELECT status FROM orders WHERE id = $1", [orderId]);
+    expect(row.rows[0].status).toBe("sold");
+  });
+
+  it("seller writes hold first too (confirm_payment, record_tracking, send_order_message)", async () => {
+    const orderId = await soldOrder();
+    const cases: Array<{ name: string; args: Record<string, unknown> }> = [
+      { name: "confirm_payment", args: { order_id: orderId, note: "cash received" } },
+      { name: "record_tracking", args: { order_id: orderId, carrier: "DHL", tracking_code: "TRACK9" } },
+      { name: "send_order_message", args: { order_id: orderId, body: "shipping tomorrow morning" } },
+    ];
+    for (const c of cases) {
+      mockLlm([toolCallMsg("c1", c.name, c.args), FINAL]);
+      const turn = await chatTurn([], `do it: ${c.name}`, sellerA);
+      expect(turn.confirm, c.name).toBeDefined();
+      expect(turn.confirm!.summary, c.name).toMatch(/.+/);
+    }
+    // nothing executed: still sold, no tracking, empty thread
+    const row = await client.query("SELECT status, carrier, tracking_code FROM orders WHERE id = $1", [orderId]);
+    expect(row.rows[0].status).toBe("sold");
+    expect(row.rows[0].carrier).toBeNull();
+    const thread = await client.query("SELECT count(*)::int AS n FROM order_messages WHERE order_id = $1", [orderId]);
+    expect(thread.rows[0].n).toBe(0);
+  });
+
+  it("confirm_payment executes via chat-confirm (pending → sold)", async () => {
+    // fresh PENDING off-platform order (no confirmPayment yet)
+    const item = await client.query(
+      `INSERT INTO items (seller_id, title, description, price_cents, shipping_price_cents, currency, shipping_tier, status)
+       VALUES ($1, 'Pay Cash Desk', 'd', 4000, 0, 'EUR', 'local', 'active') RETURNING id`,
+      [sellerA.id],
+    );
+    const { order } = await createOrder({ itemId: item.rows[0].id, buyerId: sellerB.id, paymentMode: "off_platform" });
+    mockLlm([toolCallMsg("c1", "confirm_payment", { order_id: order.id, note: "cash received" }), FINAL]);
+    const turn = await chatTurn([], "payment arrived", sellerA);
+    expect(turn.confirm!.op).toMatch(/^payment(=|$)/);
+    const done = await chatTurn([], `chat-confirm ${turn.confirm!.token}`, sellerA);
+    expect(done.text).toMatch(/✅ Payment confirmed/s);
+    const row = await client.query("SELECT status FROM orders WHERE id = $1", [order.id]);
+    expect(row.rows[0].status).toBe("sold");
+  });
+
+  it("record_tracking executes via chat-confirm (sold → label_issued, args bound)", async () => {
+    const orderId = await soldOrder();
+    mockLlm([toolCallMsg("c1", "record_tracking", { order_id: orderId, carrier: "DPD", tracking_code: "XYZ123" }), FINAL]);
+    const turn = await chatTurn([], "shipped it", sellerA);
+    expect(decodeOrderPayload(turn.confirm!.op)).toEqual({ carrier: "DPD", tracking_code: "XYZ123" });
+    const done = await chatTurn([], `chat-confirm ${turn.confirm!.token}`, sellerA);
+    expect(done.text).toMatch(/✅ Tracking recorded — .*DPD.*XYZ123/s);
+    const row = await client.query("SELECT status, carrier, tracking_code FROM orders WHERE id = $1", [orderId]);
+    expect(row.rows[0].status).toBe("label_issued");
+    expect(row.rows[0].carrier).toBe("DPD");
+    expect(row.rows[0].tracking_code).toBe("XYZ123");
+  });
+
+  it("send_order_message executes via chat-confirm and list_order_messages reads it back identically to MCP", async () => {
+    const orderId = await soldOrder();
+    mockLlm([toolCallMsg("c1", "send_order_message", { order_id: orderId, body: "Package goes out today." }), FINAL]);
+    const turn = await chatTurn([], "tell the buyer", sellerA);
+    expect(turn.confirm!.summary).toContain("Package goes out today.");
+    const done = await chatTurn([], `chat-confirm ${turn.confirm!.token}`, sellerA);
+    expect(done.text).toMatch(/✅ Message sent/);
+    // read parity: chat vs MCP on the same thread (JSON-normalized dates)
+    const viaChat = (await executeTool("list_order_messages", { order_id: orderId }, sellerB)) as { count: number; messages: unknown[]; next_cursor: string | null };
+    const viaMcp = await mcpTools(sellerB).call("list_order_messages", { order_id: orderId });
+    expect(viaChat.count).toBe(1);
+    expect(JSON.parse(JSON.stringify(viaChat))).toEqual(viaMcp.payload);
+  });
 });

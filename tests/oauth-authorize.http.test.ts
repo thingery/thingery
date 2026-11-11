@@ -136,9 +136,9 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     expect(html).not.toContain("<script");
     // Deny stays first in the markup, so pressing Enter never grants access.
     expect(html.indexOf('value="deny"')).toBeLessThan(html.indexOf('value="allow"'));
-    expect(html).toContain("Authorize Test Inspector");
+    expect(html).toContain("Let Test Inspector use your account?");
     expect(html).toContain(email);
-    expect(html).toContain("read and manage your listings and orders");
+    expect(html).toContain("Read and manage your orders");
     expect(html).toContain('action="/oauth/authorize"');
     const form = parseConsentForm(html);
     expect(form.client_id).toBe("thgc_authtest");
@@ -151,13 +151,13 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     // Provenance line: escaped text beside the application name.
-    expect(html).toContain("<strong>Test Inspector</strong> (https://inspector.example.com)");
+    expect(html).toContain("<strong>Test Inspector</strong> says it is from https://inspector.example.com");
     // Spec §5 row 8: client_uri is stored as data and never rendered as a link.
     expect(html).not.toMatch(/<a[^>]*inspector\.example\.com/);
-    // Clients registered without a client_uri render no provenance parenthesis.
+    // Clients registered without a client_uri render no provenance line.
     const noUri = await fetch(`${baseUrl}${authorizeUrl({ client_id: "thgc_xss" })}`, { headers: { cookie } });
     const noUriHtml = await noUri.text();
-    expect(noUriHtml).toContain("&lt;/script&gt;</strong> wants to connect"); // name flows straight into the sentence
+    expect(noUriHtml).not.toContain("says it is from");
     expect(noUriHtml).not.toContain("inspector.example.com");
   });
 

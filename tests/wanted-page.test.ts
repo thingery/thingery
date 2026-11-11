@@ -1,19 +1,17 @@
-// THI-441 (B2+B3, spec THI-439 §6): page-render tests for the wanted UX —
-// the /wanted board, /wanted/:id detail, the /wanted/new funnel form, and
-// the zero-result funnel on /browse. In-process only: the data seam
-// (src/wanted-feed.ts) and searchItems/listCategories are spied, no
-// Postgres needed (item-page.test.ts pattern).
+// THI-441 (spec THI-439 §6): page-render tests for the /wanted/:id detail
+// page — the one wanted page a self-hosted server still renders, because MCP
+// wanted tools return <PUBLIC_BASE_URL>/wanted/<id> links. In-process only:
+// the data seam (src/wanted-feed.ts) is spied, no Postgres needed
+// (item-page.test.ts pattern).
 //
 // The visual language is the contract under test: WANTED chip + budget as a
-// RANGE ("€150–200"), never the for-sale single-price badge; freshness line
-// "wanted N days ago · expires in M days"; dedicated /wanted tab.
+// RANGE ("€150–200"), never the for-sale single-price badge.
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Request, Response } from "express";
-import * as items from "../src/items.js";
 import * as feed from "../src/wanted-feed.js";
 import type { WantedPublicVM } from "../src/wanted-feed.js";
-import { browsePage, wantedBoardPage, wantedDetailPage, wantedNewPage } from "../src/web-pages.js";
+import { wantedDetailPage } from "../src/web-pages.js";
 
 const DAY = 24 * 60 * 60 * 1000;
 // Skew timestamps inward (a hair past whole days) so floor/ceil day counts
@@ -59,82 +57,6 @@ function render(
   });
 }
 
-beforeEach(() => {
-  vi.spyOn(items, "searchItems").mockResolvedValue([]);
-  vi.spyOn(items, "listCategories").mockResolvedValue([
-    { name: "electronics", description: "Consumer electronics", listing_count: 2 },
-    { name: "sneakers", description: "Trainers and sneakers", listing_count: 1 },
-  ]);
-});
-
-describe("browsePage — zero-result funnel (B2, spec §6.2)", () => {
-  it("renders 'Nothing used listed right now' + the prefilled CTA on a dead-end search", async () => {
-    const { html } = await render(browsePage, { query: { q: "Nintendo Switch OLED" } });
-    expect(html).toContain("Nothing used listed right now");
-    expect(html).toContain("Save what you're looking for →");
-    expect(html).toContain('href="/wanted/new?prefill=Nintendo%20Switch%20OLED"');
-    expect(html).toContain("Buyers want");
-  });
-
-  it("renders the plain empty state when browsing without a query", async () => {
-    const { html } = await render(browsePage, { query: {} });
-    expect(html).not.toContain("Nothing used listed right now");
-  });
-
-  it("renders no funnel when results exist", async () => {
-    vi.spyOn(items, "searchItems").mockResolvedValue([
-      {
-        id: "itm-1",
-        seller_id: "s1",
-        title: "Switch",
-        description: "",
-        category: "electronics",
-        condition: "good",
-        brand: null,
-        price_cents: 15000,
-        currency: "EUR",
-        location: null,
-        weight_grams: null,
-        dimensions_mm: null,
-        shipping_tier: "standard",
-        shipping_price_cents: 500,
-        images: [],
-        attributes: {},
-        status: "active",
-        photo_required: true,
-        created_at: new Date(),
-        score: 1,
-      },
-    ]);
-    const { html } = await render(browsePage, { query: { q: "switch" } });
-    expect(html).not.toContain("Nothing used listed right now");
-  });
-});
-
-describe("wantedBoardPage — the /wanted board (B3)", () => {
-  it("renders WANTED chip, budget as a range, freshness line, and category chips", async () => {
-    const boardSpy = vi.spyOn(feed, "wantedBoard").mockResolvedValue([wanted(), wanted({ id: "22222222-2222-4222-8222-222222222202", title: "Nike Air Max 90, EU 43", category: "sneakers", condition: null, budget_min_cents: 4000, budget_max_cents: 8000, created_at: ago(2), expires_at: ahead(5) })]);
-    const { html } = await render(wantedBoardPage, { query: {} });
-    expect(boardSpy).toHaveBeenCalledTimes(1);
-    expect(html).toContain("WANTED");
-    expect(html).toContain("\u20ac150\u2013200");
-    expect(html).toContain("wanted 5 days ago \u00b7 expires in 25 days");
-    expect(html).toContain("expiring"); // 5 days left → expiring-soon emphasis class
-    expect(html).toContain('href="/wanted?category=electronics"');
-    // Never the for-sale single-price badge format:
-    expect(html).not.toMatch(/\d+\.\d\d EUR/);
-    // Dedicated tab — board links back to the for-sale feed, never mixes it in:
-    expect(html).not.toContain('href="/item/');
-  });
-
-  it("renders an honest empty board with the buyer CTA", async () => {
-    vi.spyOn(feed, "wantedBoard").mockResolvedValue([]);
-    const { html } = await render(wantedBoardPage, { query: {} });
-    expect(html).toContain("No wanted listings yet");
-    expect(html).toContain('href="/wanted/new"');
-  });
-});
-
 describe("wantedDetailPage — /wanted/:id", () => {
   it("renders the wanted item, budget range, and the respond_to_wanted agent CTA", async () => {
     const id = "22222222-2222-4222-8222-222222222201";
@@ -145,7 +67,10 @@ describe("wantedDetailPage — /wanted/:id", () => {
     expect(html).toContain("\u20ac150\u2013200");
     expect(html).toContain(`wanted_id ${id}`);
     expect(html).toContain("respond_to_wanted");
-    expect(html).toContain("/chat.html?q=");
+    // The legacy public pages are gone; only links that still resolve.
+    expect(html).not.toContain("/chat.html");
+    expect(html).not.toContain('href="/browse"');
+    expect(html).not.toContain('href="/wanted"');
     expect(html).not.toContain("noindex");
   });
 
@@ -162,23 +87,5 @@ describe("wantedDetailPage — /wanted/:id", () => {
     const { html, status } = await render(wantedDetailPage, { params: { id: "33333333-3333-4333-8333-333333333301" } });
     expect(status).toBe(404);
     expect(html).toContain("Not found");
-  });
-});
-
-describe("wantedNewPage — the funnel form (B2)", () => {
-  it("prefills the title from the failed query and defaults the alert on", async () => {
-    const { html } = await render(wantedNewPage, { query: { prefill: "Nintendo Switch OLED" } });
-    expect(html).toContain('value="Nintendo Switch OLED"');
-    expect(html).toMatch(/name="alert_me"[^>]*checked/);
-    expect(html).toContain("alert me when a matching listing appears");
-    // Optional reference image — no photo required:
-    expect(html).toContain("no photo needed");
-    expect(html).toContain("/wanted.js");
-  });
-
-  it("renders without a prefill query", async () => {
-    const { html, status } = await render(wantedNewPage, { query: {} });
-    expect(status).toBe(200);
-    expect(html).toContain("Save what you&#39;re looking for");
   });
 });

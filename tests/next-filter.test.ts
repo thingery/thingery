@@ -2,7 +2,7 @@
 // backslash/percent-encoding family of open-redirect bypasses.
 
 import { describe, expect, it } from "vitest";
-import { MAX_NEXT_LEN, safeNextTarget } from "../website/next-filter.js";
+import { MAX_NEXT_LEN, safeNextTarget } from "../public/next-filter.js";
 
 const ORIGIN = "https://thingery.dev";
 

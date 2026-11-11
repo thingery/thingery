@@ -6,9 +6,9 @@ name: no-private-paths
 # deny-listed paths. CODEOWNERS cannot express "must not exist"; a path check
 # can. Deny-list from the THI-573 proposal (§5):
 #   apps/ deploy/ billing/ ops/      — active now (prophylactic)
-#   website/                          — NOT denied yet: joins the deny-list when
-#                                       Phase 2 of the repo split removes the
-#                                       consumer pages from this repo.
+#   website/                          — NOT denied yet: the consumer pages are
+#                                       gone and the self-host files now live in
+#                                       public/, so it can join the deny-list.
 on:
   pull_request:
     branches: [main]

@@ -348,12 +348,70 @@ export function revokeCsrfToken(sellerId: string, grantId: string): string {
     .digest("base64url");
 }
 
-export interface AppsGrantRow {
+/** One active grant as the seller sees it: the connected app. */
+export interface ConnectedApp {
   id: string;
   client_name: string;
   created_at: Date;
   last_used_at: Date | null;
+}
+
+export interface AppsGrantRow extends ConnectedApp {
   csrf: string;
+}
+
+/** The seller's active grants, newest first. Shared by the /apps page and the
+ *  first-party list_connected_apps tool; "last used" is the newest token use
+ *  in the grant. */
+export async function listConnectedApps(sellerId: string): Promise<ConnectedApp[]> {
+  const { rows } = await pool.query<ConnectedApp>(
+    `SELECT g.id, c.client_name, g.created_at,
+            (SELECT max(t.last_used_at) FROM oauth_tokens t WHERE t.grant_id = g.id) AS last_used_at
+       FROM oauth_grants g
+       JOIN oauth_clients c ON c.client_id = g.client_id
+      WHERE g.seller_id = $1 AND g.revoked_at IS NULL
+      ORDER BY g.created_at DESC`,
+    [sellerId],
+  );
+  return rows;
+}
+
+/** Revokes one of the seller's grants and every token in it, in one
+ *  transaction. The ownership check is the UPDATE's seller_id predicate, so
+ *  another seller's grant, an unknown id and an already revoked grant all
+ *  return false and change nothing. Shared by /apps/revoke and the
+ *  first-party revoke_connected_app tool; `surface` says which one in the
+ *  security log. */
+export async function revokeConnectedApp(
+  sellerId: string,
+  grantId: string,
+  context: { surface: "apps_page" | "mcp_session"; ip?: string },
+): Promise<boolean> {
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    const owned = await db.query<{ id: string }>(
+      `UPDATE oauth_grants SET revoked_at = now() WHERE id = $1 AND seller_id = $2 AND revoked_at IS NULL RETURNING id`,
+      [grantId, sellerId],
+    );
+    const revoked = owned.rowCount === 1;
+    if (revoked) {
+      await revokeGrantFamily(db, grantId);
+      securityEvent("grant_revoked_manual", {
+        seller_id: sellerId,
+        grant_id: grantId,
+        surface: context.surface,
+        ...(context.ip !== undefined ? { ip: context.ip } : {}),
+      });
+    }
+    await db.query("COMMIT");
+    return revoked;
+  } catch (e) {
+    await db.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    db.release();
+  }
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -400,15 +458,7 @@ function mountApps(app: Express): void {
       res.redirect(302, `/login.html?next=${encodeURIComponent("/apps")}`);
       return;
     }
-    const { rows } = await pool.query<AppsGrantRow>(
-      `SELECT g.id, c.client_name, g.created_at,
-              (SELECT max(t.last_used_at) FROM oauth_tokens t WHERE t.grant_id = g.id) AS last_used_at
-         FROM oauth_grants g
-         JOIN oauth_clients c ON c.client_id = g.client_id
-        WHERE g.seller_id = $1 AND g.revoked_at IS NULL
-        ORDER BY g.created_at DESC`,
-      [seller.id],
-    );
+    const rows = await listConnectedApps(seller.id);
     // Bind each row's CSRF to the CURRENT session's seller id.
     const bound = rows.map((g) => ({
       ...g,
@@ -438,24 +488,7 @@ function mountApps(app: Express): void {
       errorPage(res, "Invalid request", "The revocation request could not be verified. Please reload the page and try again.");
       return;
     }
-    const db = await pool.connect();
-    try {
-      await db.query("BEGIN");
-      const owned = await db.query<{ id: string }>(
-        `UPDATE oauth_grants SET revoked_at = now() WHERE id = $1 AND seller_id = $2 AND revoked_at IS NULL RETURNING id`,
-        [grantId, seller.id],
-      );
-      if (owned.rowCount === 1) {
-        await revokeGrantFamily(db, grantId);
-        securityEvent("grant_revoked_manual", { seller_id: seller.id, grant_id: grantId, ip: req.ip });
-      }
-      await db.query("COMMIT");
-    } catch (e) {
-      await db.query("ROLLBACK").catch(() => {});
-      throw e;
-    } finally {
-      db.release();
-    }
+    await revokeConnectedApp(seller.id, grantId, { surface: "apps_page", ip: req.ip });
     pageHeaders(res);
     res.redirect(302, "/apps?revoked=1");
   }));

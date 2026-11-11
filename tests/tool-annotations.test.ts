@@ -68,6 +68,15 @@ const EXPECTED: Record<
   renew_wanted: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 };
 
+// Session-only tools (registered for the first-party web session alone, so
+// absent from the anonymous registration below and from the plugin portal's
+// scan). Revoking ends an app's access: destructive, and a repeat changes
+// nothing more.
+const SESSION_ONLY_EXPECTED: typeof EXPECTED = {
+  list_connected_apps: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  revoke_connected_app: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+};
+
 const READ_TOOLS = new Set(Object.entries(EXPECTED).filter(([, a]) => a.readOnlyHint).map(([n]) => n));
 
 interface Captured {
@@ -117,6 +126,31 @@ describe("MCP tool annotations (THI-296 AC5 audit table)", () => {
     for (const [name, { config }] of registered) {
       expect(typeof config.title, `${name} title`).toBe("string");
       expect((config.title ?? "").length, `${name} title non-empty`).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("session-only tool annotations", () => {
+  const sessionRegistered = new Map<string, Captured>();
+  registerTools(
+    {
+      registerTool(name: string, config: Captured["config"]) {
+        sessionRegistered.set(name, { config });
+      },
+    },
+    { seller: { id: "11111111-1111-4111-8111-111111111111", display_name: "Web User" }, credential: "session" },
+  );
+
+  it("adds exactly the session-only tools to the audited set", () => {
+    const extra = [...sessionRegistered.keys()].filter((name) => !(name in EXPECTED));
+    expect(extra.sort()).toEqual(Object.keys(SESSION_ONLY_EXPECTED).sort());
+  });
+
+  it("annotations and titles match", () => {
+    for (const [name, expected] of Object.entries(SESSION_ONLY_EXPECTED)) {
+      const config = sessionRegistered.get(name)!.config;
+      expect(config.annotations).toEqual(expected);
+      expect((config.title ?? "").length).toBeGreaterThan(0);
     }
   });
 });

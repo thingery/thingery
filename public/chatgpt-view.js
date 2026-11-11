@@ -1,6 +1,6 @@
 // Pure view helpers for the ChatGPT-plan settings slot (THI-193 PR-4).
 // Kept free of DOM access so they unit-test DOM-less (same pattern as
-// website/account-view.js). All copy here is fixed-string only: the OAuth
+// public/account-view.js). All copy here is fixed-string only: the OAuth
 // callback's ?chatgpt= slug is mapped to known text — provider error text
 // and token material never reach the browser (spec §3.2/§3.6).
 

@@ -2,13 +2,13 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const websiteDir = fileURLToPath(new URL("../website", import.meta.url));
+const websiteDir = fileURLToPath(new URL("../public", import.meta.url));
 
 /**
  * Regression tests for THI security issue gh#8 (self-XSS in the former chat
  * page's account link).
  *
- * website/ pages are static HTML loaded from external scripts (CSP from
+ * public/ pages are static HTML loaded from external scripts (CSP from
  * the baseline security headers PR; no inline executable scripts) and no
  * framework; the only safe way to render server data in them is via text
  * nodes (textContent / createElement / replaceChildren). These tests fail
@@ -78,7 +78,7 @@ class FakeElement {
   removed = false;
 }
 
-describe("website/ HTML sinks", () => {
+describe("public/ HTML sinks", () => {
   it("html and js files contain no innerHTML/outerHTML/insertAdjacentHTML/document.write usage", () => {
     const files = readdirSync(websiteDir).filter(
       (f) => f.endsWith(".html") || f.endsWith(".js"),

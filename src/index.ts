@@ -169,8 +169,8 @@ function runHttp(): void {
 
   // Account page, its scripts and assets + discovery files (llms.txt,
   // robots.txt, .well-known/)
-  const websiteDir = path.resolve(__dirname, "..", "website");
-  app.use(express.static(websiteDir, { extensions: ["html"] }));
+  const publicDir = path.resolve(__dirname, "..", "public");
+  app.use(express.static(publicDir, { extensions: ["html"] }));
 
   // THI-54: terminal error middleware for the website surface, mounted last.
   // Errors from every earlier surface that its own middleware passed through

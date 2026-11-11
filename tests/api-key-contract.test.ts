@@ -86,13 +86,19 @@ describe.skipIf(!available)("api_key contract drop (THI-158)", () => {
     // like scripts/migrate.ts and the rest of the test suite do.
     await db.query(readFileSync(schemaPath, "utf8"));
 
-    // Plaintext column gone; hash column present.
+    // Plaintext column gone; hash column present, plus the non-secret
+    // display columns (prefix + timestamps, NULL for upgraded keys).
     const cols = await db.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = 'sellers' AND column_name LIKE 'api_key%'`,
       [schema],
     );
-    expect(cols.rows.map((r) => r.column_name).sort()).toEqual(["api_key_hash"]);
+    expect(cols.rows.map((r) => r.column_name).sort()).toEqual([
+      "api_key_created_at",
+      "api_key_hash",
+      "api_key_last_used_at",
+      "api_key_prefix",
+    ]);
 
     // The upgrader's pre-migration key still authenticates: the stored hash
     // equals what sellerFromApiKey computes for it. This is the assertion a

@@ -1,4 +1,4 @@
-// website/photos.js — frictionless item-photo capture + management (THI-308 PR 3/PR 4).
+// public/photos.js — frictionless item-photo capture + management (THI-308 PR 3/PR 4).
 // Loaded only on item pages whose viewer is the owner (the #photo-zone panel
 // is rendered owner-only server-side). All wiring is addEventListener on
 // static-file scripts — zero inline handlers, CSP stays script-src 'self'.

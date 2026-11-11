@@ -73,7 +73,13 @@ describe.skipIf(!available)("API key hash at rest (THI-114 + THI-158)", () => {
       `SELECT column_name FROM information_schema.columns
         WHERE table_schema = current_schema() AND table_name = 'sellers' AND column_name LIKE 'api_key%'`,
     );
-    expect(cols.rows.map((r) => r.column_name).sort()).toEqual(["api_key_hash"]);
+    // The display columns hold no secret: a prefix, and two timestamps.
+    expect(cols.rows.map((r) => r.column_name).sort()).toEqual([
+      "api_key_created_at",
+      "api_key_hash",
+      "api_key_last_used_at",
+      "api_key_prefix",
+    ]);
   });
 
   it("resolves a key by hash (round-trip) and rejects a wrong key", async () => {

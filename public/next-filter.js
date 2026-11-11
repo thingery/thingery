@@ -2,7 +2,7 @@
 // A regex alone is bypassable: `/\evil.com` and its %5C encoding pass `^/[^/]`
 // but navigate off-site because WHATWG URLs treat `\` as `/` in special
 // schemes. Normalize first, then require same-origin via URL parsing.
-// Shared by website/login.html and the unit tests.
+// Shared by public/login.html and the unit tests.
 
 export const MAX_NEXT_LEN = 4096;
 

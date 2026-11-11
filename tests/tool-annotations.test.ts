@@ -75,6 +75,7 @@ const EXPECTED: Record<
 const SESSION_ONLY_EXPECTED: typeof EXPECTED = {
   list_connected_apps: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   revoke_connected_app: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  get_api_key_info: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 };
 
 const READ_TOOLS = new Set(Object.entries(EXPECTED).filter(([, a]) => a.readOnlyHint).map(([n]) => n));

@@ -26,10 +26,10 @@ function registeredNames(ctx: { seller: SellerRow | null; credential?: Credentia
 }
 
 describe("session-only tool registration (pure)", () => {
-  it("registers both tools for a login-session seller", () => {
+  it("registers every session-only tool for a login-session seller", () => {
     const names = registeredNames({ seller: SELLER, credential: "session" });
     for (const tool of SESSION_ONLY_TOOLS) expect(names.has(tool)).toBe(true);
-    expect([...SESSION_ONLY_TOOLS].sort()).toEqual(["list_connected_apps", "revoke_connected_app"]);
+    expect([...SESSION_ONLY_TOOLS].sort()).toEqual(["get_api_key_info", "list_connected_apps", "revoke_connected_app"]);
   });
 
   it.each<[string, SellerRow | null, CredentialKind | undefined]>([
@@ -38,7 +38,7 @@ describe("session-only tool registration (pure)", () => {
     ["no credential kind (stdio, tests)", SELLER, undefined],
     ["an anonymous caller", null, "none"],
     ["a session label without a resolved seller", null, "session"],
-  ])("registers neither for %s", (_label, seller, credential) => {
+  ])("registers none for %s", (_label, seller, credential) => {
     const names = registeredNames({ seller, credential });
     for (const tool of SESSION_ONLY_TOOLS) expect(names.has(tool)).toBe(false);
   });

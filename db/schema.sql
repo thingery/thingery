@@ -53,6 +53,15 @@ END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS sellers_api_key_hash_idx
   ON sellers (api_key_hash) WHERE api_key_hash IS NOT NULL;
 ALTER TABLE sellers DROP COLUMN IF EXISTS api_key;
+-- API key display metadata for the web Settings page. Never the secret:
+-- api_key_prefix is the key's first 8 characters ("thg_" + 4 random base64url
+-- chars = 24 of the key's 192 random bits), written with the hash on
+-- create/rotate. api_key_last_used_at is stamped by thg_ authentication at
+-- most once an hour (src/auth.ts). Keys issued before these columns existed
+-- keep NULLs: a prefix cannot be recovered from a hash, so no backfill.
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS api_key_prefix TEXT;
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS api_key_created_at TIMESTAMPTZ;
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS api_key_last_used_at TIMESTAMPTZ;
 
 -- Category registry: declares the expected attribute fields per category so
 -- agents can self-serve the schema (describe_category tool). Items are NOT

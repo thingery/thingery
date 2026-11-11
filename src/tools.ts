@@ -16,6 +16,7 @@ import { buyShippingLabel, confirmPayment, confirmReceipt, openDispute, recordTr
 import { DEFAULT_MESSAGE_LIST_LIMIT, listOrderMessages, OrderMessageError, sendOrderMessage } from "./order-messages.js";
 import { logSecurityEvent } from "./security-events.js";
 import { listConnectedApps, revokeConnectedApp } from "./oauth.js";
+import { apiKeyInfo } from "./auth.js";
 
 /** Which credential authenticated the /mcp request (thg_ API key, thgo_ OAuth
  *  token, thgs_ login session) — see authenticateRequest in src/auth.ts. */
@@ -33,6 +34,7 @@ export interface ToolContext {
 export const SESSION_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "list_connected_apps",
   "revoke_connected_app",
+  "get_api_key_info",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -1887,6 +1889,39 @@ function registerSessionOnlyTools(server: { registerTool: Function }, seller: Se
         return ok({ revoked: true, app_id: appId });
       } catch (e) {
         return err(`revoke_connected_app failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_api_key_info",
+    {
+      title: "Get API key info",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      description:
+        "Describe the signed-in user's active API key without revealing it: has_key, prefix (the " +
+        "first 8 characters, e.g. \"thg_ab12\"), created_at and last_used_at. prefix and created_at " +
+        "are null for keys issued before they were recorded; last_used_at is null if the key was " +
+        "never used and is updated at most once an hour. Available only with the Thingery web session.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const info = await apiKeyInfo(seller.id);
+        if (!info) return err("Account not found", "not_found");
+        return ok({
+          has_key: info.has_key,
+          prefix: info.prefix,
+          created_at: info.created_at,
+          last_used_at: info.last_used_at,
+        });
+      } catch (e) {
+        return err(`get_api_key_info failed: ${describeError(e)}`);
       }
     },
   );

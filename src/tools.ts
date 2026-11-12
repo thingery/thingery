@@ -88,6 +88,60 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   "renew_wanted",
 ]);
 
+// ---------------------------------------------------------------------------
+// Tool profiles (THI-614; board product decision card ce4cd554 on THI-613,
+// 2026-11-11, "Option A"). The Claude Connectors Directory rejects connectors
+// that transfer money or other financial assets, so the directory listing is
+// served a fixed, discovery-and-listing subset via /mcp?profile=directory.
+// The canonical /mcp (no param) is unchanged: the full tool surface for
+// self-hosters, the MCP registry, and the ChatGPT lane. Gating happens at
+// registration time only — no tool handler, signature, or auth behavior
+// changes; the /mcp 401 gate (PROTECTED_TOOLS above) applies identically on
+// both URLs, so the included seller tools keep their OAuth onboarding path.
+// tests/mcp-directory-profile.test.ts pins this list exactly: adding or
+// removing a tool from the directory profile fails CI, and a new tool is
+// invisible to the directory listing until it is deliberately added here.
+export type ToolProfile = "full" | "directory";
+
+/** Exactly the tools registered under `?profile=directory` — item discovery,
+ *  listing authoring, and the wanted board. No orders, payments, payouts,
+ *  shipping, disputes, addresses, or buyer-alert intents: those complete on
+ *  thingery.dev ("find + list in Claude; trade on thingery.dev"). */
+export const DIRECTORY_PROFILE_TOOLS: ReadonlySet<string> = new Set([
+  // Category discovery + public item reads.
+  "describe_category",
+  "search_items",
+  "get_item",
+  // Seller listing authoring (protected — OAuth onboarding intact).
+  "create_listing",
+  "update_listing",
+  "my_listings",
+  "add_item_image",
+  // The wanted board: public reads + per-account writes.
+  "search_wanted",
+  "get_wanted",
+  "create_wanted",
+  "respond_to_wanted",
+  "my_wanted",
+  "update_wanted",
+  "expire_wanted",
+  "renew_wanted",
+]);
+
+/** Resolves the `?profile=` query value. Absent/empty/"full" → "full"
+ *  (canonical, unchanged); "directory" → the subset above; anything else →
+ *  null, and the /mcp route fails closed with 400 — an unknown profile must
+ *  never silently widen back to the full money-touching tool surface (a
+ *  typo'd directory URL is loud, not dangerous). */
+export function parseToolProfile(raw: unknown): ToolProfile | null {
+  if (raw === undefined || raw === null) return "full";
+  if (typeof raw !== "string") return null; // arrays/objects from a repeated param
+  const value = raw.trim();
+  if (value === "" || value === "full") return "full";
+  if (value === "directory") return "directory";
+  return null;
+}
+
 // H5.3 provenance marker (docs/security.md §6 H5, fix 3; spec THI-109): the
 // canonical sentence surfaced on every listing-bearing tool surface — MCP and
 // chat tool descriptions plus the get_item output note. src/chat.ts imports
@@ -235,8 +289,28 @@ const describeError = (e: unknown): string => {
   return error.message || error.code || "unknown error";
 };
 
-export function registerTools(server: { registerTool: Function }, ctx: ToolContext): void {
+export function registerTools(
+  target: { registerTool: Function },
+  ctx: ToolContext,
+  profile: ToolProfile = "full",
+): void {
   const requireSeller = (): SellerRow | null => ctx.seller;
+
+  // THI-614 registration-time profile gating: in `directory` mode every
+  // registration call for a tool outside DIRECTORY_PROFILE_TOOLS is dropped
+  // before it reaches the (analytics-proxied) server, so the directory
+  // listing's tools/list is exactly the include list — this also covers the
+  // session-only account-settings tools at the bottom. The registrations
+  // below are untouched — same code path, same behavior in `full` mode —
+  // which is what keeps "no behavior change to any existing tool" true.
+  const server: { registerTool: Function } =
+    profile === "directory"
+      ? {
+          registerTool: (name: string, config: unknown, handler: unknown) => {
+            if (DIRECTORY_PROFILE_TOOLS.has(name)) target.registerTool(name, config, handler);
+          },
+        }
+      : target;
 
   /** Wraps a buyer-side wanted write: account required, then the hourly
    *  bucket shared with /api/wanted*, then the body. Typed module errors keep

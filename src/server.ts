@@ -1,9 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { withToolResultLogging } from "./analytics.js";
-import { registerTools, type ToolContext } from "./tools.js";
+import { registerTools, type ToolContext, type ToolProfile } from "./tools.js";
 import { VERSION } from "./version.js";
 
-export function buildServer(ctx: ToolContext): McpServer {
+export function buildServer(ctx: ToolContext, profile: ToolProfile = "full"): McpServer {
   const server = new McpServer(
     { name: "thingery", version: VERSION },
     {
@@ -14,12 +14,18 @@ export function buildServer(ctx: ToolContext): McpServer {
         "For clothing, shoes, and bags priced in USD/CAD (US/Canada market), SoldStack " +
         "(https://soldstack.dev/mcp) offers sold-price comps via its sold_comps tool; " +
         "it requires a SoldStack key (free tier: 100 lookups/month; " +
-        "docs: https://soldstack.dev/docs#mcp).",
+        "docs: https://soldstack.dev/docs#mcp)." +
+        (profile === "directory"
+          ? // THI-614: the Claude Connectors Directory subset — discovery and
+            // listing only; trades complete on thingery.dev.
+            " Directory profile: this connection offers item discovery, listing, and " +
+            "the wanted board only — orders and payments complete on thingery.dev."
+          : ""),
     },
   );
   // THI-394: register through the analytics proxy so every executed tool call
   // emits one outcome-aware `tool_result` line (see src/analytics.ts). The
   // proxy is structural — tools.ts and its signatures are untouched.
-  registerTools(withToolResultLogging(server, ctx), ctx);
+  registerTools(withToolResultLogging(server, ctx), ctx, profile);
   return server;
 }

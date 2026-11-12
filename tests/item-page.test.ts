@@ -71,7 +71,13 @@ describe("item page gallery (THI-130: referrerpolicy=no-referrer)", () => {
     const sessionSpy = vi.spyOn(auth, "sellerFromSession").mockResolvedValue(null);
     try {
       const html = await renderItemPage();
-      for (const src of item.images) {
+      // THI-678: the hero (first photo) loads eager for the LCP, the
+      // thumbnail strip lazy — the THI-130 invariant (every gallery img
+      // carries referrerpolicy=no-referrer) is unchanged by the layout.
+      expect(html).toContain(
+        `<img src="${item.images[0]}" alt="${item.title}" loading="eager" referrerpolicy="no-referrer">`,
+      );
+      for (const src of item.images.slice(1)) {
         expect(html).toContain(
           `<img src="${src}" alt="${item.title}" loading="lazy" referrerpolicy="no-referrer">`,
         );
@@ -82,6 +88,65 @@ describe("item page gallery (THI-130: referrerpolicy=no-referrer)", () => {
       getItemSpy.mockRestore();
       sessionSpy.mockRestore();
     }
+  });
+});
+
+describe("item page gallery showcase + lightbox (THI-678, fixes THI-677)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("many photos: hero button, thumbnail strip of the remaining photos, hidden lightbox + /gallery.js", async () => {
+    const html = await renderWith(item, null); // fixture: 2 photos
+    // Hero = photo 1, a real <button> so Enter/Space activate it natively.
+    expect(html).toContain('<button type="button" class="gallery-hero" data-idx="0"');
+    expect(html).toContain(`aria-label="View photo 1 of ${item.images.length}: ${item.title}"`);
+    // Strip = photos 2..n (data-idx 1..n-1) — the hero appears exactly once.
+    expect(html).toContain('<div class="gallery-strip">');
+    expect(html).toContain('class="gallery-thumb" data-idx="1"');
+    expect(html.match(/class="gallery-hero"/g)?.length).toBe(1);
+    // Lightbox dialog: close/prev/next + position counter, hidden at render.
+    expect(html).toContain('id="item-lightbox" role="dialog" aria-modal="true"');
+    expect(html).toContain('class="lb-close"');
+    expect(html).toContain('class="lb-prev"');
+    expect(html).toContain('class="lb-next"');
+    expect(html).toContain('class="lb-count" aria-live="polite"');
+    expect(html).toContain('data-i18n-aria-label="item.lbViewer" hidden>');
+    // One /gallery.js script tag, only on photo pages (CSP: external files only).
+    expect(html.match(/src="\/gallery\.js"/g)?.length).toBe(1);
+  });
+
+  it("single photo: hero is the only click target — no strip, lightbox still available", async () => {
+    const html = await renderWith({ ...item, images: [item.images[0]] }, null);
+    expect(html).toContain('class="gallery-hero" data-idx="0"');
+    expect(html).not.toContain('<div class="gallery-strip">');
+    expect(html).not.toContain('class="gallery-thumb"');
+    expect(html).toContain('id="item-lightbox"');
+    expect(html).toContain('src="/gallery.js"');
+  });
+
+  it("zero photos: placeholder only — no gallery interactivity shipped", async () => {
+    const html = await renderWith({ ...item, images: [] }, null);
+    expect(html).toContain('src="/assets/placeholder-item.svg"');
+    // Markup assertions: the class names alone also appear in the <head>
+    // CSS block, so assert on the rendered element shapes instead.
+    expect(html).not.toContain('class="gallery-hero"');
+    expect(html).not.toContain('id="item-lightbox"');
+    expect(html).not.toContain('src="/gallery.js"');
+  });
+
+  it("keeps alt text on every photo and the JSON-LD product data", async () => {
+    const html = await renderWith(item, null);
+    // split/length, not new RegExp(title): fixture titles contain regex
+    // metacharacters ("A6400 body + kit lens").
+    expect(html.split(`alt="${item.title}"`).length - 1).toBeGreaterThanOrEqual(item.images.length);
+    expect(html).toContain('"@type":"Product"'); // compact JSON.stringify form
+  });
+
+  it("still HTML-escapes image URLs in the gallery markup", async () => {
+    const html = await renderWith({ ...item, images: ["https://cdn.example.com/a.jpg?w=1&h=2"] }, null);
+    expect(html).toContain('src="https://cdn.example.com/a.jpg?w=1&amp;h=2"');
+    expect(html).not.toContain('src="https://cdn.example.com/a.jpg?w=1&h=2"');
   });
 });
 

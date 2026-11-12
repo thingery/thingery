@@ -118,6 +118,38 @@ export function page(title: string, description: string, body: string, og?: OgMe
     .card a { text-decoration: none; }
     .card .p { font-weight: 650; }
     .gallery img { max-width: 100%; border-radius: 12px; display: block; margin: .5rem 0; border: 1px solid var(--line, rgba(127,127,127,.3)); }
+    /* THI-678 (fixes THI-677): item gallery — hero + thumbnail strip +
+       lightbox. The plain .gallery img stack above stays for the wanted
+       page's reference images. */
+    .item-gallery { margin: .8rem 0; }
+    .gallery-hero { display: block; width: 100%; padding: 0; background: none;
+      border: 1px solid rgba(127,127,127,.3); border-radius: 12px; overflow: hidden;
+      cursor: zoom-in; }
+    .gallery-hero img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover;
+      margin: 0; border: none; }
+    .gallery-strip { display: flex; gap: .4rem; margin-top: .45rem; overflow-x: auto;
+      scrollbar-width: thin; }
+    .gallery-thumb { flex: none; width: 72px; height: 72px; padding: 0; overflow: hidden;
+      border: 1px solid rgba(127,127,127,.3); border-radius: 8px; background: none;
+      cursor: zoom-in; }
+    .gallery-thumb img { display: block; width: 100%; height: 100%; object-fit: cover;
+      margin: 0; border: none; }
+    .gallery-thumb[aria-current="true"] { outline: 2px solid #019686; outline-offset: 1px; }
+    .lightbox { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: .6rem; padding: 1rem;
+      background: rgba(0,0,0,.92); }
+    .lightbox[hidden] { display: none; }
+    .lightbox .lb-img { max-width: 100%; max-height: min(78vh, 60rem); object-fit: contain;
+      border-radius: 8px; }
+    .lightbox .lb-count { margin: 0; color: #fff; font-size: .9rem; }
+    .lb-close, .lb-prev, .lb-next { position: absolute; display: flex; align-items: center;
+      justify-content: center; min-width: 44px; min-height: 44px; padding: 0; font-size: 1.4rem;
+      line-height: 1; border: none; border-radius: 50%; background: rgba(255,255,255,.14);
+      color: #fff; cursor: pointer; }
+    .lb-close { top: .9rem; right: .9rem; }
+    .lb-prev { top: 50%; transform: translateY(-50%); left: .6rem; }
+    .lb-next { top: 50%; transform: translateY(-50%); right: .6rem; }
+    body.lb-lock { overflow: hidden; }
     .upload { border: 1px dashed rgba(127,127,127,.5); border-radius: 12px; padding: .8rem 1rem; margin: 1rem 0; font-size: .95rem; }
     .upload input[type="file"] { display: none; }
     .upload .pick { display: inline-block; padding: .6rem 1.1rem; margin: .35rem .5rem .35rem 0; font: inherit; border-radius: 10px;
@@ -224,13 +256,35 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
         .join(" ")}</p>`
     : "";
 
+  // THI-678 (fixes THI-677): showcase layout — hero button (photo 1) + a
+  // thumbnail strip of the remaining photos (only when there are several) +
+  // a hidden lightbox dialog. Click targets are <button>s so keyboard
+  // activation is native; /gallery.js (static, CSP-safe like /share.js —
+  // script-src 'self' forbids inline scripts here) wires the lightbox.
+  // THI-130 (THI-128 review follow-up): every gallery <img> keeps
+  // referrerpolicy="no-referrer" — never send the viewer's referrer to
+  // arbitrary https image hosts (partial mitigation for the accepted H3
+  // residual risk; tracking pixels still learn the viewer's IP).
+  const galleryImg = (src: string, eager: boolean) =>
+    `<img src="${escapeHtml(src)}" alt="${escapeHtml(item.title)}" loading="${eager ? "eager" : "lazy"}" referrerpolicy="no-referrer">`;
   const imagesHtml = item.images.length
-    ? `<div class="gallery" id="item-gallery">${item.images
-        // THI-130 (THI-128 review follow-up): never send the viewer's referrer to
-        // arbitrary https image hosts — partial mitigation for the accepted H3
-        // residual risk (tracking pixels still learn the viewer's IP).
-        .map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer">`)
-        .join("\n")}</div>`
+    ? `<div class="item-gallery" id="item-gallery">
+        <button type="button" class="gallery-hero" data-idx="0" aria-label="View photo 1 of ${item.images.length}: ${escapeHtml(item.title)}">${galleryImg(item.images[0], true)}</button>${
+          item.images.length > 1
+            ? `\n        <div class="gallery-strip">${item.images
+                .slice(1)
+                .map((src, i) => `<button type="button" class="gallery-thumb" data-idx="${i + 1}" aria-label="View photo ${i + 2} of ${item.images.length}: ${escapeHtml(item.title)}">${galleryImg(src, false)}</button>`)
+                .join("")}</div>`
+            : ""
+        }\n        <div class="lightbox" id="item-lightbox" role="dialog" aria-modal="true" aria-label="Photo viewer" data-i18n-aria-label="item.lbViewer" hidden>
+          <button type="button" class="lb-close" aria-label="Close" data-i18n-aria-label="item.lbClose">\u2715</button>
+          <button type="button" class="lb-prev" aria-label="Previous photo" data-i18n-aria-label="item.lbPrev">\u2039</button>
+          <img class="lb-img" alt="" loading="lazy" referrerpolicy="no-referrer">
+          <button type="button" class="lb-next" aria-label="Next photo" data-i18n-aria-label="item.lbNext">\u203a</button>
+          <p class="lb-count" aria-live="polite"></p>
+        </div>
+      </div>
+      <script src="/gallery.js" defer></script>`
     : `<div class="gallery" id="item-gallery"><img id="item-placeholder" src="/assets/placeholder-item.svg" alt="No photos yet" width="640" height="480" loading="lazy" referrerpolicy="no-referrer"></div>`;
 
   // THI-308 PR 3: owner-only capture panel at the top of the owner area,

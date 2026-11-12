@@ -1,0 +1,7 @@
+# CODEOWNERS — content-boundary ownership (THI-700)
+#
+# docs/ is the boundary-sensitive surface of this public repo: company-private
+# material must never land here (AGENTS.md "Spec-landing policy"; enforced by
+# the content-marker-scan workflow). docs/ changes route to the boundary-aware
+# owner for review.
+/docs/ @isaac1972

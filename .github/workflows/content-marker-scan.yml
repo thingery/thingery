@@ -1,0 +1,45 @@
+name: content-marker-scan
+
+# Content-boundary guardrail (THI-700, board decision 6): blocks
+# company-private CONTENT in docs/** and scripts/** — the no-private-paths
+# job in ci.yml only blocks private PATHS. Marker classes (AGENTS.md
+# "Spec-landing policy"): internal tracker links / orchestration-platform
+# references, quoted board-verdict/decision-card choreography, provider
+# company-account references, real key fingerprints, and program ids
+# inside docs/specs/**.
+#
+# Two tiers:
+#   - every PR: scan ADDED lines (fail the PR before merge)
+#   - weekly + dispatch: full-tree scan (catches anything that slipped past)
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "23 4 * * 1" # Mondays 04:23 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  pr-scan:
+    name: PR added-line content markers (docs/, scripts/)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch base
+        run: git fetch --no-tags origin main
+      - name: Scan added lines for company-content markers
+        run: bash .github/scripts/check-company-markers.sh pr origin/main
+
+  tree-scan:
+    name: Weekly full-tree content markers (docs/, scripts/)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Full-tree scan for company-content markers
+        run: bash .github/scripts/check-company-markers.sh tree

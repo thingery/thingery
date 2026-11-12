@@ -68,6 +68,12 @@
     "item.toBuy": "Per comprare, scrivi al venditore tramite l'assistente che ti ha mostrato questo annuncio.",
     "item.nfH1": "Non trovato",
     "item.nfP": "Questo oggetto non esiste o è stato rimosso.",
+    // Gallery lightbox controls (THI-678) — aria labels only; the counter
+    // ("2 / 5") and photo glyphs are language-neutral.
+    "item.lbViewer": "Visualizzatore foto",
+    "item.lbClose": "Chiudi",
+    "item.lbPrev": "Foto precedente",
+    "item.lbNext": "Foto successiva",
 
     // --- account page (/login.html + account.js) -----------------------------
     "acct.title": "Account — Thingery",

@@ -2,10 +2,10 @@
 # thingery-llm-guard - LLM provider balance/failure detection
 # (docs/deploy-vps.md section 6, THI-282).
 #
-# Why this exists: on 2026-10-21 the z.ai company account balance hit zero
-# and prod chat failed SILENTLY for company-key users (THI-276 audit): every
-# inference call returned 429 code 1113 "Insufficient balance" and nobody
-# was alerted for days. This guard makes that signature loud:
+# Why this exists: when the LLM provider account balance hits zero, chat
+# fails SILENTLY: every inference call returns 429 code 1113 "Insufficient
+# balance" and nobody is alerted for days. (A real incident of exactly this
+# shape is why this guard exists.) This guard makes that signature loud:
 #
 #   1. Probes the SAME endpoint/model/key the app container uses (one
 #      1-token chat completion; config is read from the running container's
@@ -23,7 +23,7 @@
 #   */5 * * * * /usr/local/bin/thingery-llm-guard >> /var/log/thingery-llm-guard.log 2>&1
 #
 # Optional config: /etc/thingery-llm-guard.env (root:root 0600, VPS only):
-#   ROUTINE_WEBHOOK_URL=    # push target (Paperclip routine webhook or any alert endpoint); unset = log only
+#   ROUTINE_WEBHOOK_URL=    # push target (routine webhook or any alert endpoint); unset = log only
 #   ROUTINE_WEBHOOK_TOKEN=  # bearer token for the above
 #   ALERT_REPEAT_HOURS=24   # reminder cadence while a failure persists
 #   STREAK_THRESHOLD=5      # outcome=error lines in window that trip llm_error_streak
@@ -167,7 +167,7 @@ elif [ -z "$cid" ]; then
   probe_class="app_down"
   probe_detail="app container not found (docker ps name=thingery-app) - cannot probe"
 elif [ -z "$api_key" ] || [ -z "$probe_url" ]; then
-  skip_reason="company key not configured (LLM_API_KEY/LLM_API_URL absent) - probe skipped"
+  skip_reason="provider key not configured (LLM_API_KEY/LLM_API_URL absent) - probe skipped"
 else
   body_file="$STATE_DIR/probe.body.$$"
   http=$(curl -sS -m "$PROBE_TIMEOUT_SEC" -o "$body_file" -w '%{http_code}' \

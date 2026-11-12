@@ -2,13 +2,13 @@
 
 > Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.
 
-Thingery is a live product. Smoke tests, deploy verifications, and probes that
-need an authenticated seller sometimes run against **production** — that is
-allowed, but they must leave nothing behind. A 2026-10 audit ([THI-387](https://github.com/thingery/thingery/issues/387))
-found **36 synthetic seller accounts** accumulated in the prod `sellers` table
-from our own ops runs, versus 2 real ones; purging them needed a scoped,
-board-approved deletion task ([THI-388](https://github.com/thingery/thingery/issues/388)).
-This document exists so that never needs to happen again.
+Deployments with real traffic sometimes run smoke tests, deploy verifications,
+and probes that need an authenticated seller against **production** — that is
+allowed, but they must leave nothing behind. Audits of live deployments have
+found synthetic seller accounts accumulated in the `sellers` table from
+untracked ops runs (in one case dozens of synthetic accounts against a handful
+of real ones), and purging them needed a scoped, deliberately-approved deletion
+task. This document exists so that never needs to happen again.
 
 ## Rules — every smoke test that creates a seller in prod
 
@@ -72,11 +72,11 @@ ORDER BY created_at;
 ```
 
 Anything this returns that is not covered by an open ops issue is exactly the
-kind of debt THI-387 found — file it, do not silently delete it.
+kind of debt those audits found — file it, do not silently delete it.
 
 ## Tested how
 
-The SQL guard above is the exact pattern executed end-to-end against
-production during the THI-388 purge (2026-10-27): 20/21 targets deleted,
-1 correctly skipped on `orders_buyer_id_fkey`, before/after counts recorded in
-the task; the audit query is the one used for the THI-387 audit.
+The SQL guard above is the exact pattern executed end-to-end during a real
+production purge: 20/21 targets deleted, 1 correctly skipped on
+`orders_buyer_id_fkey`, with before/after counts recorded in the run's task;
+the audit query is the one used for the source audit.

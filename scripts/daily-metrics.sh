@@ -1,7 +1,7 @@
 #!/bin/bash
-# thingery-daily-metrics — daily-readable sprint metrics (THI-394).
+# thingery-daily-metrics — daily-readable funnel metrics (THI-394).
 #
-# Produces the three numbers the adoption sprint optimizes, from real events:
+# Produces the three funnel numbers, from real events:
 #   1. ACTIVATION   — callers (sellers) with >=1 successful tool call in the
 #                     window, plus anonymous useful calls
 #   2. SEARCH       — searches, share returning >=1 result (query → results),

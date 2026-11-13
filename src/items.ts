@@ -1,4 +1,5 @@
 import { pool, type ItemRow } from "./db.js";
+import { categoryFilterNames, resolveCategory } from "./categories.js";
 import { embedText, itemEmbeddingText } from "./embed.js";
 import { evaluateListingForIntents } from "./intents.js";
 import { logSecurityEvent, type ListingWriteLimit } from "./security-events.js";
@@ -275,7 +276,7 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
 
 export async function getCategory(name: string): Promise<CategoryRow | null> {
   const { rows } = await pool.query<CategoryRow>(
-    `SELECT name, description, attribute_definitions FROM categories WHERE name = $1`,
+    `SELECT name, description, attribute_definitions, parent FROM categories WHERE name = $1`,
     [name.toLowerCase()],
   );
   return rows[0] ?? null;
@@ -299,13 +300,31 @@ export function visibleInFeeds(item: Pick<ItemRow, "status" | "photo_required" |
   return item.status === "active" && (!item.photo_required || item.images.length > 0);
 }
 
-export async function listCategories(): Promise<Array<Pick<CategoryRow, "name" | "description"> & { listing_count: number }>> {
+export async function listCategories(): Promise<Array<Pick<CategoryRow, "name" | "description" | "parent"> & { listing_count: number }>> {
+  const { rows } = await pool.query(
+    `SELECT c.name, c.description, c.parent, COUNT(i.id)::int AS listing_count
+     FROM categories c
+     LEFT JOIN items i ON i.category = c.name AND i.status = 'active' AND ${FEED_VISIBLE}
+     GROUP BY c.name, c.description, c.parent
+     ORDER BY listing_count DESC, c.name ASC`,
+  );
+  return rows;
+}
+
+/** Children of a department with feed-visible listing counts (THI-734 D5 —
+ *  describe_category's `children` array). Same FEED_VISIBLE predicate and
+ *  ordering rule as listCategories; empty for leaves and 'other'. */
+export async function categoryChildren(
+  dept: string,
+): Promise<Array<Pick<CategoryRow, "name" | "description"> & { listing_count: number }>> {
   const { rows } = await pool.query(
     `SELECT c.name, c.description, COUNT(i.id)::int AS listing_count
      FROM categories c
      LEFT JOIN items i ON i.category = c.name AND i.status = 'active' AND ${FEED_VISIBLE}
+     WHERE c.parent = $1
      GROUP BY c.name, c.description
      ORDER BY listing_count DESC, c.name ASC`,
+    [dept.toLowerCase()],
   );
   return rows;
 }
@@ -353,7 +372,16 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
     return `$${params.length}`;
   };
 
-  if (filters.category) where.push(`i.category = ${add(filters.category.toLowerCase())}`);
+  if (filters.category) {
+    // THI-734 (D2/D4): resolve aliases, expand a department to dept+children.
+    // Unknown input resolves to an empty name set (matches nothing) — the MCP
+    // tool layer rejects unknown categories with the typed unknown_category
+    // error before reaching here, so web surfaces keep today's empty-result
+    // behavior instead of a 500.
+    const resolved = await resolveCategory(filters.category);
+    const names = resolved ? await categoryFilterNames(resolved.canonical) : [];
+    where.push(`i.category = ANY(${add(names)}::text[])`);
+  }
   // `condition` and `conditions` form one allowed set, so a caller that sends both
   // widens the match instead of intersecting to nothing.
   const conditions = [...new Set([...(filters.condition ? [filters.condition] : []), ...(filters.conditions ?? [])])];

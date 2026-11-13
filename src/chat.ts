@@ -4,7 +4,8 @@
 // database — the same code paths the MCP tools use.
 
 import { CONDITIONS, type SellerRow } from "./db.js";
-import { getCategory, getItem, createItem, listCategories, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
+import { resolveCategory, aliasResolutionNote, describeCategoryNote } from "./categories.js";
+import { getCategory, getItem, createItem, listCategories, categoryChildren, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import {
@@ -636,24 +637,32 @@ export async function executeTool(
 
   switch (name) {
     case "describe_category": {
-      const cat = (args.category as string | undefined)?.toLowerCase();
-      if (!cat) return { categories: await listCategories() };
-      const categoryRow = await getCategory(cat);
-      // Shape once, render twice (spec THI-83 §3.4/F3): same helper, same
-      // shape as the MCP tool in src/tools.ts — verbatim, and (field + note
-      // sentence both) omitted when empty, byte-identical to today otherwise.
+      const raw = (args.category as string | undefined)?.toLowerCase();
+      if (!raw) return { categories: await listCategories() };
+      // THI-734 §5.5 (parity with the MCP tool): alias resolution, parent on
+      // the category row, children+counts for departments, and the shared
+      // note builder — identical shapes and strings on both surfaces
+      // (THI-83 §8/F3 shape once, render twice).
+      const resolved = await resolveCategory(raw);
+      const categoryRow = resolved ? await getCategory(resolved.canonical) : null;
+      if (!resolved || !categoryRow) return { error: `unknown category '${raw}'` };
+      const children = await categoryChildren(resolved.canonical);
       const undeclared = await undeclaredKeyUsage(
-        cat,
-        categoryRow?.attribute_definitions.map((d) => d.key) ?? [],
+        resolved.canonical,
+        categoryRow.attribute_definitions.map((d) => d.key),
       );
       const hasUndeclared = undeclared.length > 0;
       return {
         category: categoryRow,
+        ...(children.length > 0 ? { children } : {}),
         ...(hasUndeclared ? { undeclared_in_use: undeclared } : {}),
-        note: "Declared keys are validated on create; listings may also carry undeclared keys, and attribute search filters match any key." +
-          (hasUndeclared
-            ? " undeclared_in_use lists undeclared keys observed on active listings (item and distinct-seller counts); they are NOT validated — treat them as search hints, not contracts."
-            : ""),
+        note: describeCategoryNote({
+          raw,
+          canonical: resolved.canonical,
+          viaAlias: resolved.viaAlias,
+          hasChildren: children.length > 0,
+          hasUndeclared,
+        }),
       };
     }
     case "search_items":
@@ -674,14 +683,18 @@ export async function executeTool(
     }
     case "create_listing": {
       const s = requireSeller();
-      const category = ((args.category as string) ?? "other").toLowerCase();
-      const categoryRow = await getCategory(category);
-      if (!categoryRow) {
+      // THI-734 (D4): same alias resolution as the MCP create_listing — the
+      // stored category is canonical, and a resolution is echoed as a note.
+      const rawCategory = ((args.category as string) ?? "other").toLowerCase();
+      const resolved = await resolveCategory(rawCategory);
+      const categoryRow = resolved ? await getCategory(resolved.canonical) : null;
+      if (!resolved || !categoryRow) {
         // THI-133 F2: create-time validation rejection, correlated by
         // sellerId (no request IP at this layer). Mirrors src/tools.ts.
         logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: s.id });
-        return { error: `unknown category '${category}'` };
+        return { error: `unknown category '${rawCategory}'` };
       }
+      const category = resolved.canonical;
       const attributes = (args.attributes as Attributes | undefined) ?? {};
       const attributeErrors = validateAttributes(categoryRow.attribute_definitions, attributes);
       if (attributeErrors.length > 0) {
@@ -717,6 +730,7 @@ export async function executeTool(
         created: true,
         id: item.id,
         url,
+        ...(resolved.viaAlias ? { note: aliasResolutionNote(rawCategory, category) } : {}),
         photo_required: item.photo_required,
         visible,
         ...(visible

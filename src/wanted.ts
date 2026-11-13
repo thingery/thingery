@@ -8,6 +8,7 @@
 // conventions (THI-360) throughout.
 
 import { pool, CONDITIONS } from "./db.js";
+import { categoryFilterNames, resolveCategory } from "./categories.js";
 import { embedText } from "./embed.js";
 import { logSecurityEvent } from "./security-events.js";
 import { screenContactInfo, screenReferenceImage, contactInfoMessage } from "./contact-scrub.js";
@@ -204,18 +205,18 @@ async function validateWantedFields(input: CreateWantedInput): Promise<{
     }
   }
 
-  // Category registry check — same check + available-list error as
-  // create_listing (spec §3.1). 'other' is the registry default. Queried
-  // directly (not via items.ts getCategory) to keep this module a leaf —
-  // items.ts imports wanted.ts for the publish-stamp hook (PR 3).
-  const category = (input.category ?? "other").toLowerCase();
-  const { rows: catRows } = await pool.query<{ name: string }>(
-    `SELECT name FROM categories WHERE name = $1`,
-    [category],
-  );
-  if (catRows.length === 0) {
-    throw new WantedValidationError(`Unknown category '${category}'. Use describe_category to list them.`);
+  // Category registry check — same check as create_listing (spec §3.1), via
+  // the shared resolution path (THI-734 D4): aliases resolve to canonical,
+  // which is what gets stored; departments are registry rows and therefore
+  // valid. 'other' is the registry default. Queried through categories.ts
+  // (not items.ts getCategory) to keep this module a leaf — items.ts imports
+  // wanted.ts for the publish-stamp hook (PR 3).
+  const rawCategory = (input.category ?? "other").toLowerCase();
+  const resolved = await resolveCategory(rawCategory);
+  if (!resolved) {
+    throw new WantedValidationError(`Unknown category '${rawCategory}'. Use describe_category to list them.`);
   }
+  const category = resolved.canonical;
 
   return {
     title,
@@ -596,7 +597,15 @@ export async function searchWanted(
     return `$${params.length}`;
   };
 
-  if (filters.category) where.push(`w.category = ${add(filters.category.toLowerCase())}`);
+  if (filters.category) {
+    // THI-734 (D2/D4): same resolve+expand as searchItems — alias → canonical,
+    // department → dept+children. Unknown input matches nothing (the MCP tool
+    // layer produces the typed unknown_category error; the /wanted board keeps
+    // today's empty-result behavior).
+    const resolved = await resolveCategory(filters.category);
+    const names = resolved ? await categoryFilterNames(resolved.canonical) : [];
+    where.push(`w.category = ANY(${add(names)}::text[])`);
+  }
   if (filters.condition) where.push(`w.condition = ${add(filters.condition)}`);
   if (filters.currency) where.push(`w.currency = ${add(filters.currency.toUpperCase())}`);
   if (filters.budget_max_cents_gte !== undefined) {

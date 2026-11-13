@@ -74,6 +74,17 @@ CREATE TABLE IF NOT EXISTS categories (
   created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Two-level taxonomy (spec THI-734 / GH #218): departments (parent NULL) over
+-- leaves (parent = department name). Departments are assignable — parent NULL
+-- means "valid category in its own right, top of tree"; 'other' is parentless
+-- and childless (fallback leaf-dept). The FK guarantees a parent exists; the
+-- two-level invariant (a parent's parent is always NULL) is enforced by seed
+-- order and asserted by tests — no trigger (registry is code-owned, no runtime
+-- writer exists). aliases (D4): lowercase slug synonyms resolved to canonical
+-- at every write/read edge (e.g. trainers -> sneakers).
+ALTER TABLE categories ADD COLUMN IF NOT EXISTS parent TEXT REFERENCES categories(name);
+ALTER TABLE categories ADD COLUMN IF NOT EXISTS aliases TEXT[] NOT NULL DEFAULT '{}';
+
 CREATE TABLE IF NOT EXISTS items (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   seller_id     UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
@@ -112,7 +123,21 @@ CREATE INDEX IF NOT EXISTS items_attributes_idx ON items USING gin (attributes j
 ALTER TABLE items ADD COLUMN IF NOT EXISTS shipping_price_cents INTEGER NOT NULL DEFAULT 0
                       CHECK (shipping_price_cents >= 0);
 
-INSERT INTO categories (name, description, attribute_definitions) VALUES
+-- Registry as code (THI-734 D7): the seed CONVERGES the registry to schema.sql
+-- on every apply — description, attribute_definitions, parent and aliases are
+-- updated in place (created_at untouched). This replaces ON CONFLICT DO
+-- NOTHING, under which shipped registry edits never reached an existing
+-- database (latent bug, spec §1). The registry has no admin write path, so
+-- convergence cannot clobber runtime state; self-hosted hand-edits are a
+-- documented behavior change (spec §5.6, release-noted in PR 3). Content
+-- (parents, aliases, new departments/leaves) lands in PR 2 — here the 14
+-- existing rows ship parentless/aliasless, so this deploy is a content no-op.
+-- Departments must be inserted before leaves once parents ship (per-row FK);
+-- the wrapper SELECT keeps the VALUES block below untouched for review.
+INSERT INTO categories (name, description, attribute_definitions, parent, aliases)
+SELECT s.name, s.description, s.attribute_definitions::jsonb, NULL::text, '{}'::text[]
+FROM (
+  VALUES
   ('sneakers', 'Trainers and sneakers',
    '[{"key":"size_eu","type":"number","required":true,"description":"EU shoe size, e.g. 43"},
      {"key":"colorway","type":"string","description":"e.g. white/grey"},
@@ -154,7 +179,12 @@ INSERT INTO categories (name, description, attribute_definitions) VALUES
   ('collectibles', 'Collectibles and memorabilia',
    '[{"key":"franchise","type":"string"}]'),
   ('other', 'Everything else', '[]')
-ON CONFLICT (name) DO NOTHING;
+) AS s(name, description, attribute_definitions)
+ON CONFLICT (name) DO UPDATE SET
+  description           = EXCLUDED.description,
+  attribute_definitions = EXCLUDED.attribute_definitions,
+  parent                = EXCLUDED.parent,
+  aliases               = EXCLUDED.aliases;
 
 -- Approximate nearest neighbour index; safe to create before rows exist
 CREATE INDEX IF NOT EXISTS items_embedding_idx

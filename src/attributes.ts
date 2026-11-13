@@ -16,6 +16,8 @@ export interface CategoryRow {
   name: string;
   description: string;
   attribute_definitions: AttributeDefinition[];
+  /** Two-level taxonomy (THI-734): department slug or null (department/'other'). */
+  parent: string | null;
 }
 
 export type AttributeValue = string | number | boolean;

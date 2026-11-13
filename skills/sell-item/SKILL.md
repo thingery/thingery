@@ -18,11 +18,16 @@ The Thingery MCP server must be connected. Listing requires the seller's API key
 
 1. **Identify** — From photos (or the user's description), determine: item type, brand, model,
    size, colorway. If ambiguous, ask ONE compact question covering all unknowns at once.
-   Call `describe_category` for the matching category and fill its expected `attributes`
-   (e.g. sneakers want `size_eu`). Undeclared extra fields are allowed — include anything
-   a buyer would filter on. The response's `undeclared_in_use` section lists undeclared
-   keys already in real use in that category; reusing those exact keys makes the listing
-   findable by existing filters.
+   Pick the most specific **leaf** category from the two-level registry (departments like
+   `fashion` are valid assignments when the leaf is unclear; aliases such as `trainers`
+   resolve to canonical automatically). Call `describe_category` for that category and fill
+   its expected `attributes` (e.g. sneakers want `size_eu`). Use the facet attributes where
+   they apply — `department` (women|men|unisex|kids) on fashion, typed sizes
+   (`size_letter` on clothing, `size_eu` on footwear) — and fill legacy keys like `size`
+   when the category still declares them. Undeclared extra fields are allowed — include
+   anything a buyer would filter on. The response's `undeclared_in_use` section lists
+   undeclared keys already in real use in that category; reusing those exact keys makes the
+   listing findable by existing filters.
 2. **Grade honestly** — Inspect photos for wear and choose `condition`:
    `new | like_new | good | fair | poor`. Never inflate. Flaws go in the description verbatim.
 3. **Estimate logistics** — Guess `weight_grams` and `dimensions_mm` (LxWxH) from the item

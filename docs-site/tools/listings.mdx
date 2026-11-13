@@ -19,7 +19,7 @@ Find used and second-hand items for sale: search the marketplace's active listin
   Free-text query, e.g. 'running shoes size 43'. Up to 400 characters.
 </ParamField>
 <ParamField body="category" type="string">
-  Category slug; see describe_category. Up to 40 characters.
+  Category slug or department — a department matches itself plus its children; aliases (e.g. trainers) resolve. See describe_category. Up to 40 characters.
 </ParamField>
 <ParamField body="condition" type="string">
   One of `new`, `like_new`, `good`, `fair`, `poor`.
@@ -62,12 +62,12 @@ Fetch one second-hand listing's full details (price, shipping_price_cents, total
 
 **Describe category** · Public · Read-only
 
-List the marketplace's categories for second-hand items, or discover one category's declared attribute fields (e.g. sneakers want size_eu, colorway...). Declared fields are validated by create_listing; listings may also carry undeclared attribute keys, and search attribute filters match any key. When undeclared keys are actually in use in a category, they're listed in undeclared_in_use with item/seller counts — search hints, not validated fields. Call with no arguments to list all categories. Use before create_listing to fill attributes correctly. Public.
+List the marketplace's categories for second-hand items, or discover one category's declared attribute fields (e.g. sneakers want size_eu, colorway...). Categories form a two-level tree: departments (e.g. fashion, electronics) and leaves. Departments are valid categories themselves (leaf unspecified), carry their own attribute definitions, and return a children array with per-child listing counts; searching a department matches its children too. Every row carries parent (null for departments). Known aliases resolve to their canonical slug (noted in the response). Declared fields are validated by create_listing; listings may also carry undeclared attribute keys, and search attribute filters match any key. When undeclared keys are actually in use in a category, they're listed in undeclared_in_use with item/seller counts — search hints, not validated fields. Call with no arguments to list all categories. Use before create_listing to fill attributes correctly. Public.
 
 **Parameters**
 
 <ParamField body="category" type="string">
-  Category slug, e.g. 'sneakers'. Up to 40 characters.
+  Category slug, alias, or department, e.g. 'sneakers'. Up to 40 characters.
 </ParamField>
 
 ## `create_listing`
@@ -85,7 +85,7 @@ Sell a used item: create a second-hand listing in this marketplace. Requires sel
   Honest description incl. flaws. Up to 5000 characters. Default `""`.
 </ParamField>
 <ParamField body="category" type="string">
-  Lowercase slug; call describe_category for the list. Up to 40 characters. Default `"other"`.
+  Lowercase slug; aliases (e.g. trainers) resolve to canonical. Call describe_category for the list. Up to 40 characters. Default `"other"`.
 </ParamField>
 <ParamField body="condition" type="string">
   One of `new`, `like_new`, `good`, `fair`, `poor`. Default `"good"`.

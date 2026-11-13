@@ -22,7 +22,8 @@ const budgetCents = z.number().int().min(0).nullable().optional().describe("Inte
 export const wantedCreateShape = {
   title,
   notes,
-  category: z.string().min(2).max(40).optional().describe("Lowercase slug; call describe_category for the list"),
+  category: z.string().min(2).max(40).optional()
+    .describe("Lowercase slug; aliases (e.g. trainers) resolve to canonical. Call describe_category for the list"),
   condition: z.enum(CONDITIONS).optional(),
   budget_min_cents: budgetCents,
   budget_max_cents: budgetCents,

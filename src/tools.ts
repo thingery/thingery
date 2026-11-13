@@ -1,7 +1,9 @@
 import { z } from "zod";
 import type { ItemRow, SellerRow } from "./db.js";
 import { CONDITIONS, SHIPPING_TIERS, STATUSES } from "./db.js";
-import { buyerShippingCents, getCategory, getItem, createItem, listCategories, ListingLimitError, listingQuota, type ListingQuota, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, SEARCH_MAX_OFFSET, ShippingPriceError, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
+import { resolveCategory } from "./categories.js";
+import { aliasResolutionNote, describeCategoryNote } from "./categories.js";
+import { buyerShippingCents, categoryChildren, getCategory, getItem, createItem, listCategories, ListingLimitError, listingQuota, type ListingQuota, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, SEARCH_MAX_OFFSET, ShippingPriceError, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, AttributeValidationError, attributeShapeErrors, type Attributes } from "./attributes.js";
 import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
 import { addItemImageBase64 } from "./images.js";
@@ -350,6 +352,11 @@ export function registerTools(
       description:
         "List the marketplace's categories for second-hand items, or discover one " +
         "category's declared attribute fields (e.g. sneakers want size_eu, colorway...). " +
+        "Categories form a two-level tree: departments (e.g. fashion, electronics) and leaves. " +
+        "Departments are valid categories themselves (leaf unspecified), carry their own attribute " +
+        "definitions, and return a children array with per-child listing counts; searching a " +
+        "department matches its children too. Every row carries parent (null for departments). " +
+        "Known aliases resolve to their canonical slug (noted in the response). " +
         "Declared fields are validated by create_listing; listings may also carry " +
         "undeclared attribute keys, and search attribute filters match any key. When undeclared " +
         "keys are actually in use in a category, they're listed in undeclared_in_use with " +
@@ -357,12 +364,12 @@ export function registerTools(
         "Call with no arguments to list all categories. Use before create_listing " +
         "to fill attributes correctly. Public.",
       inputSchema: {
-        category: z.string().min(2).max(40).optional().describe("Category slug, e.g. 'sneakers'"),
+        category: z.string().min(2).max(40).optional().describe("Category slug, alias, or department, e.g. 'sneakers'"),
       },
     },
     async (args: Record<string, unknown>) => {
-      const name = (args.category as string | undefined)?.toLowerCase();
-      if (!name) {
+      const raw = (args.category as string | undefined)?.toLowerCase();
+      if (!raw) {
         const categories = await listCategories();
         return ok({
           categories,
@@ -371,29 +378,38 @@ export function registerTools(
             "carry undeclared keys, and attribute search filters match any key.",
         });
       }
-      const category = await getCategory(name);
-      if (!category) {
+      // THI-734 (D4/D5): aliases resolve to canonical (noted in the response);
+      // a department returns its own row plus a children array with per-child
+      // feed-visible listing counts.
+      const resolved = await resolveCategory(raw);
+      if (!resolved) {
         const categories = await listCategories();
-        return err(`Unknown category '${name}'`, "unknown_category");
+        return err(`Unknown category '${raw}'. Available: ${categories.map((c) => c.name).join(", ")}`, "unknown_category");
       }
+      const category = await getCategory(resolved.canonical);
+      if (!category) {
+        return err(`Unknown category '${raw}'`, "unknown_category");
+      }
+      const children = await categoryChildren(resolved.canonical);
       // Spec THI-83 §3.1/§3.4: helper output verbatim — no re-filtering,
       // sorting or capping here; field AND its note sentence are omitted when
       // empty so clean categories keep a payload byte-identical to today's.
       const undeclared = await undeclaredKeyUsage(
-        name,
+        resolved.canonical,
         category.attribute_definitions.map((d) => d.key),
       );
       const hasUndeclared = undeclared.length > 0;
       return ok({
         category,
+        ...(children.length > 0 ? { children } : {}),
         ...(hasUndeclared ? { undeclared_in_use: undeclared } : {}),
-        note: "attribute_definitions are the declared keys — create_listing validates them " +
-          "(types, required, enums). Listings may also carry undeclared keys: they pass through " +
-          "unvalidated, and search_items attribute filters match any key, declared or not." +
-          (hasUndeclared
-            ? " undeclared_in_use lists undeclared keys observed on active listings (item and " +
-              "distinct-seller counts); they are NOT validated — treat them as search hints, not contracts."
-            : ""),
+        note: describeCategoryNote({
+          raw,
+          canonical: resolved.canonical,
+          viaAlias: resolved.viaAlias,
+          hasChildren: children.length > 0,
+          hasUndeclared,
+        }),
       });
     },
   );
@@ -421,7 +437,8 @@ export function registerTools(
       inputSchema: {
         title: z.string().min(3).max(200).describe("Short item title, e.g. 'Nike Air Max 90, size 43'"),
         description: z.string().max(5000).default("").describe("Honest description incl. flaws"),
-        category: z.string().min(2).max(40).default("other").describe("Lowercase slug; call describe_category for the list"),
+        category: z.string().min(2).max(40).default("other")
+          .describe("Lowercase slug; aliases (e.g. trainers) resolve to canonical. Call describe_category for the list"),
         condition: z.enum(CONDITIONS).default("good"),
         brand: z.string().max(80).optional(),
         price_cents: z.number().int().min(0).describe("Asking price in cents, e.g. 12500"),
@@ -451,14 +468,23 @@ export function registerTools(
       const seller = requireSeller();
       if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
       try {
-        const category = ((args.category as string) ?? "other").toLowerCase();
-        const categoryRow = await getCategory(category);
-        if (!categoryRow) {
+        // THI-734 (D4): resolve aliases to canonical (stored value is always
+        // canonical; a resolution is echoed as a note). Departments are valid
+        // categories — registry rows — so they pass as-is.
+        const rawCategory = ((args.category as string) ?? "other").toLowerCase();
+        const resolved = await resolveCategory(rawCategory);
+        if (!resolved) {
           // THI-133 F2: create-time validation rejection, correlated by
           // sellerId (no request IP at this layer). Mirrors items.ts.
           logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: seller.id });
           const available = (await listCategories()).map((c) => c.name).join(", ");
-          return err(`Unknown category '${category}'. Available: ${available}`, "unknown_category");
+          return err(`Unknown category '${rawCategory}'. Available: ${available}`, "unknown_category");
+        }
+        const category = resolved.canonical;
+        const categoryRow = await getCategory(category);
+        if (!categoryRow) {
+          logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: seller.id });
+          return err(`Unknown category '${rawCategory}'.`, "unknown_category");
         }
 
         const attributes = (args.attributes as Attributes | undefined) ?? {};
@@ -496,6 +522,7 @@ export function registerTools(
           created: true,
           seller: seller.display_name,
           item,
+          ...(resolved.viaAlias ? { note: aliasResolutionNote(rawCategory, category) } : {}),
           photo_required: item.photo_required,
           visible,
           listing_quota: await quotaAfterCreate(seller.id),
@@ -637,7 +664,8 @@ export function registerTools(
         "respond_to_wanted; response_count is how many published answers a post has. " + CONTENT_PROVENANCE_NOTE,
       inputSchema: {
         q: z.string().max(400).optional().describe("Free-text query, e.g. 'road bike 56cm'"),
-        category: z.string().min(2).max(40).optional().describe("Category slug; see describe_category"),
+        category: z.string().min(2).max(40).optional()
+          .describe("Category slug or department — a department matches itself plus its children; aliases resolve. See describe_category"),
         condition: z.enum(CONDITIONS).optional(),
         currency: z.string().length(3).optional().describe("ISO 4217 code; omit for every currency"),
         budget_max_cents_gte: z.number().int().min(0).optional()
@@ -648,9 +676,21 @@ export function registerTools(
     },
     async (args: Record<string, unknown>) => {
       try {
+        // THI-734 (D2/D4): same typed unknown_category validation as
+        // search_items; searchWanted resolves + expands internally.
+        const rawCategory = args.category as string | undefined;
+        let category: string | undefined;
+        if (rawCategory !== undefined) {
+          const resolved = await resolveCategory(rawCategory);
+          if (!resolved) {
+            const available = (await listCategories()).map((c) => c.name).join(", ");
+            return err(`Unknown category '${rawCategory.toLowerCase()}'. Available: ${available}`, "unknown_category");
+          }
+          category = resolved.canonical;
+        }
         const results = await searchWanted({
           q: args.q as string | undefined,
-          category: args.category as string | undefined,
+          category,
           condition: args.condition as string | undefined,
           currency: args.currency as string | undefined,
           budget_max_cents_gte: args.budget_max_cents_gte as number | undefined,
@@ -709,8 +749,18 @@ export function registerTools(
       inputSchema: wantedCreateShape,
     },
     wantedWrite("create_wanted", async (seller, args) => {
+      // THI-734 (D4): validateWantedFields already resolves aliases (wanted.ts);
+      // echo the canonical slug when the input was an alias.
+      const rawCategory = (args.category as string | undefined)?.toLowerCase();
       const { wanted, alertSaved } = await createWantedWithAlert(seller.id, args as WantedCreateRequest);
-      return { created: true, wanted: wantedToTool(wanted), alert_saved: alertSaved };
+      return {
+        created: true,
+        wanted: wantedToTool(wanted),
+        alert_saved: alertSaved,
+        ...(rawCategory && rawCategory !== wanted.category
+          ? { note: aliasResolutionNote(rawCategory, wanted.category) }
+          : {}),
+      };
     }),
   );
 
@@ -837,7 +887,8 @@ export function registerTools(
         CONTENT_PROVENANCE_NOTE,
       inputSchema: {
         q: z.string().max(400).optional().describe("Free-text query, e.g. 'running shoes size 43'"),
-        category: z.string().min(2).max(40).optional().describe("Category slug; see describe_category"),
+        category: z.string().min(2).max(40).optional()
+          .describe("Category slug or department — a department matches itself plus its children; aliases (e.g. trainers) resolve. See describe_category"),
         condition: z.enum(CONDITIONS).optional(),
         conditions: z.array(z.enum(CONDITIONS)).min(1).max(CONDITIONS.length).optional()
           .describe("Match any of these conditions (values as for condition), e.g. [\"new\", \"like_new\"]. If condition is also set, it is added to this list."),
@@ -856,9 +907,23 @@ export function registerTools(
       try {
         const limit = (args.limit as number) ?? 10;
         const offset = (args.offset as number | undefined) ?? 0;
+        // THI-734 (D2/D4): validate/resolve here so unknown categories get the
+        // typed unknown_category error with the available list; searchItems
+        // itself resolves + expands again (web surfaces share it without the
+        // typed error).
+        const rawCategory = args.category as string | undefined;
+        let category: string | undefined;
+        if (rawCategory !== undefined) {
+          const resolved = await resolveCategory(rawCategory);
+          if (!resolved) {
+            const available = (await listCategories()).map((c) => c.name).join(", ");
+            return err(`Unknown category '${rawCategory.toLowerCase()}'. Available: ${available}`, "unknown_category");
+          }
+          category = resolved.canonical;
+        }
         const fetched = await searchItems({
           q: args.q as string | undefined,
-          category: args.category as string | undefined,
+          category,
           condition: args.condition as string | undefined,
           conditions: args.conditions as string[] | undefined,
           min_price_cents: args.min_price_cents as number | undefined,
@@ -1661,7 +1726,8 @@ export function registerTools(
         "Max 25 stored intents; 50 saves per day.",
       inputSchema: {
         q: z.string().min(3).max(400).optional().describe("Free-text query, e.g. 'running shoes size 43' (trimmed at save)"),
-        category: z.string().min(2).max(40).optional().describe("Category slug; see describe_category"),
+        category: z.string().min(2).max(40).optional()
+          .describe("Category slug; aliases resolve to canonical. See describe_category"),
         condition: z.enum(CONDITIONS).optional(),
         min_price_cents: z.number().int().min(0).optional(),
         max_price_cents: z.number().int().min(0).optional(),
@@ -1676,8 +1742,24 @@ export function registerTools(
       if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
       // N3 (spec rev 2): trim at the edge; a whitespace-only q is no q.
       const q = typeof args.q === "string" && args.q.trim().length > 0 ? args.q.trim() : undefined;
+      // THI-734 (D4): resolve aliases to canonical — intents store the
+      // canonical slug (matching expands the item's closure, §5.6).
+      const rawCategory = (args.category as string | undefined)?.toLowerCase();
+      let resolvedCategory: string | undefined;
+      let viaAlias = false;
+      if (rawCategory !== undefined) {
+        const resolved = await resolveCategory(rawCategory);
+        if (!resolved) {
+          // Same category check (incl. the available-list error) as create_listing.
+          logSecurityEvent({ type: "intent_write", action: "save", outcome: "rejected" }, { sellerId: seller.id });
+          const available = (await listCategories()).map((c) => c.name).join(", ");
+          return err(`Unknown category '${rawCategory}'. Available: ${available}`, "unknown_category");
+        }
+        resolvedCategory = resolved.canonical;
+        viaAlias = resolved.viaAlias;
+      }
       const filters = {
-        category: (args.category as string | undefined)?.toLowerCase(),
+        category: resolvedCategory,
         condition: args.condition as string | undefined,
         min_price_cents: args.min_price_cents as number | undefined,
         max_price_cents: args.max_price_cents as number | undefined,
@@ -1698,15 +1780,6 @@ export function registerTools(
           "invalid_request",
         );
       }
-      if (filters.category !== undefined) {
-        // Same category check (incl. the available-list error) as create_listing.
-        const categoryRow = await getCategory(filters.category);
-        if (!categoryRow) {
-          logSecurityEvent({ type: "intent_write", action: "save", outcome: "rejected" }, { sellerId: seller.id });
-          const available = (await listCategories()).map((c) => c.name).join(", ");
-          return err(`Unknown category '${filters.category}'. Available: ${available}`, "unknown_category");
-        }
-      }
       // Same attribute shape caps as listings (key/value length, entry count).
       const attributeErrors = attributeShapeErrors(filters.attributes);
       if (attributeErrors.length > 0) {
@@ -1722,6 +1795,9 @@ export function registerTools(
           saved: true,
           intent: intentToPublic(intent),
           note:
+            (viaAlias && rawCategory && resolvedCategory
+              ? aliasResolutionNote(rawCategory, resolvedCategory) + " "
+              : "") +
             "Saved. When a new listing matching this intent publishes, it appears in my_matches " +
             "(check it at session start). update_intent can mute future matches; delete_intent " +
             "removes the intent and its matches. To change criteria, delete and re-save.",

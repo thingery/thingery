@@ -5,6 +5,7 @@
 // match reads. Mirrors src/items.ts conventions throughout.
 
 import { pool, type ItemRow } from "./db.js";
+import { categoryClosureForItem } from "./categories.js";
 import { embedText } from "./embed.js";
 import { logSecurityEvent } from "./security-events.js";
 import type { Attributes } from "./attributes.js";
@@ -345,6 +346,13 @@ export async function listMatches(
  * when either side has no embedding.
  */
 export async function evaluateListingForIntents(item: ItemRow): Promise<number> {
+  // THI-734 §5.6: an intent's category matches the item's CLOSURE — the item's
+  // own slug plus its department — via one shared code path with search
+  // expansion (categories.ts). A 'fashion' intent matches a 'sneakers'
+  // listing; a 'sneakers' intent never matches a 'fashion'-assigned listing
+  // (unspecified leaf). With no parents seeded yet (PR 1 content) the closure
+  // is [category] and behavior is byte-identical to the old equality check.
+  const itemCategories = await categoryClosureForItem(item.category);
   const { rows } = await pool.query(
     `WITH capped AS (
        SELECT bi.id, bi.buyer_id,
@@ -355,7 +363,7 @@ export async function evaluateListingForIntents(item: ItemRow): Promise<number> 
        ) e
        WHERE bi.muted = false
          AND bi.buyer_id <> $1
-         AND (bi.category IS NULL OR bi.category = $2)
+         AND (bi.category IS NULL OR bi.category = ANY($2::text[]))
          AND (bi.condition IS NULL OR bi.condition = $3)
          AND (bi.shipping_tier IS NULL OR bi.shipping_tier = $4)
          AND bi.currency = $5
@@ -379,7 +387,7 @@ export async function evaluateListingForIntents(item: ItemRow): Promise<number> 
      RETURNING intent_id`,
     [
       item.seller_id,
-      item.category,
+      itemCategories,
       item.condition,
       item.shipping_tier,
       item.currency,

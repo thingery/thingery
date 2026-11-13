@@ -19,7 +19,7 @@ Find what buyers are looking for: search the public wanted board's active posts 
   Free-text query, e.g. 'road bike 56cm'. Up to 400 characters.
 </ParamField>
 <ParamField body="category" type="string">
-  Category slug; see describe_category. Up to 40 characters.
+  Category slug or department — a department matches itself plus its children; aliases resolve. See describe_category. Up to 40 characters.
 </ParamField>
 <ParamField body="condition" type="string">
   One of `new`, `like_new`, `good`, `fair`, `poor`.
@@ -64,7 +64,7 @@ Buyer side of the wanted board: publish what the user is looking for, with an op
   Details for sellers. No contact details: they are rejected. Up to 2000 characters.
 </ParamField>
 <ParamField body="category" type="string">
-  Lowercase slug; call describe_category for the list. Up to 40 characters.
+  Lowercase slug; aliases (e.g. trainers) resolve to canonical. Call describe_category for the list. Up to 40 characters.
 </ParamField>
 <ParamField body="condition" type="string">
   One of `new`, `like_new`, `good`, `fair`, `poor`.
@@ -120,7 +120,7 @@ Edit one of your own active wanted posts; only the fields you send change (null 
   Integer cents; null means no bound.
 </ParamField>
 <ParamField body="category" type="string">
-  Lowercase slug; call describe_category for the list. Up to 40 characters.
+  Lowercase slug; aliases (e.g. trainers) resolve to canonical. Call describe_category for the list. Up to 40 characters.
 </ParamField>
 <ParamField body="condition" type="string | null">
   null accepts any condition.

@@ -92,11 +92,24 @@ describe("wanted public read tools (pure)", () => {
   });
 
   it("search_wanted passes filters as bound parameters, never into the SQL text", async () => {
-    const query = vi.spyOn(pool, "query").mockResolvedValue({ rows: [] } as never);
+    // THI-734: category resolution (+ child expansion) runs before the search
+    // query; satisfy the registry lookups so the search itself executes.
+    const query = vi
+      .spyOn(pool, "query")
+      .mockImplementation((sqlText: string) =>
+        Promise.resolve(
+          String(sqlText).includes("FROM categories")
+            ? ({ rows: [{ name: "music" }] } as never)
+            : ({ rows: [] } as never),
+        ));
     await call(anon, "search_wanted", { q: "x%'; DROP", category: "Music", budget_max_cents_gte: 100, limit: 5, offset: 10 });
-    const [sql, params] = query.mock.calls[0] as unknown as [string, unknown[]];
-    expect(sql).not.toContain("DROP");
-    expect(params).toEqual(expect.arrayContaining(["music", 100, 5, 10]));
+    const searchCall = query.mock.calls
+      .map(([sql, params]) => [String(sql), params] as [string, unknown[]])
+      .find(([, params]) => Array.isArray(params) && params.includes(100))!;
+    expect(searchCall[0]).not.toContain("DROP");
+    // the category filter is a bound text[] parameter (dept + children), never SQL text
+    expect(searchCall[1].some((p) => Array.isArray(p) && p.includes("music"))).toBe(true);
+    expect(searchCall[1]).toEqual(expect.arrayContaining([100, 5, 10]));
   });
 
   it("search_wanted bounds limit and offset in its input schema", () => {

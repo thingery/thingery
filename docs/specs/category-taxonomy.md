@@ -1,6 +1,6 @@
 # Spec: category taxonomy rework — two-level tree + facet attributes
 
-- **Status:** Draft — pending Security review + CEO sign-off (protected paths `db/schema.sql`, `src/tools.ts`; repo `AGENTS.md` rule 2, board THI-36). Implementation children stay blocked until both verdicts are recorded in this PR.
+- **Status:** Approved for implementation — Security design review verdict **APPROVE WITH NOTES** (THI-739, 2026-11-13; notes N1–N3 incorporated below), CEO acceptance **ACCEPTED** (THI-740, 2026-11-13; no overrides). Both verdicts quoted in the spec PR (#255) per protected-path policy (board THI-36 / repo `AGENTS.md` rule 2). Implementation PRs 1–2 return to Security + CEO sign-off at their own PRs.
 - **Date:** 2026-11-13
 - **Origin:** [GitHub issue #218](https://github.com/thingery/thingery/issues/218) (fedealconda), tracked as THI-733; plan rev `26b773eb`. Spec task THI-734.
 - **Touches (protected):** `db/schema.sql`, `src/tools.ts`.
@@ -53,7 +53,7 @@ Secondary latent bug: the categories seed uses `ON CONFLICT (name) DO NOTHING`, 
 2. **Alias seed set — proposed initial 9 aliases on 6 rows** (§5.3): `trainers→sneakers`; `stroller, pram→baby`; `jewelry→accessories`; `smartphone→phones`; `laptop→computers`; `vinyl, records→music`. Additive to extend later; each addition is a schema.sql line.
 3. **`save_intent` department expansion — proposed: yes.** Intents store the canonical slug (aliases resolved at save); `my_matches` matching expands the *item's* category to its closure `{leaf, parent?}` (§5.6). One expansion code path for search and matching.
 4. **Google Product Taxonomy — proposed: not used.** Our slugs are generic plain-English terms independently chosen; nothing is copied from GPT, so there is no license exposure to verify. (Docs spot-checks the final seed for accidental verbatim overlap.)
-5. **ROADMAP item 11** (allow `category` change in `update_listing`): **out of scope** here. Aliases + departments make it more attractive as a fast follow-up; noted on the roadmap, not this spec.
+5. **Roadmap item cited by GH #218** (`category` change in `update_listing`; the issue calls it "ROADMAP item 11" — that numbering does not resolve in the public repo's README roadmap, so ADR 0008 cites it by its source, GH #218): **out of scope** here. Aliases + departments make it more attractive as a fast follow-up; noted for the roadmap, not this spec.
 
 ## 4. Proposed design — data model
 
@@ -133,7 +133,7 @@ Facet placement rationale (Simplicity): `department` only where a gender split i
 
 Leaf module (imports only `db.js`), imported by `items.ts`, `wanted.ts`, `intents.ts`, `tools.ts`, `chat.ts` — one code path everywhere:
 
-- `resolveCategory(raw: string): Promise<{ canonical: string; viaAlias: boolean } | null>` — lowercases; exact `name` match wins, else first `aliases @> ARRAY[$1]` row, else `null`. Deterministic precedence, documented.
+- `resolveCategory(raw: string): Promise<{ canonical: string; viaAlias: boolean } | null>` — lowercases; exact `name` match wins, else the `aliases @> ARRAY[$1]` match ordered `ORDER BY name LIMIT 1`, else `null`. Deterministic precedence, documented — and the ORDER BY keeps resolution deterministic even if the alias-uniqueness invariant is ever broken by a bad seed edit (Security review N2).
 - `categoryFilterNames(canonical: string): Promise<string[]>` — `SELECT name FROM categories WHERE name = $1 OR parent = $1` → `[dept, ...children]` for a department, `[leaf]` otherwise.
 - `categoryClosureForItem(category: string): Promise<string[]>` — `[leaf, parent]` (intent matching, §5.6).
 - `listCategoriesWithParents()`, `categoryChildren(dept)` — describe_category surfaces, reusing the existing `FEED_VISIBLE` feed-visibility predicate for listing counts.
@@ -182,7 +182,7 @@ No tool signature changes; no input schema changes except descriptions. Existing
 ### 5.6 Blast radius (named)
 
 - **Registry-listed MCP installs + live sessions:** additive output fields only; strict JSON parsers that reject unknown fields could break — accepted risk, consistent with every prior additive output change; nothing existing is removed or retyped.
-- **npm self-hosters:** next `db:migrate` run converges their registry to schema.sql, overwriting any hand-edited `categories` rows. Documented behavior change (registry is code-owned; no admin write path exists to lose). Old images against the new schema: fully compatible (new columns unread, new rows behave as plain categories).
+- **npm self-hosters:** next `db:migrate` run converges their registry to schema.sql, overwriting any hand-edited `categories` rows **and any locally added row whose slug collides with a new seed slug** (e.g. a self-hoster's own `bags` gets converged to schema.sql's definition — Security review N1). Documented behavior change (registry is code-owned; no admin write path exists to lose); PR 3 surfaces it in release notes before self-hosters migrate. Old images against the new schema: fully compatible (new columns unread, new rows behave as plain categories).
 - **thingery.dev:** `/browse` and home search inherit dept expansion via `searchItems`. The browse-UI tree itself is the platform-repo follow-up (THI-738); the public repo's frozen `website/` is untouched (board ruling THI-565).
 - **Importers (platform):** gain 15 finer mapping targets + `department` autofill + `source_category` convention (D9). THI-618 (silent `other` in review flow) is independent and fixes now.
 
@@ -201,7 +201,7 @@ Expand-contract posture: purely additive (new columns, new rows, new accepted va
 ## 7. Test plan
 
 - **`src/categories.ts` unit:** resolution precedence (exact > alias > unknown); alias→canonical; case normalization; expansion (dept → dept+children; leaf → self; `other` → self); item closure (leaf → {leaf, parent}; dept-assigned → {dept}); invariants (two-level, no alias == canonical, alias uniqueness).
-- **Schema/migration:** apply schema.sql twice against a fresh DB and once against a DB with a hand-diverged description → identical converged state (DO UPDATE convergence); 29-row count; departments-first FK ordering.
+- **Schema/migration:** apply schema.sql twice against a fresh DB and once against a DB with a hand-diverged description → identical converged state (DO UPDATE convergence); same against a DB holding a pre-existing locally-added row whose slug collides with a new seed slug → converged to the seed definition (N1 case); 29-row count; departments-first FK ordering.
 - **Search:** dept filter returns dept-assigned + child-assigned items and excludes siblings; leaf filter excludes dept-assigned items; alias filter resolves; unknown dept/leaf/alias → `unknown_category` with full available list.
 - **describe_category:** no-arg rows carry `parent`; dept arg returns children with feed-visible counts; leaf arg carries `parent`; alias arg resolves + note.
 - **Write paths:** alias accepted → canonical stored + note; department accepted; new enums validated (`department`, `size_letter` reject out-of-enum); legacy `size` still accepted on clothing alongside `size_letter`; existing definitions still required (e.g. `size_eu` on sneakers).
@@ -217,13 +217,13 @@ Expand-contract posture: purely additive (new columns, new rows, new accepted va
 
 ## 9. ADR
 
-A short ADR (`docs/adr/0008-category-taxonomy-two-level.md`, ships in PR 3) records: context (§1–2), decision (two-level tree, departments assignable, facets-as-attributes, registry-as-code, zero item-row migration), rejected alternatives (flat list + more slugs; Vinted-depth copy; three-level `sneakers→shoes`; renaming `music`; FK trigger for the invariant; migrating existing rows), consequences (additive surface, self-hoster registry convergence, `other` shrink depends on importer follow-up).
+A short ADR (`docs/adr/0008-category-taxonomy-two-level.md`, ships in PR 3) records: context (§1–2), decision (two-level tree, departments assignable, facets-as-attributes, registry-as-code, zero item-row migration), rejected alternatives (flat list + more slugs; Vinted-depth copy; three-level `sneakers→shoes`; renaming `music`; FK trigger for the invariant; migrating existing rows; a DB-level alias-uniqueness guarantee such as an exclusion constraint — recorded as a future option if the registry grows, not needed at 29 code-owned rows), consequences (additive surface, self-hoster registry convergence, `other` shrink depends on importer follow-up). Per CEO review: ADR 0008 cites the `update_listing`-category-change follow-up by its source (GH #218), since the public README roadmap does not carry the issue's "ROADMAP item 11" numbering.
 
 ## 10. Implementation steps (each one purpose, ≤ ~300 lines)
 
 1. **PR 1 — schema plumbing + parent-aware filtering** (touches both protected files): `parent`/`aliases` columns; DO UPDATE seed switch (14 rows, content unchanged); `src/categories.ts`; expansion in `searchItems`/`searchWanted`; `describe_category` tree output + alias resolution; alias resolution + canonical note in create/save paths (`tools.ts`, `wanted.ts`, `chat.ts`); intent closure in `evaluateListingForIntents`; unit + integration tests. If review finds it over ~300 lines, the split line is chat-parity + intent closure into a PR 1b (still before PR 2).
 2. **PR 2 — taxonomy content** (`db/schema.sql`, protected): the 29-row seed of §5.1–5.3 (parents, aliases, new leaves, facet definitions, description clarifications); registry-content test (tree shape, invariants, all-14-slugs-survive); migrate idempotency test.
-3. **PR 3 — docs & skills:** `public/llms.txt` (departments, aliases, `source_category` convention), `skills/sell-item` + `skills/find-item`, `docs-site` regen (`npm run docs:tools`), README category mentions, ADR 0008. Docs agent keeps reference docs in sync.
+3. **PR 3 — docs & skills:** `public/llms.txt` (departments, aliases, `source_category` convention), `skills/sell-item` + `skills/find-item`, `docs-site` regen (`npm run docs:tools`), README category mentions, ADR 0008; per review notes also: **release-notes prominence** for the self-hoster registry-convergence behavior change (CEO note 2 — self-hosters must see it before migrating) and the **managed-table contract** (the `categories` table is managed by `db/schema.sql`; local edits and slug-colliding additions do not survive `db:migrate`) in the README/self-hosting docs (Security N3). Docs agent keeps reference docs in sync.
 4. **Platform follow-up (private repo `thingery/platform`, THI-738, not in these PRs):** extend Vinted/eBay mappings to new leaves; auto-fill `department` on fashion imports; adopt `source_category`; browse-UI tree; coordinate with THI-618.
 
 ## Appendix A — what deliberately does not change
@@ -231,7 +231,7 @@ A short ADR (`docs/adr/0008-category-taxonomy-two-level.md`, ships in PR 3) reco
 - No tool added/removed; no input schema change on any tool; no error code change.
 - No rename/repurpose/delete of any existing slug; no item/wanted/intent row migration.
 - No change to attribute passthrough, caps, or the undeclared-key surface.
-- `update_listing` still cannot change category (ROADMAP item 11 — follow-up).
+- `update_listing` still cannot change category (the GH #218-referenced roadmap follow-up; out of scope).
 - `website/` in the public repo stays frozen (board ruling THI-565).
 
 ## Appendix B — optional Phase-3 quality backfill (separate decision, not in PRs 1–3)

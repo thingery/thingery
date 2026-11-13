@@ -22,8 +22,9 @@ The Thingery MCP server must be connected. Listing requires the seller's API key
    `fashion` are valid assignments when the leaf is unclear; aliases such as `trainers`
    resolve to canonical automatically). Call `describe_category` for that category and fill
    its expected `attributes` (e.g. sneakers want `size_eu`). Use the facet attributes where
-   they apply — `department` (women|men|unisex|kids) on fashion, typed sizes
-   (`size_letter` on clothing, `size_eu` on footwear) — and fill legacy keys like `size`
+   they apply — `department` (women|men|unisex|kids) on fashion (all except
+   `beauty`), typed sizes (`size_letter` on clothing, `size_eu` on footwear) — and fill
+   legacy keys like `size`
    when the category still declares them. Undeclared extra fields are allowed — include
    anything a buyer would filter on. The response's `undeclared_in_use` section lists
    undeclared keys already in real use in that category; reusing those exact keys makes the

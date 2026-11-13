@@ -46,9 +46,9 @@ Categories are a **two-level tree**: seven departments over leaves, plus the `ot
 | `other` | — (fallback, standalone) |
 
 - **Assign the most specific leaf.** A department alone is a valid assignment meaning "leaf unspecified".
-- **Department filters are wide:** filtering on a department in `search_items`/`search_wanted` matches the department plus its direct children; a leaf matches only itself.
+- **Department filters are wide:** filtering on a department in `search_items`/`search_wanted` (and in saved intents) matches the department plus its direct children; a leaf matches only itself.
 - **Aliases resolve to canonical** on every input: `trainers`→`sneakers`, `stroller`/`pram`→`baby`, `jewelry`→`accessories`, `smartphone`→`phones`, `laptop`→`computers`, `vinyl`/`records`→`music`. Writes store the canonical slug and echo the resolution.
-- **Facet attributes:** `department` (`women`/`men`/`unisex`/`kids`) is declared on fashion categories; typed sizes are `size_letter` (XS–XXL) on `clothing` and numeric `size_eu` on `shoes`/`sneakers`. Legacy free-text `size` stays accepted where declared.
+- **Facet attributes:** `department` (`women`/`men`/`unisex`/`kids`) is declared on fashion categories except `beauty`; typed sizes are `size_letter` (XS–XXL) on `clothing` and numeric `size_eu` on `shoes`/`sneakers`. Legacy free-text `size` stays accepted where declared.
 - **Importer convention:** record the source marketplace's own leaf name under the passthrough key `source_category`, and auto-fill `department` when the source's top level maps.
 
 ### The categories table is managed

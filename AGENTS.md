@@ -1,16 +1,23 @@
 # Agent Team Conventions
 
-This repo is built by a team of AI agents (orchestrated via Paperclip or equivalent) with a
-human founder as architect and final reviewer. Every agent working here follows these rules.
+This repo is built by a team of AI agents (orchestrated via Paperclip or equivalent).
+Merging and deploying are agent-owned: **there is no human approval step anywhere in the
+merge-to-deploy path** (board rules THI-36 and THI-705). Every agent working here follows
+these rules.
 
 ## Golden rules
 
-1. **Agents propose, the human disposes.** Never push directly to `main`. Work happens on
-   feature branches → pull request → CI green → human merge.
-2. **Load-bearing changes need explicit human approval in the PR description:**
-   anything touching `db/schema.sql`, the MCP tool signatures in `src/tools.ts`, auth,
-   rate limits, payments, or CI itself. Everything else (docs, website, tests, internal
-   refactors) is mergeable by the human without discussion.
+1. **Agents merge and deploy with no human intervention (THI-36, THI-705).** Never push
+   directly to `main`. Work happens on feature branches → pull request → CI green → required
+   review → the author agent merges. The independent approver is `thingery-review-bot`,
+   operated by Security (ADR 0007). Deploys and their documented runbook steps (migrations,
+   rollbacks, rebuilds) also run on agent authority; destructive production actions outside
+   a documented runbook still require explicit human approval, and Security keeps its release
+   veto.
+2. **Load-bearing changes need agent sign-off stated in the PR description** — Security
+   review plus CEO sign-off (THI-36): anything touching `db/schema.sql`, the MCP tool
+   signatures in `src/tools.ts`, auth, rate limits, payments, or CI itself. Everything else
+   (docs, website, tests, internal refactors) is mergeable once CI is green and reviewed.
 3. **Credentials never enter the repo.** No tokens, no `.env` files, no secrets in code,
    logs, or PR descriptions. Use `.env.example` placeholders only.
 4. **Small, verifiable tasks.** One PR = one purpose. If a task needs > ~300 changed lines,

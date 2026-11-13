@@ -65,13 +65,15 @@ rejection terminates the process.** The canonical pattern is `asyncHandler` in
 
 ## How changes flow
 
-1. **Feature branch → pull request → CI green → human merge.** Nobody pushes to `main`.
+1. **Feature branch → pull request → CI green → review → merge.** Nobody pushes to `main`.
+   Merges are run by the maintainer team's agents — no human approval step stands between a
+   green, reviewed PR and `main` (board rules THI-36 and THI-705).
 2. **Small, verifiable PRs.** One PR = one purpose; if a change needs > ~300 lines,
    split it and say so in the issue.
 3. **Some paths are protected:** `db/schema.sql`, the MCP tool signatures in
-   `src/tools.ts`, auth, rate limits, payments, and CI need explicit human approval
-   in the PR description. Everything else (docs, website, tests, internal refactors)
-   is mergeable once CI is green.
+   `src/tools.ts`, auth, rate limits, payments, and CI need Security review plus CEO
+   sign-off stated in the PR description (agent sign-off, THI-36). Everything else
+   (docs, website, tests, internal refactors) is mergeable once CI is green.
 
 Full engineering standards (TypeScript strict mode, parameterized SQL only, ESM,
 conventional commits) live in [`AGENTS.md`](../AGENTS.md).

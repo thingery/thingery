@@ -129,57 +129,141 @@ ALTER TABLE items ADD COLUMN IF NOT EXISTS shipping_price_cents INTEGER NOT NULL
 -- NOTHING, under which shipped registry edits never reached an existing
 -- database (latent bug, spec §1). The registry has no admin write path, so
 -- convergence cannot clobber runtime state; self-hosted hand-edits are a
--- documented behavior change (spec §5.6, release-noted in PR 3). Content
--- (parents, aliases, new departments/leaves) lands in PR 2 — here the 14
--- existing rows ship parentless/aliasless, so this deploy is a content no-op.
--- Departments must be inserted before leaves once parents ship (per-row FK);
--- the wrapper SELECT keeps the VALUES block below untouched for review.
+-- documented behavior change (spec §5.6, release-noted in PR 3).
+--
+-- Taxonomy content (THI-736 / PR 2, spec §5.1–5.3): 29 rows — 7 departments
+-- over 21 leaves, plus parentless and childless 'other' as the fallback
+-- leaf-dept. All 14 legacy slugs keep their names and attribute definitions
+-- (D3); new leaves and facet attributes (department enum on the fashion rows,
+-- size_letter on clothing) are purely additive (D6). Departments are inserted
+-- BEFORE leaves so per-row FK checks on parent succeed inside this one
+-- statement (spec §4.1); the wrapper SELECT keeps the VALUES block untouched
+-- for review. Aliases per §5.3: sneakers←trainers; baby←stroller, pram;
+-- accessories←jewelry; phones←smartphone; computers←laptop; music←vinyl,
+-- records.
 INSERT INTO categories (name, description, attribute_definitions, parent, aliases)
-SELECT s.name, s.description, s.attribute_definitions::jsonb, NULL::text, '{}'::text[]
+SELECT s.name, s.description, s.attribute_definitions::jsonb, s.parent::text, s.aliases::text[]
 FROM (
   VALUES
+  -- Departments (parent NULL — assignable in their own right; 'other' is the
+  -- parentless, childless fallback leaf-dept).
+  ('fashion', 'Clothing, footwear, bags, accessories, beauty (leaf unspecified)',
+   '[{"key":"department","type":"string","enum":["women","men","unisex","kids"],"description":"who the item is for"}]',
+   NULL::text, '{}'::text[]),
+  ('kids', 'Baby and kids: gear, clothing, toys (leaf unspecified)', '[]',
+   NULL::text, '{}'::text[]),
+  ('electronics', 'Consumer electronics (misc; see phones, computers, cameras, games)',
+   '[{"key":"model","type":"string","description":"Model name/number"},
+     {"key":"warranty_months","type":"number"}]',
+   NULL::text, '{}'::text[]),
+  ('home', 'Furniture and household (incl. appliances; DIY/garden → tools)',
+   '[{"key":"material","type":"string"},
+     {"key":"color","type":"string"}]',
+   NULL::text, '{}'::text[]),
+  ('media', 'Books and recorded media (leaf unspecified)', '[]',
+   NULL::text, '{}'::text[]),
+  ('hobbies', 'Collectibles, tabletop games, instruments (leaf unspecified)', '[]',
+   NULL::text, '{}'::text[]),
+  ('sports', 'Sports and outdoor gear (bikes → bikes)',
+   '[{"key":"sport","type":"string"}]',
+   NULL::text, '{}'::text[]),
+  ('other', 'Everything else (fallback)', '[]',
+   NULL::text, '{}'::text[]),
+  -- fashion leaves
+  ('clothing', 'Clothes; sizes: size_letter or free-text size',
+   '[{"key":"size","type":"string","required":true,"description":"e.g. M, 42, One Size"},
+     {"key":"size_letter","type":"string","enum":["XS","S","M","L","XL","XXL"],"description":"letter size; use with or instead of free-text size"},
+     {"key":"material","type":"string"},
+     {"key":"color","type":"string"},
+     {"key":"department","type":"string","enum":["women","men","unisex","kids"],"description":"who the item is for"}]',
+   'fashion', '{}'::text[]),
+  ('shoes', 'Non-sneaker footwear',
+   '[{"key":"size_eu","type":"number","required":true,"description":"EU shoe size"},
+     {"key":"material","type":"string"},
+     {"key":"department","type":"string","enum":["women","men","unisex","kids"],"description":"who the item is for"}]',
+   'fashion', '{}'::text[]),
   ('sneakers', 'Trainers and sneakers',
    '[{"key":"size_eu","type":"number","required":true,"description":"EU shoe size, e.g. 43"},
      {"key":"colorway","type":"string","description":"e.g. white/grey"},
-     {"key":"has_original_box","type":"boolean"}]'),
-  ('shoes', 'Non-sneaker footwear',
-   '[{"key":"size_eu","type":"number","required":true,"description":"EU shoe size"},
-     {"key":"material","type":"string"}]'),
-  ('clothing', 'Clothes and accessories',
-   '[{"key":"size","type":"string","required":true,"description":"e.g. M, 42, One Size"},
-     {"key":"material","type":"string"},
-     {"key":"color","type":"string"}]'),
-  ('electronics', 'Consumer electronics',
-   '[{"key":"model","type":"string","description":"Model name/number"},
-     {"key":"warranty_months","type":"number"}]'),
+     {"key":"has_original_box","type":"boolean"},
+     {"key":"department","type":"string","enum":["women","men","unisex","kids"],"description":"who the item is for"}]',
+   'fashion', '{"trainers"}'::text[]),
+  ('bags', 'Handbags, backpacks, luggage',
+   '[{"key":"material","type":"string"},
+     {"key":"color","type":"string"},
+     {"key":"department","type":"string","enum":["women","men","unisex","kids"],"description":"who the item is for"}]',
+   'fashion', '{}'::text[]),
+  ('accessories', 'Jewellery, watches, belts, sunglasses, scarves',
+   '[{"key":"type","type":"string","enum":["jewellery","watch","belt","sunglasses","scarf","other"]},
+     {"key":"department","type":"string","enum":["women","men","unisex","kids"],"description":"who the item is for"}]',
+   'fashion', '{"jewelry"}'::text[]),
+  ('beauty', 'Makeup, skincare, fragrance',
+   '[{"key":"type","type":"string","enum":["makeup","skincare","fragrance","haircare","other"]}]',
+   'fashion', '{}'::text[]),
+  -- kids leaves
+  ('baby', 'Pushchairs, car seats, nursery',
+   '[{"key":"type","type":"string","enum":["pushchair","car_seat","nursery","other"]}]',
+   'kids', '{"stroller","pram"}'::text[]),
+  ('kids-clothing', 'Children''s clothing; size in years or height (e.g. 6Y, 104)',
+   '[{"key":"size","type":"string","required":true,"description":"age or height size, e.g. 6Y, 104"},
+     {"key":"color","type":"string"}]',
+   'kids', '{}'::text[]),
+  ('toys', 'Toys and playthings (tabletop games → board-games)',
+   '[{"key":"age_range","type":"string","description":"e.g. 6+, 12+"}]',
+   'kids', '{}'::text[]),
+  -- electronics leaves
   ('phones', 'Mobile phones',
    '[{"key":"model","type":"string","required":true},
      {"key":"storage_gb","type":"number"},
-     {"key":"battery_health_pct","type":"number"}]'),
+     {"key":"battery_health_pct","type":"number"}]',
+   'electronics', '{"smartphone"}'::text[]),
   ('computers', 'Laptops and desktops',
    '[{"key":"model","type":"string","required":true},
      {"key":"ram_gb","type":"number"},
-     {"key":"storage_gb","type":"number"}]'),
-  ('games', 'Video games and consoles',
-   '[{"key":"platform","type":"string","enum":["nintendo_switch","ps4","ps5","xbox_one","xbox_series","pc","other"],"required":true}]'),
+     {"key":"storage_gb","type":"number"}]',
+   'electronics', '{"laptop"}'::text[]),
+  ('cameras', 'Cameras, lenses, drones',
+   '[{"key":"model","type":"string"},
+     {"key":"shutter_count","type":"number"}]',
+   'electronics', '{}'::text[]),
+  ('games', 'Video games and consoles (tabletop → board-games)',
+   '[{"key":"platform","type":"string","enum":["nintendo_switch","ps4","ps5","xbox_one","xbox_series","pc","other"],"required":true}]',
+   'electronics', '{}'::text[]),
+  -- home leaves
+  ('tools', 'DIY, power tools, garden',
+   '[{"key":"type","type":"string","enum":["power","hand","garden","other"]}]',
+   'home', '{}'::text[]),
+  ('pets', 'Pet supplies: beds, carriers, aquariums',
+   '[{"key":"type","type":"string","enum":["dog","cat","bird","small_animal","aquarium","other"]}]',
+   'home', '{}'::text[]),
+  -- media leaves
   ('books', 'Books and magazines',
    '[{"key":"author","type":"string"},
      {"key":"isbn","type":"string"},
-     {"key":"language","type":"string"}]'),
-  ('music', 'Instruments, vinyl, CDs',
+     {"key":"language","type":"string"}]',
+   'media', '{}'::text[]),
+  ('music', 'Recorded music: vinyl, CDs, cassettes (instruments → hobbies)',
    '[{"key":"format","type":"string","enum":["vinyl","cd","cassette","instrument","other"]},
-     {"key":"artist","type":"string"}]'),
-  ('sports', 'Sports and outdoor gear',
-   '[{"key":"sport","type":"string"}]'),
-  ('home', 'Furniture and household',
-   '[{"key":"material","type":"string"},
-     {"key":"color","type":"string"}]'),
-  ('toys', 'Toys and games',
-   '[{"key":"age_range","type":"string","description":"e.g. 6+, 12+"}]'),
+     {"key":"artist","type":"string"}]',
+   'media', '{"vinyl","records"}'::text[]),
+  -- hobbies leaves
   ('collectibles', 'Collectibles and memorabilia',
-   '[{"key":"franchise","type":"string"}]'),
-  ('other', 'Everything else', '[]')
-) AS s(name, description, attribute_definitions)
+   '[{"key":"franchise","type":"string"}]',
+   'hobbies', '{}'::text[]),
+  ('board-games', 'Tabletop and board games',
+   '[{"key":"players","type":"string","description":"e.g. 2-4"},
+     {"key":"language","type":"string"}]',
+   'hobbies', '{}'::text[]),
+  ('instruments', 'Musical instruments and gear',
+   '[{"key":"instrument","type":"string","required":true}]',
+   'hobbies', '{}'::text[]),
+  -- sports leaves
+  ('bikes', 'Bicycles: road, MTB, city, e-bikes',
+   '[{"key":"type","type":"string","enum":["road","mtb","city","bmx","ebike","kids","other"]},
+     {"key":"frame_size","type":"string"},
+     {"key":"wheel_size_inches","type":"number"}]',
+   'sports', '{}'::text[])
+) AS s(name, description, attribute_definitions, parent, aliases)
 ON CONFLICT (name) DO UPDATE SET
   description           = EXCLUDED.description,
   attribute_definitions = EXCLUDED.attribute_definitions,

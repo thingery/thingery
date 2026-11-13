@@ -341,7 +341,7 @@ describe.skipIf(!available)("category taxonomy PR 1 (THI-734)", () => {
       "SELECT description, parent, aliases FROM categories WHERE name = 'sneakers'",
     );
     expect(rows[0].description).toBe("Trainers and sneakers"); // converged, not DO NOTHING
-    expect(rows[0].parent).toBeNull(); // and back to the PR-1 seed state
-    expect(rows[0].aliases).toEqual([]);
+    expect(rows[0].parent).toBe("fashion"); // converged to the PR-2 seed state
+    expect(rows[0].aliases).toEqual(["trainers"]);
   });
 });

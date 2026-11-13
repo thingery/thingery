@@ -76,10 +76,15 @@ rejected with `400` rather than silently falling back to the full tool set.
 | Every MCP tool and its parameters | [MCP tools](https://docs.thingery.dev/tools/overview) |
 | Self-hosting and environment variables | [Self-hosting](https://docs.thingery.dev/self-hosting/install) |
 | Prices, conditions, the flexible item schema | [Data conventions](https://docs.thingery.dev/reference/data-conventions) |
+| The two-level category registry (departments, aliases, typed sizes) | [Data conventions](https://docs.thingery.dev/reference/data-conventions#category-registry) |
 | Common errors | [Troubleshooting](https://docs.thingery.dev/reference/troubleshooting) |
 
 The docs live in [`docs-site/`](docs-site/) and publish with Mintlify. The tool reference is
 generated from `src/tools.ts` (`npm run docs:tools`), and a test fails when it falls out of date.
+
+Note for self-hosters: the `categories` table is **managed** — `db/schema.sql` owns its rows,
+and running a migration converges the registry to the shipped definitions. See
+[Data conventions → Category registry](https://docs.thingery.dev/reference/data-conventions#category-registry).
 Design records are in [`docs/adr/`](docs/adr/).
 
 Agent skills: [`skills/sell-item`](skills/sell-item/SKILL.md) (photos → priced listing) and

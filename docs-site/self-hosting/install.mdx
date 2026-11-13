@@ -77,6 +77,17 @@ psql -d thingery -c "CREATE EXTENSION vector;"   # as the Postgres superuser
 
 The default `DATABASE_URL` in `.env.example` matches this setup.
 
+## Upgrading
+
+Re-applying `db/schema.sql` (or `npm run db:migrate` on a newer version) is safe: every
+statement is idempotent. One exception to know: the **`categories` table is managed** —
+migrating converges the registry to the shipped definitions, overwriting local edits to
+seeded rows and any local row whose slug collides with a shipped one (rows with new slugs
+survive). The 2026-11 taxonomy rework (two-level tree: departments over leaves, aliases,
+facet attributes — [GH #218](https://github.com/thingery/thingery/issues/218)) converges on
+first upgrade; review the shipped registry in
+[Data conventions](/reference/data-conventions#category-registry) before migrating.
+
 ## Run over stdio
 
 The package also runs as a local stdio MCP server, with no web server, which clients like Claude Desktop can start themselves:

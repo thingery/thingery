@@ -21,6 +21,11 @@ The Thingery MCP server must be connected. `search_items` and `get_item` are pub
    (`max_price_cents`, `category`, `condition` — or `conditions` to accept several, e.g.
    `["new", "like_new"]` — and `attributes` for exact matches like
    `{"size_eu": 43}` — the filter matches any attribute key, not just declared ones).
+   Category filters are two-level: a leaf (`sneakers`) matches only that leaf; a department
+   (`fashion`) matches itself plus all its child leaves — go one level up when a leaf search
+   is too narrow, one level down when the buyer named a whole department. Typed sizes
+   (`size_eu`, `size_letter`) and the `department` facet (women|men|unisex|kids) filter
+   exactly on fashion listings.
    For must-have attributes the category doesn't declare, check `describe_category`:
    its `undeclared_in_use` section lists undeclared keys in real use — a hint for filters
    (values can differ per listing). Run 1–2 query variations if the first returns nothing

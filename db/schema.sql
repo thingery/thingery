@@ -697,3 +697,80 @@ CREATE INDEX IF NOT EXISTS order_messages_order_created_idx
 -- Per-account abuse review / retention sweeps scan by sender.
 CREATE INDEX IF NOT EXISTS order_messages_sender_created_idx
   ON order_messages (sender_id, created_at);
+
+-- ---------------------------------------------------------------------------
+-- THI-760 plan Phase 1 / THI-763 (board-approved plan revision aad0e354):
+-- buyer/seller notification core. Two additive tables + a one-row watermark.
+-- Derived data only — the fan-out sweep reads the append-only order_events
+-- audit log and INSERTs here with ON CONFLICT (dedupe_key) DO NOTHING, so
+-- notifications are idempotent/replay-safe by construction and the order
+-- state machine (src/orders.ts) is untouched. Payloads are PII-free (F6):
+-- ids, titles, amounts, statuses, links — never addresses or counterparty
+-- contact data. Nothing reads or writes these tables until the notify sweeps
+-- and web routes land (later PRs of the same plan): this deploy is dark.
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  recipient_id UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+  order_id     UUID REFERENCES orders(id) ON DELETE CASCADE,
+  event_type   TEXT NOT NULL,          -- 'buyer.payment_received', 'seller.item_sold', ...
+  role         TEXT NOT NULL CHECK (role IN ('buyer','seller')),
+  payload      JSONB NOT NULL DEFAULT '{}'::jsonb,  -- PII-free (F6): ids, titles, amounts, statuses
+  dedupe_key   TEXT UNIQUE NOT NULL,   -- '{event_type}:{order_events.id}' → fan-out at-most-once
+  read_at      TIMESTAMPTZ,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Unread badge + ?unread=1 listing (partial, plan §2.1).
+CREATE INDEX IF NOT EXISTS notifications_recipient_unread_idx
+  ON notifications (recipient_id, created_at DESC) WHERE read_at IS NULL;
+-- Full per-recipient listing (GET /api/notifications) uses the same key
+-- shape without the partial predicate — additive extension of plan §2.1's
+-- index list so the read path needs no seq scan on the same query shape.
+CREATE INDEX IF NOT EXISTS notifications_recipient_idx
+  ON notifications (recipient_id, created_at DESC);
+
+-- Transactional email outbox (plan §2.2). One row per notification that has
+-- an email channel (dedupe_key = the notification id): the delivery sweep
+-- claims rows with a conditional UPDATE, renders the template, and drives
+-- the explicit state machine pending → sent | skipped | pending(retry) |
+-- dead (attempts ≥ 8; backoff 1m→2m→…→6h cap). sent/skipped/dead are
+-- terminal; the CHECK constraint makes illegal statuses unrepresentable and
+-- the guarded UPDATEs make illegal transitions no-ops.
+CREATE TABLE IF NOT EXISTS email_outbox (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  notification_id UUID REFERENCES notifications(id) ON DELETE CASCADE,
+  to_email     TEXT NOT NULL,          -- '' when the account has no address (NULL email)
+  subject      TEXT NOT NULL,
+  template     TEXT NOT NULL,          -- 'seller.item_sold.v1' (plan §6 key convention)
+  locale       TEXT NOT NULL DEFAULT 'en',   -- reserved for later i18n (plan §6)
+  payload      JSONB NOT NULL DEFAULT '{}'::jsonb,  -- PII-free template args (F6)
+  status       TEXT NOT NULL DEFAULT 'pending'
+               CHECK (status IN ('pending','sent','skipped','dead')),
+  attempts     INT NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_error   TEXT,
+  provider_message_id TEXT,
+  sent_at      TIMESTAMPTZ,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  dedupe_key   TEXT UNIQUE NOT NULL    -- '{notification_id}' → one email per notification
+);
+-- Due-row claim scan (partial, plan §2.2).
+CREATE INDEX IF NOT EXISTS email_outbox_due_idx
+  ON email_outbox (next_attempt_at) WHERE status = 'pending';
+-- Per-recipient hourly send counts (rate cap, plan §4 sweep 2) — additive
+-- extension of plan §2.2's index list for the cap's count query.
+CREATE INDEX IF NOT EXISTS email_outbox_recipient_sent_idx
+  ON email_outbox (to_email, sent_at DESC) WHERE status = 'sent';
+
+-- Fan-out watermark (plan §2.1: "a last_processed watermark"). One row per
+-- sweep source; advanced transactionally with the notification INSERTs, so
+-- a crash mid-fan-out re-reads the same events and the dedupe keys absorb
+-- the replay. last_event_at/last_event_id bracket the processed prefix; the
+-- sweep re-reads a small overlap window, so late-committing transactions are
+-- picked up and replays stay idempotent (webhook-idempotency lens).
+CREATE TABLE IF NOT EXISTS notify_watermarks (
+  name          TEXT PRIMARY KEY,     -- 'order-events' (message store sources: plan §7, later)
+  last_event_id UUID,
+  last_event_at TIMESTAMPTZ,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);

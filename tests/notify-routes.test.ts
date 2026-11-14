@@ -88,7 +88,9 @@ describe.skipIf(!available)("/api/notifications + /api/me unread (THI-763 PR 5)"
   });
 
   it("anonymous → 401 on all three routes; anonymous /api/me shape unchanged", async () => {
-    for (const pathName of ["/api/notifications", "/api/notifications/x/read"]) {
+    const res1 = await fetch(`${base}/api/notifications`); // GET
+    expect(res1.status).toBe(401);
+    for (const pathName of ["/api/notifications/x/read", "/api/notifications/read-all"]) {
       const res = await fetch(`${base}${pathName}`, { method: "POST" });
       expect(res.status).toBe(401);
     }

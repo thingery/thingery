@@ -53,6 +53,16 @@ these rules.
 | `docs-site/` | Public docs site (Mintlify). `tools/*.mdx` is generated from `src/tools.ts`: run `npm run docs:tools` after changing a tool |
 | `tests/` | Vitest suites |
 
+## Spec-landing policy (THI-565, THI-700)
+
+This is the **public** repo (Apache-2.0, self-hostable core). Company-side work —
+commercial programs, board-gated or company-ops specs, billing, deploy/ops material —
+lives in the private `thingery/platform` repo. Specs in `docs/specs/` here describe
+**core-product behavior only** and must be governance-neutral: no internal ticket
+choreography or tracker links, no board verdicts / decision-card quotes, no company-account
+or flagship-infrastructure specifics (those go to `platform`). CI scans `docs/` and
+`scripts/` for these markers on every PR and weekly.
+
 ## Canonical language
 
 External-facing text (README, llms.txt, website, skill files) uses this sentence verbatim

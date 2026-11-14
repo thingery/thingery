@@ -85,6 +85,10 @@ const apiKeyRotateLimiter = new RateLimiter(10, 60 * 60_000); // 10 key rotation
 export const chatAnonLimiter = new RateLimiter(chatLimits.turnsHourlyAnon, 60 * 60_000); // anonymous chats per IP per hour (THI-180: env-configurable)
 export const chatAuthedLimiter = new RateLimiter(chatLimits.turnsHourlyAuthed, 60 * 60_000); // logged-in chats per hour (THI-180: env-configurable)
 export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin calls per IP per hour (F7)
+// THI-760 Phase 1 / THI-763: notification reads/marks are cheap, but every
+// route on the session API gets a cap — 240/h per account is far above any
+// human poller while keeping scripted abuse bounded.
+const notificationsLimiter = new RateLimiter(240, 60 * 60_000);
 export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
 export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 image upload attempts per IP per hour (THI-140 / THI-123 obs 2)
 export const imageMutationLimiter = new RateLimiter(60, 60 * 60_000); // 60 image delete/reorder mutations per seller per hour (THI-308 F6: churn here must never consume upload quota)
@@ -256,13 +260,101 @@ api.get("/me", asyncHandler(async (req: Request, res: Response) => {
   // THI-114: no api_key here — the key is show-once (signup/regenerate).
   // THI-762: email + verification state — the session owner's own account
   // facts (additive fields; anonymous shape unchanged).
+  // THI-760 Phase 1 / THI-763: unread badge count (additive field).
+  const unread = await pool
+    .query<{ c: string }>(
+      "SELECT count(*)::text AS c FROM notifications WHERE recipient_id = $1 AND read_at IS NULL",
+      [seller.id],
+    )
+    .catch(() => ({ rows: [{ c: "0" }] }));
   res.json({
     seller: {
       name: seller.display_name,
       email: seller.email,
       email_verified: seller.email_verified_at !== null,
+      unread_notifications: Number(unread.rows[0]?.c ?? 0),
     },
   });
+}));
+
+// THI-760 Phase 1 / THI-763 (plan §5): notification read surface for the
+// session owner. All three routes are recipient-scoped by construction —
+// every query filters on the session seller id, ids from other accounts are
+// indistinguishable from nonexistent ones (404), and the payload is the
+// PII-free JSONB the fan-out wrote (F6). ?unread=1 rides the partial index.
+api.get("/notifications", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to see notifications." });
+    return;
+  }
+  if (!notificationsLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/notifications" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const unreadOnly = req.query.unread === "1";
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 100 ? limitRaw : 50;
+  const rows = await pool.query(
+    `SELECT id, order_id, event_type, role, payload, read_at, created_at
+       FROM notifications
+      WHERE recipient_id = $1 ${unreadOnly ? "AND read_at IS NULL" : ""}
+      ORDER BY created_at DESC
+      LIMIT $2`,
+    [seller.id, limit],
+  );
+  const unread = await pool.query<{ c: string }>(
+    "SELECT count(*)::text AS c FROM notifications WHERE recipient_id = $1 AND read_at IS NULL",
+    [seller.id],
+  );
+  res.json({ notifications: rows.rows, unread_count: Number(unread.rows[0]?.c ?? 0) });
+}));
+
+// Mark one read. Idempotent: re-marking a read row is ok:true; an id that is
+// not the caller's own is the same 404 as an unknown id — no cross-account
+// oracle (there is nothing to learn: the row set is recipient-scoped).
+api.post("/notifications/:id/read", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage notifications." });
+    return;
+  }
+  if (!notificationsLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/notifications/:id/read" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const id = typeof req.params.id === "string" ? req.params.id : "";
+  const updated = await pool.query(
+    "UPDATE notifications SET read_at = now() WHERE id = $1 AND recipient_id = $2 AND read_at IS NULL RETURNING id",
+    [id, seller.id],
+  );
+  if (updated.rows.length === 0) {
+    // Already read, someone else's, or nonexistent — uniform 404.
+    res.status(404).json({ error: "Notification not found." });
+    return;
+  }
+  res.json({ ok: true });
+}));
+
+// Mark everything read (badge clear). Returns how many flipped.
+api.post("/notifications/read-all", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage notifications." });
+    return;
+  }
+  if (!notificationsLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/notifications/read-all" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const updated = await pool.query(
+    "UPDATE notifications SET read_at = now() WHERE recipient_id = $1 AND read_at IS NULL RETURNING id",
+    [seller.id],
+  );
+  res.json({ ok: true, updated: updated.rows.length });
 }));
 
 // THI-760 Phase 0 / THI-762: consume a verification token from an email link

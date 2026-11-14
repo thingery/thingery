@@ -6,7 +6,8 @@
 // logs metadata only; message bodies (which carry single-use links) are never
 // logged, and no email leaves the process in Phase 0 by construction.
 
-import { envValue } from "./config.js";
+import { envValue, notifyConfig } from "./config.js";
+import { ResendMailer } from "./resend.js";
 
 /** One outbound transactional email. `idempotencyKey` is belt-and-braces for
  * providers that honor it (Resend does) — replaying the same key must never
@@ -49,21 +50,25 @@ export class DryRunMailer implements Mailer {
 }
 
 /** Boot-time mailer selection. Fail-closed (config.ts F1 posture): an empty
- * or malformed NOTIFY_EMAIL_ENABLED counts as unset, and — decisive for
- * Phase 0 — no provider adapter exists yet, so EVERY configuration resolves
- * to DryRunMailer. Enabling the flag today produces a boot error line, not a
- * send path; the Resend adapter + outbox replace this in Phase 1 (plan §8
- * PR 5). This is what makes the Phase 0 deploy dark: no code path can emit
- * email, regardless of env. */
+ *  or malformed NOTIFY_EMAIL_ENABLED counts as unset. Phase 1 (THI-760 plan
+ *  §3/§8 PR 4) adds the Resend adapter: enabled + RESEND_API_KEY →
+ *  ResendMailer; enabled + key missing → boot error + DryRunMailer, never an
+ *  open send path. The delivery sweep (src/notify/delivery.ts) additionally
+ *  refuses to claim rows unless enabled — dark deploys leave outbox rows
+ *  pending, by design. */
 export function buildMailer(env: NodeJS.ProcessEnv = process.env): Mailer {
   const flag = (env.NOTIFY_EMAIL_ENABLED ?? "").trim();
   const enabled = flag === "1" || flag === "true";
   if (!enabled) return new DryRunMailer("NOTIFY_EMAIL_ENABLED off");
-  console.error(
-    "mailer: NOTIFY_EMAIL_ENABLED is set, but the provider adapter ships in Phase 1 " +
-      "(THI-760 plan §8 PR 5) — email stays in dry-run; nothing is sent.",
-  );
-  return new DryRunMailer("no provider adapter until Phase 1");
+  const cfg = notifyConfig(env);
+  if (cfg.resendApiKey === undefined) {
+    console.error(
+      "mailer: NOTIFY_EMAIL_ENABLED is on but RESEND_API_KEY is unset — " +
+        "fail-closed to dry-run; nothing is sent until the key is configured.",
+    );
+    return new DryRunMailer("enabled without RESEND_API_KEY (fail-closed)");
+  }
+  return new ResendMailer({ apiKey: cfg.resendApiKey, fromAddress: cfg.fromAddress });
 }
 
 const mailer: Mailer = buildMailer();

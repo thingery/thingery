@@ -311,3 +311,62 @@ export function renderSellerPayoutPaid(p: OrderFacts): RenderedEmail {
     facts: p,
   });
 }
+
+/** Registry: a notification payload (the PII-free JSONB the fan-out stores)
+ *  → the rendered email for its event type, with deep links built from the
+ *  deployment base URL. One source of truth for content: fan-out stores the
+ *  subject snapshot, the delivery sweep renders subject+body identically.
+ *  Unknown keys throw — the fan-out only emits ORDER_EMAIL_KEYS events, so an
+ *  unknown key is a programming error to surface, not silently mail. */
+export function renderOrderEmail(
+  eventType: string,
+  payload: Record<string, unknown>,
+  baseUrl: string,
+): RenderedEmail {
+  const str = (k: string): string | undefined => (typeof payload[k] === "string" ? (payload[k] as string) : undefined);
+  const num = (k: string): number | undefined => (typeof payload[k] === "number" ? (payload[k] as number) : undefined);
+  const facts: OrderFacts = {
+    itemTitle: str("item_title") ?? "",
+    amountCents: num("amount_cents") ?? 0,
+    currency: str("currency") ?? "EUR",
+    orderStatus: str("order_status") ?? "",
+    orderUrl: str("order_id") ? `${baseUrl}/order/${payload.order_id}` : baseUrl,
+    itemUrl: str("item_id") ? `${baseUrl}/item/${payload.item_id}` : undefined,
+  };
+  switch (eventType) {
+    case "buyer.order_placed":
+      return renderBuyerOrderPlaced({ ...facts, paymentDeadline: str("payment_deadline") });
+    case "buyer.payment_deadline_reminder":
+      return renderBuyerPaymentDeadlineReminder({ ...facts, paymentDeadline: str("payment_deadline") ?? "" });
+    case "buyer.order_cancelled":
+      return renderBuyerOrderCancelled({ ...facts, reason: str("reason") ?? "" });
+    case "buyer.payment_received":
+      return renderBuyerPaymentReceived(facts);
+    case "buyer.item_shipped":
+      return renderBuyerItemShipped({ ...facts, carrier: str("carrier"), trackingCode: str("tracking_code") });
+    case "buyer.order_delivered":
+      return renderBuyerOrderDelivered({ ...facts, disputeWindowHours: num("dispute_window_hours") ?? 48 });
+    case "buyer.refund_initiated":
+      return renderBuyerRefundInitiated({ ...facts, reason: str("reason") ?? "" });
+    case "buyer.refund_confirmed":
+      return renderBuyerRefundConfirmed(facts);
+    case "buyer.dispute_outcome":
+      return renderBuyerDisputeOutcome({ ...facts, outcome: str("outcome") ?? "" });
+    case "seller.off_platform_order":
+      return renderSellerOffPlatformOrder(facts);
+    case "seller.item_sold":
+      return renderSellerItemSold(facts);
+    case "seller.order_cancelled_by_buyer":
+      return renderSellerOrderCancelledByBuyer({ ...facts, reason: str("reason") ?? "" });
+    case "seller.dispute_opened":
+      return renderSellerDisputeOpened(facts);
+    case "seller.chargeback":
+      return renderSellerChargeback(facts);
+    case "seller.dispute_resolved":
+      return renderSellerDisputeResolved({ ...facts, outcome: str("outcome") ?? "" });
+    case "seller.payout_paid":
+      return renderSellerPayoutPaid(facts);
+    default:
+      throw new Error(`renderOrderEmail: unknown event type ${eventType}`);
+  }
+}

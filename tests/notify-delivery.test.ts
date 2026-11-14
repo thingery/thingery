@@ -109,7 +109,7 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
   const disabledCfg = notifyConfig({});
 
   interface Seed {
-    to: string;
+    to?: string; // undefined = the account's address; "" = deliberately no address
     verified: boolean;
     subject?: string;
     template?: string;
@@ -132,7 +132,7 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
     const account = s.accountId
       ? { id: s.accountId, email: (await db.query<{ email: string }>("SELECT email FROM sellers WHERE id = $1", [s.accountId])).rows[0].email }
       : await seedAccount(s.verified);
-    const email = s.to || account.email;
+    const email = s.to !== undefined ? s.to : account.email;
     const notif = await db.query<{ id: string }>(
       `INSERT INTO notifications (recipient_id, event_type, role, payload, dedupe_key)
        VALUES ($1, 'buyer.order_placed', 'buyer', $2::jsonb, $3) RETURNING id`,
@@ -145,7 +145,7 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
       `INSERT INTO email_outbox (notification_id, to_email, subject, template, payload, dedupe_key, attempts, next_attempt_at)
        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, CASE WHEN $8 THEN now() - interval '1 minute' ELSE now() + interval '1 hour' END)
        RETURNING id`,
-      [notif.rows[0].id, s.to, s.subject ?? "Order placed", s.template ?? "buyer.order_placed.v1",
+      [notif.rows[0].id, email, s.subject ?? "Order placed", s.template ?? "buyer.order_placed.v1",
        JSON.stringify({ item_title: "Vintage denim jacket" }), notif.rows[0].id, s.attempts ?? 0, s.nextAttemptPast ?? true],
     );
     return outbox.rows[0].id;
@@ -170,7 +170,7 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
   });
 
   it("sent: provider ok → status sent, attempts counted, provider id stored; body rendered from template+payload", async () => {
-    const id = await seedOutbox({ to: "", verified: true, subject: "Order placed: Vintage denim jacket — Thingery" });
+    const id = await seedOutbox({ verified: true, subject: "Order placed: Vintage denim jacket — Thingery" });
     const mailer = new ScriptedMailer([{ ok: true, providerMessageId: "re-123" }]);
     const r = await runNotifyDelivery(enabledCfg, mailer);
     expect(r.sent).toBeGreaterThanOrEqual(1);

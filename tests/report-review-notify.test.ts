@@ -224,6 +224,8 @@ describe.skipIf(!available)("report review notification (THI-788 step 3)", () =>
     expect(desc).not.toContain("https://");
     expect(desc).toContain("…");
     expect(desc).toContain("UNTRUSTED user-submitted content");
-    expect(desc.length).toBeLessThan(700);
+    // 600-char motivation must be truncated to 500 + ~200 boilerplate; an
+    // untruncated motivation would push this far over 1000.
+    expect(desc.length).toBeLessThan(900);
   });
 });

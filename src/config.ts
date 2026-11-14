@@ -149,6 +149,63 @@ export function orderFlowConfig(): OrderFlowConfig {
   };
 }
 
+// Notifications (THI-760 plan Phase 1 / THI-763): the deploy is dark by
+// default — NOTIFY_EMAIL_ENABLED defaults to false, so in-app notifications
+// work end-to-end and zero emails leave the process. Same fail-closed rules
+// as orderFlowConfig: empty/whitespace env values count as unset (F1), and a
+// half-configured provider (flag on, key missing) degrades to dry-run with a
+// boot error, never to an open send path (enforced in src/mailer.ts + the
+// delivery sweep, later PRs of the same plan).
+export interface NotifyConfig {
+  // Master email switch (default false — in-app only).
+  emailEnabled: boolean;
+  // Resend provider key (plan §3: managed provider, not self-hosted SMTP).
+  resendApiKey: string | undefined;
+  // Sender identity (plan §3: no-reply, no Reply-To — adopted decision #4).
+  fromAddress: string;
+  // Absolute base for deep links: NOTIFY_PUBLIC_BASE_URL overrides
+  // PUBLIC_BASE_URL, then the dev default (plan §3).
+  publicBaseUrl: string;
+  // Sweep cadence for both notify sweeps (fan-out + delivery).
+  sweepIntervalMinutes: number;                 // 1
+  // Per-recipient rate cap (overflow stays pending; next sweep retries).
+  maxEmailsPerRecipientPerHour: number;         // 6
+  // Per-run global send cap (protects the provider free tier, plan §4).
+  maxSendsPerSweep: number;                     // 50
+}
+
+export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig {
+  // envValue reads process.env directly; notifyConfig takes an explicit env
+  // so tests can exercise parsing without mutating process state — same F1
+  // empty-is-unset rule, scoped here to the passed environment.
+  const value = (name: string): string | undefined => {
+    const raw = env[name];
+    if (raw === undefined) return undefined;
+    const trimmed = raw.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  };
+  const int = (name: string, fallback: number): number => {
+    const raw = value(name);
+    if (raw === undefined) return fallback;
+    const n = Number(raw);
+    return Number.isInteger(n) && n > 0 ? n : fallback;
+  };
+  const flag = (env.NOTIFY_EMAIL_ENABLED ?? "").trim();
+  return {
+    emailEnabled: flag === "1" || flag === "true",
+    resendApiKey: value("RESEND_API_KEY"),
+    fromAddress: value("NOTIFY_FROM_ADDRESS") ?? "notifications@thingery.dev",
+    publicBaseUrl: (
+      value("NOTIFY_PUBLIC_BASE_URL") ??
+      value("PUBLIC_BASE_URL") ??
+      "http://localhost:3000"
+    ).replace(/\/+$/, ""),
+    sweepIntervalMinutes: int("NOTIFY_SWEEP_INTERVAL_MINUTES", 1),
+    maxEmailsPerRecipientPerHour: int("NOTIFY_MAX_EMAILS_PER_RECIPIENT_PER_HOUR", 6),
+    maxSendsPerSweep: int("NOTIFY_MAX_SENDS_PER_SWEEP", 50),
+  };
+}
+
 /** Boot-time report (fail-closed errors are logged, never swallowed). */
 export function logConfigBootReport(cfg: OrderFlowConfig = orderFlowConfig()): OrderFlowConfig {
   if (cfg.stripePaymentsEnabled) {

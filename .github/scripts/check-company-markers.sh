@@ -69,19 +69,35 @@ scan_lines() {
 case "$MODE" in
   tree)
     echo "Full-tree content-marker scan (docs/** scripts/**)..."
+    # git failures must fail closed — a failed file listing must never look
+    # like a clean scan (a bad-revision git diff used to exit 0)
+    tree_files="$(git ls-files -- 'docs/**' 'scripts/**')" || {
+      echo "::error::git ls-files failed; failing closed" >&2
+      exit 1
+    }
     # process substitution keeps scan_lines in the main shell so fail= sticks
     scan_lines < <(
-      git ls-files -- 'docs/**' 'scripts/**' | while IFS= read -r f; do
+      printf '%s\n' "$tree_files" | while IFS= read -r f; do
         awk -v f="$f" '{print f "\t" $0}' "$f"
       done
     )
     ;;
   pr)
-    echo "PR added-line content-marker scan (docs/** scripts/**) vs ${BASE_REF}..."
+    BASE_SHA="$(git rev-parse --verify -q "${BASE_REF}^{commit}" || true)"
+    if [ -z "$BASE_SHA" ]; then
+      echo "::error::invalid base ref '${BASE_REF}' — cannot compute PR diff; failing closed" >&2
+      exit 1
+    fi
+    echo "PR added-line content-marker scan (docs/** scripts/**) vs ${BASE_SHA}..."
     # one "path<TAB>added-line" pair per + line, with its file header;
-    # process substitution keeps scan_lines in the main shell so fail= sticks
+    # process substitution keeps scan_lines in the main shell so fail= sticks;
+    # a failed git diff must fail closed, never scan-nothing-and-pass
+    diff_out="$(git diff --diff-filter=ACMRT -U0 "${BASE_SHA}...HEAD" -- docs scripts)" || {
+      echo "::error::git diff failed vs ${BASE_SHA}; failing closed" >&2
+      exit 1
+    }
     scan_lines < <(
-      git diff --diff-filter=ACMRT -U0 "${BASE_REF}...HEAD" -- docs scripts \
+      printf '%s\n' "$diff_out" \
         | awk '/^\+\+\+ /{f=substr($2,3)} /^\+[^+]/{if (f!="") print f "\t" substr($0,2)}'
     )
     ;;

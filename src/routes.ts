@@ -6,16 +6,22 @@ import { z } from "zod";
 import {
   accountByEmail,
   createAccount,
+  EMAIL_VERIFICATION_TOKEN_RE,
   EMAIL_VERIFICATION_TTL_S,
+  emailVerificationTokenHash,
+  issueEmailVerification,
   regenerateApiKey,
   sellerFromSession,
   sessionCookieOptions,
   signSession,
   SESSION_SECRET,
+  verifyEmailToken,
   verifyPassword,
   SESSION_COOKIE,
   type SignupRow,
 } from "./auth.js";
+import { sendMail, type MailMessage } from "./mailer.js";
+import { renderEmailVerification } from "./notify/templates.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import {
@@ -84,6 +90,38 @@ export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 im
 export const imageMutationLimiter = new RateLimiter(60, 60 * 60_000); // 60 image delete/reorder mutations per seller per hour (THI-308 F6: churn here must never consume upload quota)
 export const llmCredentialLimiter = new RateLimiter(10, 60 * 60_000); // 10 BYO credential writes per seller per hour (THI-189)
 export const chatgptConnectLimiter = new RateLimiter(10, 60 * 60_000); // 10 ChatGPT connect starts per seller per hour (THI-193 §3.2)
+const emailVerifyLimiter = new RateLimiter(60, 60 * 60_000); // 60 verify-link attempts per IP per hour (THI-762 — link-consumption surface; tokens are unguessable, the cap protects the DB)
+const emailResendLimiter = new RateLimiter(3, 60 * 60_000); // 3 verification resends per seller per hour (THI-762)
+
+/** Public base for email links (THI-760 plan §3): NOTIFY_PUBLIC_BASE_URL
+ * overrides, PUBLIC_BASE_URL next, then the dev default — dry-run bodies need
+ * a well-formed absolute link even when nothing is configured. Empty strings
+ * count as unset (config.ts F1 rule). */
+function emailLinkBase(): string {
+  return (
+    process.env.NOTIFY_PUBLIC_BASE_URL?.trim() ||
+    process.env.PUBLIC_BASE_URL?.trim() ||
+    "http://localhost:3000"
+  ).replace(/\/+$/, "");
+}
+
+/** Builds the verification email exactly once per issuance site (signup,
+ * resend) so both paths cannot drift. The idempotency key pins the send to
+ * this specific token (its hash) — a replayed key can never double-send. */
+function verificationEmailMessage(to: string, token: string): MailMessage {
+  const verifyUrl = `${emailLinkBase()}/api/verify-email?token=${encodeURIComponent(token)}`;
+  const rendered = renderEmailVerification({
+    verifyUrl,
+    ttlHours: EMAIL_VERIFICATION_TTL_S / 3600,
+  });
+  return {
+    to,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: rendered.html,
+    idempotencyKey: `email-verification:${emailVerificationTokenHash(token)}`,
+  };
+}
 
 function clientIp(req: Request): string {
   return req.ip ?? "unknown";
@@ -140,6 +178,16 @@ api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
   }
   // THI-112: signup success — correlated by seller id + IP (H4.2).
   logSecurityEvent({ type: "signup", outcome: "success" }, { sellerId: account.id, ip: clientIp(req) });
+  // THI-760 Phase 0 / THI-762: fire the verification email through the mailer
+  // seam. buildMailer resolves to DryRunMailer in EVERY Phase 0 configuration
+  // (flag off by default; no provider adapter exists yet), so this records/
+  // logs and nothing leaves the process — and a mailer fault must never fail
+  // signup.
+  try {
+    await sendMail(verificationEmailMessage(account.email, account.email_verification_token));
+  } catch (err) {
+    console.error("email verification send failed (ignored):", err);
+  }
   // Sign at the live epoch (spec THI-115 §3): a fresh account is epoch 0, but
   // passing the row's value keeps the cookie correct-by-construction.
   res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
@@ -206,7 +254,76 @@ api.get("/me", asyncHandler(async (req: Request, res: Response) => {
     return;
   }
   // THI-114: no api_key here — the key is show-once (signup/regenerate).
-  res.json({ seller: { name: seller.display_name } });
+  // THI-762: email + verification state — the session owner's own account
+  // facts (additive fields; anonymous shape unchanged).
+  res.json({
+    seller: {
+      name: seller.display_name,
+      email: seller.email,
+      email_verified: seller.email_verified_at !== null,
+    },
+  });
+}));
+
+// THI-760 Phase 0 / THI-762: consume a verification token from an email link
+// (browser-friendly GET). Uniform failure: unknown, expired, reused, and
+// malformed tokens are one 400 body — no account identifier is input, so
+// there is nothing to enumerate; success is the only signal. Rate-limited
+// per IP: tokens are 256-bit random (brute force is not the threat), the cap
+// just keeps the link-consumption endpoint from hammering the DB.
+api.get("/verify-email", asyncHandler(async (req: Request, res: Response) => {
+  if (!emailVerifyLimiter.allow(`ip:${clientIp(req)}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/verify-email" }, { ip: clientIp(req) });
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const token = typeof req.query.token === "string" ? req.query.token : "";
+  const sellerId = EMAIL_VERIFICATION_TOKEN_RE.test(token) ? await verifyEmailToken(token) : null;
+  if (!sellerId) {
+    res.status(400).json({ error: "Invalid or expired verification link." });
+    return;
+  }
+  logSecurityEvent({ type: "email_verified", outcome: "success" }, { sellerId });
+  res.json({ ok: true, email_verified: true });
+}));
+
+// THI-760 Phase 0 / THI-762: resend (or first-time issue, for legacy accounts)
+// the verification email. Session-auth only, 3/hour per account. The response
+// is uniform ok:true for every account state — already-verified, no-email
+// (OAuth accounts), and bounce-suppressed accounts get the same body as a
+// real send; the caller is the session owner, so there is no cross-account
+// enumeration surface, and the mailer (dry-run in Phase 0) records the truth.
+api.post("/me/resend-email-verification", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage email verification." });
+    return;
+  }
+  if (!emailResendLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent(
+      { type: "rate_limit", route: "/api/me/resend-email-verification" },
+      { sellerId: seller.id },
+    );
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const issued = await issueEmailVerification(seller.id);
+  const token = issued?.status === "issued" ? issued.token : null;
+  if (issued?.status === "issued") {
+    try {
+      await sendMail(verificationEmailMessage(issued.email, issued.token));
+    } catch (err) {
+      console.error("email verification send failed (ignored):", err);
+    }
+  }
+  const body: { ok: true; email_verification?: { token: string; expires_in_s: number } } = { ok: true };
+  // Show-once dev surfacing (same rule as signup): the plaintext token appears
+  // in a response only outside production.
+  if (token && process.env.NODE_ENV !== "production") {
+    body.email_verification = { token, expires_in_s: EMAIL_VERIFICATION_TTL_S };
+  }
+  res.set("Cache-Control", "no-store"); // the dev body may carry the show-once token
+  res.json(body);
 }));
 
 // THI-114 (security doc §6 H2): rotate the seller API key. Session-auth only;

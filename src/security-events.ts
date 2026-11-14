@@ -34,7 +34,11 @@ export type SecurityEventRoute =
   | "/api/wanted"
   | "/api/wanted/:id"
   | "/api/wanted/:id/expire"
-  | "/api/wanted/:id/renew";
+  | "/api/wanted/:id/renew"
+  // THI-762 (THI-760 Phase 0): email-verification link consumption + resend
+  // limiter 429s.
+  | "/api/verify-email"
+  | "/api/me/resend-email-verification";
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a
@@ -147,7 +151,11 @@ export type SecurityEvent =
    *  reveal in the admin dispute workspace. `orderId` is the server-generated
    *  order uuid (not request payload text); the address itself is never
    *  logged. */
-  | { type: "admin_pii_reveal"; orderId: string };
+  | { type: "admin_pii_reveal"; orderId: string }
+  /** THI-762 (THI-760 Phase 0): a verification token was consumed (the
+   *  unverified → verified transition) — seller id only, no token material
+   *  (hash or plaintext) ever reaches the event log. */
+  | { type: "email_verified"; outcome: "success" };
 
 export interface SecurityEventContext {
   sellerId?: string;

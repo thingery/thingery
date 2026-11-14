@@ -35,6 +35,9 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       | "/api/wanted/:id"
       | "/api/wanted/:id/expire"
       | "/api/wanted/:id/renew"
+      // THI-762: email-verification limiter slugs.
+      | "/api/verify-email"
+      | "/api/me/resend-email-verification"
     >();
     const routes: SecurityEventRoute[] = [
       "/api/signup",
@@ -50,6 +53,8 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       "/api/wanted/:id",
       "/api/wanted/:id/expire",
       "/api/wanted/:id/renew",
+      "/api/verify-email",
+      "/api/me/resend-email-verification",
     ];
     expectTypeOf(routes).toEqualTypeOf<SecurityEventRoute[]>();
   });

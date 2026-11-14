@@ -24,7 +24,7 @@ const WATERMARK = "order-events";
  *  behind the watermark; re-reading this overlap keeps them in play while the
  *  dedupe keys absorb the replay. 5 min ≫ any order transaction's lifetime. */
 const OVERLAP_MS = 5 * 60_000;
-const BATCH_LIMIT = 200;
+export const BATCH_LIMIT = 200;
 /** Plan §1.1 row 2: remind ~4h before the payment deadline, once per order. */
 const REMINDER_LEAD_MS = 4 * 3_600_000;
 

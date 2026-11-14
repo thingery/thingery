@@ -45,7 +45,7 @@ describe.skipIf(!available)("report review notification (THI-788 step 3)", () =>
   const runTag = crypto.randomBytes(4).toString("hex");
   const savedEnv: Record<string, string | undefined> = {};
   let received: Received[] = [];
-  let respond: { status: number; json: unknown } = { status: 200, json: { id: "triage-1" } };
+  let respond: { status: number; json: unknown; headers?: Record<string, string> } = { status: 200, json: { id: "triage-1" } };
 
   async function mkSeller(): Promise<string> {
     const r = await db.query<{ id: string }>(
@@ -74,6 +74,7 @@ describe.skipIf(!available)("report review notification (THI-788 step 3)", () =>
       req.on("end", () => {
         received.push({ auth: req.headers.authorization, body: JSON.parse(raw || "{}") });
         res.statusCode = respond.status;
+        for (const [k, v] of Object.entries(respond.headers ?? {})) res.setHeader(k, v);
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify(respond.json));
       });
@@ -171,6 +172,45 @@ describe.skipIf(!available)("report review notification (THI-788 step 3)", () =>
     expect(row.rows[0].board_issue_ref).toBeNull();
   });
 
+  it("over-long id (>256) treated as no usable id: ref NULL (THI-792)", async () => {
+    setEnv({
+      REPORT_REVIEW_CREATE_URL: `${mockBase}/create`,
+      REPORT_REVIEW_API_TOKEN: "test-token",
+    });
+    respond = { status: 200, json: { id: "x".repeat(300) } };
+    const reporter = await mkSeller();
+    const item = await mkItem(await mkSeller());
+    const report = await createItemReport({
+      itemId: item, reporterAccountId: reporter, reason: "other",
+      motivation: "Endpoint echoes a misbehaving over-long reference id.",
+    });
+    expect(report.status).toBe("open");
+    const row = await db.query<{ board_issue_ref: string | null }>(
+      "SELECT board_issue_ref FROM reports WHERE id = $1", [report.id],
+    );
+    expect(row.rows[0].board_issue_ref).toBeNull();
+  });
+
+  it("3xx redirect answered with the bearer must not be followed: ref NULL, no throw (THI-792)", async () => {
+    setEnv({
+      REPORT_REVIEW_CREATE_URL: `${mockBase}/create`,
+      REPORT_REVIEW_API_TOKEN: "test-token",
+    });
+    respond = { status: 302, json: {}, headers: { Location: `${mockBase}/elsewhere` } };
+    const reporter = await mkSeller();
+    const item = await mkItem(await mkSeller());
+    const report = await createItemReport({
+      itemId: item, reporterAccountId: reporter, reason: "other",
+      motivation: "A redirect answer must fail closed, never follow it.",
+    });
+    expect(report.status).toBe("open");
+    const row = await db.query<{ board_issue_ref: string | null }>(
+      "SELECT board_issue_ref FROM reports WHERE id = $1", [report.id],
+    );
+    expect(row.rows[0].board_issue_ref).toBeNull();
+    expect(received).toHaveLength(1); // original call only — no second hop
+  });
+
   it("description truncates long motivations and works without a URL template", () => {
     const config: ReportReviewConfig = { createUrl: "x", apiToken: "y" };
     const desc = reportReviewDescription(
@@ -183,6 +223,7 @@ describe.skipIf(!available)("report review notification (THI-788 step 3)", () =>
     expect(desc).toContain("item i1");
     expect(desc).not.toContain("https://");
     expect(desc).toContain("…");
+    expect(desc).toContain("UNTRUSTED user-submitted content");
     expect(desc.length).toBeLessThan(700);
   });
 });

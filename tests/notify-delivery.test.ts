@@ -133,20 +133,21 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
       ? { id: s.accountId, email: (await db.query<{ email: string }>("SELECT email FROM sellers WHERE id = $1", [s.accountId])).rows[0].email }
       : await seedAccount(s.verified);
     const email = s.to !== undefined ? s.to : account.email;
+    const payload = JSON.stringify({
+      order_id: crypto.randomUUID(), item_id: crypto.randomUUID(), item_title: "Vintage denim jacket",
+      amount_cents: 1234, currency: "EUR", order_status: "pending",
+    });
     const notif = await db.query<{ id: string }>(
       `INSERT INTO notifications (recipient_id, event_type, role, payload, dedupe_key)
        VALUES ($1, 'buyer.order_placed', 'buyer', $2::jsonb, $3) RETURNING id`,
-      [account.id, JSON.stringify({
-        order_id: crypto.randomUUID(), item_id: crypto.randomUUID(), item_title: "Vintage denim jacket",
-        amount_cents: 1234, currency: "EUR", order_status: "pending",
-      }), `thi763d:${crypto.randomUUID()}`],
+      [account.id, payload, `thi763d:${crypto.randomUUID()}`],
     );
     const outbox = await db.query<{ id: string }>(
       `INSERT INTO email_outbox (notification_id, to_email, subject, template, payload, dedupe_key, attempts, next_attempt_at)
        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, CASE WHEN $8 THEN now() - interval '1 minute' ELSE now() + interval '1 hour' END)
        RETURNING id`,
       [notif.rows[0].id, email, s.subject ?? "Order placed", s.template ?? "buyer.order_placed.v1",
-       JSON.stringify({ item_title: "Vintage denim jacket" }), notif.rows[0].id, s.attempts ?? 0, s.nextAttemptPast ?? true],
+       payload, notif.rows[0].id, s.attempts ?? 0, s.nextAttemptPast ?? true],
     );
     return outbox.rows[0].id;
   }

@@ -38,6 +38,10 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       // THI-762: email-verification limiter slugs.
       | "/api/verify-email"
       | "/api/me/resend-email-verification"
+      // THI-763 (THI-760 Phase 1): notification limiter slugs.
+      | "/api/notifications"
+      | "/api/notifications/:id/read"
+      | "/api/notifications/read-all"
     >();
     const routes: SecurityEventRoute[] = [
       "/api/signup",

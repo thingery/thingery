@@ -196,7 +196,8 @@ describe("mailer seam + templates (THI-762, no DB required)", () => {
     expect(buildMailer({}).kind).toBe("dry_run");
     expect(buildMailer({ NOTIFY_EMAIL_ENABLED: "" }).kind).toBe("dry_run");
     expect(buildMailer({ NOTIFY_EMAIL_ENABLED: "nope" }).kind).toBe("dry_run"); // F1: unknown value ≠ enabled
-    // Even with the flag on there is no provider adapter until Phase 1 —
+    // Flag on without RESEND_API_KEY stays fail-closed to dry-run (Phase 1
+    // adapter requires both — see tests/notify-delivery.test.ts) —
     // no configuration can send email in Phase 0.
     expect(buildMailer({ NOTIFY_EMAIL_ENABLED: "1" }).kind).toBe("dry_run");
     expect(buildMailer({ NOTIFY_EMAIL_ENABLED: "true" }).kind).toBe("dry_run");

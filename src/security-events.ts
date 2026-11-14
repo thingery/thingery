@@ -38,7 +38,12 @@ export type SecurityEventRoute =
   // THI-762 (THI-760 Phase 0): email-verification link consumption + resend
   // limiter 429s.
   | "/api/verify-email"
-  | "/api/me/resend-email-verification";
+  | "/api/me/resend-email-verification"
+  // THI-763 (THI-760 Phase 1): notification read/mark limiter 429s — one
+  // slug per route.
+  | "/api/notifications"
+  | "/api/notifications/:id/read"
+  | "/api/notifications/read-all";
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a

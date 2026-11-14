@@ -18,6 +18,7 @@ import { stripeWebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
 import { logConfigBootReport, orderFlowConfig } from "./config.js";
 import { startSweepScheduler } from "./orders-sweep.js";
+import { startNotifyFanoutTimer } from "./notify/fanout.js";
 import { statsHandler } from "./stats.js";
 import { homeSearchHandler } from "./home-search.js";
 import {
@@ -190,6 +191,10 @@ function runHttp(): void {
     // Order deadline sweeps + webhook reprocessing (spec THI-3 §4.5):
     // boot run + every SWEEP_INTERVAL_MINUTES (10 default), unref'd.
     startSweepScheduler(orderFlowConfig());
+    // Notification fan-out (THI-760 plan Phase 1 / THI-763): order_events →
+    // notifications + email outbox, watermark-driven; boot run + every
+    // NOTIFY_SWEEP_INTERVAL_MINUTES (1 default), unref'd.
+    startNotifyFanoutTimer();
     console.log(`Thingery MCP server listening on http://localhost:${PORT}`);
     console.log(`  MCP endpoint:     http://localhost:${PORT}/mcp`);
     console.log(`  Health check:     http://localhost:${PORT}/healthz`);

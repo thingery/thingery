@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   accountByEmail,
   createAccount,
+  EMAIL_VERIFICATION_TTL_S,
   regenerateApiKey,
   sellerFromSession,
   sessionCookieOptions,
@@ -142,7 +143,19 @@ api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
   // Sign at the live epoch (spec THI-115 §3): a fresh account is epoch 0, but
   // passing the row's value keeps the cookie correct-by-construction.
   res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
-  res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
+  // THI-762 (THI-760 Phase 0 PR 1): surface the verification token ONLY outside
+  // production — the show-once plaintext for dev/testing until PR 2's mailer
+  // logs it via DryRunMailer. Production never returns it; the signup flow and
+  // every existing response field are otherwise unchanged (deployable dark).
+  const sellerBody = { name: account.display_name, email: account.email, api_key: account.api_key };
+  if (process.env.NODE_ENV === "production") {
+    res.json({ seller: sellerBody });
+  } else {
+    res.json({
+      seller: sellerBody,
+      email_verification: { token: account.email_verification_token, expires_in_s: EMAIL_VERIFICATION_TTL_S },
+    });
+  }
 }));
 
 api.post("/login", asyncHandler(async (req: Request, res: Response) => {

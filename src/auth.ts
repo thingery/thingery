@@ -385,8 +385,52 @@ export interface AccountRow extends SellerRow {
 
 /** Signup result: the account row plus the freshly generated key — the one
  * show-once moment where the plaintext exists (in memory, never in the DB;
- * THI-114 + THI-158 contract). */
-export type SignupRow = AccountRow & { api_key: string };
+ * THI-114 + THI-158 contract). `email_verification_token` follows the same
+ * show-once rule (THI-762 / THI-760 Phase 0): only its sha256 hash is stored. */
+export type SignupRow = AccountRow & { api_key: string; email_verification_token: string };
+
+// ---------------------------------------------------------------------------
+// Email verification (THI-760 plan Phase 0 / THI-762): signup mints a
+// single-use, expiring, 256-bit token; the database stores only its sha256
+// hash (same at-rest reasoning as apiKeyHash — an unsalted hash is fine for a
+// high-entropy random token, and lookup stays one indexed equality). No email
+// is sent in Phase 0: the plaintext surfaces only in non-production responses
+// (dev/testing) until the mailer arrives in PR 2. Legacy and NULL-email
+// accounts are simply "not verified" — email_verified_at stays NULL until a
+// token is consumed; nothing else about the account changes.
+
+/** Bearer-style prefix for email verification tokens (dispatch convention:
+ * thg_ key / thgo_ oauth / thgs_ session — this one never rides the
+ * Authorization header; the prefix exists for boundary format-gating). */
+export const EMAIL_VERIFICATION_TOKEN_PREFIX = "thge_";
+
+/** Token lifetime: 48h (THI-760 Phase 0; long enough for a weekly check-in,
+ * short enough that an abandoned link dies quickly). Resend replaces the
+ * outstanding token wholesale (PR 2). */
+export const EMAIL_VERIFICATION_TTL_S = 48 * 3600;
+
+/** At-rest form of a `thge_` token (sellers.email_verification_token_hash). */
+export function emailVerificationTokenHash(token: string): string {
+  return crypto.createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+export interface EmailVerificationToken {
+  /** Plaintext `thge_...` — show-once, same rule as the signup API key. */
+  token: string;
+  /** sha256 hex — what sellers.email_verification_token_hash stores. */
+  tokenHash: string;
+  /** now + EMAIL_VERIFICATION_TTL_S — email_verification_expires_at. */
+  expiresAt: Date;
+}
+
+export function newEmailVerificationToken(nowMs = Date.now()): EmailVerificationToken {
+  const token = `${EMAIL_VERIFICATION_TOKEN_PREFIX}${crypto.randomBytes(32).toString("base64url")}`;
+  return {
+    token,
+    tokenHash: emailVerificationTokenHash(token),
+    expiresAt: new Date(nowMs + EMAIL_VERIFICATION_TTL_S * 1000),
+  };
+}
 
 export async function createAccount(
   email: string,
@@ -396,13 +440,25 @@ export async function createAccount(
   // THI-114/THI-158: the key is generated here and handed back exactly once
   // from this variable — the database stores only its hash.
   const apiKey = newApiKey();
+  // THI-762: same show-once contract for the verification token. Emitted at
+  // signup for every new account (legacy accounts verify via resend, PR 2).
+  const verification = newEmailVerificationToken();
   const { rows } = await pool.query<SellerRow & { email: string; session_epoch: number }>(
-    `INSERT INTO sellers (api_key_hash, api_key_prefix, api_key_created_at, display_name, email, password_hash)
-     VALUES ($1, $2, now(), $3, $4, $5)
+    `INSERT INTO sellers (api_key_hash, api_key_prefix, api_key_created_at, display_name, email, password_hash,
+                          email_verification_token_hash, email_verification_expires_at)
+     VALUES ($1, $2, now(), $3, $4, $5, $6, $7)
      RETURNING id, display_name, email, session_epoch`,
-    [apiKeyHash(apiKey), apiKeyPrefix(apiKey), displayName, email, hashPassword(password)],
+    [
+      apiKeyHash(apiKey),
+      apiKeyPrefix(apiKey),
+      displayName,
+      email,
+      hashPassword(password),
+      verification.tokenHash,
+      verification.expiresAt,
+    ],
   );
-  return { ...rows[0], api_key: apiKey, password_hash: null };
+  return { ...rows[0], api_key: apiKey, password_hash: null, email_verification_token: verification.token };
 }
 
 /** Login path. THI-158 contract: hash-only schema — login no longer returns

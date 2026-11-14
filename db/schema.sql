@@ -23,6 +23,34 @@ ALTER TABLE sellers ADD COLUMN IF NOT EXISTS password_hash TEXT;
 -- for that seller at once. Default 0 keeps seeded/existing sellers usable.
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS session_epoch INT NOT NULL DEFAULT 0;
 
+-- Email verification groundwork (THI-760 plan Phase 0 / THI-762; board-approved
+-- plan revision aad0e354). One accounts table (sellers) holds buyers and sellers
+-- alike, and `email` has never been verified (docs/security.md §4 H4): no
+-- notification email may ever be sent to an address that is unverified or NULL.
+-- Phase 0 lays the columns and mints the token only — nothing gates sending on
+-- email_verified_at yet (all sending arrives in later phases; this deploy is
+-- dark by construction). Additive, expand-only, idempotent:
+--   email_verified_at               set once, by consuming a valid token
+--   email_verification_token_hash   sha256 hex of the live single-use token;
+--                                   NULL when none is outstanding (also cleared
+--                                   on consumption — a reused token must fail)
+--   email_verification_expires_at   the live token's TTL anchor (48h,
+--                                   src/auth.ts). Extension of the plan's
+--                                   three-column list: its own acceptance
+--                                   criteria require expiring tokens, and the
+--                                   codebase convention for expiring single-use
+--                                   credentials is an explicit timestamp column
+--                                   (oauth_codes.expires_at) — noted in the PR.
+--   email_bounced_at                groundwork for Phase 1 bounce suppression
+--                                   (delivery sweep marks hard bounces and
+--                                   suppresses further sends); never set yet.
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS email_verification_token_hash TEXT;
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS email_verification_expires_at TIMESTAMPTZ;
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS email_bounced_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS sellers_email_verification_token_hash_idx
+  ON sellers (email_verification_token_hash) WHERE email_verification_token_hash IS NOT NULL;
+
 -- API key hash at rest (security doc §6 H2 fix 1; THI-114 expand → THI-158
 -- contract). Fresh databases store only the sha256 hash. Legacy databases
 -- are migrated hash-before-drop so no seller key is ever invalidated:

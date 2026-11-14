@@ -163,7 +163,7 @@ describe.skipIf(!available)("email verification routes (THI-762 PR 2)", () => {
     const email = `thi762-r-me-${runTag}@example.test`;
     const { setCookie, body } = await signupAndLogin(email);
     const authed = await fetch(`${base}/api/me`, { headers: { cookie: setCookie ?? "" } });
-    expect(await authed.json()).toEqual({ seller: { name: body.seller.name, email, email_verified: false } });
+    expect(await authed.json()).toEqual({ seller: { name: body.seller.name, email, email_verified: false, unread_notifications: 0 } }); // THI-763: additive field
 
     await fetch(`${base}/api/verify-email?token=${encodeURIComponent(body.email_verification.token)}`);
     const verified = await fetch(`${base}/api/me`, { headers: { cookie: setCookie ?? "" } });

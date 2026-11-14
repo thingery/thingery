@@ -185,7 +185,7 @@ describe("a thgs_ bearer has no authority outside /mcp", () => {
       const viaBearer = await fetch(`${baseUrl}/api/me`, { headers: bearer(validSession()) });
       expect(await viaBearer.json()).toEqual({ seller: null });
       const viaCookie = await fetch(`${baseUrl}/api/me`, { headers: sessionCookie() });
-      expect(await viaCookie.json()).toEqual({ seller: { name: "Web User", email: null, email_verified: false } }); // THI-762: additive /api/me fields
+      expect(await viaCookie.json()).toEqual({ seller: { name: "Web User", email: null, email_verified: false, unread_notifications: 0 } }); // THI-762/THI-763: additive /api/me fields
       const mint = await fetch(`${baseUrl}/api/me/api-key`, { method: "POST", headers: bearer(validSession()) });
       expect(mint.status).toBe(401);
     });

@@ -30,6 +30,7 @@ import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { RateLimiter } from "./rate-limit.js";
 import { logSecurityEvent } from "./security-events.js";
+import { createReportReviewTask, reportReviewConfig } from "./report-review-notify.js";
 
 /** Spec: canned causes, stable slugs. The DB CHECK mirrors this list
  *  exactly; labels live in the frontend i18n (private repo). */
@@ -65,6 +66,40 @@ export interface ItemReport {
   id: string;
   status: "open";
   created_at: Date;
+}
+
+/** Best-effort triage notification (spec §board notification): one attempt
+ *  after the INSERT committed, outside the transaction. Never throws to the
+ *  caller — a notification failure must not fail a saved report. */
+async function notifyReview(input: {
+  report: ItemReport;
+  itemId: string;
+  reason: string;
+  motivation: string;
+  reporterAccountId: string;
+}): Promise<void> {
+  const config = reportReviewConfig();
+  if (!config) return; // notification disabled: rows land, ref stays NULL
+  try {
+    const ref = await createReportReviewTask(
+      {
+        report: input.report,
+        itemId: input.itemId,
+        reason: input.reason,
+        motivation: input.motivation,
+        reporterAccountId: input.reporterAccountId,
+        createdAt: input.report.created_at,
+      },
+      config,
+    );
+    if (ref) {
+      await setBoardIssueRef(input.report.id, ref);
+    } else {
+      console.warn(`[reports] review endpoint returned no task id for report ${input.report.id}`);
+    }
+  } catch (err) {
+    console.warn(`[reports] review notification failed for report ${input.report.id}: ${(err as Error).message}`);
+  }
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -123,6 +158,16 @@ export async function createItemReport(
         [input.reporterAccountId, input.itemId, input.reason, motivation],
       );
       await db.query("COMMIT");
+      // Triage task creation happens after COMMIT (spec): an external call
+      // must not hold the insert lock, and a committed report is never lost
+      // to a notification failure.
+      await notifyReview({
+        report: inserted.rows[0],
+        itemId: input.itemId,
+        reason: input.reason,
+        motivation,
+        reporterAccountId: input.reporterAccountId,
+      });
       return inserted.rows[0];
     } catch (err) {
       await db.query("ROLLBACK").catch(() => {});
@@ -138,9 +183,9 @@ export async function createItemReport(
   }
 }
 
-/** Board notification seam (THI-788 step 3 fills this in). Exported for
- *  that PR: marks the report's board_issue_ref after a successful issue
- *  creation, outside any report transaction. */
+/** Records the external triage task ref on a report (spec: filled by the
+ *  notification seam after a successful create, never inside the insert
+ *  transaction). */
 export async function setBoardIssueRef(
   reportId: string,
   boardIssueRef: string,

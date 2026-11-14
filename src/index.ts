@@ -16,9 +16,11 @@ import { mountApiRoutes } from "./routes.js";
 import { mountOpenaiAppsChallenge } from "./openai-apps-challenge.js";
 import { stripeWebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
-import { logConfigBootReport, orderFlowConfig } from "./config.js";
+import { logConfigBootReport, notifyConfig, orderFlowConfig } from "./config.js";
 import { startSweepScheduler } from "./orders-sweep.js";
 import { startNotifyFanoutTimer } from "./notify/fanout.js";
+import { startNotifyDeliveryTimer } from "./notify/delivery.js";
+import { buildMailer } from "./mailer.js";
 import { statsHandler } from "./stats.js";
 import { homeSearchHandler } from "./home-search.js";
 import {
@@ -195,6 +197,9 @@ function runHttp(): void {
     // notifications + email outbox, watermark-driven; boot run + every
     // NOTIFY_SWEEP_INTERVAL_MINUTES (1 default), unref'd.
     startNotifyFanoutTimer();
+    // Delivery sweep: walks email_outbox pending→sent|skipped|dead. Claims
+    // nothing while NOTIFY_EMAIL_ENABLED=false (dark deploy — THI-760 §4).
+    startNotifyDeliveryTimer(notifyConfig(), buildMailer());
     console.log(`Thingery MCP server listening on http://localhost:${PORT}`);
     console.log(`  MCP endpoint:     http://localhost:${PORT}/mcp`);
     console.log(`  Health check:     http://localhost:${PORT}/healthz`);

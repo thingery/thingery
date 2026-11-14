@@ -30,8 +30,9 @@ beforeEach(() => {
   queries = [];
   const stub = async (sql: string, params: unknown[] = []) => {
     queries.push(sql);
-    if (sql.includes("session_epoch FROM sellers WHERE id") && params[0] === SELLER_ID) {
-      return { rows: [{ id: SELLER_ID, display_name: "Web User", session_epoch: EPOCH }] };
+    if (sql.includes("FROM sellers WHERE id") && params[0] === SELLER_ID) {
+      // THI-762: the session SELECT now also carries email + email_verified_at.
+      return { rows: [{ id: SELLER_ID, display_name: "Web User", session_epoch: EPOCH, email: null, email_verified_at: null }] };
     }
     // my_listings reads the listing quota: an aggregate always returns one row.
     if (sql.includes("AS creates_24h")) {
@@ -184,7 +185,7 @@ describe("a thgs_ bearer has no authority outside /mcp", () => {
       const viaBearer = await fetch(`${baseUrl}/api/me`, { headers: bearer(validSession()) });
       expect(await viaBearer.json()).toEqual({ seller: null });
       const viaCookie = await fetch(`${baseUrl}/api/me`, { headers: sessionCookie() });
-      expect(await viaCookie.json()).toEqual({ seller: { name: "Web User" } });
+      expect(await viaCookie.json()).toEqual({ seller: { name: "Web User", email: null, email_verified: false } }); // THI-762: additive /api/me fields
       const mint = await fetch(`${baseUrl}/api/me/api-key`, { method: "POST", headers: bearer(validSession()) });
       expect(mint.status).toBe(401);
     });

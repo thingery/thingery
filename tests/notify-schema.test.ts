@@ -75,7 +75,9 @@ describe.skipIf(!available)("notify schema (THI-763 PR 1)", () => {
     const idx = await db.query(
       `SELECT indexdef FROM pg_indexes WHERE tablename = 'notifications' AND indexname = 'notifications_recipient_unread_idx'`,
     );
-    expect(idx.rows[0]?.indexdef).toContain("WHERE read_at IS NULL");
+    // Postgres normalizes partial predicates ("WHERE (read_at IS NULL)") —
+    // assert on the paren-free form, not the literal DDL text.
+    expect(idx.rows[0]?.indexdef.replace(/[()]/g, "")).toContain("WHERE read_at IS NULL");
   });
 
   it("email_outbox matches plan §2.2 (state CHECK, dedupe, due index)", async () => {
@@ -117,7 +119,9 @@ describe.skipIf(!available)("notify schema (THI-763 PR 1)", () => {
     const due = await db.query(
       `SELECT indexdef FROM pg_indexes WHERE tablename = 'email_outbox' AND indexname = 'email_outbox_due_idx'`,
     );
-    expect(due.rows[0]?.indexdef).toContain("WHERE status = 'pending'");
+    // Postgres normalizes literals ("status = 'pending'::text") — assert on
+    // the cast-stripped form.
+    expect(due.rows[0]?.indexdef.replace(/::text/g, "").replace(/[()]/g, "")).toContain("WHERE status = 'pending'");
   });
 
   it("notify_watermarks holds one fan-out source row shape", async () => {

@@ -16,6 +16,7 @@
 // posture the board asked for.
 
 import { pool } from "../db.js";
+import type { PoolClient } from "pg";
 import { notifyConfig, type NotifyConfig } from "../config.js";
 import type { Mailer, MailSendResult } from "../mailer.js";
 import { renderOrderEmail } from "./templates.js";
@@ -51,31 +52,35 @@ export interface DeliveryReport {
 
 type SkipReason = "no_address" | "not_verified";
 
-async function markSent(id: string, providerMessageId?: string): Promise<void> {
-  await pool.query(
+// All three markers run on the sweep's transaction client: the claim holds
+// FOR UPDATE locks on these rows, so a pool connection would deadlock
+// against the sweep's own transaction (and then hit the pool's 3s
+// statement_timeout) — same-connection updates never block.
+async function markSent(db: PoolClient, id: string, providerMessageId?: string): Promise<void> {
+  await db.query(
     `UPDATE email_outbox SET status = 'sent', sent_at = now(), provider_message_id = $2,
             attempts = attempts + 1, last_error = NULL WHERE id = $1`,
     [id, providerMessageId ?? null],
   );
 }
 
-async function markSkipped(id: string, reason: SkipReason): Promise<void> {
-  await pool.query(
+async function markSkipped(db: PoolClient, id: string, reason: SkipReason): Promise<void> {
+  await db.query(
     `UPDATE email_outbox SET status = 'skipped', attempts = attempts + 1, last_error = $2 WHERE id = $1`,
     [id, `skipped:${reason}`],
   );
 }
 
-async function markFailure(row: OutboxRow, error: string): Promise<"retried" | "dead"> {
+async function markFailure(db: PoolClient, row: OutboxRow, error: string): Promise<"retried" | "dead"> {
   const attempts = row.attempts + 1;
   if (attempts >= MAX_ATTEMPTS) {
-    await pool.query(
+    await db.query(
       `UPDATE email_outbox SET status = 'dead', attempts = $2, last_error = $3 WHERE id = $1`,
       [row.id, attempts, error],
     );
     return "dead";
   }
-  await pool.query(
+  await db.query(
     `UPDATE email_outbox SET attempts = $2, last_error = $3, next_attempt_at = now() + ($4 || ' milliseconds')::interval
       WHERE id = $1`,
     [row.id, attempts, error, String(backoffMs(attempts))],
@@ -129,7 +134,7 @@ export async function runNotifyDelivery(
 
     for (const row of claimed.rows) {
       if (row.to_email === "") {
-        await markSkipped(row.id, "no_address");
+        await markSkipped(client, row.id, "no_address");
         report.skipped++;
         continue;
       }
@@ -142,7 +147,7 @@ export async function runNotifyDelivery(
         [row.notification_id],
       );
       if (!verified.rows[0]?.verified) {
-        await markSkipped(row.id, "not_verified");
+        await markSkipped(client, row.id, "not_verified");
         report.skipped++;
         continue;
       }
@@ -166,11 +171,11 @@ export async function runNotifyDelivery(
         result = { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
       if (result.ok) {
-        await markSent(row.id, result.providerMessageId);
+        await markSent(client, row.id, result.providerMessageId);
         sentThisHour.set(row.to_email, used + 1);
         report.sent++;
       } else {
-        const outcome = await markFailure(row, result.error);
+        const outcome = await markFailure(client, row, result.error);
         report[outcome]++;
       }
     }

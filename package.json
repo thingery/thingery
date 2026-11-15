@@ -49,6 +49,7 @@
     "backfill:reencode": "tsx scripts/reencode-existing-uploads.ts",
     "backfill:embeddings": "tsx scripts/backfill-embeddings.ts",
     "docs:tools": "tsx scripts/gen-tool-docs.ts",
+    "eval:extraction": "tsx scripts/extraction-eval.ts",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {

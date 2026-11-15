@@ -170,10 +170,10 @@ export const TOOLS: ToolDef[] = [
     type: "function",
     function: {
       name: "my_listings",
-      description: "List the logged-in seller's own listings.",
+      description: "List the logged-in seller's own listings, including stored private inventory (filter with status).",
       parameters: {
         type: "object",
-        properties: { status: { type: "string", enum: ["active", "reserved", "sold", "deleted"] } },
+        properties: { status: { type: "string", enum: ["active", "stored", "reserved", "sold", "deleted"] } },
       },
     },
   },
@@ -181,12 +181,12 @@ export const TOOLS: ToolDef[] = [
     type: "function",
     function: {
       name: "update_listing",
-      description: "Update one of your listings: status (active/reserved/sold/deleted), price_cents, shipping_price_cents, title, description, condition.",
+      description: "Update one of your listings: flip between stored (private inventory, invisible to buyers) and active (for sale), status (active/stored/reserved/sold/deleted), price_cents, shipping_price_cents, title, description, condition.",
       parameters: {
         type: "object",
         properties: {
           id: { type: "string" },
-          status: { type: "string", enum: ["active", "reserved", "sold", "deleted"] },
+          status: { type: "string", enum: ["active", "stored", "reserved", "sold", "deleted"] },
           price_cents: { type: "integer", minimum: 0 },
           shipping_price_cents: SHIPPING_PRICE_PARAM,
           title: { type: "string" },
@@ -681,7 +681,12 @@ export async function executeTool(
       };
     case "get_item": {
       const item = await getItem(args.id as string);
-      return item ? { item } : { error: "not found" };
+      // ADR 0010: stored is owner-private inventory — same rule as the MCP
+      // get_item: not found for everyone except the authenticated owner.
+      if (!item || item.status === "deleted" || (item.status === "stored" && seller?.id !== item.seller_id)) {
+        return { error: "not found" };
+      }
+      return { item };
     }
     case "create_listing": {
       const s = requireSeller();

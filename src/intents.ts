@@ -255,7 +255,7 @@ export async function listMatches(
      JOIN items i ON i.id = m.item_id
      JOIN sellers s ON s.id = i.seller_id
      WHERE m.buyer_id = $1
-       AND i.status <> 'deleted'
+       AND i.status = 'active' -- ADR 0010: offers to buy must be live; stored inventory never matches
        ${opts.unreadOnly ? "AND m.read_at IS NULL" : ""}
      ORDER BY m.created_at DESC
      LIMIT $2`,

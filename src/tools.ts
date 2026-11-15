@@ -1,9 +1,9 @@
 import { z } from "zod";
 import type { ItemRow, SellerRow } from "./db.js";
-import { CONDITIONS, SHIPPING_TIERS, STATUSES } from "./db.js";
+import { CONDITIONS, CREATE_ITEM_STATUSES, SHIPPING_TIERS, STATUSES } from "./db.js";
 import { resolveCategory } from "./categories.js";
 import { aliasResolutionNote, describeCategoryNote } from "./categories.js";
-import { buyerShippingCents, categoryChildren, getCategory, getItem, createItem, listCategories, ListingLimitError, listingQuota, type ListingQuota, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, SEARCH_MAX_OFFSET, ShippingPriceError, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
+import { buyerShippingCents, categoryChildren, getCategory, getItem, createItem, listCategories, ItemTransitionError, ListingLimitError, listingQuota, type ListingQuota, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, SEARCH_MAX_OFFSET, ShippingPriceError, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, AttributeValidationError, attributeShapeErrors, type Attributes } from "./attributes.js";
 import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
 import { addItemImageBase64 } from "./images.js";
@@ -442,6 +442,9 @@ export function registerTools(
         "(call describe_category first to see what's declared — undeclared keys are allowed " +
         "and searchable). Generates the item's embedding for semantic search. " +
         "Listings are hidden from search until they have at least one photo. " +
+        "status: \"stored\" saves the item to your private inventory instead — invisible to buyers " +
+        "and search; flip it to for-sale later with update_listing (status: \"active\"), keeping all " +
+        "data, photos and indexing. " +
         LISTING_QUOTA_NOTE,
       inputSchema: {
         title: z.string().min(3).max(200).describe("Short item title, e.g. 'Nike Air Max 90, size 43'"),
@@ -471,6 +474,8 @@ export function registerTools(
         ).max(12).default([]).describe("Image URLs (http/https only, max 2048 chars each)"),
         attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({})
           .describe("Category-specific fields, e.g. {\"size_eu\": 43, \"colorway\": \"white/grey\"}"),
+        status: z.enum(CREATE_ITEM_STATUSES).default("active")
+          .describe('\"active\" (default) = for sale now; \"stored\" = save to your private inventory — buyers and search never see it until update_listing flips it to active (all data/photos/indexing preserved)'),
       },
     },
     async (args: Record<string, unknown>) => {
@@ -520,12 +525,17 @@ export function registerTools(
             shipping_tier: (args.shipping_tier as string) ?? "unknown",
             images: (args.images as string[]) ?? [],
             attributes,
+            // ADR 0010: absent/default = "active" — byte-identical to the
+            // pre-stored create path. "stored" = private inventory save.
+            status: (args.status as (typeof CREATE_ITEM_STATUSES)[number] | undefined) ?? "active",
           }),
         );
         // THI-308 PR 2 (additive): publish state at create time. A zero-image
         // create succeeds but stays pending — next_steps then tells the agent
         // how to publish instead of implying the listing is live. status is
-        // 'active' on insert, so this reduces to the photo gate.
+        // 'active' on insert, so this reduces to the photo gate. ADR 0010:
+        // a stored create is never feed-visible (status != active), so it
+        // gets its own next_steps branch below instead of the pending story.
         const visible = visibleInFeeds(item);
         return ok({
           created: true,
@@ -535,7 +545,12 @@ export function registerTools(
           photo_required: item.photo_required,
           visible,
           listing_quota: await quotaAfterCreate(seller.id),
-          next_steps: visible
+          next_steps: item.status === "stored"
+            ? [
+                "Saved to your private inventory — buyers and search cannot see it",
+                `When you want to sell it, flip it to for-sale with update_listing (id: ${item.id}, status: "active") — everything is preserved, no re-entry`,
+              ]
+            : visible
             ? [
                 "Share the item URL with potential buyers",
                 "Update status to 'reserved' when a deal is close, 'sold' when completed",
@@ -988,12 +1003,21 @@ export function registerTools(
         openWorldHint: false,
       },
       description: "Fetch one second-hand listing's full details (price, shipping_price_cents, total_price_cents, condition, " +
-        "attributes, images) by its item id. Public. " + CONTENT_PROVENANCE_NOTE,
+        "attributes, images) by its item id. Public — except items saved to a seller's private inventory " +
+        "(status \"stored\"): those return not_found unless you authenticate as the owning seller. " +
+        CONTENT_PROVENANCE_NOTE,
       inputSchema: { id: z.string().uuid() },
     },
     async (args: Record<string, unknown>) => {
       const item = await getItem(args.id as string);
       if (!item || item.status === "deleted") return err("Item not found", "not_found");
+      // ADR 0010: `stored` is owner-private inventory — the same not_found a
+      // deleted item gets, for every caller except the authenticated owner.
+      // requireSeller() is a pure read of the request context (no challenge),
+      // so anonymous calls just fail the ownership check.
+      if (item.status === "stored" && requireSeller()?.id !== item.seller_id) {
+        return err("Item not found", "not_found");
+      }
       // H5.3 (spec THI-109): machine-readable provenance marker on the item
       // object plus the canonical note sentence, so buyer agents treat
       // listing text as data, never instructions. Additive only — existing
@@ -1016,8 +1040,9 @@ export function registerTools(
         idempotentHint: true,
         openWorldHint: false,
       },
-      description: "List your own second-hand listings (the authenticated seller's items for sale). " +
-        "Requires API key. " + LISTING_QUOTA_NOTE,
+      description: "List your own second-hand listings (the authenticated seller's items — for sale, " +
+        "reserved/sold, and stored private inventory). Use status to filter, e.g. status: \"stored\" " +
+        "for items you saved to inventory. Requires API key. " + LISTING_QUOTA_NOTE,
       inputSchema: {
         status: z.enum(STATUSES).optional(),
         limit: z.number().int().min(1).max(100).default(50),
@@ -1046,9 +1071,13 @@ export function registerTools(
         openWorldHint: false,
       },
       description:
-        "Update one of your own listings: mark it reserved or sold (or delist it), adjust the " +
-        "asking price or shipping price, or edit title/description/condition. Changing shipping_price_cents only " +
-        "affects future orders; existing orders keep the price they snapshotted. Requires API key.",
+        "Update one of your own listings: flip between stored (private inventory) and active (for sale — " +
+        "all data/photos/indexing preserved), mark it reserved or sold (or delist it), adjust the " +
+        "asking price or shipping price, or edit title/description/condition. Stored rules: " +
+        "only an active listing can be stored, a stored listing can only flip to active or deleted, and a " +
+        "listing with a live order cannot be stored (typed errors: invalid_item_transition / item_in_order). " +
+        "Changing shipping_price_cents only affects future orders; existing orders keep the price they " +
+        "snapshotted. Requires API key.",
       inputSchema: {
         id: z.string().uuid(),
         status: z.enum(STATUSES).optional(),
@@ -1084,6 +1113,11 @@ export function registerTools(
           return err(`Invalid attributes: ${describeError(e)}`, e.code);
         }
         if (e instanceof ShippingPriceError) return err(describeError(e), e.code);
+        // ADR 0010: illegal stored transitions are typed rejections an agent
+        // can explain to its user — bare message + machine-readable code
+        // (invalid_item_transition / item_in_order), same posture as the
+        // ShippingPriceError above.
+        if (e instanceof ItemTransitionError) return err(describeError(e), e.code);
         return err(`update_listing failed: ${describeError(e)}`);
       }
     },

@@ -510,8 +510,10 @@ export async function listMyWanted(
      FROM wanted_items w
      LEFT JOIN (
        SELECT wr.wanted_item_id,
-              COUNT(*) FILTER (WHERE i.status <> 'deleted') AS total,
-              COUNT(*) FILTER (WHERE i.status <> 'deleted'
+              -- ADR 0010: response counts are live offers only — stored
+              -- (owner-private) listings leave the counts until re-listed.
+              COUNT(*) FILTER (WHERE i.status = 'active') AS total,
+              COUNT(*) FILTER (WHERE i.status = 'active'
                                AND wr.published_at IS NOT NULL AND wr.read_at IS NULL) AS unread
        FROM wanted_responses wr
        JOIN items i ON i.id = wr.item_id
@@ -556,7 +558,8 @@ const PUBLIC_RESPONSE_COUNT = `(SELECT COUNT(*)::int
      JOIN items i ON i.id = wr.item_id
     WHERE wr.wanted_item_id = w.id
       AND wr.published_at IS NOT NULL
-      AND i.status <> 'deleted') AS response_count`;
+      AND i.status = 'active' -- ADR 0010: live offers only, stored never counts
+    ) AS response_count`;
 
 export interface WantedSearchFilters {
   q?: string;

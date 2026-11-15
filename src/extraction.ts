@@ -50,7 +50,7 @@ export const draftListingRequestSchema = z
       ),
   })
   .refine(
-    (v) => (v.text !== undefined && v.text.length > 0) || (v.photos !== undefined && v.photos.length > 0),
+    (v) => (v.text ?? "").trim().length > 0 || (v.photos !== undefined && v.photos.length > 0),
     { message: "provide text and/or one photo" },
   );
 
@@ -392,7 +392,7 @@ const HINT_TIERS = SHIPPING_TIERS.filter((t) => t !== "unknown");
 
 // --- category registry ---------------------------------------------------------
 
-interface RegistryEntry {
+export interface RegistryEntry {
   name: string;
   parent: string | null;
   description: string;
@@ -400,8 +400,9 @@ interface RegistryEntry {
 }
 
 /** One SELECT per draft: slugs + declared attribute keys for the prompt and
- *  the validation post-pass (~30 rows, small — ADR 0009 §2). */
-async function loadRegistry(): Promise<RegistryEntry[]> {
+ *  the validation post-pass (~30 rows, small — ADR 0009 §2). Exported for the
+ *  test suite (validateModelDraft takes the registry as an argument). */
+export async function loadRegistry(): Promise<RegistryEntry[]> {
   const { rows } = await pool.query<{
     name: string;
     parent: string | null;
@@ -711,7 +712,11 @@ export async function computeComparablesAndFmv(
   draft: ListingDraft,
   notes: string[],
 ): Promise<{ comparables: Comparable[]; fmv: FairMarketValue }> {
-  const q = [draft.brand, draft.title].filter(Boolean).join(" ").trim().slice(0, 200) || undefined;
+  // Keyword probe: the draft title alone. Brand usually already rides inside
+  // the title; concatenating brand + title makes the keyword fallback's
+  // substring match over-constrained (and the vector path reads the same
+  // string). Category + condition band do the structural filtering.
+  const q = draft.title.trim().slice(0, 200) || undefined;
   let rows;
   try {
     rows = await searchItems({
@@ -749,7 +754,12 @@ export async function computeComparablesAndFmv(
   const prices = byCurrency.get(currency) ?? [];
   const comparables: Comparable[] = priced.filter((c) => c.currency === currency);
   const excluded = priced.length - comparables.length;
-  if (excluded > 0) notes.push(`FMV computed from ${currency} comparables only (${excluded} different-currency listing(s) excluded)`);
+  const excludedCurrencies = [...byCurrency.keys()].filter((c) => c !== currency);
+  if (excluded > 0) {
+    notes.push(
+      `FMV computed from ${currency} comparables only (${excluded} listing(s) in ${excludedCurrencies.join(", ")} excluded)`,
+    );
+  }
   return { comparables, fmv: computeFmv(prices, currency) };
 }
 
@@ -766,7 +776,7 @@ export interface DraftListingInput extends DraftListingRequest {
  *  validate → FMV → assemble. The budget is charged for the provider call as
  *  soon as it completes; everything after is local and cannot fail closed. */
 export async function draftListing(input: DraftListingInput): Promise<DraftListingResult> {
-  const hasText = input.text !== undefined && input.text.length > 0;
+  const hasText = input.text !== undefined && input.text.trim().length > 0;
   const photos = input.photos ?? [];
   if (!hasText && photos.length === 0) {
     throw new ExtractionError("invalid_image", "provide text and/or one photo");

@@ -1,8 +1,8 @@
 # Spec: category taxonomy rework — two-level tree + facet attributes
 
-- **Status:** Approved for implementation — Security design review verdict **APPROVE WITH NOTES** (THI-739, 2026-11-13; notes N1–N3 incorporated below), CEO acceptance **ACCEPTED** (THI-740, 2026-11-13; no overrides). Both verdicts quoted in the spec PR (#255) per protected-path policy (board THI-36 / repo `AGENTS.md` rule 2). Implementation PRs 1–2 return to Security + CEO sign-off at their own PRs.
+- **Status:** Approved for implementation (design review passed with notes N1–N3, incorporated below; acceptance recorded 2026-11-13, no overrides — both sign-offs are quoted in the spec PR #255 per repo `AGENTS.md` rule 2). Implementation PRs 1–2 carry their own sign-off at their PRs.
 - **Date:** 2026-11-13
-- **Origin:** [GitHub issue #218](https://github.com/thingery/thingery/issues/218) (fedealconda), tracked as THI-733; plan rev `26b773eb`. Spec task THI-734.
+- **Origin:** [GitHub issue #218](https://github.com/thingery/thingery/issues/218) (fedealconda).
 - **Touches (protected):** `db/schema.sql`, `src/tools.ts`.
 - **Touches (unprotected):** `src/items.ts`, `src/wanted.ts`, `src/intents.ts`, `src/chat.ts`, new `src/categories.ts`, `public/llms.txt`, `skills/`, `docs-site/`, `README.md`, tests.
 - **Does not touch:** `src/auth.ts`, `src/routes.ts`, any item/wanted/intent row.
@@ -27,7 +27,7 @@ Secondary latent bug: the categories seed uses `ON CONFLICT (name) DO NOTHING`, 
 - **No admin writes to `categories` exist.** Making the seed converge (D7) cannot clobber runtime state; the only current writers are the seed itself and hand-edits on self-hosted instances (documented behavior change, §8).
 - **API evolution constraint.** All 14 slugs are public API surface used by registry-listed MCP installs, npm self-hosters, and live sessions on thingery.dev. No slug may be renamed, repurposed, or deleted.
 
-## 3. Design decisions (D1–D9, from plan rev 26b773eb)
+## 3. Design decisions (D1–D9)
 
 **D1 — Strict two levels; departments stay assignable.** `categories.parent TEXT NULL REFERENCES categories(name)`. 8 departments over 21 leaves. Departments remain valid assignment targets: a department assignment means "leaf unspecified". Every existing item (all `category='electronics'` etc.) keeps working unchanged. The #218 tension "make `sneakers` a child of `shoes`" is resolved by keeping them sibling leaves under `fashion`; classification consistency is attacked with descriptions + aliases (D4), not depth.
 
@@ -45,7 +45,7 @@ Secondary latent bug: the categories seed uses `ON CONFLICT (name) DO NOTHING`, 
 
 **D8 — Zero item-row migration.** No `items`/`wanted_items`/`buyer_intents` row is read or written by the migration. Only data changes: new category rows (INSERT) and `parent`/`aliases` convergence on existing rows (idempotent UPDATE via D7). Optional Phase-3 quality backfill (Appendix B) is a separate, later, non-blocking decision.
 
-**D9 — Importer mapping stays in `thingery/platform`** (per #218 point 4). Core-repo conventions for importers: auto-fill `department` when the source has it (Vinted's top level maps 1:1); record the source's own leaf name under the shared passthrough key `source_category` (undeclared key — passes through today, becomes a documented convention in llms.txt; no schema change). Platform-side work (mapping extension, department autofill, browse-UI tree) is the private-repo follow-up task THI-738.
+**D9 — Importer mapping stays in `thingery/platform`** (per #218 point 4). Core-repo conventions for importers: auto-fill `department` when the source has it (Vinted's top level maps 1:1); record the source's own leaf name under the shared passthrough key `source_category` (undeclared key — passes through today, becomes a documented convention in llms.txt; no schema change). Platform-side work (mapping extension, department autofill, browse-UI tree) is a private-repo follow-up.
 
 ### Decisions requested from this review (was: open questions)
 
@@ -60,7 +60,7 @@ Secondary latent bug: the categories seed uses `ON CONFLICT (name) DO NOTHING`, 
 ### 4.1 Schema changes (`db/schema.sql`, protected)
 
 ```sql
--- Two-level taxonomy (spec THI-734 / GH #218): departments (parent NULL) over
+-- Two-level taxonomy (GH #218): departments (parent NULL) over
 -- leaves (parent = department name). Departments are assignable — parent NULL
 -- means "valid category in its own right, top of tree". 'other' is parentless
 -- and childless (fallback leaf-dept). FK guarantees a parent exists; the
@@ -177,20 +177,20 @@ No tool signature changes; no input schema changes except descriptions. Existing
   - alias arg: resolves to canonical; output shape follows the canonical; note reports `"category 'trainers' resolved to canonical slug 'sneakers'"`.
 - **`create_listing` / `create_wanted` / `update_wanted` / `save_intent`**: category resolves per §5.4; when an alias was resolved the response gains a `note` naming the canonical slug (stored `category` field is always canonical). Departments are accepted as categories (they are registry rows). Error semantics unchanged.
 - **`search_items` / `search_wanted`**: `category` resolves and expands; the WHERE clause becomes `category = ANY($n::text[])` (parameterized array). Tool descriptions updated to document departments and aliases. Unknown → `unknown_category` unchanged.
-- **`chat.ts`** (listing-flow parity, THI-83 §8/F3): `describe_category` and the create flow mirror the same shapes and resolution (parity test extended).
+- **`chat.ts`** (listing-flow parity, §8/F3): `describe_category` and the create flow mirror the same shapes and resolution (parity test extended).
 
 ### 5.6 Blast radius (named)
 
 - **Registry-listed MCP installs + live sessions:** additive output fields only; strict JSON parsers that reject unknown fields could break — accepted risk, consistent with every prior additive output change; nothing existing is removed or retyped.
 - **npm self-hosters:** next `db:migrate` run converges their registry to schema.sql, overwriting any hand-edited `categories` rows **and any locally added row whose slug collides with a new seed slug** (e.g. a self-hoster's own `bags` gets converged to schema.sql's definition — Security review N1). Documented behavior change (registry is code-owned; no admin write path exists to lose); PR 3 surfaces it in release notes before self-hosters migrate. Old images against the new schema: fully compatible (new columns unread, new rows behave as plain categories).
-- **thingery.dev:** `/browse` and home search inherit dept expansion via `searchItems`. The browse-UI tree itself is the platform-repo follow-up (THI-738); the public repo's frozen `website/` is untouched (board ruling THI-565).
-- **Importers (platform):** gain 15 finer mapping targets + `department` autofill + `source_category` convention (D9). THI-618 (silent `other` in review flow) is independent and fixes now.
+- **thingery.dev:** `/browse` and home search inherit dept expansion via `searchItems`. The browse-UI tree itself is the platform-repo follow-up; the public repo's frozen `website/` is untouched.
+- **Importers (platform):** gain 15 finer mapping targets + `department` autofill + `source_category` convention (D9). The silent-`other` review-flow fix is independent and lands now.
 
 Security lens: no new auth surface; category and alias values remain fully parameterized (`= ANY($n)`, `@> ARRAY[$n]`); input length caps unchanged (category 2–40 chars, aliases ≤ 40); alias scan is one query over a ~29-row table — no rate or DoS surface change; no PII. Security review requested on: the DO UPDATE convergence semantics (self-hoster overwrite), alias precedence, and the expanded `unknown_category` available-list (29 names, no info leak).
 
 ## 6. Migration plan
 
-**Zero item-row migration (D8).** Deploy sequence (standard agent-owned deploy, THI-36/THI-705; DevOps runbook steps, no human gate):
+**Zero item-row migration (D8).** Deploy sequence (standard agent-owned deploy; DevOps runbook steps, no human gate):
 
 1. **PR 1 merges → deploy.** Migrate applies the two `ADD COLUMN IF NOT EXISTS` (inert) and re-runs the 14-row seed with DO UPDATE (content unchanged → no-op). New code paths are live but find no parents/aliases/departments — resolution is exact-match-only, expansion returns single names: behavior byte-identical to today.
 2. **PR 2 merges → deploy.** Migrate applies the 29-row seed: 15 INSERTs (new departments/leaves) + 14 UPDATEs (parents, aliases, `music`/`toys`/`electronics`/`home`/`sports` description clarifications, new fashion attribute definitions). No `items`/`wanted_items`/`buyer_intents` row is touched.
@@ -206,14 +206,14 @@ Expand-contract posture: purely additive (new columns, new rows, new accepted va
 - **describe_category:** no-arg rows carry `parent`; dept arg returns children with feed-visible counts; leaf arg carries `parent`; alias arg resolves + note.
 - **Write paths:** alias accepted → canonical stored + note; department accepted; new enums validated (`department`, `size_letter` reject out-of-enum); legacy `size` still accepted on clothing alongside `size_letter`; existing definitions still required (e.g. `size_eu` on sneakers).
 - **Intents:** save_intent stores canonical; `fashion` intent matches a `sneakers` listing publish; `sneakers` intent does not match a `fashion`-assigned listing; alias intent resolves at save.
-- **Chat parity** (THI-83 §8/F3): describe_category shape and alias resolution match the MCP tool.
+- **Chat parity** (§8/F3): describe_category shape and alias resolution match the MCP tool.
 - **Existing suites green**, including the search-relevance harness and MCP gate tool list (directory profile unaffected — no tool added/removed).
 
 ## 8. Rollout + rollback
 
-- **Rollout:** §6; each PR merges on green CI + recorded Security/CEO sign-off (this spec PR first — children THI-735–737 stay blocked until then), then deploys per the standard runbook.
+- **Rollout:** §6; each PR merges on green CI + recorded sign-off (this spec PR first, implementation children after), then deploys per the standard runbook.
 - **Rollback per PR:** redeploy the previous image (DB untouched). New columns are unread by old code; new category rows are ordinary registry rows — old code accepts them for creates and exact-match search, which is harmless surplus. Rolling back PR 2's schema.sql as well is unnecessary and not recommended (old seed's DO NOTHING would simply leave the new rows in place — still harmless).
-- **No destructive step exists in this design.** Destructive production actions outside a runbook still require explicit human approval (board THI-705 carve-out unaffected).
+- **No destructive step exists in this design.** Destructive production actions outside a runbook still require explicit human approval (standing carve-out unaffected).
 
 ## 9. ADR
 
@@ -224,7 +224,7 @@ A short ADR (`docs/adr/0008-category-taxonomy-two-level.md`, ships in PR 3) reco
 1. **PR 1 — schema plumbing + parent-aware filtering** (touches both protected files): `parent`/`aliases` columns; DO UPDATE seed switch (14 rows, content unchanged); `src/categories.ts`; expansion in `searchItems`/`searchWanted`; `describe_category` tree output + alias resolution; alias resolution + canonical note in create/save paths (`tools.ts`, `wanted.ts`, `chat.ts`); intent closure in `evaluateListingForIntents`; unit + integration tests. If review finds it over ~300 lines, the split line is chat-parity + intent closure into a PR 1b (still before PR 2).
 2. **PR 2 — taxonomy content** (`db/schema.sql`, protected): the 29-row seed of §5.1–5.3 (parents, aliases, new leaves, facet definitions, description clarifications); registry-content test (tree shape, invariants, all-14-slugs-survive); migrate idempotency test.
 3. **PR 3 — docs & skills:** `public/llms.txt` (departments, aliases, `source_category` convention), `skills/sell-item` + `skills/find-item`, `docs-site` regen (`npm run docs:tools`), README category mentions, ADR 0008; per review notes also: **release-notes prominence** for the self-hoster registry-convergence behavior change (CEO note 2 — self-hosters must see it before migrating) and the **managed-table contract** (the `categories` table is managed by `db/schema.sql`; local edits and slug-colliding additions do not survive `db:migrate`) in the README/self-hosting docs (Security N3). Docs agent keeps reference docs in sync.
-4. **Platform follow-up (private repo `thingery/platform`, THI-738, not in these PRs):** extend Vinted/eBay mappings to new leaves; auto-fill `department` on fashion imports; adopt `source_category`; browse-UI tree; coordinate with THI-618.
+4. **Platform follow-up (private repo `thingery/platform`, not in these PRs):** extend Vinted/eBay mappings to new leaves; auto-fill `department` on fashion imports; adopt `source_category`; browse-UI tree; coordinate with the silent-`other` review-flow fix.
 
 ## Appendix A — what deliberately does not change
 
@@ -232,7 +232,7 @@ A short ADR (`docs/adr/0008-category-taxonomy-two-level.md`, ships in PR 3) reco
 - No rename/repurpose/delete of any existing slug; no item/wanted/intent row migration.
 - No change to attribute passthrough, caps, or the undeclared-key surface.
 - `update_listing` still cannot change category (the GH #218-referenced roadmap follow-up; out of scope).
-- `website/` in the public repo stays frozen (board ruling THI-565).
+- `website/` in the public repo stays frozen (standing board ruling; see repo `AGENTS.md`).
 
 ## Appendix B — optional Phase-3 quality backfill (separate decision, not in PRs 1–3)
 

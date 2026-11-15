@@ -1,8 +1,8 @@
 # Spec: new-account write ramp — cap account-farming spam
 
-- **Status:** Approved for implementation — Security design review verdict **APPROVE WITH NOTES** (THI-543, 2026-11-10), CEO acceptance **ACCEPTED** (THI-544, 2026-11-10). Both verdicts are quoted in the implementation PR's description per protected-path policy (board THI-36 / repo `AGENTS.md` rule 2).
+- **Status:** Approved for implementation — Security design review **APPROVE WITH NOTES** + CEO acceptance, 2026-11-10. Both verdicts are stated in the implementation PR's description per protected-path policy (repo `AGENTS.md` rule 2).
 - **Date:** 2026-11-10 (revised same day after the Security review notes)
-- **Origin:** [GitHub issue #212](https://github.com/thingery/thingery/issues/212) (fedealconada), tracked as THI-542
+- **Origin:** [GitHub issue #212](https://github.com/thingery/thingery/issues/212) (fedealconada)
 - **Touches:** `src/items.ts` (write caps — protected as *rate limits*), tests, this doc. No `db/schema.sql`, `src/tools.ts`, `src/auth.ts`, or `src/routes.ts` change.
 
 ## Problem
@@ -31,7 +31,7 @@ abuse controls beyond IP limits → H4"; API2 lists "no email verification" as a
 - **Cap enforcement point:** `createItem` runs one indexed COUNT over `items` covering both
   caps, deliberately *before* the embeddings call (the cost-DoS ordering, §6 H4). Every
   listing-creating surface goes through `createItem` — `create_listing` and
-  `respond_to_wanted` (THI-439 response loop writes a listing on the caller's behalf).
+  `respond_to_wanted` (the response loop writes a listing on the caller's behalf).
   `update_listing` creates no rows; image uploads have their own per-seller daily quota.
 - **Existing caps are deliberately not env-configurable** (`src/items.ts:33-35` comment):
   module constants, one place, Security owns the numbers.
@@ -41,7 +41,7 @@ abuse controls beyond IP limits → H4"; API2 lists "no email verification" as a
 | Option | Verdict | Rationale |
 |---|---|---|
 | **3. Lower caps for new accounts** (age-based ramp) | **Chosen for v1** | Zero new infrastructure; pure server-side; identical behavior on hosted and every self-hosted instance (no new config, no SMTP, no third party); directly bounds the farming economics; no schema change (uses existing `sellers.created_at`); no UX change beyond slower start; reversible by revert. |
-| 1. Email verification before publishing | **Deferred, not rejected** | Strongest per-account cost signal, but requires building the first outbound-email subsystem in the repo (SMTP/provider config, verify-token lifecycle, resend + expiry, login.html flow) — new operational surface against the ADR 0002 single-container constraint for self-hosters, who would need it default-off. It also puts a human-clicked-link gate in front of *every* new MCP/OAuth agent user's first listing — a direct hit to the frictionless-listing principle — to bound a spam wave the ramp already bounds. **Revisit trigger (measurable, per Security review THI-543):** sustained `new_seller_ramp` limit rejections (the Q3 event field below) across ≥10 distinct sellers for ≥7 consecutive days on the hosted instance, **or** any single spam incident that defeats the ramp via aged accounts. When revisited it ships as opt-in (`SMTP_*` env, default off for self-hosters, hosted-instance enforcement only) plus a disposable-domain blocklist — expand-contract friendly. |
+| 1. Email verification before publishing | **Deferred, not rejected** | Strongest per-account cost signal, but requires building the first outbound-email subsystem in the repo (SMTP/provider config, verify-token lifecycle, resend + expiry, login.html flow) — new operational surface against the ADR 0002 single-container constraint for self-hosters, who would need it default-off. It also puts a human-clicked-link gate in front of *every* new MCP/OAuth agent user's first listing — a direct hit to the frictionless-listing principle — to bound a spam wave the ramp already bounds. **Revisit trigger (measurable, per the security review):** sustained `new_seller_ramp` limit rejections (the Q3 event field below) across ≥10 distinct sellers for ≥7 consecutive days on the hosted instance, **or** any single spam incident that defeats the ramp via aged accounts. When revisited it ships as opt-in (`SMTP_*` env, default off for self-hosters, hosted-instance enforcement only) plus a disposable-domain blocklist — expand-contract friendly. |
 | 2. Signup challenge (Turnstile/hCaptcha) | **Rejected for now** | Adds a third-party dependency + account (site key/secret), is cheap to bypass at abuse scale (solver services), protects only the hosted instance (self-hosters would disable it), and bounds nothing once bypassed — it does not cap writes. The ramp caps writes regardless of how the accounts were created. |
 | Tighter `authAttemptLimiter` on signup | Rejected | The limiter is shared with login; tightening it punishes legitimate sign-in and is trivially rotated around via IPs. Non-goal. |
 
@@ -60,14 +60,14 @@ abuse controls beyond IP limits → H4"; API2 lists "no email verification" as a
   computed in TypeScript, and the comparison proceeds exactly as today. Ordering is preserved:
   ramp check runs **before** `embedText`, so an over-ramp create never reaches the embeddings
   API (cost-DoS ordering, §6 H4).
-- Rejection: same typed error as today — `code: "rate_limited"` (the THI-113 documented
+- Rejection: same typed error as today — `code: "rate_limited"` (the documented
   choice; agents already treat it as back-off-and-retry-later) — with a distinct message that
   names the ramp and says full limits unlock automatically after 7 days, e.g.
   `"New-account limit reached (max 10 creates/day, 20 active during your first 7 days). Full limits unlock automatically after 7 days."`
   Implementation shape: parameterize `ListingLimitError` (message + numbers interpolated from
-  the constants — never a hardcoded string that can drift from the numbers, per THI-543 Q2);
+  the constants — never a hardcoded string that can drift from the numbers);
   `code` stays `rate_limited` either way.
-- Observability (THI-543 Q4, exact shape confirmed): add an optional field to the
+- Observability (exact shape confirmed): add an optional field to the
   `listing_write` member of the security-event union only — do **not** extend
   `SecurityEventReason` (repo precedent: separate unions per event family):
   `limit?: "new_seller_ramp" | "seller_cap"`, mirroring the `wanted_response.count?`
@@ -133,7 +133,7 @@ SQL with an explicit timestamp (the suite already creates schema/fixtures direct
   says so explicitly; (b) npm package / stdio users: server-side only, no client change;
   (c) existing sessions and keys: unaffected.
 
-## Resolved questions (verdicts from the Security review THI-543, 2026-11-10; CEO conditions from THI-544)
+## Resolved questions (Security review verdicts 2026-11-10; CEO conditions)
 
 1. **Image-upload ramp — unchanged in v1, follow-up filed.** Search-visible image spam is
    bounded by the item ramp (uploads attach to an owned item, 12/item). Stated residual: a
@@ -150,7 +150,7 @@ SQL with an explicit timestamp (the suite already creates schema/fixtures direct
 3. **Observability — confirmed**, exact field shape in the design section above
    (`limit?: "new_seller_ramp" | "seller_cap"` on `listing_write` only).
 
-Residual risks recorded for `docs/security.md` §6 H4 (from THI-543): (a) aged-account
+Residual risks recorded for `docs/security.md` §6 H4: (a) aged-account
 patience — a farmer willing to wait 7 days per account gets full caps; the `limit` telemetry
 is the detector, progressive ramp / reputation is the follow-up lever, not now; (b)
 proxy-rotated farming is only IP-rate-limited — the ramp is what makes each account
@@ -164,4 +164,4 @@ expensive; (c) signup 409 email enumeration remains an open API2 item, out of sc
 | **B** | Ramp constants + cap-query extension + parameterized error + `limit` field on the `listing_write` security event (both rejection classes) + tests; `docs/security.md` §6 H4 note updated with the ramp numbers and residuals | `src/items.ts` (protected: rate limits), `src/security-events.ts`, `tests/listing-limits.test.ts`, `docs/security.md` — ~150 lines |
 
 PR B merges only with the Security review verdict and CEO sign-off stated in its description
-(board THI-36; repo AGENTS.md rule 2), after CI is green.
+(repo AGENTS.md rule 2), after CI is green.

@@ -46,5 +46,14 @@ export interface SellerRow {
 }
 
 export const CONDITIONS = ["new", "like_new", "good", "fair", "poor"] as const;
-export const STATUSES = ["active", "reserved", "sold", "deleted"] as const;
+/** Full item status domain (ADR 0010). `stored` is owner-private inventory:
+ *  in the CHECK (db/schema.sql), visible to its owner only, and every public
+ *  surface filters it out. `reserved`/`sold` stay order-machine-owned; only
+ *  CREATE_ITEM_STATUSES are legal at create time. z.enum(STATUSES) sites
+ *  (my_listings, update_listing) pick `stored` up from here. */
+export const STATUSES = ["active", "stored", "reserved", "sold", "deleted"] as const;
+/** Statuses create_listing may set: `active` (default, for sale) or `stored`
+ *  (ADR 0010 — save to private inventory). Everything else is written by the
+ *  owner toggles (`update_listing`) or the order machine, never by create. */
+export const CREATE_ITEM_STATUSES = ["active", "stored"] as const;
 export const SHIPPING_TIERS = ["locker", "parcel", "bulky", "local", "unknown"] as const;

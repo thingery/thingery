@@ -72,6 +72,16 @@ export const TERMINAL_STATUSES: readonly OrderStatus[] = [
   "refunded", "paid_out", "cancelled", "completed",
 ];
 
+/** Order statuses that count as "a live order on the item" — the exact set of
+ *  the `one_live_order_per_item` partial unique index (db/schema.sql). The
+ *  item-status guard in updateItem (ADR 0010) reuses it for the
+ *  active → stored rejection: an item with a live order must stay buyable.
+ *  Keep the two lists in lockstep with the schema index. */
+export const LIVE_ORDER_ITEM_STATUSES: readonly OrderStatus[] = [
+  "pending", "sold", "label_issued", "in_transit", "delivered", "disputed",
+  "refunding", "payout_pending",
+];
+
 const NON_TERMINAL_EXCEPT_REFUNDING: readonly OrderStatus[] = [
   "pending", "sold", "label_issued", "in_transit", "delivered", "disputed", "payout_pending",
 ];

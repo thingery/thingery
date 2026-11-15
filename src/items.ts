@@ -1,8 +1,9 @@
-import { pool, type ItemRow } from "./db.js";
+import { pool, CREATE_ITEM_STATUSES, type ItemRow } from "./db.js";
 import { categoryFilterNames, resolveCategory } from "./categories.js";
 import { embedText, itemEmbeddingText } from "./embed.js";
 import { evaluateListingForIntents } from "./intents.js";
 import { logSecurityEvent, type ListingWriteLimit } from "./security-events.js";
+import { LIVE_ORDER_ITEM_STATUSES } from "./orders.js";
 import { markWantedResponsesPublished } from "./wanted.js";
 import {
   attributeShapeErrors,
@@ -29,6 +30,29 @@ export interface CreateItemInput {
   shipping_tier: string;
   images: string[];
   attributes?: Attributes;
+  /** ADR 0010: create_listing may save straight to private inventory.
+   *  Only the two CREATE_ITEM_STATUSES are legal — everything else is written
+   *  by update_listing toggles or the order machine, never by create. Absent
+   *  = "active", byte-identical to the pre-stored behavior. */
+  status?: (typeof CREATE_ITEM_STATUSES)[number];
+}
+
+/** Thrown by updateItem when a status change violates the ADR-0010 transition
+ *  table. `code` is the MCP error code update_listing reports:
+ *  - `invalid_item_transition` — the from→to pair is not a legal move
+ *    (e.g. stored → reserved: order-machine-owned states are unreachable
+ *    directly from inventory);
+ *  - `item_in_order` — active → stored while a live order exists on the item
+ *    (the one_live_order_per_item status set): the item must stay buyable.
+ *  Legacy moves among active/reserved/sold/deleted stay free-form by design
+ *  (ADR 0010, one behavior change per PR) and never reach this error. */
+export class ItemTransitionError extends Error {
+  readonly code: "invalid_item_transition" | "item_in_order";
+  constructor(code: "invalid_item_transition" | "item_in_order", message: string) {
+    super(message);
+    this.name = "ItemTransitionError";
+    this.code = code;
+  }
 }
 
 // Per-seller listing velocity caps (docs/security.md §6 H4 fix 1, THI-113) —
@@ -173,6 +197,13 @@ export async function listingQuota(sellerId: string): Promise<ListingQuota> {
 }
 
 export async function createItem(input: CreateItemInput): Promise<ItemRow> {
+  // ADR 0010: only the two create-legal statuses pass; anything else is a
+  // caller bug (the MCP zod enum already rejects it) — fail loudly, never
+  // coerce, so a wrong value can't silently become 'active'.
+  const status = input.status ?? "active";
+  if (!(CREATE_ITEM_STATUSES as readonly string[]).includes(status)) {
+    throw new Error(`createItem: status must be one of ${CREATE_ITEM_STATUSES.join("/")} (got '${status}')`);
+  }
   try {
     assertValidShippingPrice(input.shipping_price_cents ?? 0, input.shipping_tier);
   } catch (err) {
@@ -215,8 +246,9 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
     `INSERT INTO items (
        seller_id, title, description, category, condition, brand,
        price_cents, currency, location, weight_grams, dimensions_mm,
-       shipping_tier, images, attributes, embedding, shipping_price_cents
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::vector,$16)
+       shipping_tier, images, attributes, embedding, shipping_price_cents,
+       status
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::vector,$16,$17)
      RETURNING *`,
     [
       input.seller_id,
@@ -235,6 +267,7 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
       JSON.stringify(input.attributes ?? {}),
       embedding ? JSON.stringify(embedding) : null,
       input.shipping_price_cents ?? 0,
+      status,
     ],
   );
   // THI-112 (H4.2): successful listing create — seller id only, never the
@@ -245,7 +278,10 @@ export async function createItem(input: CreateItemInput): Promise<ItemRow> {
   // feed-visible (photo attached at create — THI-308 photo-gated visibility)
   // fans out to buyer intents. Alerting must never fail the publish: errors
   // are caught and logged here; the log line carries counts only, never
-  // listing or intent payload.
+  // listing or intent payload. ADR 0010: a 'stored' create skips the fan-out
+  // for free — visibleInFeeds requires status 'active', so inventory saves
+  // never fire buyer alerts (the stored → active toggle fans out instead,
+  // see updateItem).
   if (visibleInFeeds(rows[0])) {
     try {
       const inserted = await evaluateListingForIntents(rows[0]);
@@ -492,6 +528,46 @@ export interface ItemUpdate {
   attributes?: Attributes;
 }
 
+/** Reads the item's current status for the ADR-0010 transition check. One
+ *  indexed PK read, paid only on the status-update path. Null = row missing
+ *  or not owned — the UPDATE's own not-found path reports that to the caller. */
+async function itemStatusForTransition(id: string, sellerId: string): Promise<string | null> {
+  const { rows } = await pool.query<Pick<ItemRow, "status">>(
+    `SELECT status FROM items WHERE id = $1 AND seller_id = $2`,
+    [id, sellerId],
+  );
+  return rows[0]?.status ?? null;
+}
+
+/** ADR-0010 transition table for moves involving `stored`; throws
+ *  ItemTransitionError with the typed code update_listing reports. Only
+ *  `active` may enter stored; stored may only exit to active (for sale) or
+ *  deleted. Same-status writes are no-ops and stay legal; legacy moves among
+ *  active/reserved/sold/deleted stay free-form (deliberately not re-
+ *  restricted in this change — ADR 0010 open question, one behavior change
+ *  per PR). The live-order guard for active → stored runs in updateItem,
+ *  after this table passes. */
+function assertItemTransition(from: string, to: string): void {
+  if (from === to) return;
+  if (from !== "stored" && to !== "stored") return; // legacy free-form, unchanged
+  if (to === "stored") {
+    if (from !== "active") {
+      throw new ItemTransitionError(
+        "invalid_item_transition",
+        `Cannot move a '${from}' listing to stored — only 'active' listings can be saved to inventory.`,
+      );
+    }
+    return; // active → stored is legal; the live-order guard runs in updateItem
+  }
+  // from === "stored": inventory exits only to active or deleted.
+  if (to !== "active" && to !== "deleted") {
+    throw new ItemTransitionError(
+      "invalid_item_transition",
+      `Cannot move a stored listing to '${to}' — flip it to active first; reserved/sold are set by the order machine.`,
+    );
+  }
+}
+
 export async function updateItem(
   id: string,
   sellerId: string,
@@ -503,6 +579,11 @@ export async function updateItem(
     params.push(value);
     return `$${params.length}`;
   };
+  // ADR 0010: set by the status-transition block below (null = no status
+  // change, or row missing/not owned — the UPDATE still returns null and the
+  // caller reports not_found); read after the UPDATE to decide whether the
+  // stored → active publish fan-out fires.
+  let fromStatus: string | null = null;
   if (update.status !== undefined) sets.push(`status = ${add(update.status)}`);
   if (update.price_cents !== undefined) sets.push(`price_cents = ${add(update.price_cents)}`);
   if (update.shipping_price_cents !== undefined) {
@@ -537,6 +618,38 @@ export async function updateItem(
     }
     sets.push(`attributes = ${add(JSON.stringify(update.attributes))}::jsonb`);
   }
+  // ADR 0010: status changes through stored run the transition table (typed
+  // errors, never inferred) plus the live-order guard — enforced after the
+  // local validations above (cheap shape/price errors win, no DB roundtrip
+  // needed to report them) and before any write.
+  if (update.status !== undefined) {
+    fromStatus = await itemStatusForTransition(id, sellerId);
+    if (fromStatus) {
+      assertItemTransition(fromStatus, update.status);
+      if (update.status === "stored" && fromStatus !== "stored") {
+        // active → stored with a live order on the item (the
+        // one_live_order_per_item status set) would pull a buyable listing
+        // out from under a buyer — reject with item_in_order. A stored item
+        // has no live order by construction (create_order requires active,
+        // order transitions never produce stored), so this is a thin
+        // belt-and-braces check on the create-order race.
+        const { rows: liveRows } = await pool.query(
+          `SELECT 1 FROM orders WHERE item_id = $1 AND status = ANY($2::text[]) LIMIT 1`,
+          [id, LIVE_ORDER_ITEM_STATUSES],
+        );
+        if (liveRows.length > 0) {
+          logSecurityEvent(
+            { type: "listing_write", action: writeAction(update.status), outcome: "rejected" },
+            { sellerId },
+          );
+          throw new ItemTransitionError(
+            "item_in_order",
+            "This listing has a live order — it can't be stored until the order finishes or is cancelled.",
+          );
+        }
+      }
+    }
+  }
   if (sets.length === 0) return getItem(id);
 
   params.push(id, sellerId);
@@ -552,6 +665,34 @@ export async function updateItem(
     { type: "listing_write", action: writeAction(update.status), outcome: rows[0] ? "success" : "rejected" },
     { sellerId },
   );
+  // ADR 0010: entering 'active' from stored is a publish — buyer-intent
+  // fan-out fires at exactly the moment inventory goes for sale, and it must
+  // never fail the toggle (same try/catch posture as the createItem publish
+  // path). Legacy transitions into active deliberately don't fan out — they
+  // are unchanged behavior, not publishes. The wanted-response stamp is
+  // idempotent (IS NULL guard): it only bites when a stored item was a
+  // wanted-board response that never published.
+  if (rows[0] && fromStatus === "stored" && update.status === "active" && visibleInFeeds(rows[0])) {
+    try {
+      const inserted = await evaluateListingForIntents(rows[0]);
+      if (inserted > 0) {
+        console.log(JSON.stringify({ type: "intent_fanout", count: inserted }));
+      }
+    } catch (err) {
+      console.error("buyer-intent evaluation failed (status toggle unaffected)", err instanceof Error ? err.message : err);
+    }
+    try {
+      const stamped = await markWantedResponsesPublished(rows[0].id);
+      if (stamped > 0) {
+        logSecurityEvent(
+          { type: "wanted_response", action: "publish", outcome: "success", count: stamped },
+          { sellerId },
+        );
+      }
+    } catch (err) {
+      console.error("wanted-response stamping failed (status toggle unaffected)", err instanceof Error ? err.message : err);
+    }
+  }
   return rows[0] ?? null;
 }
 

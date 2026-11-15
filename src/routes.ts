@@ -25,6 +25,12 @@ import { renderEmailVerification } from "./notify/templates.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import {
+  draftListing,
+  draftListingRequestSchema,
+  ExtractionError,
+  extractionSellerLimiter,
+} from "./extraction.js";
+import {
   CHATGPT_PLAN_USAGE_SCOPE,
   chatgptOauthEnabled,
   deleteChatgptConnection,
@@ -1180,6 +1186,45 @@ async function resolveByoCredential(sellerId: string): Promise<ResolvedLlmCreden
     return null;
   }
 }
+
+// THI-814 (P1-2, ADR 0009): session-authenticated draft endpoint for the web
+// UI (P1-5, platform repo). Same core function, same per-seller limiter and
+// deployment-wide budget as the draft_listing MCP tool (spec §3.3). No
+// persistence — the response is the product; publishing stays an explicit
+// create_listing call by the seller.
+api.post("/draft-listing", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req);
+  if (!seller) {
+    res.status(401).json({ error: "Sign in to draft a listing." });
+    return;
+  }
+  if (!extractionSellerLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/draft-listing" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Draft limit reached (10 per hour) — try again later.", code: "rate_limited" });
+    return;
+  }
+  const parsed = draftListingRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Provide text (≤500 chars) and/or one photo (jpeg, png, webp or gif, base64)." });
+    return;
+  }
+  try {
+    res.json(await draftListing({ ...parsed.data, sellerId: seller.id }));
+  } catch (e) {
+    if (e instanceof ExtractionError) {
+      // Same posture as the chat route: not-configured is a deployment state
+      // (503), invalid input is client error (400), budget/rate exhaustion is
+      // 429 with a try-again-tomorrow message; provider failure is 503.
+      const status =
+        e.code === "invalid_image" ? 400
+        : e.code === "extraction_budget_exhausted" ? 429
+        : 503; // extraction_not_configured | extraction_provider_unavailable
+      res.status(status).json({ error: e.message, code: e.code });
+      return;
+    }
+    throw e;
+  }
+}));
 
 api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
   const seller = await sellerFromSession(req).catch(() => null);

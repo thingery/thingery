@@ -44,6 +44,9 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       | "/api/notifications/read-all"
       // THI-788 step 2 (spec docs/specs/item-reports.md): report limiter slug.
       | "/api/items/:id/report"
+      // THI-814 (P1-2 draft_listing extraction): per-seller limiter slug on
+      // the session-authenticated web-UI draft route.
+      | "/api/draft-listing"
     >();
     const routes: SecurityEventRoute[] = [
       "/api/signup",
@@ -61,6 +64,8 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       "/api/wanted/:id/renew",
       "/api/verify-email",
       "/api/me/resend-email-verification",
+      "/api/items/:id/report",
+      "/api/draft-listing",
     ];
     expectTypeOf(routes).toEqualTypeOf<SecurityEventRoute[]>();
   });

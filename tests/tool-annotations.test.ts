@@ -28,6 +28,10 @@ const EXPECTED: Record<
   get_payout_setup: { title: "Get payout setup", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   create_listing: { title: "Create a listing", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   add_item_image: { title: "Add item image", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  // THI-814 (P1-2 draft_listing extraction, ADR 0009): a pure computation over
+  // seller input — one LLM call, nothing persisted (readOnlyHint). It calls
+  // out to the operator's LLM provider, hence openWorldHint.
+  draft_listing: { title: "Draft a listing", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   update_listing: { title: "Update listing", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   create_order: { title: "Create order", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   cancel_order: { title: "Cancel order", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },

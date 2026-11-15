@@ -1,6 +1,6 @@
 # ADR 0003: Order state machine, Stripe Connect payouts, carrier webhooks
 
-- **Status:** Accepted (spec [THI-3](https://paperclip.ing/THI/issues/THI-3) rev 2/3, CEO-accepted 2026-10-12; board OQ verdicts 2026-10-12); **amended 2026-10-27** — fee model superseded per board decision (see [Amendment](#amendment--sellers-bear-stripe-processing-fees-2026-10-27-thi-374), [THI-374](https://paperclip.ing/THI/issues/THI-374))
+- **Status:** Accepted (spec rev 2/3, CEO-accepted 2026-10-12; open-question verdicts 2026-10-12); **amended 2026-10-27** — fee model superseded (see [Amendment](#amendment--sellers-bear-stripe-processing-fees-2026-10-27-thi-374), spec `docs/specs/seller-borne-stripe-fees.md`)
 - **Date:** 2026-10-13
 - **Implements:** PRs #39–#49 (order flow)
 
@@ -12,12 +12,12 @@ Thingery listings had no order path: an item could be marked `sold` via `update_
 
 Constraints that shaped the design:
 
-- **Free for buyers and sellers** — the platform absorbs payment costs; no take rate, no seller/buyer fees (board OQ1). *(Fee axis superseded 2026-10-27 — see the 2026-10-27 Amendment below: sellers bear the Stripe processing fee; still no take rate and no platform fee.)*
+- **Free for buyers and sellers** — the platform absorbs payment costs; no take rate, no seller/buyer fees (OQ1). *(Fee axis superseded 2026-10-27 — see the 2026-10-27 Amendment below: sellers bear the Stripe processing fee; still no take rate and no platform fee.)*
 - **Agent-native** — every step is an MCP tool; the website gets only a minimal payment-return page.
 - **Self-hostable** — payments and carrier integration must be optional per deployment, degrading to an `off_platform` order mode rather than breaking.
 - **Second-hand items are unique** — quantity is always 1; one listing → at most one live order.
 - **EU flagship** — card payments via Stripe Checkout, carrier coverage via one aggregator (EasyPost), EUR-default currencies.
-- **Trust boundaries** — provider webhooks (Stripe, EasyPost) and an admin dispute route are untrusted or semi-trusted inputs on a money path; every handler must be idempotent, replay-safe, and fail closed on missing configuration ([THI-8](https://paperclip.ing/THI/issues/THI-8) findings F1–F15).
+- **Trust boundaries** — provider webhooks (Stripe, EasyPost) and an admin dispute route are untrusted or semi-trusted inputs on a money path; every handler must be idempotent, replay-safe, and fail closed on missing configuration (security review THI-8 findings F1–F15).
 
 ## Decision
 
@@ -36,7 +36,7 @@ Constraints that shaped the design:
 - **Offers/negotiation in v1** — chat already supports informal negotiation; the order snapshots the agreed price. YAGNI until asked for.
 - **Direct carrier APIs** — N integrations, each with its own auth/webhook shape; one aggregator covers the EU carrier set the flagship actually sees.
 - **Item-status-only "sold"** (status quo) — no buyer, payment, or audit trail; the reason this ADR exists.
-- **`off_platform` order mode in v1** — initially deferred as "double the machine"; **reconsidered at implementation**: payments being optional per deployment forced a mode flag anyway, and off-platform orders fell out of the same transition table for near-zero extra states (board OQ4 approved building it).
+- **`off_platform` order mode in v1** — initially deferred as "double the machine"; **reconsidered at implementation**: payments being optional per deployment forced a mode flag anyway, and off-platform orders fell out of the same transition table for near-zero extra states (OQ4 approved building it).
 - **Renaming `sellers` → `accounts`** — cosmetic destructive churn on a protected schema; rejected.
 - **Empty-secret-tolerant config** — fail-open; rejected per THI-8 F1.
 
@@ -50,20 +50,20 @@ Constraints that shaped the design:
 
 ## Amendment — sellers bear Stripe processing fees (2026-10-27, THI-374)
 
-- **Status:** Accepted. **Decision source:** board, 2026-10-27T15:02:33Z — rejection of the THI-358 live-flip confirmation card `112e00aa`, verbatim: *"sellers will pay the fees with their stripe account. Platform will not bare any cost."* Spec: `docs/specs/seller-borne-stripe-fees.md`.
+- **Status:** Accepted (product decision, 2026-10-27). Spec: `docs/specs/seller-borne-stripe-fees.md`.
 
 **Decision.** OQ1 is superseded **for the fee axis only**: Thingery stays free — no take rate, no platform fee — but the **Stripe processing fee on the buyer's charge is borne by the seller**, netted out of the payout. `createTransferForOrder` (`src/stripe.ts`) transfers `orderAmountCents(order) − fee`, where `fee` is read from the PaymentIntent's latest-charge balance transaction at payout time (`paymentIntents.retrieve(id, { expand: ["latest_charge.balance_transaction"] })` — the settlement source of truth, never recomputed from published pricing). A completed order costs the platform €0 net: the balance receives `amount − fee` and pays out exactly `amount − fee`. The escrow architecture is untouched: separate charges & transfers, hold until delivered + dispute window, platform remains merchant of record (OQ2). Fee unknown at payout time → the transfer call fails closed and the existing §6.6 `payout_pending` retry/alert semantics apply; the fee is fixed once the charge settles, so the `payout:{order_id}` idempotency key stays sound.
 
-**Refunds (decided).** Stripe does not return processing fees on refunds (docs.stripe.com/refunds, verified 2026-10-27; refunds issued before settlement may process as fee-free reversals — possible recovery, never assumed), and under separate charges & transfers no mechanism can debit a seller beyond reversing the transfer. Therefore on **refunded** orders the platform bears the unreturned fee: pre-payout refunds cost exactly the fee; post-payout refunds reverse the net transfer, refund the buyer in full, and leave a fee-sized gap (down from the full-price gap this ADR originally reserved for). The buyer is always refunded in full. This residual is bounded per order by the fee, applies to refunded orders only — completed orders cost €0 — and is flagged to the board here rather than silently assumed.
+**Refunds (decided).** Stripe does not return processing fees on refunds (docs.stripe.com/refunds, verified 2026-10-27; refunds issued before settlement may process as fee-free reversals — possible recovery, never assumed), and under separate charges & transfers no mechanism can debit a seller beyond reversing the transfer. Therefore on **refunded** orders the platform bears the unreturned fee: pre-payout refunds cost exactly the fee; post-payout refunds reverse the net transfer, refund the buyer in full, and leave a fee-sized gap (down from the full-price gap this ADR originally reserved for). The buyer is always refunded in full. This residual is bounded per order by the fee, applies to refunded orders only — completed orders cost €0 — and is recorded here rather than silently assumed.
 
-**Flagged, unchanged.** Dispute/chargeback liability remains on the platform (merchant of record, OQ2). Zero dispute exposure would require direct charges (connected account as merchant of record) — a product redesign re-trading escrow and buyer protection, out of scope absent an explicit board decision.
+**Flagged, unchanged.** Dispute/chargeback liability remains on the platform (merchant of record, OQ2). Zero dispute exposure would require direct charges (connected account as merchant of record) — a product redesign re-trading escrow and buyer protection, out of scope absent an explicit product decision.
 
 **Alternatives rejected in this amendment:**
 
 - *Store `fee_cents` on the order at charge time* — schema churn plus a second source of truth that can drift; one API call at payout time is always correct.
 - *Compute the fee from published pricing (1.5% + €0.25 …)* — breaks silently when account pricing or per-card rates change (EEA vs international).
 - *`application_fee_amount`* — meaningless under separate charges & transfers (no destination charge to skim); a platform cut, not a fee pass-through.
-- *Destination charges (option B) / direct charges (option C)* — B stays rejected per this ADR (no hold at delivery → no buyer protection); C additionally re-trades dispute liability and escrow without a board decision.
+- *Destination charges (option B) / direct charges (option C)* — B stays rejected per this ADR (no hold at delivery → no buyer protection); C additionally re-trades dispute liability and escrow without an explicit product decision.
 - *Per-deployment gross/net config flag* — a second money-path branch for a hypothetical self-hoster need (YAGNI).
 
-**Consequences.** Seller payouts are visibly smaller than the order total (`llms.txt` updated to set expectations); the THI-358 live flip is unblocked; self-hosters get netting automatically on upgrade (payout amounts only — no schema or MCP-signature change); `docs/deploy-vps.md` §5.3 payout-verification expectations are updated by DevOps at rollout.
+**Consequences.** Seller payouts are visibly smaller than the order total (`llms.txt` updated to set expectations); the live-mode flip is unblocked; self-hosters get netting automatically on upgrade (payout amounts only — no schema or MCP-signature change); `docs/deploy-vps.md` §5.3 payout-verification expectations are updated at rollout.

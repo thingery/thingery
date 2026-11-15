@@ -42,6 +42,8 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       | "/api/notifications"
       | "/api/notifications/:id/read"
       | "/api/notifications/read-all"
+      // THI-788 step 2 (spec docs/specs/item-reports.md): report limiter slug.
+      | "/api/items/:id/report"
     >();
     const routes: SecurityEventRoute[] = [
       "/api/signup",

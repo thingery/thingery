@@ -4,11 +4,11 @@ name: Deploy to VPS
 #   repo variables:          DEPLOY_ENABLED="true", DEPLOY_HOST, DEPLOY_USER
 #   environment secret:      DEPLOY_SSH_KEY, in the protected `production`
 #                            environment (deployment-branch policy: main only —
-#                            THI-224 F1; unreviewed refs cannot resolve it)
-# The SSH key can ONLY run the server-side wrapper
-# /usr/local/bin/thingery-deploy.sh (authorized_keys forced command — THI-224
-# F3): this workflow controls WHEN deploys run; the server controls WHAT a
-# deploy can do. Runbook: docs/deploy-vps.md §5/§5.0.
+#                            unreviewed refs cannot resolve it)
+# The SSH key can ONLY run the server-side deploy wrapper
+# (authorized_keys forced command): this workflow controls WHEN deploys
+# run; the server controls WHAT a deploy can do. Runbook:
+# docs/deploy-vps.md §5/§5.0.
 on:
   push:
     branches: [main]

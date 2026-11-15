@@ -1,14 +1,14 @@
-# Spec: Sellers bear Stripe processing fees (THI-374)
+# Spec: Sellers bear Stripe processing fees
 
 - **Status:** Accepted design, pending Security review → implementation
 - **Date:** 2026-10-27
 - **Author:** Architect
-- **Decision source:** board 2026-10-27T15:02:33Z — rejection of the THI-358 confirmation card `112e00aa`, verbatim: *"sellers will pay the fees with their stripe account. Platform will not bare any cost."* Supersedes ADR 0003 OQ1 for the fee axis.
-- **Gates THI-358** (DevOps live-mode flip). DevOps will not flip prod onto a cost model the board rejected.
+- **Decision:** product decision, 2026-10-27 — sellers bear the Stripe processing fee; the platform's net cost per completed order must be €0. Supersedes ADR 0003 OQ1 for the fee axis.
+- **Gates the live-mode flip** (docs/deploy-vps.md §5.3). The deployment does not flip prod onto a rejected cost model.
 
 ## Problem
 
-Today the platform transfers the **full** order amount to the seller's Express account (`src/stripe.ts` `createTransferForOrder` → `stripe.transfers.create({ amount: orderAmountCents(order) })`, `application_fee_amount` omitted). The buyer's charge settles into the platform balance **net of the Stripe processing fee**, so every completed order leaves the platform balance short by the fee (~1.5% + €0.25 EEA standard pricing). The board has rejected that cost model: sellers bear the fees; the platform's net cost per completed order must be €0.
+Today the platform transfers the **full** order amount to the seller's Express account (`src/stripe.ts` `createTransferForOrder` → `stripe.transfers.create({ amount: orderAmountCents(order) })`, `application_fee_amount` omitted). The buyer's charge settles into the platform balance **net of the Stripe processing fee**, so every completed order leaves the platform balance short by the fee (~1.5% + €0.25 EEA standard pricing). That cost model is rejected: sellers bear the fees; the platform's net cost per completed order must be €0.
 
 ## Context (repo @ 22fa8cf)
 
@@ -26,7 +26,7 @@ Today the platform transfers the **full** order amount to the seller's Express a
 
 ```ts
 /** Seller payout = gross − the Stripe processing fee on the buyer's charge
- *  (board 2026-10-27; ADR 0003 amendment). Fails closed: any unknown fee
+ *  (ADR 0003 amendment, 2026-10-27). Fails closed: any unknown fee
  *  leaves the order payout_pending for the sweep to retry (§6.6). */
 export async function sellerNetTransferCents(
   order: { payment_intent_id: string | null; price_cents: number; shipping_price_cents: number; currency: string },
@@ -47,9 +47,9 @@ Money flow after the change (€100 order, €1.75 fee): buyer card → platform
 **Refund sub-decision (decided, per verified Stripe policy).** Fees are not returned on refunds, and under separate charges & transfers there is no mechanism to debit a seller beyond reversing the transfer (max = the net already transferred), so the fee on a refunded order is **borne by the platform**:
 - Pre-payout refunds (stale sale, stuck transit, never-shipped, carrier failure, unexpected payment): buyer refunded in full; platform cost = the fee (unless the refund lands as a pre-settlement reversal, best case).
 - Post-payout refunds (admin refund after transfer): the existing full transfer reversal recovers the net transfer; the buyer is refunded in full; the residual gap shrinks from full-price to exactly the fee. The existing §6.4 reserve requirement and shortfall alert shrink accordingly.
-- This residual is bounded per order by the fee and applies to **refunded** orders only — completed orders cost €0, which is the required end state. Recorded in the ADR amendment and flagged to the board (not silently decided).
+- This residual is bounded per order by the fee and applies to **refunded** orders only — completed orders cost €0, which is the required end state. Recorded in the ADR amendment (not silently decided).
 
-**Unchanged and flagged.** Dispute/chargeback liability stays on the platform (merchant of record, ADR 0003 OQ2). Zero dispute exposure would mean direct charges (option C) — a product redesign re-trading escrow and buyer protection; out of scope without an explicit board decision.
+**Unchanged and flagged.** Dispute/chargeback liability stays on the platform (merchant of record, ADR 0003 OQ2). Zero dispute exposure would mean direct charges (option C) — a product redesign re-trading escrow and buyer protection; out of scope without an explicit product decision.
 
 ## Data model changes
 
@@ -57,7 +57,7 @@ None. No new columns, no migrations. The fee is read live from the balance trans
 
 ## API / MCP tool changes
 
-None to signatures or schemas (API-evolution lens: no agent-visible contract breaks). Behavioral change: the transfer that lands on a seller's connected account equals the order total **minus** the Stripe processing fee. `llms.txt` payout wording is updated so agents can set seller expectations. Self-hosters (registry installs, npm package) get netting automatically on upgrade — blast radius is payout amounts only, named in the PR and release notes. No per-deployment gross/net flag: one money-path branch fewer (simplicity/YAGNI; the board decision is product-level).
+None to signatures or schemas (API-evolution lens: no agent-visible contract breaks). Behavioral change: the transfer that lands on a seller's connected account equals the order total **minus** the Stripe processing fee. `llms.txt` payout wording is updated so agents can set seller expectations. Self-hosters (registry installs, npm package) get netting automatically on upgrade — blast radius is payout amounts only, named in the PR and release notes. No per-deployment gross/net flag: one money-path branch fewer (simplicity/YAGNI; the decision is product-level).
 
 ## Migration plan (expand-contract lens)
 
@@ -80,12 +80,12 @@ Update existing fakes: `fulfillment.test.ts` and `orders-sweep.test.ts` fake Str
 
 ## Rollout and rollback
 
-- Rollout: merge (THI-36: CI green + Security review stated in the PR) → DevOps deploys → THI-358 executes the live flip + one real €1 end-to-end order (under the new model the ~€0.27 fee on the €1 test is borne by the test seller). DevOps updates `docs/deploy-vps.md` §5.3 payout-verification expectations after the code lands.
+- Rollout: merge (CI green + Security review stated in the PR) → deploy → the live flip includes one real €1 end-to-end order (under the new model the ~€0.27 fee on the €1 test is borne by the test seller). `docs/deploy-vps.md` §5.3 payout-verification expectations are updated after the code lands.
 - Rollback: revert the commit; the kill switch (§5.3) is unchanged. Residual edge: an order whose netted transfer attempt failed at Stripe and whose gross retry is issued within the 24h idempotency window gets an `idempotency_error` → stays `payout_pending` → rule 7 alert → operator manual payout. Acceptable for a rollback-only path.
 
 ## Open questions
 
-- None blocking. Two flags recorded, neither gating this change: (1) refund-path fee residual is platform-borne (mechanically unavoidable under A; board-visible in the ADR amendment); (2) dispute liability remains platform-borne (option C territory, needs an explicit board decision if ever wanted).
+- None blocking. Two flags recorded, neither gating this change: (1) refund-path fee residual is platform-borne (mechanically unavoidable under A; recorded in the ADR amendment); (2) dispute liability remains platform-borne (option C territory, needs an explicit product decision if ever wanted).
 
 ## PR-sized breakdown
 
@@ -94,4 +94,4 @@ One PR, `feat/thi374-seller-borne-fees` (~300 lines incl. docs):
 2. `src/stripe.ts`: `sellerNetTransferCents` + netted `createTransferForOrder`.
 3. `tests/payout-netting.test.ts` + fake updates in `fulfillment.test.ts` / `orders-sweep.test.ts`.
 
-Sequence: Security reviews this spec **before** step 2 lands (payments change — secure-by-design lens); the review verdict is stated in the PR description with the board decision citation.
+Sequence: Security reviews this spec **before** step 2 lands (payments change — secure-by-design lens); the review verdict is stated in the PR description with the decision citation.

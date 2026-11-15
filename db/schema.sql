@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS items (
   attributes    JSONB NOT NULL DEFAULT '{}'::jsonb,  -- category-specific fields (size, colorway,
                                                      -- ISBN, shutter_count, ...) — free-form
   status        TEXT NOT NULL DEFAULT 'active'
-                CHECK (status IN ('active','reserved','sold','deleted')),
+                CHECK (status IN ('active','stored','reserved','sold','deleted')),
   embedding     vector(1536),                  -- text-embedding-3-small by default
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -150,6 +150,25 @@ CREATE INDEX IF NOT EXISTS items_attributes_idx ON items USING gin (attributes j
 -- (shipping_tier = 'local'). Snapshotted onto orders at creation.
 ALTER TABLE items ADD COLUMN IF NOT EXISTS shipping_price_cents INTEGER NOT NULL DEFAULT 0
                       CHECK (shipping_price_cents >= 0);
+
+-- Widen the items status CHECK with 'stored' (ADR 0010: owner-private inventory
+-- — "not currently for sale" without abusing 'deleted'). Idempotent widening
+-- block, the established orders_status_check pattern: databases created before
+-- this change carry the four-value inline CHECK, so drop/re-add when the
+-- existing constraint lacks the new value. Skipped when already widened.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'items_status_check'
+      AND conrelid = 'items'::regclass
+      AND pg_get_constraintdef(oid) NOT LIKE '%stored%'
+  ) THEN
+    ALTER TABLE items DROP CONSTRAINT items_status_check;
+    ALTER TABLE items ADD CONSTRAINT items_status_check
+      CHECK (status IN ('active','stored','reserved','sold','deleted'));
+  END IF;
+END $$;
 
 -- Registry as code (THI-734 D7): the seed CONVERGES the registry to schema.sql
 -- on every apply — description, attribute_definitions, parent and aliases are

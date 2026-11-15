@@ -221,6 +221,14 @@ export async function itemPage(req: Request, res: Response): Promise<void> {
   const viewer = await sellerFromSession(req).catch(() => null);
   const isOwner = Boolean(viewer && viewer.id === item.seller_id);
 
+  // ADR 0010: `stored` is owner-private inventory — the public item page 404s
+  // it exactly like the MCP get_item does for non-owners, so a stored item's
+  // URL never leaks listing details (or its existence) to anyone else.
+  if (item.status === "stored" && !isOwner) {
+    res.status(404).send(page("Not found — Thingery", "Item not found", `<h1 data-i18n="item.nfH1">Not found</h1><p data-i18n="item.nfP">This item does not exist or was removed.</p><p><a href="/">Thingery</a></p>`));
+    return;
+  }
+
   const sold = item.status !== "active";
   // THI-396: base URL is needed before the body (CTA + share button carry
   // absolute URLs); PUBLIC_BASE_URL wins so prod pages are deterministic.

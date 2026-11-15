@@ -49,7 +49,9 @@ describe("public wanted response_count SQL (pure)", () => {
     const sql = String(query.mock.calls[0][0]);
     expect(sql).toMatch(/\(SELECT COUNT\(\*\)::int\s+FROM wanted_responses wr/);
     expect(sql).toContain("wr.published_at IS NOT NULL");
-    expect(sql).toContain("i.status <> 'deleted'");
+    // ADR 0010: counts are live offers only — stored (and any non-active
+    // status) leaves the count until the listing is active again.
+    expect(sql).toContain("i.status = 'active'");
     expect(sql).not.toMatch(/wr\.seller_id|wr\.item_id AS/);
   });
 
@@ -117,20 +119,23 @@ describe.skipIf(!available)("public wanted response_count (DB)", () => {
     await db.end();
   });
 
-  it("counts published answers on live listings, on both list and detail", async () => {
+  it("counts published answers on live (active) listings, on both list and detail", async () => {
     const title = `Count probe ${randomUUID()}`;
     const wantedId = await insertWanted(title);
     await respond(wantedId, { published: true });
+    // ADR 0010: response counts are live offers only. A sold response is no
+    // longer an offer (was counted before); a stored response (below) would
+    // not count either. Deleted never counted.
     await respond(wantedId, { published: true, status: "sold" });
     await respond(wantedId, { published: false }); // pending photo: not visible yet
     await respond(wantedId, { published: true, status: "deleted" }); // taken down
 
     const listed = await call("search_wanted", { q: title, limit: 5 });
     expect(listed.body.results).toHaveLength(1);
-    expect(listed.body.results[0].response_count).toBe(2);
+    expect(listed.body.results[0].response_count).toBe(1);
 
     const detail = await call("get_wanted", { wanted_id: wantedId });
-    expect(detail.body.wanted.response_count).toBe(2);
+    expect(detail.body.wanted.response_count).toBe(1);
   });
 
   it("is 0 for a post nobody has answered", async () => {

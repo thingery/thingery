@@ -99,6 +99,7 @@ for (const f of fixtures) {
       ...(photo ? { photos: photo } : {}),
     });
   } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
     outcomes.push({
       id: f.id,
       ok: false,
@@ -106,8 +107,11 @@ for (const f of fixtures) {
       conditionHit: false,
       attrExpected: Object.keys(f.expected.attributes).length,
       attrHit: 0,
-      problems: [`pipeline error: ${e instanceof Error ? e.message : String(e)}`],
+      problems: [`pipeline error: ${message}`],
     });
+    // Per-line evidence must cover every fixture, including hard failures —
+    // this output is pasted as merge evidence (THI-840 review F2).
+    console.log(`✗ ${f.id}  pipeline error: ${message}`);
     continue;
   }
 
@@ -122,7 +126,7 @@ for (const f of fixtures) {
     if (out.draft.attributes[key] === want) attrHit += 1;
     else problems.push(`attribute ${key}: got ${JSON.stringify(out.draft.attributes[key])}, want ${JSON.stringify(want)}`);
   }
-  outcomes.push({
+  const outcome: Outcome = {
     id: f.id,
     ok: categoryHit && attrHit === expectedPairs.length,
     categoryHit,
@@ -130,7 +134,8 @@ for (const f of fixtures) {
     attrExpected: expectedPairs.length,
     attrHit,
     problems,
-  });
+  };
+  outcomes.push(outcome);
 
   if (RECORD) {
     // Store what the model actually said (post-JSON-parse content is not
@@ -152,9 +157,12 @@ for (const f of fixtures) {
     writeFileSync(recordedPath, JSON.stringify(recorded, null, 2) + "\n");
   }
 
-  const mark = out.ok ? "✓" : "✗";
+  // THI-840 review F2: log from the outcome record, not the pipeline result —
+  // draftListing output has no ok/attrHit/attrExpected fields, so the old
+  // per-line glyph and attrs counts were undefined in the live report.
+  const mark = outcome.ok ? "✓" : "✗";
   console.log(
-    `${mark} ${f.id}  category=${out.draft.category}(${categoryHit ? "hit" : "MISS"}) attrs=${out.attrHit}/${out.attrExpected} condition=${out.draft.condition}(${conditionHit ? "hit" : "MISS"})`,
+    `${mark} ${f.id}  category=${out.draft.category}(${outcome.categoryHit ? "hit" : "MISS"}) attrs=${outcome.attrHit}/${outcome.attrExpected} condition=${out.draft.condition}(${outcome.conditionHit ? "hit" : "MISS"})`,
   );
   for (const p of problems) console.log(`    ${p}`);
 }

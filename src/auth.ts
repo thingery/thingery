@@ -334,14 +334,23 @@ function readCookie(req: Request, name: string): string | undefined {
 }
 
 /** Resolves the logged-in seller from the session cookie (browser clients). */
-export async function sellerFromSession(req: Request): Promise<SellerRow | null> {
+/** What a resolved login session carries (THI-762): the account row plus the
+ * email verification state /api/me reports — never credentials of any kind. */
+export interface SessionSeller extends SellerRow {
+  email: string | null;
+  email_verified_at: Date | null;
+}
+
+export async function sellerFromSession(req: Request): Promise<SessionSeller | null> {
   return sellerFromSessionValue(readCookie(req, SESSION_COOKIE));
 }
 
 /** Verifies a raw session value (MAC, 30-day expiry, live `session_epoch`) —
  * the single check behind both the cookie and the `thgs_` bearer.
- * THI-114: no plaintext key selected — /api/me must not carry it. */
-async function sellerFromSessionValue(sessionValue: string | undefined): Promise<SellerRow | null> {
+ * THI-114: no plaintext key selected — /api/me must not carry it. THI-762:
+ * email + email_verified_at ride along (additive, same one query) so /api/me
+ * can report verification state without a second roundtrip. */
+async function sellerFromSessionValue(sessionValue: string | undefined): Promise<SessionSeller | null> {
   const token = splitSessionToken(sessionValue);
   if (!token) return null;
   // Trust-boundary format gate (THI-122 review, finding 1): sellers.id is a
@@ -357,10 +366,10 @@ async function sellerFromSessionValue(sessionValue: string | undefined): Promise
   // but it is only used as a parameterized lookup key; nothing from this row
   // is returned before `verifySessionToken` passes. THI-114: no plaintext key
   // selected — /api/me must not carry it.
-  const { rows } = await pool.query<SellerRow & { session_epoch: number }>(
-    `SELECT id, display_name, session_epoch FROM sellers WHERE id = $1`,
-    [token.sellerId],
-  );
+  const { rows } = await pool.query<SessionSeller & { session_epoch: number }>(
+    `SELECT id, display_name, session_epoch, email, email_verified_at FROM sellers WHERE id = $1`, [
+    token.sellerId,
+  ]);
   const seller = rows[0];
   if (!seller) return null;
   return verifySessionToken(token, seller.session_epoch) ? seller : null;
@@ -385,8 +394,52 @@ export interface AccountRow extends SellerRow {
 
 /** Signup result: the account row plus the freshly generated key — the one
  * show-once moment where the plaintext exists (in memory, never in the DB;
- * THI-114 + THI-158 contract). */
-export type SignupRow = AccountRow & { api_key: string };
+ * THI-114 + THI-158 contract). `email_verification_token` follows the same
+ * show-once rule (THI-762 / THI-760 Phase 0): only its sha256 hash is stored. */
+export type SignupRow = AccountRow & { api_key: string; email_verification_token: string };
+
+// ---------------------------------------------------------------------------
+// Email verification (THI-760 plan Phase 0 / THI-762): signup mints a
+// single-use, expiring, 256-bit token; the database stores only its sha256
+// hash (same at-rest reasoning as apiKeyHash — an unsalted hash is fine for a
+// high-entropy random token, and lookup stays one indexed equality). No email
+// is sent in Phase 0: the plaintext surfaces only in non-production responses
+// (dev/testing) until the mailer arrives in PR 2. Legacy and NULL-email
+// accounts are simply "not verified" — email_verified_at stays NULL until a
+// token is consumed; nothing else about the account changes.
+
+/** Bearer-style prefix for email verification tokens (dispatch convention:
+ * thg_ key / thgo_ oauth / thgs_ session — this one never rides the
+ * Authorization header; the prefix exists for boundary format-gating). */
+export const EMAIL_VERIFICATION_TOKEN_PREFIX = "thge_";
+
+/** Token lifetime: 48h (THI-760 Phase 0; long enough for a weekly check-in,
+ * short enough that an abandoned link dies quickly). Resend replaces the
+ * outstanding token wholesale (PR 2). */
+export const EMAIL_VERIFICATION_TTL_S = 48 * 3600;
+
+/** At-rest form of a `thge_` token (sellers.email_verification_token_hash). */
+export function emailVerificationTokenHash(token: string): string {
+  return crypto.createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+export interface EmailVerificationToken {
+  /** Plaintext `thge_...` — show-once, same rule as the signup API key. */
+  token: string;
+  /** sha256 hex — what sellers.email_verification_token_hash stores. */
+  tokenHash: string;
+  /** now + EMAIL_VERIFICATION_TTL_S — email_verification_expires_at. */
+  expiresAt: Date;
+}
+
+export function newEmailVerificationToken(nowMs = Date.now()): EmailVerificationToken {
+  const token = `${EMAIL_VERIFICATION_TOKEN_PREFIX}${crypto.randomBytes(32).toString("base64url")}`;
+  return {
+    token,
+    tokenHash: emailVerificationTokenHash(token),
+    expiresAt: new Date(nowMs + EMAIL_VERIFICATION_TTL_S * 1000),
+  };
+}
 
 export async function createAccount(
   email: string,
@@ -396,13 +449,25 @@ export async function createAccount(
   // THI-114/THI-158: the key is generated here and handed back exactly once
   // from this variable — the database stores only its hash.
   const apiKey = newApiKey();
+  // THI-762: same show-once contract for the verification token. Emitted at
+  // signup for every new account (legacy accounts verify via resend, PR 2).
+  const verification = newEmailVerificationToken();
   const { rows } = await pool.query<SellerRow & { email: string; session_epoch: number }>(
-    `INSERT INTO sellers (api_key_hash, api_key_prefix, api_key_created_at, display_name, email, password_hash)
-     VALUES ($1, $2, now(), $3, $4, $5)
+    `INSERT INTO sellers (api_key_hash, api_key_prefix, api_key_created_at, display_name, email, password_hash,
+                          email_verification_token_hash, email_verification_expires_at)
+     VALUES ($1, $2, now(), $3, $4, $5, $6, $7)
      RETURNING id, display_name, email, session_epoch`,
-    [apiKeyHash(apiKey), apiKeyPrefix(apiKey), displayName, email, hashPassword(password)],
+    [
+      apiKeyHash(apiKey),
+      apiKeyPrefix(apiKey),
+      displayName,
+      email,
+      hashPassword(password),
+      verification.tokenHash,
+      verification.expiresAt,
+    ],
   );
-  return { ...rows[0], api_key: apiKey, password_hash: null };
+  return { ...rows[0], api_key: apiKey, password_hash: null, email_verification_token: verification.token };
 }
 
 /** Login path. THI-158 contract: hash-only schema — login no longer returns
@@ -414,6 +479,80 @@ export async function accountByEmail(email: string): Promise<AccountRow | null> 
     [email],
   );
   return rows[0] ?? null;
+}
+
+/** Structural gate for a presented verification token: `thge_` + exactly 43
+ * base64url chars (sha256-strength randomness). Anything else never reaches
+ * the database (boundary format-gating, same posture as the thg_/thgo_/thgs_
+ * dispatch). Exported for route-level pre-validation and tests. */
+export const EMAIL_VERIFICATION_TOKEN_RE = /^thge_[A-Za-z0-9_-]{43}$/;
+
+/** Consumes a verification token (THI-762 / THI-760 Phase 0): one atomic
+ * conditional UPDATE — success stamps `email_verified_at` and CLEARS the
+ * token columns in the same statement, which is what makes the token
+ * single-use (a replay finds no hash: same null as any unknown token —
+ * uniform, no oracle) and the account state-machine transition explicit:
+ * unverified → verified, once, ever. Expiry is checked in the WHERE clause,
+ * so an expired token fails identically. Returns the verified seller id, or
+ * null for unknown/expired/reused/malformed tokens. */
+export async function verifyEmailToken(token: string): Promise<string | null> {
+  if (!EMAIL_VERIFICATION_TOKEN_RE.test(token)) return null;
+  const { rows } = await pool.query<{ id: string }>(
+    `UPDATE sellers
+        SET email_verified_at = now(),
+            email_verification_token_hash = NULL,
+            email_verification_expires_at = NULL
+      WHERE email_verification_token_hash = $1
+        AND email_verification_expires_at > now()
+        AND email_verified_at IS NULL
+      RETURNING id`,
+    [emailVerificationTokenHash(token)],
+  );
+  return rows[0]?.id ?? null;
+}
+
+/** Resend/late-verification issuance (THI-762): mints a fresh token for an
+ * EXISTING account and atomically replaces any outstanding one (one live
+ * token per account, enforced by the single column — the previous link dies
+ * the moment this commits). Issuing is allowed only while unverified, with
+ * an email on file, and not bounce-suppressed (email_bounced_at, Phase 1
+ * groundwork — already honored here so a suppressed address can never be
+ * re-armed by resend). The 0-row diagnostic read is display-only; the UPDATE
+ * above remains the authority under concurrency. */
+export type EmailVerificationIssue =
+  | { status: "issued"; token: string; email: string }
+  | { status: "already_verified" }
+  | { status: "no_email" }
+  | { status: "suppressed" };
+
+export async function issueEmailVerification(
+  sellerId: string,
+): Promise<EmailVerificationIssue | null> {
+  const verification = newEmailVerificationToken();
+  const { rows } = await pool.query<{ email: string }>(
+    `UPDATE sellers
+        SET email_verification_token_hash = $2,
+            email_verification_expires_at = $3
+      WHERE id = $1
+        AND email IS NOT NULL
+        AND email_verified_at IS NULL
+        AND email_bounced_at IS NULL
+      RETURNING email`,
+    [sellerId, verification.tokenHash, verification.expiresAt],
+  );
+  if (rows.length === 1) {
+    return { status: "issued", token: verification.token, email: rows[0].email };
+  }
+  const state = await pool.query<{
+    email: string | null;
+    email_verified_at: Date | null;
+    email_bounced_at: Date | null;
+  }>(`SELECT email, email_verified_at, email_bounced_at FROM sellers WHERE id = $1`, [sellerId]);
+  if (state.rows.length === 0) return null; // unknown seller
+  const row = state.rows[0];
+  if (row.email_verified_at) return { status: "already_verified" };
+  if (!row.email) return { status: "no_email" };
+  return { status: "suppressed" };
 }
 
 /** Rotates a seller's API key (THI-114) and revokes every outstanding

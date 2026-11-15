@@ -23,6 +23,34 @@ ALTER TABLE sellers ADD COLUMN IF NOT EXISTS password_hash TEXT;
 -- for that seller at once. Default 0 keeps seeded/existing sellers usable.
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS session_epoch INT NOT NULL DEFAULT 0;
 
+-- Email verification groundwork (THI-760 plan Phase 0 / THI-762; board-approved
+-- plan revision aad0e354). One accounts table (sellers) holds buyers and sellers
+-- alike, and `email` has never been verified (docs/security.md §4 H4): no
+-- notification email may ever be sent to an address that is unverified or NULL.
+-- Phase 0 lays the columns and mints the token only — nothing gates sending on
+-- email_verified_at yet (all sending arrives in later phases; this deploy is
+-- dark by construction). Additive, expand-only, idempotent:
+--   email_verified_at               set once, by consuming a valid token
+--   email_verification_token_hash   sha256 hex of the live single-use token;
+--                                   NULL when none is outstanding (also cleared
+--                                   on consumption — a reused token must fail)
+--   email_verification_expires_at   the live token's TTL anchor (48h,
+--                                   src/auth.ts). Extension of the plan's
+--                                   three-column list: its own acceptance
+--                                   criteria require expiring tokens, and the
+--                                   codebase convention for expiring single-use
+--                                   credentials is an explicit timestamp column
+--                                   (oauth_codes.expires_at) — noted in the PR.
+--   email_bounced_at                groundwork for Phase 1 bounce suppression
+--                                   (delivery sweep marks hard bounces and
+--                                   suppresses further sends); never set yet.
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS email_verification_token_hash TEXT;
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS email_verification_expires_at TIMESTAMPTZ;
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS email_bounced_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS sellers_email_verification_token_hash_idx
+  ON sellers (email_verification_token_hash) WHERE email_verification_token_hash IS NOT NULL;
+
 -- API key hash at rest (security doc §6 H2 fix 1; THI-114 expand → THI-158
 -- contract). Fresh databases store only the sha256 hash. Legacy databases
 -- are migrated hash-before-drop so no seller key is ever invalidated:
@@ -669,3 +697,103 @@ CREATE INDEX IF NOT EXISTS order_messages_order_created_idx
 -- Per-account abuse review / retention sweeps scan by sender.
 CREATE INDEX IF NOT EXISTS order_messages_sender_created_idx
   ON order_messages (sender_id, created_at);
+
+-- ---------------------------------------------------------------------------
+-- THI-760 plan Phase 1 / THI-763 (board-approved plan revision aad0e354):
+-- buyer/seller notification core. Two additive tables + a one-row watermark.
+-- Derived data only — the fan-out sweep reads the append-only order_events
+-- audit log and INSERTs here with ON CONFLICT (dedupe_key) DO NOTHING, so
+-- notifications are idempotent/replay-safe by construction and the order
+-- state machine (src/orders.ts) is untouched. Payloads are PII-free (F6):
+-- ids, titles, amounts, statuses, links — never addresses or counterparty
+-- contact data. Nothing reads or writes these tables until the notify sweeps
+-- and web routes land (later PRs of the same plan): this deploy is dark.
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  recipient_id UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+  order_id     UUID REFERENCES orders(id) ON DELETE CASCADE,
+  event_type   TEXT NOT NULL,          -- 'buyer.payment_received', 'seller.item_sold', ...
+  role         TEXT NOT NULL CHECK (role IN ('buyer','seller')),
+  payload      JSONB NOT NULL DEFAULT '{}'::jsonb,  -- PII-free (F6): ids, titles, amounts, statuses
+  dedupe_key   TEXT UNIQUE NOT NULL,   -- '{event_type}:{order_events.id}' → fan-out at-most-once
+  read_at      TIMESTAMPTZ,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Unread badge + ?unread=1 listing (partial, plan §2.1).
+CREATE INDEX IF NOT EXISTS notifications_recipient_unread_idx
+  ON notifications (recipient_id, created_at DESC) WHERE read_at IS NULL;
+-- Full per-recipient listing (GET /api/notifications) uses the same key
+-- shape without the partial predicate — additive extension of plan §2.1's
+-- index list so the read path needs no seq scan on the same query shape.
+CREATE INDEX IF NOT EXISTS notifications_recipient_idx
+  ON notifications (recipient_id, created_at DESC);
+
+-- Transactional email outbox (plan §2.2). One row per notification that has
+-- an email channel (dedupe_key = the notification id): the delivery sweep
+-- claims rows with a conditional UPDATE, renders the template, and drives
+-- the explicit state machine pending → sent | skipped | pending(retry) |
+-- dead (attempts ≥ 8; backoff 1m→2m→…→6h cap). sent/skipped/dead are
+-- terminal; the CHECK constraint makes illegal statuses unrepresentable and
+-- the guarded UPDATEs make illegal transitions no-ops.
+CREATE TABLE IF NOT EXISTS email_outbox (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  notification_id UUID REFERENCES notifications(id) ON DELETE CASCADE,
+  to_email     TEXT NOT NULL,          -- '' when the account has no address (NULL email)
+  subject      TEXT NOT NULL,
+  template     TEXT NOT NULL,          -- 'seller.item_sold.v1' (plan §6 key convention)
+  locale       TEXT NOT NULL DEFAULT 'en',   -- reserved for later i18n (plan §6)
+  payload      JSONB NOT NULL DEFAULT '{}'::jsonb,  -- PII-free template args (F6)
+  status       TEXT NOT NULL DEFAULT 'pending'
+               CHECK (status IN ('pending','sent','skipped','dead')),
+  attempts     INT NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_error   TEXT,
+  provider_message_id TEXT,
+  sent_at      TIMESTAMPTZ,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  dedupe_key   TEXT UNIQUE NOT NULL    -- '{notification_id}' → one email per notification
+);
+-- Due-row claim scan (partial, plan §2.2).
+CREATE INDEX IF NOT EXISTS email_outbox_due_idx
+  ON email_outbox (next_attempt_at) WHERE status = 'pending';
+-- Per-recipient hourly send counts (rate cap, plan §4 sweep 2) — additive
+-- extension of plan §2.2's index list for the cap's count query.
+CREATE INDEX IF NOT EXISTS email_outbox_recipient_sent_idx
+  ON email_outbox (to_email, sent_at DESC) WHERE status = 'sent';
+
+-- Fan-out watermark (plan §2.1: "a last_processed watermark"). One row per
+-- sweep source; advanced transactionally with the notification INSERTs, so
+-- a crash mid-fan-out re-reads the same events and the dedupe keys absorb
+-- the replay. last_event_at/last_event_id bracket the processed prefix; the
+-- sweep re-reads a small overlap window, so late-committing transactions are
+-- picked up and replays stay idempotent (webhook-idempotency lens).
+CREATE TABLE IF NOT EXISTS notify_watermarks (
+  name          TEXT PRIMARY KEY,     -- 'order-events' (message store sources: plan §7, later)
+  last_event_id UUID,
+  last_event_at TIMESTAMPTZ,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Item reports (spec docs/specs/item-reports.md, THI-788 step 2 / THI-617
+-- MVP): a signed-in reporter flags one item with a canned cause + required
+-- motivation; every row is one board-triage unit. Dedupe is durable:
+-- UNIQUE (reporter, item) — one report per reporter per item, ever.
+-- State machine: open → resolved | dismissed; v1 only INSERTs (open), the
+-- CHECK makes illegal values unrepresentable and no v1 path mutates status.
+-- board_issue_ref is the external triage task ref, NULL until the
+-- notification seam (THI-788 step 3) creates it after the INSERT commits.
+CREATE TABLE IF NOT EXISTS reports (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  reporter_account_id UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+  target_item_id      UUID NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  reason              TEXT NOT NULL CHECK (reason IN ('explicit_images','scam_fraud','other')),
+  motivation          TEXT NOT NULL CHECK (char_length(motivation) BETWEEN 10 AND 1000),
+  status              TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved','dismissed')),
+  board_issue_ref     TEXT,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (reporter_account_id, target_item_id)
+);
+-- Triage read path (spec): all reports for an item, newest first.
+CREATE INDEX IF NOT EXISTS reports_target_created_idx
+  ON reports (target_item_id, created_at);

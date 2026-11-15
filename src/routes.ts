@@ -6,15 +6,22 @@ import { z } from "zod";
 import {
   accountByEmail,
   createAccount,
+  EMAIL_VERIFICATION_TOKEN_RE,
+  EMAIL_VERIFICATION_TTL_S,
+  emailVerificationTokenHash,
+  issueEmailVerification,
   regenerateApiKey,
   sellerFromSession,
   sessionCookieOptions,
   signSession,
   SESSION_SECRET,
+  verifyEmailToken,
   verifyPassword,
   SESSION_COOKIE,
   type SignupRow,
 } from "./auth.js";
+import { sendMail, type MailMessage } from "./mailer.js";
+import { renderEmailVerification } from "./notify/templates.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import {
@@ -65,6 +72,7 @@ import {
   WantedNotFoundError,
 } from "./wanted.js";
 import { createWantedWithAlert, wantedCreateSchema, wantedEditShape, wantedWriteLimiter } from "./wanted-writes.js";
+import { createItemReport, ItemReportError, MAX_MOTIVATION_CHARS, MIN_MOTIVATION_CHARS, REPORT_REASONS } from "./reports.js";
 import crypto from "node:crypto";
 import { pool } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
@@ -78,11 +86,47 @@ const apiKeyRotateLimiter = new RateLimiter(10, 60 * 60_000); // 10 key rotation
 export const chatAnonLimiter = new RateLimiter(chatLimits.turnsHourlyAnon, 60 * 60_000); // anonymous chats per IP per hour (THI-180: env-configurable)
 export const chatAuthedLimiter = new RateLimiter(chatLimits.turnsHourlyAuthed, 60 * 60_000); // logged-in chats per hour (THI-180: env-configurable)
 export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin calls per IP per hour (F7)
+// THI-760 Phase 1 / THI-763: notification reads/marks are cheap, but every
+// route on the session API gets a cap — 240/h per account is far above any
+// human poller while keeping scripted abuse bounded.
+const notificationsLimiter = new RateLimiter(240, 60 * 60_000);
 export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
 export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 image upload attempts per IP per hour (THI-140 / THI-123 obs 2)
 export const imageMutationLimiter = new RateLimiter(60, 60 * 60_000); // 60 image delete/reorder mutations per seller per hour (THI-308 F6: churn here must never consume upload quota)
 export const llmCredentialLimiter = new RateLimiter(10, 60 * 60_000); // 10 BYO credential writes per seller per hour (THI-189)
 export const chatgptConnectLimiter = new RateLimiter(10, 60 * 60_000); // 10 ChatGPT connect starts per seller per hour (THI-193 §3.2)
+const emailVerifyLimiter = new RateLimiter(60, 60 * 60_000); // 60 verify-link attempts per IP per hour (THI-762 — link-consumption surface; tokens are unguessable, the cap protects the DB)
+const emailResendLimiter = new RateLimiter(3, 60 * 60_000); // 3 verification resends per seller per hour (THI-762)
+
+/** Public base for email links (THI-760 plan §3): NOTIFY_PUBLIC_BASE_URL
+ * overrides, PUBLIC_BASE_URL next, then the dev default — dry-run bodies need
+ * a well-formed absolute link even when nothing is configured. Empty strings
+ * count as unset (config.ts F1 rule). */
+function emailLinkBase(): string {
+  return (
+    process.env.NOTIFY_PUBLIC_BASE_URL?.trim() ||
+    process.env.PUBLIC_BASE_URL?.trim() ||
+    "http://localhost:3000"
+  ).replace(/\/+$/, "");
+}
+
+/** Builds the verification email exactly once per issuance site (signup,
+ * resend) so both paths cannot drift. The idempotency key pins the send to
+ * this specific token (its hash) — a replayed key can never double-send. */
+function verificationEmailMessage(to: string, token: string): MailMessage {
+  const verifyUrl = `${emailLinkBase()}/api/verify-email?token=${encodeURIComponent(token)}`;
+  const rendered = renderEmailVerification({
+    verifyUrl,
+    ttlHours: EMAIL_VERIFICATION_TTL_S / 3600,
+  });
+  return {
+    to,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: rendered.html,
+    idempotencyKey: `email-verification:${emailVerificationTokenHash(token)}`,
+  };
+}
 
 function clientIp(req: Request): string {
   return req.ip ?? "unknown";
@@ -139,10 +183,32 @@ api.post("/signup", asyncHandler(async (req: Request, res: Response) => {
   }
   // THI-112: signup success — correlated by seller id + IP (H4.2).
   logSecurityEvent({ type: "signup", outcome: "success" }, { sellerId: account.id, ip: clientIp(req) });
+  // THI-760 Phase 0 / THI-762: fire the verification email through the mailer
+  // seam. buildMailer resolves to DryRunMailer in EVERY Phase 0 configuration
+  // (flag off by default; no provider adapter exists yet), so this records/
+  // logs and nothing leaves the process — and a mailer fault must never fail
+  // signup.
+  try {
+    await sendMail(verificationEmailMessage(account.email, account.email_verification_token));
+  } catch (err) {
+    console.error("email verification send failed (ignored):", err);
+  }
   // Sign at the live epoch (spec THI-115 §3): a fresh account is epoch 0, but
   // passing the row's value keeps the cookie correct-by-construction.
   res.cookie(SESSION_COOKIE, signSession(account.id, account.session_epoch), sessionCookieOptions());
-  res.json({ seller: { name: account.display_name, email: account.email, api_key: account.api_key } });
+  // THI-762 (THI-760 Phase 0 PR 1): surface the verification token ONLY outside
+  // production — the show-once plaintext for dev/testing until PR 2's mailer
+  // logs it via DryRunMailer. Production never returns it; the signup flow and
+  // every existing response field are otherwise unchanged (deployable dark).
+  const sellerBody = { name: account.display_name, email: account.email, api_key: account.api_key };
+  if (process.env.NODE_ENV === "production") {
+    res.json({ seller: sellerBody });
+  } else {
+    res.json({
+      seller: sellerBody,
+      email_verification: { token: account.email_verification_token, expires_in_s: EMAIL_VERIFICATION_TTL_S },
+    });
+  }
 }));
 
 api.post("/login", asyncHandler(async (req: Request, res: Response) => {
@@ -193,7 +259,164 @@ api.get("/me", asyncHandler(async (req: Request, res: Response) => {
     return;
   }
   // THI-114: no api_key here — the key is show-once (signup/regenerate).
-  res.json({ seller: { name: seller.display_name } });
+  // THI-762: email + verification state — the session owner's own account
+  // facts (additive fields; anonymous shape unchanged).
+  // THI-760 Phase 1 / THI-763: unread badge count (additive field).
+  const unread = await pool
+    .query<{ c: string }>(
+      "SELECT count(*)::text AS c FROM notifications WHERE recipient_id = $1 AND read_at IS NULL",
+      [seller.id],
+    )
+    .catch(() => ({ rows: [{ c: "0" }] }));
+  res.json({
+    seller: {
+      name: seller.display_name,
+      email: seller.email,
+      email_verified: seller.email_verified_at !== null,
+      unread_notifications: Number(unread.rows[0]?.c ?? 0),
+    },
+  });
+}));
+
+// THI-760 Phase 1 / THI-763 (plan §5): notification read surface for the
+// session owner. All three routes are recipient-scoped by construction —
+// every query filters on the session seller id, ids from other accounts are
+// indistinguishable from nonexistent ones (404), and the payload is the
+// PII-free JSONB the fan-out wrote (F6). ?unread=1 rides the partial index.
+api.get("/notifications", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to see notifications." });
+    return;
+  }
+  if (!notificationsLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/notifications" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const unreadOnly = req.query.unread === "1";
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 100 ? limitRaw : 50;
+  const rows = await pool.query(
+    `SELECT id, order_id, event_type, role, payload, read_at, created_at
+       FROM notifications
+      WHERE recipient_id = $1 ${unreadOnly ? "AND read_at IS NULL" : ""}
+      ORDER BY created_at DESC
+      LIMIT $2`,
+    [seller.id, limit],
+  );
+  const unread = await pool.query<{ c: string }>(
+    "SELECT count(*)::text AS c FROM notifications WHERE recipient_id = $1 AND read_at IS NULL",
+    [seller.id],
+  );
+  res.json({ notifications: rows.rows, unread_count: Number(unread.rows[0]?.c ?? 0) });
+}));
+
+// Mark one read. Idempotent: re-marking a read row is ok:true; an id that is
+// not the caller's own is the same 404 as an unknown id — no cross-account
+// oracle (there is nothing to learn: the row set is recipient-scoped).
+api.post("/notifications/:id/read", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage notifications." });
+    return;
+  }
+  if (!notificationsLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/notifications/:id/read" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const id = typeof req.params.id === "string" ? req.params.id : "";
+  const updated = await pool.query(
+    "UPDATE notifications SET read_at = now() WHERE id = $1 AND recipient_id = $2 AND read_at IS NULL RETURNING id",
+    [id, seller.id],
+  );
+  if (updated.rows.length === 0) {
+    // Already read, someone else's, or nonexistent — uniform 404.
+    res.status(404).json({ error: "Notification not found." });
+    return;
+  }
+  res.json({ ok: true });
+}));
+
+// Mark everything read (badge clear). Returns how many flipped.
+api.post("/notifications/read-all", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage notifications." });
+    return;
+  }
+  if (!notificationsLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/notifications/read-all" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const updated = await pool.query(
+    "UPDATE notifications SET read_at = now() WHERE recipient_id = $1 AND read_at IS NULL RETURNING id",
+    [seller.id],
+  );
+  res.json({ ok: true, updated: updated.rows.length });
+}));
+
+// THI-760 Phase 0 / THI-762: consume a verification token from an email link
+// (browser-friendly GET). Uniform failure: unknown, expired, reused, and
+// malformed tokens are one 400 body — no account identifier is input, so
+// there is nothing to enumerate; success is the only signal. Rate-limited
+// per IP: tokens are 256-bit random (brute force is not the threat), the cap
+// just keeps the link-consumption endpoint from hammering the DB.
+api.get("/verify-email", asyncHandler(async (req: Request, res: Response) => {
+  if (!emailVerifyLimiter.allow(`ip:${clientIp(req)}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/verify-email" }, { ip: clientIp(req) });
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const token = typeof req.query.token === "string" ? req.query.token : "";
+  const sellerId = EMAIL_VERIFICATION_TOKEN_RE.test(token) ? await verifyEmailToken(token) : null;
+  if (!sellerId) {
+    res.status(400).json({ error: "Invalid or expired verification link." });
+    return;
+  }
+  logSecurityEvent({ type: "email_verified", outcome: "success" }, { sellerId });
+  res.json({ ok: true, email_verified: true });
+}));
+
+// THI-760 Phase 0 / THI-762: resend (or first-time issue, for legacy accounts)
+// the verification email. Session-auth only, 3/hour per account. The response
+// is uniform ok:true for every account state — already-verified, no-email
+// (OAuth accounts), and bounce-suppressed accounts get the same body as a
+// real send; the caller is the session owner, so there is no cross-account
+// enumeration surface, and the mailer (dry-run in Phase 0) records the truth.
+api.post("/me/resend-email-verification", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage email verification." });
+    return;
+  }
+  if (!emailResendLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent(
+      { type: "rate_limit", route: "/api/me/resend-email-verification" },
+      { sellerId: seller.id },
+    );
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const issued = await issueEmailVerification(seller.id);
+  const token = issued?.status === "issued" ? issued.token : null;
+  if (issued?.status === "issued") {
+    try {
+      await sendMail(verificationEmailMessage(issued.email, issued.token));
+    } catch (err) {
+      console.error("email verification send failed (ignored):", err);
+    }
+  }
+  const body: { ok: true; email_verification?: { token: string; expires_in_s: number } } = { ok: true };
+  // Show-once dev surfacing (same rule as signup): the plaintext token appears
+  // in a response only outside production.
+  if (token && process.env.NODE_ENV !== "production") {
+    body.email_verification = { token, expires_in_s: EMAIL_VERIFICATION_TTL_S };
+  }
+  res.set("Cache-Control", "no-store"); // the dev body may carry the show-once token
+  res.json(body);
 }));
 
 // THI-114 (security doc §6 H2): rotate the seller API key. Session-auth only;
@@ -731,6 +954,50 @@ api.put("/items/:id/images/order", asyncHandler(async (req: Request, res: Respon
   }
   res.set("Cache-Control", "no-store");
   res.json({ images: updated.rows[0].images });
+}));
+
+// --- item reports (spec docs/specs/item-reports.md, THI-788 step 2) ----------
+// Session-authed Report action: canned cause + required motivation, one row
+// per board triage. Logic (dedupe, hourly cap, self-report guard) lives in
+// src/reports.ts — this handler only wires auth, validation and status
+// mapping (same layering as the wanted surface, THI-439 §6.3). Anonymous
+// users 401 here; the frontend hides the action entirely.
+
+const itemReportSchema = z.object({
+  reason: z.enum(REPORT_REASONS),
+  motivation: z.string().min(MIN_MOTIVATION_CHARS).max(MAX_MOTIVATION_CHARS), // required free text; DB CHECK mirrors
+});
+
+api.post("/items/:id/report", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to report items." });
+    return;
+  }
+  const parsed = itemReportSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: `Pick a reason and describe the problem in ${MIN_MOTIVATION_CHARS}–${MAX_MOTIVATION_CHARS} characters.` });
+    return;
+  }
+  try {
+    const report = await createItemReport({
+      itemId: req.params.id,
+      reporterAccountId: seller.id,
+      reason: parsed.data.reason,
+      motivation: parsed.data.motivation,
+    });
+    res.status(201).json({ ok: true, report_id: report.id });
+  } catch (err) {
+    if (err instanceof ItemReportError) {
+      const status =
+        err.code === "not_found" ? 404 :
+        err.code === "duplicate" ? 409 :
+        err.code === "rate_limited" ? 429 : 400; // validation | own_item
+      res.status(status).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
 }));
 
 // --- wanted listings, browser CRUD (spec THI-439 §6.3 — protected path) ------

@@ -1,4 +1,4 @@
-# Weekly activation funnel (THI-371) + sprint metrics (THI-394)
+# Metrics: activation funnel, search success, listing funnel (THI-371/THI-394)
 
 How Thingery measures adoption with **no new infrastructure**: structured stdout
 JSON lines per MCP call — dispatch-time `tool_call` lines (THI-371, shipped in
@@ -7,9 +7,9 @@ JSON lines per MCP call — dispatch-time `tool_call` lines (THI-371, shipped in
 already have, by `scripts/daily-metrics.sh` (daily snapshot) and the weekly
 metrics routine. Same JSON-line discipline as `src/security-events.ts`.
 
-## Sprint week-1 metrics (THI-394) — activation / search success / listing funnel
+## Funnel metrics (THI-394) — activation / search success / listing funnel
 
-The adoption sprint optimizes three numbers. All are computable from real
+The weekly funnel report tracks three numbers. All are computable from real
 events via **`scripts/daily-metrics.sh`** (run on the VPS from `/opt/thingery`;
 cron-daily per docs/deploy-vps.md §6b) or ad-hoc with the jq below.
 
@@ -37,9 +37,9 @@ correlates the bucket, not an individual caller. Authenticated sellers
 is visible afterwards, including second photos of already-visible items; the
 exact publish count is `sql_published`.
 - `tool_result` measures tool execution, not buyer conversion; `create_order`
-success is available in `by_tool` if the sprint later needs it.
+success is available in `by_tool` if needed later.
 
-## Sharing attribution (THI-396, sprint D9)
+## Sharing attribution (THI-396)
 
 Every successful public item-page render (`GET /item/:id`, 200 only) emits one
 `page_view` line with the visit origin classified **at request time** —
@@ -55,7 +55,7 @@ line of `scripts/daily-metrics.sh` carry:
 | `human_by_origin` | Human views by origin: `direct` (no/blocked referrer) / `internal` (own host) / `external` (referrer host = sharing platform) | `page_view` `.origin` |
 | `top_ref_hosts` | Top 5 external referrer hosts among human views | `page_view` `.refHost` |
 | `utm_tagged_views` | Human views carrying valid `utm_*` params (a sharer tagged the link) | `page_view` `.utm` |
-| `share_attributable_views` | Human views with `external` origin **or** utm params — the "share-clicks" number for the ≥5-shares sprint target | `page_view` lines |
+| `share_attributable_views` | Human views with `external` origin **or** utm params — the "share-clicks" number for share-attribution reporting | `page_view` lines |
 
 Owner self-views carry `owner:true` and can be filtered out (jq: `select(.owner != true)`).
 
@@ -152,14 +152,15 @@ curl -s https://api.npmjs.org/downloads/point/last-week/thingery | jq .downloads
   accumulating at deploy; no backfill.
 - **Glama:** the server page exposes view/click analytics in its dashboard,
   but no public API for automated pulls → `glama_views_7d` is a **manual
-  weekly entry** by Growth until an API appears.
-- **Smithery / mcp.so:** not yet published (growth strategy Bet 2) → no
-  analytics source yet; the row appears once listed.
+  weekly entry** until an API appears.
+- **Smithery / mcp.so:** not yet published → no analytics source yet; the row
+  appears once listed.
 - **stats.json: unchanged.** It is a public, cached homepage asset with an
   aggregate-only, no-user-data design (THI-311). The funnel ratios above are
   operational metrics for the weekly report, not homepage content — keeping
-  them out avoids a data-handling change (which would escalate to the
-  board). `stats.json` continues to serve `items` / `agents` / `users`.
+  them out avoids a data-handling change (which would require an explicit
+  product decision). `stats.json` continues to serve `items` / `agents` /
+  `users`.
 
 ## Log-line contract
 

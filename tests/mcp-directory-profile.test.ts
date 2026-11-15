@@ -52,6 +52,28 @@ const DIRECTORY_PIN: readonly string[] = [
   "update_wanted",
 ];
 
+/** THI-769: the annotations.title pin for the same 15 tools (Anthropic
+ *  directory review criteria — every tool's annotations must carry a title).
+ *  Keys mirror DIRECTORY_PIN; a tool added to the profile without a pinned
+ *  title fails the tests below. Same reviewed-edit policy as the name pin. */
+const DIRECTORY_TITLE_PIN: Readonly<Record<string, string>> = {
+  add_item_image: "Add item image",
+  create_listing: "Create a listing",
+  create_wanted: "Create wanted post",
+  describe_category: "Describe category",
+  expire_wanted: "Expire wanted post",
+  get_item: "Get item details",
+  get_wanted: "Get wanted post",
+  my_listings: "My listings",
+  my_wanted: "My wanted posts",
+  renew_wanted: "Renew wanted post",
+  respond_to_wanted: "Respond to a wanted listing",
+  search_items: "Search second-hand listings",
+  search_wanted: "Search wanted posts",
+  update_listing: "Update listing",
+  update_wanted: "Update wanted post",
+};
+
 /** The money/order/PII/intent/account surface that must NEVER appear in
  *  the directory listing (THI-614 exclude list — everything except the 15;
  *  grew 19→22 when #249/#250 added session-only account tools, which stay
@@ -82,7 +104,7 @@ const EXCLUDED_PIN: readonly string[] = [
 ];
 
 interface Captured {
-  config: { description?: string };
+  config: { description?: string; title?: string; annotations?: Record<string, boolean | string> };
   handler: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -130,6 +152,23 @@ describe("directory profile pin (registration-time gating)", () => {
     const { server, registered } = captureServer();
     registerTools(server, { seller: null }, "directory");
     expect([...registered.keys()].sort()).toEqual([...DIRECTORY_PIN]);
+  });
+
+  // THI-769: the directory review criteria require annotations.title on
+  // every tool — pin the 15 exact strings, their mirror of the tool-level
+  // title, and the ≤64-char cap.
+  it("every directory tool carries its pinned annotations.title (THI-769)", () => {
+    expect(Object.keys(DIRECTORY_TITLE_PIN).sort()).toEqual([...DIRECTORY_PIN]);
+    const { server, registered } = captureServer();
+    registerTools(server, { seller: null }, "directory");
+    for (const [name, entry] of registered) {
+      const { config } = entry;
+      const title = config.annotations?.title;
+      expect(typeof title, `${name} annotations.title`).toBe("string");
+      expect(title, `${name} annotations.title matches the pin`).toBe(DIRECTORY_TITLE_PIN[name]);
+      expect(config.title, `${name} annotations.title mirrors the tool title`).toBe(title);
+      expect((title ?? "").length, `${name} title within 64 chars`).toBeLessThanOrEqual(64);
+    }
   });
 
   it("no excluded tool leaks into the directory registration", () => {
@@ -247,6 +286,22 @@ describe("/mcp?profile=directory (HTTP, DB-free)", () => {
   it("?profile=directory serves exactly the pinned 15 tools over tools/list", async () => {
     const names = await toolNames("/mcp?profile=directory");
     expect(names.sort()).toEqual([...DIRECTORY_PIN]);
+  });
+
+  // THI-769: end-to-end through the real MCP SDK serialization — every tool
+  // on the directory listing must reach the wire with annotations.title set
+  // to its pinned string (the Claude portal flags tools missing it).
+  it("directory tools/list carries annotations.title on every tool, matching the pin (THI-769)", async () => {
+    const res = await post("/mcp?profile=directory", rpc("tools/list"));
+    expect(res.status).toBe(200);
+    const body = rpcBody(await res.text());
+    expect(body.error).toBeUndefined();
+    const tools = body.result?.tools as { name: string; title?: string; annotations?: { title?: string } }[];
+    expect(tools.map((t) => t.name).sort()).toEqual([...DIRECTORY_PIN]);
+    for (const tool of tools) {
+      expect(tool.annotations?.title, `${tool.name} wire annotations.title`).toBe(DIRECTORY_TITLE_PIN[tool.name]);
+      expect(tool.title, `${tool.name} wire tool title mirrors annotations.title`).toBe(tool.annotations?.title);
+    }
   });
 
   it("default /mcp (no param) still serves the full surface (34 tools for a non-session caller)", async () => {

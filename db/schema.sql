@@ -774,3 +774,26 @@ CREATE TABLE IF NOT EXISTS notify_watermarks (
   last_event_at TIMESTAMPTZ,
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Item reports (spec docs/specs/item-reports.md, THI-788 step 2 / THI-617
+-- MVP): a signed-in reporter flags one item with a canned cause + required
+-- motivation; every row is one board-triage unit. Dedupe is durable:
+-- UNIQUE (reporter, item) — one report per reporter per item, ever.
+-- State machine: open → resolved | dismissed; v1 only INSERTs (open), the
+-- CHECK makes illegal values unrepresentable and no v1 path mutates status.
+-- board_issue_ref is the external triage task ref, NULL until the
+-- notification seam (THI-788 step 3) creates it after the INSERT commits.
+CREATE TABLE IF NOT EXISTS reports (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  reporter_account_id UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+  target_item_id      UUID NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  reason              TEXT NOT NULL CHECK (reason IN ('explicit_images','scam_fraud','other')),
+  motivation          TEXT NOT NULL CHECK (char_length(motivation) BETWEEN 10 AND 1000),
+  status              TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved','dismissed')),
+  board_issue_ref     TEXT,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (reporter_account_id, target_item_id)
+);
+-- Triage read path (spec): all reports for an item, newest first.
+CREATE INDEX IF NOT EXISTS reports_target_created_idx
+  ON reports (target_item_id, created_at);

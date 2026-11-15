@@ -43,6 +43,8 @@ export type SecurityEventRoute =
   // slug per route.
   | "/api/notifications"
   | "/api/notifications/:id/read"
+  // THI-788 step 2 (spec docs/specs/item-reports.md): report limiter 429s.
+  | "/api/items/:id/report"
   | "/api/notifications/read-all";
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with

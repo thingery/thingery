@@ -72,6 +72,7 @@ import {
   WantedNotFoundError,
 } from "./wanted.js";
 import { createWantedWithAlert, wantedCreateSchema, wantedEditShape, wantedWriteLimiter } from "./wanted-writes.js";
+import { createItemReport, ItemReportError, MAX_MOTIVATION_CHARS, MIN_MOTIVATION_CHARS, REPORT_REASONS } from "./reports.js";
 import crypto from "node:crypto";
 import { pool } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
@@ -953,6 +954,50 @@ api.put("/items/:id/images/order", asyncHandler(async (req: Request, res: Respon
   }
   res.set("Cache-Control", "no-store");
   res.json({ images: updated.rows[0].images });
+}));
+
+// --- item reports (spec docs/specs/item-reports.md, THI-788 step 2) ----------
+// Session-authed Report action: canned cause + required motivation, one row
+// per board triage. Logic (dedupe, hourly cap, self-report guard) lives in
+// src/reports.ts — this handler only wires auth, validation and status
+// mapping (same layering as the wanted surface, THI-439 §6.3). Anonymous
+// users 401 here; the frontend hides the action entirely.
+
+const itemReportSchema = z.object({
+  reason: z.enum(REPORT_REASONS),
+  motivation: z.string().min(MIN_MOTIVATION_CHARS).max(MAX_MOTIVATION_CHARS), // required free text; DB CHECK mirrors
+});
+
+api.post("/items/:id/report", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to report items." });
+    return;
+  }
+  const parsed = itemReportSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: `Pick a reason and describe the problem in ${MIN_MOTIVATION_CHARS}–${MAX_MOTIVATION_CHARS} characters.` });
+    return;
+  }
+  try {
+    const report = await createItemReport({
+      itemId: req.params.id,
+      reporterAccountId: seller.id,
+      reason: parsed.data.reason,
+      motivation: parsed.data.motivation,
+    });
+    res.status(201).json({ ok: true, report_id: report.id });
+  } catch (err) {
+    if (err instanceof ItemReportError) {
+      const status =
+        err.code === "not_found" ? 404 :
+        err.code === "duplicate" ? 409 :
+        err.code === "rate_limited" ? 429 : 400; // validation | own_item
+      res.status(status).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
 }));
 
 // --- wanted listings, browser CRUD (spec THI-439 §6.3 — protected path) ------

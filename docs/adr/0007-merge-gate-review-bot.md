@@ -39,8 +39,8 @@ merge without waiting for a human).
    `dismiss_stale_reviews: true` and `require_last_push_approval: true`. Existing strict
    required checks (`verify`, `Secret scan (gitleaks)`) and `enforce_admins: true` are
    unchanged.
-3. The reviewer's credential (the fine-grained PAT) lives as a Paperclip secret granted **only
-   to the Security agent** via an API-access binding — never as an environment variable and
+3. The reviewer's credential (the fine-grained PAT) lives as a managed secret granted **only
+   to the reviewer role** via an access binding — never as an environment variable and
    never to any PR-authoring agent. Reviewer ≠ author is enforced by credential reach: the
    credential reaches exactly the one agent that never pushes code. Security never authors
    PRs; every author pushes as `isaac1972` and cannot reach the reviewer credential.
@@ -83,7 +83,7 @@ merge without waiting for a human).
 - Compromise of the PAT allows *approval* of PRs on this one repo only — no code write
   (fine-grained token carries only `pull_requests`). Response: revoke the token in the
   machine user's developer settings (instant), remove the collaborator if needed, generate a
-  new token, rotate the Paperclip secret. Expiry is at most one year; rotate before then.
+  new token, rotate the stored secret. Expiry is at most one year; rotate before then.
 - The gate flip is reversible (`required_approving_review_count: 0`) — exercised for real on
   2026-10-31 when the App drill failed the "counted" test; rollback was verified within the
   same minute. This is the documented un-wedge for any future gate failure.
@@ -99,8 +99,8 @@ override. Record at merge time:
   collaborator API: `permission: write`).
 - **Reviewer credential live:** fine-grained PAT `thingery-review-approver` per Decision 1
   (repo-scoped to `thingery/thingery`, sole permission `pull_requests: read & write`),
-  stored as Paperclip secret `thingery_review_bot_pat`, granted to the Security agent only
-  (Decision 3). The approving review on this PR is submitted with it by Security.
+  stored as a named managed secret, granted to the reviewer role only
+  (Decision 3). The approving review on this PR is submitted with it.
 - **Gate live:** `main` flipped per Decision 2 (`required_approving_review_count: 1`,
   `dismiss_stale_reviews: true`, `require_last_push_approval: true`; checks and
   `enforce_admins` untouched), verified by GET after the flip. Rollback remains

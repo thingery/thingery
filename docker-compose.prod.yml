@@ -85,6 +85,15 @@ services:
       EASYPOST_WEBHOOK_SECRET_PREVIOUS: ${EASYPOST_WEBHOOK_SECRET_PREVIOUS:-}
       LABEL_MAX_COST_CENTS: ${LABEL_MAX_COST_CENTS:-}
       LABEL_DAILY_BUDGET_CENTS: ${LABEL_DAILY_BUDGET_CENTS:-}
+      # Notifications — in-app store + Resend transactional email (THI-760
+      # Phase 0-1, enablement THI-779). NOTIFY_EMAIL_ENABLED=false keeps email
+      # dark (in-app notifications only, code default). Flag on with an empty
+      # RESEND_API_KEY degrades fail-closed (dry-run + boot error, never an
+      # open send path — src/mailer.ts). Values live in the VPS .env only.
+      NOTIFY_EMAIL_ENABLED: ${NOTIFY_EMAIL_ENABLED:-false}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      NOTIFY_FROM_ADDRESS: ${NOTIFY_FROM_ADDRESS:-}
+      NOTIFY_PUBLIC_BASE_URL: ${NOTIFY_PUBLIC_BASE_URL:-}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}

@@ -333,6 +333,11 @@ phishing concerns — threat-model them before building, not after.
   `<`-escaped so seller content cannot break out of the data block (stored XSS fix).
 - Fail-securely examples: unset `SESSION_SECRET` → sessions invalid (not forged);
   missing DB → 503 on `/healthz`; invalid key → read-only toolset.
+- Notification store + transactional email (THI-760 Phase 0–1, THI-762/THI-763): in-app
+  `notifications` fanned out from the append-only `order_events` log (dedupe-keyed,
+  replay-safe); email outbox with verified-address gate, rate caps, backoff +
+  dead-letter; provider adapter = Resend, channel off unless `NOTIFY_EMAIL_ENABLED=true`
+  (default **false** — in-app only until enabled). Privacy and retention statement: §4a.
 
 **Missing (each maps to a backlog item below):**
 
@@ -341,14 +346,66 @@ phishing concerns — threat-model them before building, not after.
   `SESSION_SECRET`/`LLM_API_KEY` not passed in `docker-compose.prod.yml` (H2).
 - Upload caps/quotas, upload-route rate limit, magic-byte validation, image URL scheme
   allowlist (H3).
-- Email verification, listing velocity limits, moderation/takedown tooling, security
-  event logging and alerting (H4).
+- Moderation/takedown tooling and security event logging/alerting (H4). Listing velocity
+  limits shipped earlier (H4.1) and email verification shipped with the notification
+  work (THI-762 Phase 0 — statement in §4a); H4.4 verification-before-*publishing*
+  remains an open product decision.
 - Prompt-injection hardening for the chat agent and downstream agent consumers (H5).
 - CSP `style-src 'unsafe-inline'` remains (inline `<style>` blocks and `style=""`
   attributes); replace with per-response nonces or external stylesheets later.
 - Full `npm audit` (incl. dev) and `npm outdated` are not part of CI — CI gates only
   `npm audit --omit=dev --audit-level=high` per PR (see §7; the dev-dep baseline is
   currently 0 findings).
+
+## 4a. Notification email — privacy & retention statement
+
+The notification system (in-app store + transactional email; THI-760 plan §5, shipped
+as Phase 0–1 in THI-762/THI-763, Phase 2 in flight) handles personal data. This section
+is the plain-language statement of how — EU-first (GDPR/ePrivacy). Each item is marked
+**live** (on `main` today) or **planned** (Phase 2) so the statement cannot overstate.
+
+**Transactional only — live.** Mail is order-lifecycle and account mail: order placed
+(with payment link + deadline), payment reminders, payment receipts, shipping +
+tracking, delivery + dispute window, refunds and cancellations, dispute outcomes,
+seller sale/payout notices, and the email-verification mail
+(`src/notify/templates.ts`). No marketing, ever. Sender identity:
+`notifications@thingery.dev`, no-reply (`NOTIFY_FROM_ADDRESS`, `src/config.ts`). This
+is service mail necessary to perform the sales contract (GDPR art. 6(1)(b)); no consent
+is asked and none is implied.
+
+**Verification gate — live.** Email is sent only to **verified** addresses
+(`sellers.email_verified_at`; signup issues a single-use 48-hour token, verify/resend
+routes in `src/auth.ts` + `src/routes.ts`). Addresses that are unverified, absent
+(oauth sign-ups), or bounce-flagged (`email_bounced_at`) get the in-app notification
+store only — the delivery sweep marks those sends `skipped`, never sends
+(`src/notify/delivery.ts`). Automatic provider-bounce marking lands with Phase 2; the
+suppression column is honored today.
+
+**Policy classes — planned (Phase 2).** Money/security-critical mail (receipts,
+refunds, disputes, chargebacks) will not be disableable; ordinary transactional mail
+(shipped, sold, reminders) will be opt-out per channel; the digest will be opt-in with
+one-click unsubscribe (List-Unsubscribe header). None of this gating is live yet:
+there is currently no per-category opt-out and no unsubscribe link. Today's bounds are
+the rate caps (default ≤ 6 emails/account/hour plus a per-sweep cap, `src/config.ts`),
+the fixed event taxonomy, and the operator-side channel flag
+(`NOTIFY_EMAIL_ENABLED=false` stops all mail).
+
+**PII minimization — live.** Emails and notification payloads carry item title,
+amounts, currency, order status, and deep links — never shipping addresses or
+counterparty contact data (F6; by construction in `src/notify/fanout.ts` +
+`src/notify/templates.ts`, asserted in the template tests). Every mail carries the
+canonical footer sentence.
+
+**Retention — 12-month policy adopted; purge sweep planned (Phase 2).** In-app
+notification records and email-outbox records are kept at most **12 months**, then
+purged. The sweep that enforces this is not on `main` yet — until it ships, records
+persist (PII-minimal by the rule above). What the provider (Resend) retains about a
+delivered message follows the provider's own retention, not ours.
+
+**Self-hosting — live.** The npm package ships the same code with the email channel
+off by default: no provider key configured → no mail leaves the host, and no processor
+relationship is created. Operators who enable it choose the provider and from-address
+and carry the corresponding obligations.
 
 ## 5. Secrets hygiene policy
 

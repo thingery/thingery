@@ -339,11 +339,19 @@ export function registerTools(
     }
   };
 
+  // THI-769 (Claude Connectors Directory review criteria): every tool's
+  // annotations carry a human-readable `title` (≤64 chars) alongside the
+  // hint booleans — the directory portal flags tools whose annotations lack
+  // one. It mirrors the tool-level `title` string exactly; both are pinned
+  // per-tool in tests/tool-annotations.test.ts (same frozen-table policy as
+  // the hints), and tests/mcp-directory-profile.test.ts pins the 15 profile
+  // titles.
   server.registerTool(
     "describe_category",
     {
       title: "Describe category",
       annotations: {
+        title: "Describe category",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -417,8 +425,9 @@ export function registerTools(
   server.registerTool(
     "create_listing",
     {
-      title: "Create listing",
+      title: "Create a listing",
       annotations: {
+        title: "Create a listing",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -555,6 +564,7 @@ export function registerTools(
     {
       title: "Respond to a wanted listing",
       annotations: {
+        title: "Respond to a wanted listing",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -652,6 +662,7 @@ export function registerTools(
     {
       title: "Search wanted posts",
       annotations: {
+        title: "Search wanted posts",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -709,6 +720,7 @@ export function registerTools(
     {
       title: "Get wanted post",
       annotations: {
+        title: "Get wanted post",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -735,6 +747,7 @@ export function registerTools(
     {
       title: "Create wanted post",
       annotations: {
+        title: "Create wanted post",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -769,6 +782,7 @@ export function registerTools(
     {
       title: "My wanted posts",
       annotations: {
+        title: "My wanted posts",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -799,6 +813,7 @@ export function registerTools(
     {
       title: "Update wanted post",
       annotations: {
+        title: "Update wanted post",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -829,6 +844,7 @@ export function registerTools(
     {
       title: "Expire wanted post",
       annotations: {
+        title: "Expire wanted post",
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
@@ -850,6 +866,7 @@ export function registerTools(
     {
       title: "Renew wanted post",
       annotations: {
+        title: "Renew wanted post",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -869,8 +886,9 @@ export function registerTools(
   server.registerTool(
     "search_items",
     {
-      title: "Search items",
+      title: "Search second-hand listings",
       annotations: {
+        title: "Search second-hand listings",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -963,6 +981,7 @@ export function registerTools(
     {
       title: "Get item details",
       annotations: {
+        title: "Get item details",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -991,6 +1010,7 @@ export function registerTools(
     {
       title: "My listings",
       annotations: {
+        title: "My listings",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -1019,6 +1039,7 @@ export function registerTools(
     {
       title: "Update listing",
       annotations: {
+        title: "Update listing",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -1073,6 +1094,7 @@ export function registerTools(
     {
       title: "Add item image",
       annotations: {
+        title: "Add item image",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -1122,6 +1144,7 @@ export function registerTools(
     {
       title: "Get payout setup",
       annotations: {
+        title: "Get payout setup",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -1172,6 +1195,7 @@ export function registerTools(
     {
       title: "Create order",
       annotations: {
+        title: "Create order",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -1229,6 +1253,7 @@ export function registerTools(
     {
       title: "Get order",
       annotations: {
+        title: "Get order",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -1266,6 +1291,7 @@ export function registerTools(
     {
       title: "Share shipping address",
       annotations: {
+        title: "Share shipping address",
         readOnlyHint: false,
         // Disclosure to the seller cannot be undone, same posture as release_funds.
         destructiveHint: true,
@@ -1298,6 +1324,7 @@ export function registerTools(
     {
       title: "My orders",
       annotations: {
+        title: "My orders",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -1338,6 +1365,7 @@ export function registerTools(
     {
       title: "Cancel order",
       annotations: {
+        title: "Cancel order",
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
@@ -1380,6 +1408,7 @@ export function registerTools(
     {
       title: "Record tracking",
       annotations: {
+        title: "Record tracking",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -1425,6 +1454,7 @@ export function registerTools(
     {
       title: "Buy shipping label",
       annotations: {
+        title: "Buy shipping label",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,
@@ -1490,6 +1520,7 @@ export function registerTools(
     {
       title: "Confirm payment",
       annotations: {
+        title: "Confirm payment",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -1523,6 +1554,7 @@ export function registerTools(
     {
       title: "Confirm receipt",
       annotations: {
+        title: "Confirm receipt",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -1555,6 +1587,7 @@ export function registerTools(
     {
       title: "Open dispute",
       annotations: {
+        title: "Open dispute",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -1586,6 +1619,7 @@ export function registerTools(
     {
       title: "Release funds",
       annotations: {
+        title: "Release funds",
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
@@ -1626,6 +1660,7 @@ export function registerTools(
     {
       title: "Send order message",
       annotations: {
+        title: "Send order message",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -1665,6 +1700,7 @@ export function registerTools(
     {
       title: "List order messages",
       annotations: {
+        title: "List order messages",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -1713,6 +1749,7 @@ export function registerTools(
     {
       title: "Save search intent (buyer alert)",
       annotations: {
+        title: "Save search intent (buyer alert)",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -1816,6 +1853,7 @@ export function registerTools(
     {
       title: "My saved search intents",
       annotations: {
+        title: "My saved search intents",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -1843,6 +1881,7 @@ export function registerTools(
     {
       title: "Mute or unmute a saved intent",
       annotations: {
+        title: "Mute or unmute a saved intent",
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -1883,6 +1922,7 @@ export function registerTools(
     {
       title: "Delete a saved intent",
       annotations: {
+        title: "Delete a saved intent",
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
@@ -1918,6 +1958,7 @@ export function registerTools(
     {
       title: "New listing matches (buyer alerts)",
       annotations: {
+        title: "New listing matches (buyer alerts)",
         readOnlyHint: false, // mark_read stamps read_at
         destructiveHint: false,
         idempotentHint: false,
@@ -1988,6 +2029,7 @@ function registerSessionOnlyTools(server: { registerTool: Function }, seller: Se
     {
       title: "List connected apps",
       annotations: {
+        title: "List connected apps",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,
@@ -2022,6 +2064,7 @@ function registerSessionOnlyTools(server: { registerTool: Function }, seller: Se
     {
       title: "Disconnect app",
       annotations: {
+        title: "Disconnect app",
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: true,
@@ -2050,6 +2093,7 @@ function registerSessionOnlyTools(server: { registerTool: Function }, seller: Se
     {
       title: "Get API key info",
       annotations: {
+        title: "Get API key info",
         readOnlyHint: true,
         destructiveHint: false,
         idempotentHint: true,

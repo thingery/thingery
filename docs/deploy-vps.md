@@ -139,9 +139,10 @@ Script contents (`/usr/local/bin/thingery-backup`):
 set -uo pipefail
 umask 077
 
-PUBKEY='age1ln7rs3dymzlgvtmtvj4kaly598ncpt80m3mxjlnndzw84tfgqehszz22vk'
-# ^ production key (2026-10-14, THI-116). Public — not secret. The copy on the
-# VPS (/usr/local/bin/thingery-backup) must match this line exactly; a monthly
+PUBKEY='age1...YOUR-PUBLIC-KEY-HERE...'
+# ^ your age PUBLIC key from "Key management" above (not secret — the private
+# key never leaves the operator's password manager). The copy on the VPS
+# (/usr/local/bin/thingery-backup) must match this line exactly; a monthly
 # drill decrypt failure or a diff here = possible key substitution, treat as a
 # security incident.
 BACKUP_DIR=/var/backups
@@ -595,10 +596,9 @@ change):**
 
 **Rotating the deploy key.** Generate a new keypair (step 3), replace the
 `authorized_keys` line (step 4), `gh secret set DEPLOY_SSH_KEY --env production`
-again, confirm with a `workflow_dispatch` deploy from `main`. During staging of THI-223
-the key was rotated exactly this way (old fingerprint
-`SHA256:wqn4Utx2Ut/PaZysOAfZwOgJ1MwlzNGfIgH5NOKsrn0` → current
-`SHA256:MiisD8QGoWO6P9FB8vZdAn9kglpDj/uVEUi4ab7rY8E`).
+again, confirm with a `workflow_dispatch` deploy from `main`. A rotation is
+exactly this sequence; record the before/after key fingerprints in your own
+off-repo ops records when you rotate.
 
 **Revoking.** Delete the `restrict,command=… ssh-ed25519 … thingery-deploy-github-actions`
 line from `/home/deploy/.ssh/authorized_keys` — the trust path dies immediately; running
@@ -722,8 +722,9 @@ docker compose -f docker-compose.prod.yml logs app 2>&1 | grep '\[config\] Strip
 ```
 
 **Gate.** Live mode means real buyer payments and real Connect payouts. Flip only
-after the board's legal/ToS sign-off is recorded (THI-357 confirmation card), and
-only the Stripe account owner activates the account for live mode (business
+after the operator's legal/ToS sign-off for acting as merchant of record is
+recorded, and only the Stripe account owner activates the account for live mode
+(business
 profile, bank details, platform + Connect terms accepted in the Stripe dashboard).
 
 **Flip (all on the VPS, secrets never leave the box or this file):**
@@ -750,9 +751,8 @@ payout-setup flow once the platform account is live-enabled; `account.updated`
 webhook events flip `sellers.stripe_onboarded_at` when `transfers` capability is
 active. Confirm one seller onboarding before declaring live mode operational.
 
-**Payout verification (seller-borne fees — THI-374).** Under the board decision
-of 2026-10-27 (recorded via the THI-358 card `112e00aa` rejection) sellers bear
-the Stripe processing fee: the seller transfer is **gross − fee**
+**Payout verification (seller-borne fees).** Sellers bear the Stripe processing
+fee (ADR 0003 amendment): the seller transfer is **gross − fee**
 (`src/stripe.ts` `sellerNetTransferCents`), with the fee read at payout time
 from the PaymentIntent's latest-charge **balance transaction** (settlement
 source of truth). Expected €1 verification order: buyer pays €1.00, seller
@@ -785,13 +785,14 @@ verification).
 via buyer `confirm_receipt` (state machine T6/T13) and payouts release via buyer
 `release_funds` (T17) or the dispute-window sweep (T16).
 
-## 6. LLM guard: provider balance/failure detection (THI-282)
+## 6. LLM guard: provider balance/failure detection
 
-On 2026-10-21 the z.ai company account balance hit zero and prod chat failed
-silently for days (THI-276 audit): every inference call returned `429 code 1113
-"Insufficient balance"` and users saw a generic failure banner. The LLM guard
-makes that signature loud. It runs on the VPS as root cron every 5 minutes
-(`scripts/llm-guard.sh` in the repo is the source of truth):
+If the LLM provider account balance hits zero, chat fails SILENTLY without a
+guard: every inference call returns a 429 "Insufficient balance" signature and
+users only see a generic failure banner — an incident of exactly this shape
+(balance exhausted for days before anyone noticed) is why this guard exists.
+The LLM guard makes that signature loud. It runs on the VPS as root cron every
+5 minutes (`scripts/llm-guard.sh` in the repo is the source of truth):
 
 1. **Probe**: one 1-token chat completion against the **same** endpoint, model
    and key the app container uses (read from the running container's env — the
@@ -805,12 +806,11 @@ makes that signature loud. It runs on the VPS as root cron every 5 minutes
    alert per class on first occurrence, at most one reminder per 24 h while the
    failure persists, one recovery line when health returns. Never per-request.
    The current state is always readable in `/var/lib/thingery-llm-guard/status`
-   (that file is what the 2×/day "Prod LLM guard alert" Paperclip routine reads
-   when it wakes DevOps; alert → escalate to CEO per the recharge decision tree,
-   THI-279).
+   (that status file is what a periodic alerting routine should read; route
+   balance-exhaustion alerts to whoever owns provider account recharging).
 4. **Optional push**: if `ROUTINE_WEBHOOK_URL` is set in
    `/etc/thingery-llm-guard.env`, each alert/recovery is also POSTed there
-   (Paperclip routine webhook or any alert endpoint). No-op with a log line
+   (routine webhook or any alert endpoint). No-op with a log line
    until configured — same posture as the offsite push in `thingery-backup`.
 
 ### Install (on the VPS, one-time)
@@ -829,8 +829,9 @@ sudo crontab -e   # add:
 # */5 * * * * /usr/local/bin/thingery-llm-guard >> /var/log/thingery-llm-guard.log 2>&1
 ```
 
-Cost note: a healthy probe consumes ~1 completion token of `glm-5.3-flash`
-every 5 minutes (≈ 288 tiny calls/day, negligible; rejected calls cost nothing).
+Cost note: a healthy probe consumes ~1 completion token of the configured
+probe model every 5 minutes (≈ 288 tiny calls/day, negligible; rejected calls
+cost nothing).
 
 ### Verify / drill (any time)
 
@@ -847,10 +848,10 @@ alert is visible in the log and (if configured) the webhook, marked `test:true`.
 **Rollback:** comment the crontab line (detection stops; nothing else depends on
 it). The script reads but never modifies app/db/Caddy state.
 
-## 6b. Daily sprint metrics snapshot (THI-394)
+## 6b. Daily metrics snapshot
 
 `scripts/daily-metrics.sh` (source of truth; see `docs/metrics.md`) aggregates
-the sprint's three numbers — activation, search success, listing funnel — from
+the three funnel numbers — activation, search success, listing funnel — from
 app-container analytics lines + read-only SQL, prints a 4-line summary, and
 writes `metrics/daily-YYYY-MM-DD.json` (counts only, no PII). Snapshots are the
 durable record because container logs rotate (§7).
@@ -861,7 +862,7 @@ place; it needs no copy in `/usr/local/bin`). Dependency: `jq`
 
 ```bash
 sudo tee /etc/cron.d/thingery-daily-metrics >/dev/null <<'CRON'
-# THI-394: daily sprint metrics snapshot (00:10 UTC). Read-only; writes /opt/thingery/metrics/.
+# daily metrics snapshot (00:10 UTC). Read-only; writes /opt/thingery/metrics/.
 10 0 * * * deploy cd /opt/thingery && scripts/daily-metrics.sh >> /var/log/thingery-daily-metrics.log 2>&1
 CRON
 sudo chmod 644 /etc/cron.d/thingery-daily-metrics

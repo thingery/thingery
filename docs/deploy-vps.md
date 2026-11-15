@@ -785,6 +785,68 @@ verification).
 via buyer `confirm_receipt` (state machine T6/T13) and payouts release via buyer
 `release_funds` (T17) or the dispute-window sweep (T16).
 
+### 5.4 Item report review triage: enabling the board notification (THI-788 step 3)
+
+The report button (THI-788 step 2) writes item reports to the `reports` table.
+After each report INSERT commits, `src/report-review-notify.ts` POSTs one review
+task to the operator-configured triage endpoint and stores the returned task id
+in `reports.board_issue_ref`. Best-effort by design: one attempt, 5s timeout,
+never retried in-process — a failure leaves the ref NULL and never fails the
+user's report. The seam is **disabled unless BOTH** `REPORT_REVIEW_CREATE_URL`
+**and** `REPORT_REVIEW_API_TOKEN` are set; a deployment without them still
+records reports, just without triage tasks.
+
+Endpoint contract: `POST <REPORT_REVIEW_CREATE_URL>` with
+`Authorization: Bearer <REPORT_REVIEW_API_TOKEN>` and body
+`{ title, description, assigneeAgentId?, idempotencyKey }` (`idempotencyKey` =
+`report-review:<report id>`, replay-safe). A 2xx response whose JSON body
+carries a string `id` populates the ref. Redirects are a hard failure (the
+bearer token must never ride a 3xx) — configure the final URL directly. If the
+description carries an item link, set
+`REPORT_REVIEW_ITEM_URL_TEMPLATE=https://<your-domain>/item/{id}` (literal
+`{id}` placeholder). `REPORT_REVIEW_ASSIGNEE_ID` is passed through as
+`assigneeAgentId` when set (triage ownership is operator policy).
+
+**Reachability prerequisite.** The app container egresses through the host, so
+whatever network the endpoint lives on, the **VPS host** must reach it over
+HTTPS. If the endpoint is on a private overlay network (e.g. a WireGuard/
+Tailscale tailnet), join the overlay from the VPS, and prefer deterministic
+name resolution over changing host DNS: run the join with `--accept-dns=false`
+and pin the endpoint host in `/etc/hosts` to its overlay IP (idempotent one
+line). Verify from inside the app container — node resolves `/etc/hosts` via
+getaddrinfo:
+
+```bash
+node -e "require('dns').lookup('<endpoint-host>',(e,a)=>console.log(e||a))"
+```
+
+**Wiring (values only in the VPS `.env`, never in the repo):**
+
+```bash
+cd /opt/thingery
+printf '%s\n' 'REPORT_REVIEW_CREATE_URL=<endpoint URL>' \
+  'REPORT_REVIEW_API_TOKEN=<token>' \
+  'REPORT_REVIEW_ASSIGNEE_ID=<assignee id>' \
+  'REPORT_REVIEW_ITEM_URL_TEMPLATE=https://thingery.dev/item/{id}' >> .env
+# env changes need a container recreate, not a rebuild:
+docker compose -f docker-compose.prod.yml up -d
+```
+
+**Verification (smoke per ops-smoke-policy.md — disposable account, deleted
+after the evidence is captured):** file one report on a test item → expect a
+review task created at the endpoint and `reports.board_issue_ref` non-NULL for
+that row (`docker exec $(docker ps -qf name=thingery-db) psql -U thingery -d
+thingery -c "SELECT id, board_issue_ref FROM reports ORDER BY created_at DESC
+LIMIT 1;"`); a duplicate report answers 409 friendly. Notify failures are
+logged by the app and silent to users (grep container logs for
+`review notification failed`).
+
+**Rollback / kill switch:** remove (or empty) either `REPORT_REVIEW_CREATE_URL`
+or `REPORT_REVIEW_API_TOKEN` in `.env`, then recreate the container — the seam
+returns to no-op; reports keep flowing and existing refs stay stored. Blast
+radius of the whole feature: the app container only (one outbound HTTPS call
+per new report; no schema, no ports, no Caddy/db changes).
+
 ## 6. LLM guard: provider balance/failure detection
 
 If the LLM provider account balance hits zero, chat fails SILENTLY without a

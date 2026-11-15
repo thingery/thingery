@@ -94,6 +94,17 @@ services:
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       NOTIFY_FROM_ADDRESS: ${NOTIFY_FROM_ADDRESS:-}
       NOTIFY_PUBLIC_BASE_URL: ${NOTIFY_PUBLIC_BASE_URL:-}
+      # Item report review triage (THI-788 step 3, activation THI-802).
+      # Passthrough only: values live in the VPS .env. The seam stays
+      # disabled unless BOTH REPORT_REVIEW_CREATE_URL and
+      # REPORT_REVIEW_API_TOKEN are set (src/report-review-notify.ts:
+      # best-effort notify after a report INSERT; failure leaves
+      # reports.board_issue_ref NULL and never fails the user's report).
+      # The token value lives only in the VPS .env, never in this repo.
+      REPORT_REVIEW_CREATE_URL: ${REPORT_REVIEW_CREATE_URL:-}
+      REPORT_REVIEW_API_TOKEN: ${REPORT_REVIEW_API_TOKEN:-}
+      REPORT_REVIEW_ASSIGNEE_ID: ${REPORT_REVIEW_ASSIGNEE_ID:-}
+      REPORT_REVIEW_ITEM_URL_TEMPLATE: ${REPORT_REVIEW_ITEM_URL_TEMPLATE:-}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}

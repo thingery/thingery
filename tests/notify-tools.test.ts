@@ -100,7 +100,8 @@ describe.skipIf(!available)("list_notifications MCP tool (DB)", () => {
     expect(PROTECTED_TOOLS.has("list_notifications")).toBe(true);
     const anon = parse(await toolsFor(null).get("list_notifications")!({}));
     expect(anon.isError).toBe(true);
-    expect(anon.body.error).toContain("unauthorized");
+    expect(anon.body.code).toBe("unauthorized");
+    expect(anon.body.error).toContain("Bearer");
   });
 
   it("returns only the caller's notifications, newest first, with unread_count", async () => {

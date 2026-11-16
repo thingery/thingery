@@ -29,6 +29,7 @@ import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { orderFlowConfig, type OrderFlowConfig } from "./config.js";
 import { getStripe, createRefundForOrder, orderAmountCents } from "./stripe.js";
+import { planAccountNotification } from "./notify/items.js";
 import { applyTransition, IllegalTransitionError, type OrderRow, type OrderStatus } from "./orders.js";
 
 /** Spec §6.5 acceptance failure (F5): stored + logged, NO state change, 2xx —
@@ -320,10 +321,34 @@ export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cf
       const account = object as unknown as Stripe.Account & { capabilities?: { transfers?: string } };
       const transfers = account.capabilities?.transfers === "active";
       // F5: known connected accounts only — unknown ids change nothing.
-      await db.query(
-        "UPDATE sellers SET stripe_onboarded_at = $2 WHERE stripe_account_id = $1",
+      // THI-780 PR 3: badge the seller exactly once per Stripe account on the
+      // NULL→set flip (plan §5): re-off cycles never re-badge, and the
+      // notification is idempotent under webhook redelivery.
+      const flipped = await db.query<{ id: string; email: string | null }>(
+        `UPDATE sellers SET stripe_onboarded_at = $2
+          WHERE stripe_account_id = $1 AND $2::timestamptz IS NOT NULL AND stripe_onboarded_at IS NULL
+          RETURNING id, email`,
         [account.id, transfers ? new Date() : null],
       );
+      if (!transfers) {
+        await db.query(
+          "UPDATE sellers SET stripe_onboarded_at = NULL WHERE stripe_account_id = $1",
+          [account.id],
+        );
+        return;
+      }
+      if (flipped.rows[0]) {
+        await planAccountNotification({
+          recipientId: flipped.rows[0].id,
+          toEmail: flipped.rows[0].email,
+          eventType: "seller.payouts_enabled",
+          role: "seller",
+          subject: "Payouts enabled — Thingery",
+          payload: {},
+          dedupeKey: `payouts_enabled:${account.id}`,
+          client: db,
+        });
+      }
       return;
     }
     case "charge.dispute.created": {

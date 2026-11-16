@@ -136,8 +136,9 @@ interface OrderFacts {
 
 /** Subject-line hardening: subjects are plain text rendered by mail clients
  * with unknown strictness — strip angle brackets (no HTML) and CR/LF (no
- * header-injection surface, belt-and-braces even with a JSON API provider). */
-function subjectSafe(s: string): string {
+ * header-injection surface, belt-and-braces even with a JSON API provider).
+ * Exported for outbox-subject builders that embed DB strings (THI-780 PR 3). */
+export function subjectSafe(s: string): string {
   return s.replaceAll("<", "").replaceAll(">", "").replaceAll("\r", " ").replaceAll("\n", " ");
 }
 
@@ -358,6 +359,57 @@ export function renderSellerPayoutPaid(p: OrderFacts): RenderedEmail {
   });
 }
 
+// THI-780 PR 3: item/account-level events (plan §6). All orders-class
+// (prefs-gated transactional), PII-free bodies.
+
+/** `seller.payouts_enabled.v1` — account.updated flipped transfers on. */
+export function renderSellerPayoutsEnabled(): RenderedEmail {
+  const subject = "Payouts enabled — Thingery";
+  const text =
+    "Your payout account is set up. Money from your sales can now reach you automatically.\n\n" +
+    `— ${CANONICAL_SENTENCE}\n`;
+  const html =
+    "<p>Your payout account is set up. Money from your sales can now reach you automatically.</p>\n" +
+    `<p style="color:#666;font-size:12px">— ${CANONICAL_SENTENCE}</p>\n`;
+  return { subject, text, html };
+}
+
+/** `seller.stale_sale_warning.v1` / `seller.stuck_transit_warning.v1` — the
+ * sweep's early warning before the hard deadline cancels/refunds. */
+export function renderSellerDeadlineWarning(p: OrderFacts & { kind: "stale_sale" | "stuck_transit" }): RenderedEmail {
+  const intro =
+    p.kind === "stale_sale"
+      ? "You sold this item but no shipping has been recorded. If nothing is shipped in time, the order is cancelled and the buyer refunded automatically."
+      : "This shipment has not moved for a while. If no carrier event arrives in time, the order is refunded to the buyer automatically.";
+  return orderEmail({
+    subject:
+      p.kind === "stale_sale"
+        ? `Action needed: ship your sale — ${p.itemTitle} — Thingery`
+        : `Shipping stalled: ${p.itemTitle} — Thingery`,
+    intro,
+    facts: p,
+  });
+}
+
+/** `seller.item_taken_down.v1` — moderation removed a listing. */
+export function renderSellerItemTakenDown(p: { itemTitle: string; itemUrl: string; reason: string }): RenderedEmail {
+  const subject = subjectSafe(`Listing removed: ${p.itemTitle} — Thingery`);
+  const lines = [`Item: ${p.itemTitle}`, `Reason: ${p.reason}`];
+  const text =
+    "A moderator removed your listing from Thingery:\n\n" +
+    lines.join("\n") +
+    `\n\n${p.itemUrl}\n\n` +
+    `If you believe this was a mistake, contact the marketplace operators.\n\n` +
+    `— ${CANONICAL_SENTENCE}\n`;
+  const html =
+    "<p>A moderator removed your listing from Thingery:</p>\n" +
+    `<ul>\n${lines.map((l) => `  <li>${escapeHtml(l)}</li>`).join("\n")}\n</ul>\n` +
+    `<p><a href="${escapeHtml(p.itemUrl)}">View the item</a></p>\n` +
+    `<p>If you believe this was a mistake, contact the marketplace operators.</p>\n` +
+    `<p style="color:#666;font-size:12px">— ${CANONICAL_SENTENCE}</p>\n`;
+  return { subject, text, html };
+}
+
 /** Registry: a notification payload (the PII-free JSONB the fan-out stores)
  *  → the rendered email for its event type, with deep links built from the
  *  deployment base URL. One source of truth for content: fan-out stores the
@@ -428,6 +480,19 @@ export function renderOrderEmail(
       return renderSellerDisputeResolved({ ...facts, outcome: str("outcome") ?? "" });
     case "seller.payout_paid":
       return renderSellerPayoutPaid(facts);
+    // THI-780 PR 3: item/account-level events.
+    case "seller.payouts_enabled":
+      return renderSellerPayoutsEnabled();
+    case "seller.stale_sale_warning":
+      return renderSellerDeadlineWarning({ ...facts, kind: "stale_sale" });
+    case "seller.stuck_transit_warning":
+      return renderSellerDeadlineWarning({ ...facts, kind: "stuck_transit" });
+    case "seller.item_taken_down":
+      return renderSellerItemTakenDown({
+        itemTitle: str("item_title") ?? "",
+        itemUrl: str("item_id") ? `${baseUrl}/item/${payload.item_id}` : baseUrl,
+        reason: str("reason") ?? "policy violation",
+      });
     default:
       throw new Error(`renderOrderEmail: unknown event type ${eventType}`);
   }

@@ -23,6 +23,7 @@ import {
 } from "./stripe.js";
 import { processCarrierEvent } from "./webhooks-carrier.js";
 import { processStripeEvent } from "./webhooks-stripe.js";
+import { planAccountNotification } from "./notify/items.js";
 
 const SYSTEM = { type: "system" as const };
 
@@ -100,10 +101,57 @@ async function rule1(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   }
 }
 
+// THI-780 PR 3: early warning before a hard sweep deadline. One notice per
+// order per kind (dedupe warn:{kind}:{order_id}) at half the window elapsed;
+// the transition itself still fires at the full window. PII-free payload:
+// item title + order id + the hard deadline.
+async function deadlineWarning(order: OrderRow, kind: "stale_sale" | "stuck_transit", deadline: Date): Promise<void> {
+  await planAccountNotification({
+    recipientId: order.seller_id,
+    toEmail: await sellerEmail(order.seller_id),
+    eventType: kind === "stale_sale" ? "seller.stale_sale_warning" : "seller.stuck_transit_warning",
+    role: "seller",
+    subject: kind === "stale_sale" ? "Action needed: ship your sale — Thingery" : "Shipping stalled — Thingery",
+    payload: {
+      item_title: await itemTitle(order.item_id),
+      item_id: order.item_id,
+      order_id: order.id,
+      order_status: order.status,
+      amount_cents: order.price_cents + order.shipping_price_cents,
+      currency: order.currency,
+      deadline: deadline.toISOString(),
+    },
+    dedupeKey: `warn:${kind}:${order.id}`,
+  });
+}
+
+async function sellerEmail(sellerId: string): Promise<string | null> {
+  const r = await pool.query<{ email: string | null }>("SELECT email FROM sellers WHERE id = $1", [sellerId]);
+  return r.rows[0]?.email ?? null;
+}
+
+async function itemTitle(itemId: string): Promise<string> {
+  const r = await pool.query<{ title: string | null }>("SELECT title FROM items WHERE id = $1", [itemId]);
+  return r.rows[0]?.title ?? "your item";
+}
+
 // --- Rule 2: sold past STALE_SOLD_DAYS without tracking → refunding (#9) /
 // cancelled (#9b off_platform). Item → active either way (dead seller relists).
+// THI-780 PR 3: a warning fires at half the window, before the hard cancel.
 async function rule2(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   open(report, "2-stale-sale");
+  const half = new Date(now.getTime() - days(cfg.staleSoldDays / 2));
+  const warnable = await pool.query<OrderRow>(
+    "SELECT * FROM orders WHERE status = 'sold' AND tracking_code IS NULL AND status_changed_at < $1 AND status_changed_at >= $2",
+    [new Date(now.getTime() - days(cfg.staleSoldDays)), half],
+  );
+  for (const order of warnable.rows) {
+    try {
+      await deadlineWarning(order, "stale_sale", new Date(order.status_changed_at.getTime() + days(cfg.staleSoldDays)));
+    } catch (err) {
+      console.error(`[sweep:2] warning for order ${order.id}:`, err);
+    }
+  }
   const { rows } = await pool.query<OrderRow>(
     "SELECT * FROM orders WHERE status = 'sold' AND tracking_code IS NULL AND status_changed_at < $1",
     [new Date(now.getTime() - days(cfg.staleSoldDays))],
@@ -136,8 +184,21 @@ async function rule2(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
 // --- Rule 3: in_transit past IN_TRANSIT_STUCK_DAYS without a carrier event.
 // in_transit is reachable only via the carrier event (#10), which refreshes
 // status_changed_at — so an old status_changed_at *is* "no carrier event since".
+// THI-780 PR 3: a warning fires at half the window, before the hard refund.
 async function rule3(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   open(report, "3-stuck-transit");
+  const half = new Date(now.getTime() - days(cfg.inTransitStuckDays / 2));
+  const warnable = await pool.query<OrderRow>(
+    "SELECT * FROM orders WHERE status = 'in_transit' AND status_changed_at < $1 AND status_changed_at >= $2",
+    [new Date(now.getTime() - days(cfg.inTransitStuckDays)), half],
+  );
+  for (const order of warnable.rows) {
+    try {
+      await deadlineWarning(order, "stuck_transit", new Date(order.status_changed_at.getTime() + days(cfg.inTransitStuckDays)));
+    } catch (err) {
+      console.error(`[sweep:3] warning for order ${order.id}:`, err);
+    }
+  }
   const { rows } = await pool.query<OrderRow>(
     "SELECT * FROM orders WHERE status = 'in_transit' AND status_changed_at < $1",
     [new Date(now.getTime() - days(cfg.inTransitStuckDays))],

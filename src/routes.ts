@@ -24,6 +24,8 @@ import { sendMail, type MailMessage } from "./mailer.js";
 import { renderEmailVerification } from "./notify/templates.js";
 import { parseNotificationPrefs, sanitizePrefsUpdate } from "./notify/prefs.js";
 import { verifyDigestUnsubscribeToken } from "./notify/digest.js";
+import { planAccountNotification } from "./notify/items.js";
+import { subjectSafe } from "./notify/templates.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import {
@@ -1369,6 +1371,61 @@ const resolveDisputeSchema = z.object({
   outcome: z.enum(["refund", "release"]),
   note: z.string().min(1).max(500),
 });
+
+// THI-780 PR 3 (plan §5): moderation takedown — Bearer ADMIN_API_KEY like
+// the dispute route, same boot gate (unset/short key ⇒ 404, route
+// indistinguishable from absent, F1/F7). Takes an item out of all feeds by
+// status (listings are never row-deleted) and notifies the seller exactly
+// once (dedupe takedown:{item_id}); the email is orders-class, so the
+// seller's prefs and the account gate apply at send time.
+const takedownSchema = z.object({ reason: z.string().min(1).max(500) });
+
+api.post("/admin/items/:id/takedown", asyncHandler(async (req: Request, res: Response) => {
+  if (!orderFlowConfig().adminRouteEnabled) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const header = req.get("Authorization");
+  const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : undefined;
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
+    res.status(401).json({ error: "Not authorized." });
+    return;
+  }
+  const parsed = takedownSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "reason (1-500 chars) required." });
+    return;
+  }
+  const taken = await pool.query<{ seller_id: string; title: string }>(
+    `UPDATE items SET status = 'deleted', updated_at = now()
+      WHERE id = $1 AND status IN ('active', 'stored')
+      RETURNING seller_id, title`,
+    [String(req.params.id)],
+  );
+  if (!taken.rows[0]) {
+    res.status(404).json({ error: "Item not found or not takedown-eligible." });
+    return;
+  }
+  const item = taken.rows[0];
+  const seller = await pool.query<{ email: string | null }>(
+    "SELECT email FROM sellers WHERE id = $1", [item.seller_id],
+  );
+  await planAccountNotification({
+    recipientId: item.seller_id,
+    toEmail: seller.rows[0]?.email,
+    eventType: "seller.item_taken_down",
+    role: "seller",
+    subject: subjectSafe(`Listing removed: ${item.title} — Thingery`),
+    payload: { item_title: item.title, item_id: String(req.params.id), reason: parsed.data.reason },
+    dedupeKey: `takedown:${String(req.params.id)}`,
+  });
+  res.set("Cache-Control", "no-store");
+  res.json({ item_id: String(req.params.id), status: "deleted", seller_notified: true });
+}));
 
 const ADMIN = { type: "admin" as const };
 

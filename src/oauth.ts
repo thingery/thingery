@@ -5,6 +5,12 @@ import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { RateLimiter } from "./rate-limit.js";
 import { SESSION_SECRET, sellerFromSession, oauthDisabled } from "./auth.js";
+import {
+  CimdError,
+  createMetadataDocumentResolver,
+  isMetadataDocumentClientId,
+  type MetadataDocumentClient,
+} from "./oauth-cimd.js";
 
 // MCP OAuth one-click onboarding — spec THI-11 rev 2.
 // This module is new auth surface: every change follows the protected-path
@@ -68,6 +74,7 @@ function authorizationServerDoc(issuer: string) {
     code_challenge_methods_supported: ["S256"],
     scopes_supported: ["mcp"],
     authorization_response_iss_parameter_supported: true,
+    client_id_metadata_document_supported: true,
   };
 }
 
@@ -685,6 +692,44 @@ async function clientById(clientId: string): Promise<ClientRow | null> {
   return rows[0] ?? null;
 }
 
+const resolveMetadataDocument = createMetadataDocumentResolver();
+
+/**
+ * A client whose client_id is a metadata document URL (CIMD). Its row in oauth_clients is
+ * written from the document on every authorize, so codes, grants, tokens and Connected
+ * apps treat it like a registered client, and a changed document takes effect within the
+ * resolver's cache lifetime. The name shown is the document's host, which the fetch
+ * proved, never its self-declared client_name. Null when the document cannot be used.
+ */
+async function clientFromMetadataDocument(clientId: string): Promise<ClientRow | null> {
+  const rejected = (reason: string): null => {
+    securityEvent("cimd_rejected", { reason, client_id: clientId.slice(0, 200) });
+    return null;
+  };
+  let document: MetadataDocumentClient;
+  try {
+    document = await resolveMetadataDocument(clientId);
+  } catch (e) {
+    if (e instanceof CimdError) return rejected(e.reason);
+    throw e;
+  }
+  let registration: ClientRegistration;
+  try {
+    // Same redirect URI rules as dynamic registration; it throws only RegistrationError.
+    registration = validateClientRegistration({ redirect_uris: document.redirect_uris });
+  } catch {
+    return rejected("invalid_redirect_uri");
+  }
+  const { rows } = await pool.query<ClientRow>(
+    `INSERT INTO oauth_clients (client_id, client_name, client_uri, redirect_uris)
+     VALUES ($1, $2, NULL, $3)
+     ON CONFLICT (client_id) DO UPDATE SET client_name = EXCLUDED.client_name, redirect_uris = EXCLUDED.redirect_uris
+     RETURNING client_id, client_name, client_uri, redirect_uris`,
+    [document.client_id, document.display_name, registration.redirect_uris],
+  );
+  return rows[0];
+}
+
 interface AuthorizeQuery {
   client_id?: string;
   redirect_uri?: string;
@@ -800,8 +845,19 @@ function mountAuthorize(app: Express): void {
     if (typeof q.client_id !== "string" || !q.client_id) {
       return { errorPage: { title: "Missing client_id", detail: "The authorization request is incomplete." } };
     }
-    const client = await clientById(q.client_id);
-    if (!client) return { errorPage: { title: "Unknown application", detail: "This client is not registered with Thingery." } };
+    const client = isMetadataDocumentClientId(q.client_id)
+      ? await clientFromMetadataDocument(q.client_id)
+      : await clientById(q.client_id);
+    if (!client) {
+      return {
+        errorPage: {
+          title: "Unknown application",
+          detail: isMetadataDocumentClientId(q.client_id)
+            ? "Thingery could not read a valid client metadata document at this client_id."
+            : "This client is not registered with Thingery.",
+        },
+      };
+    }
     // Repeated query/form params arrive as arrays (Express qs / urlencoded):
     // reject them as malformed here so clientById and the matcher below only
     // ever see strings (400 error page, never a 500 from the DB layer).

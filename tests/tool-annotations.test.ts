@@ -45,6 +45,9 @@ const EXPECTED: Record<
   // caller's own thread — same posture as my_orders.
   send_order_message: { title: "Send order message", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   list_order_messages: { title: "List order messages", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // THI-780 (notification inbox): pure read of the caller's own rows —
+  // same posture as my_orders.
+  list_notifications: { title: "List my notifications", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   // THI-360 spec rev 2 PR 2 (buyer alerts): my_intents is a pure read;
   // save/update are plain writes; delete_intent removes the intent and its
   // match records — destructiveHint, same posture as cancel_order.

@@ -67,7 +67,9 @@ describe.skipIf(!available)("operator alerts (THI-780 PR 4 — DB)", () => {
     return r.rows[0].id;
   }
 
-  async function seedOrder(status: string, days: number): Promise<string> {
+  // `withTracking` matters for the disputed case: rule 8 auto-resolves
+  // disputed orders that have no tracking_code, before rule 9 can see them.
+  async function seedOrder(status: string, days: number, withTracking = false): Promise<string> {
     const seller = await seedSeller();
     const buyer = await seedSeller();
     const item = await db.query<{ id: string }>(
@@ -77,10 +79,10 @@ describe.skipIf(!available)("operator alerts (THI-780 PR 4 — DB)", () => {
     );
     const order = await db.query<{ id: string }>(
       `INSERT INTO orders (item_id, seller_id, buyer_id, status, payment_mode, price_cents,
-                           shipping_price_cents, currency, fulfillment, status_changed_at)
-       VALUES ($1, $2, $3, $4, 'off_platform', 5000, 0, 'EUR', 'shipping', now() - ($5 || ' days')::interval)
+                           shipping_price_cents, currency, fulfillment, status_changed_at, carrier, tracking_code)
+       VALUES ($1, $2, $3, $4, 'off_platform', 5000, 0, 'EUR', 'shipping', now() - ($5 || ' days')::interval, $6, $7)
        RETURNING id`,
-      [item.rows[0].id, seller, buyer, status, String(days)],
+      [item.rows[0].id, seller, buyer, status, String(days), withTracking ? "post" : null, withTracking ? `TRK${runTag}` : null],
     );
     return order.rows[0].id;
   }
@@ -127,7 +129,7 @@ describe.skipIf(!available)("operator alerts (THI-780 PR 4 — DB)", () => {
   });
 
   it("rule 9 (stale dispute) → one operator.stale_dispute row per order, once", async () => {
-    await seedOrder("disputed", 8);
+    await seedOrder("disputed", 8, true);
     await runSweeps(cfg, new Date());
     const rows = (await operatorRows()).filter((r) => r.template === "operator.stale_dispute.v1");
     expect(rows.length).toBeGreaterThanOrEqual(1);

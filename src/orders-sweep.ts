@@ -24,6 +24,8 @@ import {
 import { processCarrierEvent } from "./webhooks-carrier.js";
 import { processStripeEvent } from "./webhooks-stripe.js";
 import { planAccountNotification } from "./notify/items.js";
+import { planOperatorAlert } from "./notify/operator.js";
+import { notifyConfig } from "./config.js";
 
 const SYSTEM = { type: "system" as const };
 
@@ -389,6 +391,8 @@ async function rule6(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
 
 // --- Rule 7: stuck-money alert (F11) — payout_pending/refunding beyond N
 // days. Alert-only (operator acts via Stripe dashboard / admin route).
+// THI-780 PR 4: mirrors to OPERATOR_ALERT_EMAIL when set (once per order,
+// opalert dedupe); console.error is always the floor.
 async function rule7(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   const { rows } = await pool.query<{ id: string; status: string }>(
     "SELECT id, status FROM orders WHERE status IN ('payout_pending','refunding') AND status_changed_at < $1",
@@ -399,6 +403,19 @@ async function rule7(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
       `[sweep:7] operator alert: ${rows.length} order(s) stuck in money states beyond ${cfg.stuckMoneyAlertDays}d:`,
       rows.map((r) => `${r.id} (${r.status})`).join(", "),
     );
+    if (notifyConfig().operatorAlertEmail) {
+      for (const r of rows) {
+        await planOperatorAlert({
+          kind: "stuck_money",
+          ref: r.id,
+          subject: `Stuck money: order ${r.id} (${r.status}) — Thingery`,
+          payload: {
+            title: `Order stuck in ${r.status} beyond ${cfg.stuckMoneyAlertDays} days`,
+            lines: [`Order: ${r.id}`, `Status: ${r.status} (since > ${cfg.stuckMoneyAlertDays}d)`, "Action: inspect in Stripe dashboard / admin route"],
+          },
+        });
+      }
+    }
   }
   report["7-stuck-money"] = { acted: rows.length, skipped: 0, errored: 0 };
 }
@@ -436,7 +453,8 @@ async function rule8(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
 }
 
 // --- Rule 9 (rev 3 §11.3): stale-dispute escalation — alert only; humans
-// resolve everything else on the admin route (PR-9).
+// resolve everything else on the admin route (PR-9). THI-780 PR 4: mirrors
+// to OPERATOR_ALERT_EMAIL when set (once per order).
 async function rule9(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   const { rows } = await pool.query<{ id: string }>(
     "SELECT id FROM orders WHERE status = 'disputed' AND status_changed_at < $1",
@@ -447,8 +465,21 @@ async function rule9(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
       `[sweep:9] operator alert: ${rows.length} dispute(s) unresolved beyond ${cfg.disputeStaleDays}d — resolve via admin route:`,
       rows.map((r) => r.id).join(", "),
     );
+    if (notifyConfig().operatorAlertEmail) {
+      for (const r of rows) {
+        await planOperatorAlert({
+          kind: "stale_dispute",
+          ref: r.id,
+          subject: `Stale dispute: order ${r.id} — Thingery`,
+          payload: {
+            title: `Dispute unresolved beyond ${cfg.disputeStaleDays} days`,
+            lines: [`Order: ${r.id}`, `Status: disputed (since > ${cfg.disputeStaleDays}d)`, "Action: resolve via admin route"],
+          },
+        });
+      }
+    }
   }
-  report["9-stale-dispute"] = { acted: rows.length, skipped: 0, errored:0 };
+  report["9-stale-dispute"] = { acted: rows.length, skipped: 0, errored: 0 };
 }
 
 /** One pass of every rule. A rule failure never blocks the others. */

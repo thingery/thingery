@@ -44,7 +44,7 @@ export const ConnectPanel = ({ url = "https://thingery.dev/mcp" }) => {
       rows: [
         {
           title: "Claude app",
-          body: "Opens claude.ai with the connector filled in. Add it, then sign in. It works in Claude Desktop and the mobile apps too.",
+          body: "Opens claude.ai with the connector filled in. Under Authentication, choose Sign in when needed, add it, then sign in. It works in Claude Desktop and the mobile apps too.",
           action: {
             label: "Add connector",
             href: `https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Thingery&connectorUrl=${encodeURIComponent(url)}`,

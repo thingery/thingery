@@ -68,14 +68,16 @@ describe.skipIf(!available)("list_notifications MCP tool (DB)", () => {
 
     const a = `thi780t-${runTag}-a@example.test`;
     const b = `thi780t-${runTag}-b@example.test`;
-    const ins = await db.query<{ a: string; b: string }>(
-      `INSERT INTO sellers (email, password_hash, display_name)
-       VALUES ($1, 'x', 'A'), ($2, 'x', 'B')
-       RETURNING (SELECT id WHERE email = $1) AS a, (SELECT id WHERE email = $2) AS b`,
-      [a, b],
+    // Two separate inserts — a multi-row VALUES insert can't RETURN per-row
+    // correlated ids portably, and a NULL recipient_id fails NOT NULL anyway.
+    const insA = await db.query<{ id: string }>(
+      "INSERT INTO sellers (email, password_hash, display_name) VALUES ($1, 'x', 'A') RETURNING id", [a],
     );
-    aId = ins.rows[0].a;
-    bId = ins.rows[0].b;
+    const insB = await db.query<{ id: string }>(
+      "INSERT INTO sellers (email, password_hash, display_name) VALUES ($1, 'x', 'B') RETURNING id", [b],
+    );
+    aId = insA.rows[0].id;
+    bId = insB.rows[0].id;
 
     // Three notifications for A (two unread), one for B.
     const mk = async (recipient: string, type: string, read: boolean) =>

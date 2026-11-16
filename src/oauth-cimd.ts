@@ -66,11 +66,11 @@ for (const [prefix, bits] of [
 ] as const) {
   BLOCKED_IPV4.addSubnet(prefix, bits, "ipv4");
 }
-// IPv6 forms that can carry an IPv4 address (mapped, NAT64, 6to4, Teredo) are blocked
+// IPv6 forms that can carry an IPv4 address (compatible, mapped, NAT64, 6to4, Teredo) are blocked
 // whole rather than decoded: no client needs them to publish a metadata document.
 const BLOCKED_IPV6 = new net.BlockList();
 for (const [prefix, bits] of [
-  ["::", 127], ["::ffff:0:0", 96], ["64:ff9b::", 96], ["100::", 64], ["2001::", 32],
+  ["::", 96], ["::ffff:0:0", 96], ["64:ff9b::", 96], ["100::", 64], ["2001::", 32],
   ["2001:db8::", 32], ["2002::", 16], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8],
 ] as const) {
   BLOCKED_IPV6.addSubnet(prefix, bits, "ipv6");

@@ -188,12 +188,25 @@ export async function runNotifyDelivery(
       let result: MailSendResult;
       try {
         const rendered = renderOrderEmail(row.template.replace(/\.v1$/, ""), row.payload, cfg.publicBaseUrl);
+        // THI-780 PR 2: opt-in mail (digests) carries a one-click unsubscribe
+        // URL in its payload — stamp the standard headers when present. The
+        // body always carries the link too (provider header-stripping hedge).
+        const unsubscribeUrl =
+          typeof row.payload.unsubscribe_url === "string" ? row.payload.unsubscribe_url : undefined;
         result = await mailer.send({
           to: row.to_email,
           subject: rendered.subject,
           text: rendered.text,
           html: rendered.html,
           idempotencyKey: `outbox-${row.id}`, // stable across retries
+          ...(unsubscribeUrl
+            ? {
+                headers: {
+                  "List-Unsubscribe": `<${unsubscribeUrl}>`,
+                  "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+                },
+              }
+            : {}),
         });
       } catch (err) {
         result = { ok: false, error: err instanceof Error ? err.message : String(err) };

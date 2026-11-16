@@ -21,6 +21,52 @@ export const EMAIL_TEMPLATE_KEYS = {
   emailVerification: "account.email_verification.v1",
 } as const;
 
+/** THI-780 PR 2 (plan §5 + §6): digest line items — public listing data
+ * only (item title + link), no counterparties, no addresses (F6). */
+export interface DigestItem {
+  eventType: string;
+  itemTitle?: string;
+  url?: string;
+}
+
+/** `digest.daily.v1` / `digest.weekly.v1` — one renderer, the frequency is
+ * a parameter. Opt-in mail: every digest carries a working one-click
+ * unsubscribe link in the body (plus the List-Unsubscribe header the
+ * delivery sweep stamps from payload.unsubscribe_url — belt and braces in
+ * case the provider strips headers). */
+export function renderDigest(p: {
+  frequency: "daily" | "weekly";
+  count: number;
+  items: DigestItem[];
+  unsubscribeUrl: string;
+}): RenderedEmail {
+  const label = p.frequency;
+  const subject = subjectSafe(
+    p.count > p.items.length
+      ? `Your ${label} Thingery digest — ${p.count} updates`
+      : `Your ${label} Thingery digest`,
+  );
+  const lines = p.items.map(
+    (it) => `${it.itemTitle ?? it.eventType}${it.url ? ` — ${it.url}` : ""}`,
+  );
+  const more = p.count > p.items.length ? [`… and ${p.count - p.items.length} more` ] : [];
+  const text =
+    `Here is what happened on Thingery since your last digest:
+
+` +
+    [...lines, ...more].join("\n") +
+    `\n\nManage or turn off digests: ${p.unsubscribeUrl}\n` +
+    `\n— ${CANONICAL_SENTENCE}\n`;
+  const html =
+    `<p>Here is what happened on Thingery since your last digest:</p>\n<ul>\n` +
+    p.items.map((it) => `  <li>${it.url ? `<a href="${escapeHtml(it.url)}">${escapeHtml(it.itemTitle ?? it.eventType)}</a>` : escapeHtml(it.itemTitle ?? it.eventType)}</li>`).join("\n") +
+    (p.count > p.items.length ? `\n  <li>… and ${p.count - p.items.length} more</li>` : "") +
+    `\n</ul>\n` +
+    `<p><a href="${escapeHtml(p.unsubscribeUrl)}">Turn off ${label} digests</a></p>\n` +
+    `<p style="color:#666;font-size:12px">— ${CANONICAL_SENTENCE}</p>\n`;
+  return { subject, text, html };
+}
+
 function escapeHtml(s: string): string {
   return s
     .replaceAll("&", "&amp;")
@@ -325,6 +371,22 @@ export function renderOrderEmail(
 ): RenderedEmail {
   const str = (k: string): string | undefined => (typeof payload[k] === "string" ? (payload[k] as string) : undefined);
   const num = (k: string): number | undefined => (typeof payload[k] === "number" ? (payload[k] as number) : undefined);
+  // THI-780 PR 2: digest rows carry their own payload shape (items list),
+  // not order facts.
+  if (eventType === "digest.daily" || eventType === "digest.weekly") {
+    return renderDigest({
+      frequency: eventType === "digest.daily" ? "daily" : "weekly",
+      count: num("count") ?? 0,
+      items: Array.isArray(payload.items)
+        ? (payload.items as Array<Record<string, unknown>>).map((it) => ({
+            eventType: typeof it.event_type === "string" ? it.event_type : "",
+            itemTitle: typeof it.item_title === "string" ? it.item_title : undefined,
+            url: typeof it.url === "string" ? it.url : undefined,
+          }))
+        : [],
+      unsubscribeUrl: str("unsubscribe_url") ?? baseUrl,
+    });
+  }
   const facts: OrderFacts = {
     itemTitle: str("item_title") ?? "",
     amountCents: num("amount_cents") ?? 0,

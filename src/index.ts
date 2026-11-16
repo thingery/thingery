@@ -16,6 +16,7 @@ import { mountApiRoutes } from "./routes.js";
 import { mountOpenaiAppsChallenge } from "./openai-apps-challenge.js";
 import { stripeWebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
+import { resendWebhookRouter } from "./webhooks-resend.js";
 import { logConfigBootReport, notifyConfig, orderFlowConfig } from "./config.js";
 import { startSweepScheduler } from "./orders-sweep.js";
 import { startNotifyFanoutTimer } from "./notify/fanout.js";
@@ -104,6 +105,12 @@ function runHttp(): void {
   // Carrier webhook (spec THI-3 §4.3/§5): same raw-body-before-JSON
   // constraint; fail-closed 503 stub until EASYPOST_WEBHOOK_SECRET is set.
   app.use(carrierWebhookRouter(cfg));
+
+  // Resend bounce webhook (THI-760 plan Phase 2 / THI-780): raw-body HMAC,
+  // fail-closed 503 stub until RESEND_WEBHOOK_SECRET is set — bounce →
+  // email_bounced_at + pending-outbox suppression (delivery sweep gates the
+  // rest). Config knob lives in notifyConfig, not OrderFlowConfig.
+  app.use(resendWebhookRouter());
 
   // Browser API (accounts + chat). /mcp above consumes the raw body stream,
   // so the JSON parser starts here and never touches MCP traffic.

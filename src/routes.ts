@@ -22,6 +22,7 @@ import {
 } from "./auth.js";
 import { sendMail, type MailMessage } from "./mailer.js";
 import { renderEmailVerification } from "./notify/templates.js";
+import { parseNotificationPrefs, sanitizePrefsUpdate } from "./notify/prefs.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import {
@@ -90,6 +91,10 @@ export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin
 // route on the session API gets a cap — 240/h per account is far above any
 // human poller while keeping scripted abuse bounded.
 const notificationsLimiter = new RateLimiter(240, 60 * 60_000);
+// THI-760 Phase 2 / THI-780: preference reads/writes — 60/h per account is
+// far above any human settings page while bounding scripted churn (the
+// PATCH is a profile write, so it gets its own bucket, not the read bucket).
+const preferencesLimiter = new RateLimiter(60, 60 * 60_000);
 export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
 export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 image upload attempts per IP per hour (THI-140 / THI-123 obs 2)
 export const imageMutationLimiter = new RateLimiter(60, 60 * 60_000); // 60 image delete/reorder mutations per seller per hour (THI-308 F6: churn here must never consume upload quota)
@@ -356,6 +361,65 @@ api.post("/notifications/read-all", asyncHandler(async (req: Request, res: Respo
     [seller.id],
   );
   res.json({ ok: true, updated: updated.rows.length });
+}));
+
+// THI-760 Phase 2 / THI-780 (plan §5): notification preferences, stored in
+// `sellers.profile.notification_prefs` (the column's reserved key). GET
+// returns the effective preferences — per-key defaults for anything not yet
+// stored, so the shape is stable from day one. PATCH validates strictly
+// (sanitizePrefsUpdate): the money class is LOCKED ('email+in_app') — every
+// attempt to change it is a 400, never a silent drop; policy enforcement
+// itself lives in the delivery sweep (src/notify/delivery.ts accountGate),
+// the single choke point every outbound email passes.
+api.get("/me/preferences", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to see notification preferences." });
+    return;
+  }
+  if (!preferencesLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/preferences" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const rows = await pool.query<{ prefs: unknown }>(
+    "SELECT profile->'notification_prefs' AS prefs FROM sellers WHERE id = $1",
+    [seller.id],
+  );
+  res.json({ preferences: parseNotificationPrefs(rows.rows[0]?.prefs) });
+}));
+
+api.patch("/me/preferences", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to change notification preferences." });
+    return;
+  }
+  if (!preferencesLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/preferences" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const { prefs, errors } = sanitizePrefsUpdate(req.body);
+  if (errors.length > 0) {
+    res.status(400).json({ error: errors[0].reason, errors });
+    return;
+  }
+  // Atomic JSONB merge (no read-modify-write race on the rest of profile):
+  // stored notification_prefs || validated patch, written back under the
+  // reserved key. An empty patch is a no-op returning current state.
+  const updated = await pool.query<{ prefs: unknown }>(
+    `UPDATE sellers
+        SET profile = jsonb_set(
+              COALESCE(profile, '{}'::jsonb),
+              '{notification_prefs}',
+              COALESCE(profile->'notification_prefs', '{}'::jsonb) || $2::jsonb
+            )
+      WHERE id = $1
+      RETURNING profile->'notification_prefs' AS prefs`,
+    [seller.id, JSON.stringify(prefs)],
+  );
+  res.json({ preferences: parseNotificationPrefs(updated.rows[0]?.prefs) });
 }));
 
 // THI-760 Phase 0 / THI-762: consume a verification token from an email link

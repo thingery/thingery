@@ -172,6 +172,10 @@ export interface NotifyConfig {
   maxEmailsPerRecipientPerHour: number;         // 6
   // Per-run global send cap (protects the provider free tier, plan §4).
   maxSendsPerSweep: number;                     // 50
+  // Inbound bounce-webhook secret (RESEND_WEBHOOK_SECRET). Unset ⇒ the
+  // webhook answers fail-closed 503 (Phase 2 / THI-780) — same posture as
+  // STRIPE_WEBHOOK_SECRET / EASYPOST_WEBHOOK_SECRET.
+  resendWebhookSecret: string | undefined;
 }
 
 export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig {
@@ -203,6 +207,7 @@ export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig
     sweepIntervalMinutes: int("NOTIFY_SWEEP_INTERVAL_MINUTES", 1),
     maxEmailsPerRecipientPerHour: int("NOTIFY_MAX_EMAILS_PER_RECIPIENT_PER_HOUR", 6),
     maxSendsPerSweep: int("NOTIFY_MAX_SENDS_PER_SWEEP", 50),
+    resendWebhookSecret: value("RESEND_WEBHOOK_SECRET"),
   };
 }
 

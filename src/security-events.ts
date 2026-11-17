@@ -45,7 +45,9 @@ export type SecurityEventRoute =
   | "/api/notifications/:id/read"
   // THI-788 step 2 (spec docs/specs/item-reports.md): report limiter 429s.
   | "/api/items/:id/report"
-  | "/api/notifications/read-all";
+  | "/api/notifications/read-all"
+  // THI-780 (THI-760 Phase 2): preferences limiter 429s.
+  | "/api/me/preferences";
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a

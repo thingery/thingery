@@ -253,7 +253,7 @@ describe.skipIf(!available)("address tools over the store (DB)", () => {
       `SELECT shipping_address, status FROM orders WHERE buyer_id = $1`,
       [freshBuyer],
     );
-    expect(order.rows[0].status).toBe("pending_payment");
+    expect(order.rows[0].status).toBe("pending"); // initial state per order-flow's state machine
     // Copied as if typed — lowercase 'it' was normalized to 'IT' at save.
     expect(order.rows[0].shipping_address).toEqual({
       name: "Ada Lovelace",

@@ -299,6 +299,20 @@ export async function updateAddress(
   }
 }
 
+/** Stamps last_used_at at order time (spec "Using a saved address").
+ *  Owner-scoped and advisory only: the order keeps its own snapshot, so a
+ *  row deleted between the order's load and this stamp is not an error —
+ *  0 affected rows is fine. Best-effort by design: an order must never
+ *  fail (or surface an error) because a usage stamp could not be written. */
+export async function markAddressUsed(accountId: string, addressId: string): Promise<void> {
+  await pool
+    .query(
+      `UPDATE account_addresses SET last_used_at = now() WHERE id = $1 AND account_id = $2`,
+      [addressId, accountId],
+    )
+    .catch(() => {}); // advisory stamp — swallow, never fail the order
+}
+
 /** The model-facing summary (spec "The model never sees a full saved
  *  address", review condition C2): label, city, country, default flag and
  *  verification STATUS only. This is the one allowlist — pinned by test:

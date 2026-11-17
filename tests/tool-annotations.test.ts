@@ -72,6 +72,14 @@ const EXPECTED: Record<
   update_wanted: { title: "Update wanted post", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   expire_wanted: { title: "Expire wanted post", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   renew_wanted: { title: "Renew wanted post", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  // Saved addresses (docs/specs/saved-addresses.md step 2): list_addresses
+  // is a pure read of the caller's own summaries; save_address is a plain
+  // write; delete_address removes a row the user can re-create — same
+  // destructiveHint posture as delete_intent. No tool here can touch an
+  // order's snapshot, so nothing order-destructive exists on this surface.
+  list_addresses: { title: "My saved addresses", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  save_address: { title: "Save a shipping address", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  delete_address: { title: "Delete a saved address", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
 };
 
 // Session-only tools (registered for the first-party web session alone, so

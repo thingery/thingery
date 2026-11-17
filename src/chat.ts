@@ -8,6 +8,7 @@ import { resolveCategory, aliasResolutionNote, describeCategoryNote } from "./ca
 import { getCategory, getItem, createItem, listCategories, categoryChildren, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
+import { isIsoCountryCode } from "./countries.js";
 import {
   cancelOrder,
   createOrder,
@@ -615,8 +616,15 @@ export function normalizeOrderArgs(
         const line2 = addr.line2 === undefined ? undefined : str(addr.line2, 200, "line2", 0);
         const city = str(addr.city, 80, "city");
         const postal = str(addr.postal_code, 20, "postal_code");
-        const country = typeof addr.country === "string" && addr.country.length === 2 ? addr.country : null;
-        if (!name || !line1 || !city || !postal || !country || (addr.line2 !== undefined && line2 === null)) {
+        // ISO 3166-1 parity with the MCP tool's zod schema: normalize trim +
+        // uppercase before the membership check (" it " → "IT"), and reject a
+        // real-looking but unassigned code with a field-only error — the
+        // rejected value is never echoed (PII/log hygiene).
+        const country = typeof addr.country === "string" ? addr.country.trim().toUpperCase() : null;
+        if (country !== null && country.length === 2 && !isIsoCountryCode(country)) {
+          return { ok: false, error: "create_order: shipping_address.country must be an ISO 3166-1 alpha-2 country code" };
+        }
+        if (!name || !line1 || !city || !postal || !country || country.length !== 2 || (addr.line2 !== undefined && line2 === null)) {
           return { ok: false, error: "create_order: shipping_address needs name (1-120), line1 (1-200), optional line2 (≤200), city (1-80), postal_code (1-20) and a 2-letter country" };
         }
         out.shipping_address = { name, line1, ...(line2 !== undefined ? { line2 } : {}), city, postal_code: postal, country };
@@ -1645,7 +1653,9 @@ async function executeConfirmedOrderOp(subjectId: string, op: string, seller: Se
 
   switch (verb) {
     case "order": {
-      // create_order: subjectId is the item id.
+      // create_order: subjectId is the item id. The shipping address
+      // arrives pre-normalized from normalizeOrderArgs (ISO 3166-1 alpha-2,
+      // uppercased) — same rule as the MCP handler.
       const request: Parameters<typeof createOrder>[0] = { itemId: subjectId, buyerId: seller.id };
       const addr = payload.shipping_address as ShippingAddress | undefined;
       if (addr) request.shippingAddress = addr;

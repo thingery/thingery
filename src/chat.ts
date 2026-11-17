@@ -1132,8 +1132,20 @@ export type ChatTurnResult = {
   confirm?: ChatConfirmCard;
   /** Listings the reply talks about, for the web chat's item cards (at most MAX_REPLY_ITEMS). */
   items?: string[];
+  /** The tools this turn ran, in first-call order, for the web chat's tool lines. */
+  tools?: string[];
   usage?: ChatUsageSummary;
 };
+
+const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set(TOOLS.map((tool) => tool.function.name));
+
+/**
+ * The tools a turn called, each once. Only names on our own tool list: a name the model made up
+ * never reaches the page, which accepts lower-case slugs only.
+ */
+export function replyToolNames(called: readonly string[]): string[] {
+  return [...new Set(called.filter((name) => KNOWN_TOOL_NAMES.has(name)))];
+}
 
 /** A listing a tool returned during this turn: the only ids a reply card may show. */
 export type TurnItem = { id: string; title: string };
@@ -1840,10 +1852,12 @@ export async function chatTurn(
       if (!reply.tool_calls || reply.tool_calls.length === 0) {
         const text = reply.content ?? "";
         const items = replyItemIds(text, turnItems);
+        const tools = replyToolNames(toolNames);
         return {
           text,
           ...(confirm ? { confirm } : {}),
           ...(items.length > 0 ? { items } : {}),
+          ...(tools.length > 0 ? { tools } : {}),
           usage: usageSummary(),
         };
       }

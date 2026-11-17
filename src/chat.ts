@@ -8,6 +8,7 @@ import { resolveCategory, aliasResolutionNote, describeCategoryNote } from "./ca
 import { getCategory, getItem, createItem, listCategories, categoryChildren, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, type Attributes } from "./attributes.js";
 import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
+import { normalizeCountryCode } from "./countries.js";
 import {
   cancelOrder,
   createOrder,
@@ -1648,7 +1649,16 @@ async function executeConfirmedOrderOp(subjectId: string, op: string, seller: Se
       // create_order: subjectId is the item id.
       const request: Parameters<typeof createOrder>[0] = { itemId: subjectId, buyerId: seller.id };
       const addr = payload.shipping_address as ShippingAddress | undefined;
-      if (addr) request.shippingAddress = addr;
+      if (addr) {
+        // Same ISO 3166-1 alpha-2 rule as the MCP create_order handler
+        // (docs/specs/saved-addresses.md "Storage"): a two-letter but
+        // unassigned code ('XX') is rejected, lowercase is uppercased.
+        try {
+          request.shippingAddress = { ...addr, country: normalizeCountryCode(addr.country) };
+        } catch {
+          return "⚠️ country must be a real ISO 3166-1 alpha-2 code, e.g. 'IT'.";
+        }
+      }
       const mode = text(payload.payment_mode);
       if (mode === "stripe" || mode === "off_platform") request.paymentMode = mode;
       try {

@@ -28,6 +28,7 @@ import {
   deleteAddress,
   getOwnedAddress,
   listAddresses,
+  markAddressUsed,
   saveAddress,
   updateAddress,
   type AccountAddressRow,
@@ -364,5 +365,26 @@ describe.skipIf(!available)("addresses (db)", () => {
     const accountId = await seedAccount();
     await expect(saveAddress(accountId, input({ country: "XX" }))).rejects.toBeInstanceOf(CountryCodeError);
     await client.query(`DELETE FROM sellers WHERE id = $1`, [accountId]);
+  });
+
+  it("markAddressUsed stamps last_used_at, owner-scoped, and never throws", async () => {
+    const accountId = await seedAccount();
+    const saved = await saveAddress(accountId, input());
+    await markAddressUsed(accountId, saved.id);
+    const stamped = await client.query<{ last_used_at: string | null }>(
+      `SELECT last_used_at FROM account_addresses WHERE id = $1`,
+      [saved.id],
+    );
+    expect(stamped.rows[0].last_used_at).not.toBeNull();
+    // Foreign scope is a no-op, not an error (0 rows is fine).
+    const foreign = await seedAccount();
+    await expect(markAddressUsed(foreign, saved.id)).resolves.toBeUndefined();
+    const again = await client.query<{ last_used_at: string | null }>(
+      `SELECT last_used_at FROM account_addresses WHERE id = $1`,
+      [saved.id],
+    );
+    expect(again.rows[0].last_used_at).not.toBeNull();
+    await client.query(`DELETE FROM sellers WHERE id = $1`, [accountId]);
+    await client.query(`DELETE FROM sellers WHERE id = $1`, [foreign]);
   });
 });

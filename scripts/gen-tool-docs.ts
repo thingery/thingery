@@ -101,6 +101,16 @@ export const TOOL_PAGES: ToolPage[] = [
     ],
   },
   {
+    slug: "addresses",
+    title: "Saved addresses",
+    description: "Save shipping addresses once and reuse them on every order.",
+    intro:
+      "An account keeps up to 10 saved shipping addresses. The tool surface only ever returns a " +
+      "summary — label, city, country and verification status; the recipient name, street and " +
+      "postal code stay on the server and are copied into the order when the address is used.",
+    tools: ["list_addresses", "save_address", "delete_address"],
+  },
+  {
     slug: "alerts",
     title: "Buyer alerts",
     description: "Save what a buyer is looking for and read new matching listings.",

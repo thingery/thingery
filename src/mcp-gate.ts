@@ -138,6 +138,11 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   "update_wanted",
   "expire_wanted",
   "renew_wanted",
+  // Saved addresses (spec docs/specs/saved-addresses.md, step 2): the
+  // account address book joins the funnel events.
+  "list_addresses",
+  "save_address",
+  "delete_address",
   // First-party session-only account settings (SESSION_ONLY_TOOLS).
   "list_connected_apps",
   "revoke_connected_app",

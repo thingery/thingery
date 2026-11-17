@@ -76,6 +76,18 @@ import {
   WantedNotFoundError,
 } from "./wanted.js";
 import { createWantedWithAlert, wantedCreateSchema, wantedEditShape, wantedWriteLimiter } from "./wanted-writes.js";
+import {
+  addressWriteLimiter,
+  deleteAddress,
+  listAddresses,
+  saveAddress,
+  updateAddress,
+  AddressLimitError,
+  AddressNotFoundError,
+  AddressValidationError,
+  type AccountAddressRow,
+} from "./addresses.js";
+import { CountryCodeError, isIsoCountryCode } from "./countries.js";
 import { createItemReport, ItemReportError, MAX_MOTIVATION_CHARS, MIN_MOTIVATION_CHARS, REPORT_REASONS } from "./reports.js";
 import crypto from "node:crypto";
 import { pool } from "./db.js";
@@ -109,6 +121,12 @@ export const llmCredentialLimiter = new RateLimiter(10, 60 * 60_000); // 10 BYO 
 export const chatgptConnectLimiter = new RateLimiter(10, 60 * 60_000); // 10 ChatGPT connect starts per seller per hour (THI-193 §3.2)
 const emailVerifyLimiter = new RateLimiter(60, 60 * 60_000); // 60 verify-link attempts per IP per hour (THI-762 — link-consumption surface; tokens are unguessable, the cap protects the DB)
 const emailResendLimiter = new RateLimiter(3, 60 * 60_000); // 3 verification resends per seller per hour (THI-762)
+// Saved-address reads for the settings screen (spec docs/specs/saved-addresses.md,
+// rollout step 3): reads share the existing authenticated-limits posture
+// (240/h per seller, same class as notifications). Writes do NOT use this —
+// they draw from the shared 30/h addressWriteLimiter in src/addresses.ts so
+// MCP-tool writes and web writes cannot double the allowance.
+const addressesReadLimiter = new RateLimiter(240, 60 * 60_000);
 
 /** Public base for email links (THI-760 plan §3): NOTIFY_PUBLIC_BASE_URL
  * overrides, PUBLIC_BASE_URL next, then the dev default — dry-run bodies need
@@ -434,6 +452,176 @@ api.patch("/me/preferences", asyncHandler(async (req: Request, res: Response) =>
     [seller.id, JSON.stringify(prefs)],
   );
   res.json({ preferences: parseNotificationPrefs(updated.rows[0]?.prefs) });
+}));
+
+// Saved shipping addresses — web settings routes (spec docs/specs/
+// saved-addresses.md, rollout step 3; protected path). Session-authenticated,
+// owner-scoped. Unlike the MCP tools (C2: summaries only), these return the
+// FULL address: this is the owner's own settings screen, the one surface the
+// spec allows to see name, street and postal code. Everything else mirrors
+// the tool surface: validation + the 10-row cap + the one-default invariant
+// live in src/addresses.ts (never duplicated here), writes draw from the
+// shared 30/h bucket, foreign or malformed ids answer a uniform 404, and
+// responses are no-store (PII must never sit in a shared cache).
+const addressIdRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const addressInputShape = {
+  label: z.string().min(1).max(40),
+  name: z.string().min(1).max(120),
+  line1: z.string().min(1).max(200),
+  // Optional: an empty string is accepted here and normalized to NULL by the
+  // module — same as the MCP tool's `line2` handling.
+  line2: z.string().max(200).optional(),
+  city: z.string().min(1).max(80),
+  postal_code: z.string().min(1).max(20),
+  // Same schema-level normalization the create_order tool uses: trim +
+  // uppercase, then a real ISO 3166-1 alpha-2 check (src/countries.ts).
+  country: z.string().trim().toUpperCase().length(2).refine(
+    isIsoCountryCode,
+    "country must be an ISO 3166-1 alpha-2 code",
+  ),
+};
+const addressCreateSchema = z.object({
+  ...addressInputShape,
+  // Setting the default is web-only in v1 (spec "New MCP tools"); the
+  // MCP save tool never sends this.
+  is_default: z.boolean().optional(),
+});
+// Wholesale replacement semantics (updateAddress contract): the form sends
+// the merged target state, so is_default is required — an edit can never
+// silently unset an existing default.
+const addressUpdateSchema = z.object({ ...addressInputShape, is_default: z.boolean() });
+
+/** The owner-facing full shape (dates as ISO strings). This serializer is
+ *  the web counterpart of addressToSummary — deliberately NOT shared with
+ *  the MCP surface; C2's allowlist keeps its own single pinned serializer. */
+function addressWebJson(row: AccountAddressRow) {
+  return {
+    id: row.id,
+    label: row.label,
+    name: row.name,
+    line1: row.line1,
+    line2: row.line2,
+    city: row.city,
+    postal_code: row.postal_code,
+    country: row.country,
+    is_default: row.is_default,
+    verification: row.verification ?? { status: "not_checked" as const },
+    created_at: row.created_at.toISOString(),
+    updated_at: row.updated_at.toISOString(),
+    last_used_at: row.last_used_at?.toISOString() ?? null,
+  };
+}
+
+function addressErrorResponse(e: unknown, res: Response): boolean {
+  if (e instanceof AddressLimitError) {
+    res.status(429).json({ error: e.message });
+    return true;
+  }
+  if (e instanceof AddressValidationError || e instanceof CountryCodeError) {
+    res.status(400).json({ error: e.message });
+    return true;
+  }
+  if (e instanceof AddressNotFoundError) {
+    res.status(404).json({ error: "Address not found." });
+    return true;
+  }
+  return false;
+}
+
+async function addressSeller(req: Request, res: Response) {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage saved addresses." });
+    return null;
+  }
+  return seller;
+}
+
+api.get("/me/addresses", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await addressSeller(req, res);
+  if (!seller) return;
+  if (!addressesReadLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/addresses" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const rows = await listAddresses(seller.id);
+  res.set("Cache-Control", "no-store");
+  res.json({ addresses: rows.map(addressWebJson) });
+}));
+
+api.post("/me/addresses", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await addressSeller(req, res);
+  if (!seller) return;
+  if (!addressWriteLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/addresses" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many address changes. Try again later." });
+    return;
+  }
+  const parsed = addressCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid address." });
+    return;
+  }
+  const { is_default, ...input } = parsed.data;
+  try {
+    const row = await saveAddress(seller.id, input, { isDefault: is_default ?? false });
+    res.set("Cache-Control", "no-store");
+    res.status(201).json({ address: addressWebJson(row) });
+  } catch (e) {
+    if (!addressErrorResponse(e, res)) throw e;
+  }
+}));
+
+api.patch("/me/addresses/:id", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await addressSeller(req, res);
+  if (!seller) return;
+  if (!addressWriteLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/addresses/:id" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many address changes. Try again later." });
+    return;
+  }
+  // Malformed ids 404 like unknown ones — no uuid parse error, no oracle.
+  const id = typeof req.params.id === "string" ? req.params.id : "";
+  if (!addressIdRe.test(id)) {
+    res.status(404).json({ error: "Address not found." });
+    return;
+  }
+  const parsed = addressUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid address." });
+    return;
+  }
+  const { is_default, ...input } = parsed.data;
+  try {
+    const row = await updateAddress(seller.id, id, { address: input, is_default });
+    res.set("Cache-Control", "no-store");
+    res.json({ address: addressWebJson(row) });
+  } catch (e) {
+    if (!addressErrorResponse(e, res)) throw e;
+  }
+}));
+
+api.delete("/me/addresses/:id", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await addressSeller(req, res);
+  if (!seller) return;
+  if (!addressWriteLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/addresses/:id" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many address changes. Try again later." });
+    return;
+  }
+  const id = typeof req.params.id === "string" ? req.params.id : "";
+  if (!addressIdRe.test(id)) {
+    res.status(404).json({ error: "Address not found." });
+    return;
+  }
+  try {
+    await deleteAddress(seller.id, id);
+    res.json({ ok: true });
+  } catch (e) {
+    if (!addressErrorResponse(e, res)) throw e;
+  }
 }));
 
 // THI-780 PR 2 (plan §5): one-click digest unsubscribe — GET (mail-client

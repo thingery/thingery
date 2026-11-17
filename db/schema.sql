@@ -816,3 +816,43 @@ CREATE TABLE IF NOT EXISTS reports (
 -- Triage read path (spec): all reports for an item, newest first.
 CREATE INDEX IF NOT EXISTS reports_target_created_idx
   ON reports (target_item_id, created_at);
+
+-- Saved shipping addresses (spec docs/specs/saved-addresses.md, rollout
+-- step 1). One store per account (the sellers table holds buyers and
+-- sellers alike): at most 10 rows per account — enforced in
+-- src/addresses.ts with a race-safe single-statement INSERT…SELECT —
+-- owner-only reads, hard delete, and ON DELETE CASCADE so account deletion
+-- (when it exists) removes them. Orders keep their own snapshot in
+-- orders.shipping_address: an edit here never rewrites a past order.
+-- PII minimization (docs/security.md): no address content ever reaches
+-- logs, security events, emails or notifications — ids and statuses only.
+-- `verification` is the advisory EasyPost result (rollout step 4): status
+-- verified | suggested | unverified | not_checked, default not_checked; the
+-- CHECK makes illegal statuses unrepresentable, and the raw provider
+-- response is never stored. `country` is ISO 3166-1 alpha-2, validated in
+-- code (src/countries.ts) — CHAR(2) is only the shape, not the check.
+CREATE TABLE IF NOT EXISTS account_addresses (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id    UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+  label         TEXT NOT NULL CHECK (char_length(label) BETWEEN 1 AND 40),  -- "Home", "Work"
+  name          TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 120),
+  line1         TEXT NOT NULL CHECK (char_length(line1) BETWEEN 1 AND 200),
+  line2         TEXT CHECK (line2 IS NULL OR char_length(line2) <= 200),
+  city          TEXT NOT NULL CHECK (char_length(city) BETWEEN 1 AND 80),
+  postal_code   TEXT NOT NULL CHECK (char_length(postal_code) BETWEEN 1 AND 20),
+  country       CHAR(2) NOT NULL,
+  is_default    BOOLEAN NOT NULL DEFAULT false,
+  verification  JSONB NOT NULL DEFAULT '{"status":"not_checked"}'::jsonb
+                CHECK (verification->>'status' IN ('verified','suggested','unverified','not_checked')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at  TIMESTAMPTZ
+);
+-- Owner listing (list_addresses summary + the web settings screen).
+CREATE INDEX IF NOT EXISTS account_addresses_account_idx
+  ON account_addresses (account_id, created_at);
+-- At most one default per account. Setting a default clears the previous
+-- one in the same transaction (src/addresses.ts, review note N5) so the
+-- partial unique index can never reject a legal write with a 500.
+CREATE UNIQUE INDEX IF NOT EXISTS account_addresses_one_default
+  ON account_addresses (account_id) WHERE is_default;

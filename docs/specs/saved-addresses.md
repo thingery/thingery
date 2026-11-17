@@ -165,9 +165,9 @@ as today; the same check can be added there later as a warning.
 
 ## Rollout
 
-Each step is one PR and ships on its own. Repos follow the THI-565 split: the open-source
-core ships in `thingery/thingery`; the company side (website, consumer app) ships in
-`thingery/platform`.
+Each step is one PR and ships on its own. Repos follow the two-repo split (open-source
+core vs company side): the core ships in `thingery/thingery`; the website and
+consumer app ship in `thingery/platform`.
 
 1. ✅ Schema, the address module (`src/addresses.ts`), the ISO country check, tests.
    (thingery, #301)

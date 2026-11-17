@@ -12,10 +12,13 @@
 // Security events carry ids and statuses only, never address content
 // (review note N3).
 
+import { z } from "zod";
 import { pool } from "./db.js";
 import { normalizeCountryCode, CountryCodeError } from "./countries.js";
 import { RateLimiter } from "./rate-limit.js";
 import { logSecurityEvent } from "./security-events.js";
+import { envValue } from "./config.js";
+import { verifyEasyPostAddress, type EasyPostAddressInput } from "./easypost.js";
 
 /** Fan-out controls (spec "Security and privacy"): module constants,
  *  deliberately not env-configurable — same posture as the wanted caps.
@@ -28,6 +31,19 @@ export const MAX_ADDRESSES_PER_ACCOUNT = 10;
  *  average-rate ceiling with burst-after-idle, not a wall-clock calendar
  *  cap — documented per review note N2, same caveat as the wanted buckets. */
 export const addressWriteLimiter = new RateLimiter(30, 60 * 60_000);
+
+/** Spec "Verification (advisory)": 20 checks per account per day — a ceiling,
+ *  not an expected rate (EasyPost charges per check). Over the limit is
+ *  not_checked, never an error. Same token-bucket semantics as the write
+ *  bucket (review note N2): an average-rate ceiling over a 24h window with
+ *  burst-after-idle, not a wall-clock calendar cap — so "about 20/day" in
+ *  the privacy statement (docs/security.md §4b) is exact. */
+export const addressVerificationLimiter = new RateLimiter(20, 24 * 60 * 60_000);
+
+/** Hard cap on the stored `suggested` correction (review condition C4): the
+ *  suggestion is provider-written, untrusted text — capped at synthesis and
+ *  zod-enforced on every read back (AddressVerificationSchema below). */
+export const MAX_VERIFICATION_SUGGESTED_LENGTH = 200;
 
 /** The advisory verification state machine (spec "Verification"): one of
  *  ADDRESS_VERIFICATION_STATUSES, mirrored by the DB CHECK on
@@ -45,6 +61,22 @@ export interface AddressVerification {
    *  untrusted provider text (review condition C4). Never returned through
    *  MCP tools — the summary carries the status only. */
   suggested?: string;
+}
+
+/** C4, enforced at the read boundary: every verification JSONB read back
+ *  from the database is re-validated — status from the closed set,
+ *  `suggested` length-capped. A row that fails (hand-edited, corrupted)
+ *  degrades to the not_checked default instead of surfacing unbounded
+ *  provider text. */
+export const AddressVerificationSchema = z.object({
+  status: z.enum(ADDRESS_VERIFICATION_STATUSES),
+  checked_at: z.string().optional(),
+  suggested: z.string().max(MAX_VERIFICATION_SUGGESTED_LENGTH).optional(),
+});
+
+export function parseAddressVerification(json: unknown): AddressVerification {
+  const parsed = AddressVerificationSchema.safeParse(json);
+  return parsed.success ? parsed.data : { status: "not_checked" };
 }
 
 /** Over the 10-address cap. Quota-shaped: rate_limited, the same code as
@@ -95,6 +127,13 @@ export interface AccountAddressRow {
   last_used_at: Date | null;
 }
 
+/** Maps a raw pg row onto AccountAddressRow: the only job is re-validating
+ *  the verification JSONB through AddressVerificationSchema (the C4
+ *  read-boundary cap). Every query site returns rows through here. */
+function mapRow(raw: AccountAddressRow): AccountAddressRow {
+  return { ...raw, verification: parseAddressVerification(raw?.verification) };
+}
+
 /** The writable shape shared by the MCP save tool and the web POST/PATCH
  *  routes. Lengths mirror the DB CHECKs exactly (defense in depth: the
  *  zod surface, this module and the schema all enforce the same bounds). */
@@ -106,6 +145,14 @@ export interface AddressInput {
   city: string;
   postal_code: string;
   country: string;
+}
+
+/** Test seams for the advisory verification: production resolves the env
+ *  key and the global fetch — both injectable so tests never touch the
+ *  network and never depend on the host environment. */
+export interface AddressVerificationDeps {
+  apiKey?: string;
+  fetchImpl?: typeof fetch;
 }
 
 /** Wholesale field replacement (update_listing semantics) plus the
@@ -164,7 +211,7 @@ export function validateAddressInput(input: AddressInput): Required<Pick<Address
 export async function saveAddress(
   accountId: string,
   input: AddressInput,
-  options?: { isDefault?: boolean },
+  options?: { isDefault?: boolean; verification?: AddressVerificationDeps },
 ): Promise<AccountAddressRow> {
   let address;
   try {
@@ -200,7 +247,7 @@ export async function saveAddress(
     }
     await client.query("COMMIT");
     logAddressWrite("save", "success", accountId, row.id);
-    return row;
+    return await withAdvisoryVerification(accountId, row, options?.verification);
   } catch (e) {
     await client.query("ROLLBACK").catch(() => {});
     throw e;
@@ -218,7 +265,7 @@ export async function listAddresses(accountId: string): Promise<AccountAddressRo
      ORDER BY is_default DESC, created_at`,
     [accountId],
   );
-  return rows;
+  return rows.map(mapRow);
 }
 
 /** Owner-scoped load: a foreign or missing id is AddressNotFoundError,
@@ -230,7 +277,7 @@ export async function getOwnedAddress(accountId: string, addressId: string): Pro
   );
   const row = rows[0];
   if (!row) throw new AddressNotFoundError();
-  return row;
+  return mapRow(row);
 }
 
 /** Hard delete, owner-scoped: 0 deleted rows is AddressNotFoundError.
@@ -255,6 +302,7 @@ export async function updateAddress(
   accountId: string,
   addressId: string,
   update: AddressUpdate,
+  options?: { verification?: AddressVerificationDeps },
 ): Promise<AccountAddressRow> {
   let address;
   try {
@@ -290,7 +338,7 @@ export async function updateAddress(
     }
     await client.query("COMMIT");
     logAddressWrite("update", "success", accountId, addressId);
-    return row;
+    return await withAdvisoryVerification(accountId, row, options?.verification);
   } catch (e) {
     await client.query("ROLLBACK").catch(() => {});
     throw e;
@@ -311,6 +359,126 @@ export async function markAddressUsed(accountId: string, addressId: string): Pro
       [addressId, accountId],
     )
     .catch(() => {}); // advisory stamp — swallow, never fail the order
+}
+
+// --- Advisory EasyPost verification (spec "Verification (advisory)",
+// rollout step 4) ----------------------------------------------------------
+//
+// Runs on save and edit ONLY — never on list, never at order time. Every
+// failure mode (no key, over the daily ceiling, provider error, the C3
+// timeout) maps to not_checked: saving never fails because of verification,
+// and a valid address is never refused (advisory only).
+
+const NOT_CHECKED: AddressVerification = { status: "not_checked" };
+
+function toEasyPostInput(input: AddressInput): EasyPostAddressInput {
+  return {
+    name: input.name,
+    line1: input.line1,
+    ...(input.line2 ? { line2: input.line2 } : {}),
+    city: input.city,
+    postalCode: input.postal_code,
+    country: input.country,
+  };
+}
+
+/** Whitespace- and case-insensitive single-field compare. */
+function norm(s: string): string {
+  return s.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/** True when the carrier-confirmed address differs from what the user typed
+ *  (delivery fields only — a name-only difference is not a correction). */
+function addressDiffers(input: AddressInput, corrected: EasyPostAddressInput): boolean {
+  return (
+    norm(input.line1) !== norm(corrected.line1) ||
+    norm(input.line2 ?? "") !== norm(corrected.line2 ?? "") ||
+    norm(input.city) !== norm(corrected.city) ||
+    norm(input.postal_code) !== norm(corrected.postalCode) ||
+    norm(input.country) !== norm(corrected.country)
+  );
+}
+
+/** The stored suggestion (C4): one line of untrusted, provider-written text,
+ *  each component whitespace-collapsed and capped to its field bound, the
+ *  whole line capped at MAX_VERIFICATION_SUGGESTED_LENGTH. Synthesized here
+ *  from the corrected fields — the provider's raw response is never stored. */
+function suggestedLine(corrected: EasyPostAddressInput): string {
+  const line1 = corrected.line1.trim().replace(/\s+/g, " ").slice(0, 200);
+  const line2 = corrected.line2?.trim().replace(/\s+/g, " ").slice(0, 200);
+  const city = corrected.city.trim().replace(/\s+/g, " ").slice(0, 80);
+  const postal = corrected.postalCode.trim().slice(0, 20);
+  const country = corrected.country.trim().slice(0, 2);
+  const line = [line1, ...(line2 ? [line2] : []), `${city} ${postal}`, country].join(", ");
+  return line.length > MAX_VERIFICATION_SUGGESTED_LENGTH
+    ? `${line.slice(0, MAX_VERIFICATION_SUGGESTED_LENGTH - 1)}…`
+    : line;
+}
+
+/** One advisory check: resolves the env key unless deps override it, draws
+ *  from the 20/day bucket only when a check can actually run, and maps
+ *  every outcome onto the four-status state machine (spec table). Exported
+ *  for tests; never touches the database. */
+export async function verifyAddressAdvisory(
+  accountId: string,
+  input: AddressInput,
+  deps?: AddressVerificationDeps,
+): Promise<AddressVerification> {
+  const apiKey = deps?.apiKey ?? envValue("EASYPOST_API_KEY");
+  if (apiKey === undefined) return NOT_CHECKED;
+  if (!addressVerificationLimiter.allow(`seller:${accountId}`)) return NOT_CHECKED;
+  try {
+    const result = await verifyEasyPostAddress(toEasyPostInput(input), {
+      apiKey,
+      ...(deps?.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+    });
+    if (result === null) return NOT_CHECKED;
+    const checked_at = new Date().toISOString();
+    if (!result.success) return { status: "unverified", checked_at };
+    if (result.corrected && addressDiffers(input, result.corrected)) {
+      return { status: "suggested", checked_at, suggested: suggestedLine(result.corrected) };
+    }
+    return { status: "verified", checked_at };
+  } catch (e) {
+    // Spec "Failure" + C3: provider error or timeout → not_checked. The
+    // logged message carries no address content (EasyPostError is
+    // status+code only); the address itself never reaches a log line.
+    console.error("address verification failed (ignored):", e instanceof Error ? e.message : e);
+    return NOT_CHECKED;
+  }
+}
+
+/** Post-commit verification stamp for a freshly written row: runs the
+ *  advisory check and persists the non-default result. The stamp UPDATE is
+ *  itself advisory — its failure leaves the row at not_checked and never
+ *  fails the save. updated_at is deliberately untouched: a check is not an
+ *  edit. Runs outside the write transaction so no DB connection is ever
+ *  held across the provider fetch. */
+async function withAdvisoryVerification(
+  accountId: string,
+  raw: AccountAddressRow,
+  deps?: AddressVerificationDeps,
+): Promise<AccountAddressRow> {
+  const row = mapRow(raw);
+  const input: AddressInput = {
+    label: row.label,
+    name: row.name,
+    line1: row.line1,
+    line2: row.line2,
+    city: row.city,
+    postal_code: row.postal_code,
+    country: row.country,
+  };
+  const verification = await verifyAddressAdvisory(accountId, input, deps);
+  if (verification.status === "not_checked") return row;
+  await pool
+    .query(`UPDATE account_addresses SET verification = $1 WHERE id = $2 AND account_id = $3`, [
+      JSON.stringify(verification),
+      row.id,
+      accountId,
+    ])
+    .catch(() => {}); // advisory stamp — swallow, never fail the save
+  return { ...row, verification };
 }
 
 /** The model-facing summary (spec "The model never sees a full saved

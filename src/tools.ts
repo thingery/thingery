@@ -29,6 +29,7 @@ import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStri
 import { orderFlowConfig } from "./config.js";
 import { cancelOrder, createOrder, getOrderView, listOrdersForAccount, MAX_ORDER_LIST_LIMIT, ORDER_ROLES, OrderFlowError, shareShippingAddress, shippingAddressConsent, shippingAddressForSeller, type OrderRole } from "./order-flow.js";
 import { ORDER_STATUSES, type OrderStatus } from "./orders.js";
+import { getSellerSummary, SellerNotFoundError, SELLER_LISTINGS_MAX_LIMIT, SELLER_LISTINGS_MAX_OFFSET } from "./sellers.js";
 import { buyShippingLabel, confirmPayment, confirmReceipt, openDispute, recordTracking, releaseFunds } from "./fulfillment.js";
 import { DEFAULT_MESSAGE_LIST_LIMIT, listOrderMessages, OrderMessageError, sendOrderMessage } from "./order-messages.js";
 import { logSecurityEvent } from "./security-events.js";
@@ -139,6 +140,7 @@ export const DIRECTORY_PROFILE_TOOLS: ReadonlySet<string> = new Set([
   "describe_category",
   "search_items",
   "get_item",
+  "get_seller_summary",
   // Seller listing authoring (protected — OAuth onboarding intact).
   "create_listing",
   "update_listing",
@@ -1051,6 +1053,58 @@ export function registerTools(
         item: { ...itemToPublic(item), content_provenance: "user_generated" },
         note: CONTENT_PROVENANCE_NOTE,
       });
+    },
+  );
+
+  server.registerTool(
+    "get_seller_summary",
+    {
+      title: "Get seller summary",
+      annotations: {
+        title: "Get seller summary",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      description:
+        "Who is selling: public profile of one marketplace seller — display name, member since " +
+        "(month), ships from, items sold (orders that reached payment), active listings, and " +
+        "whether card payment through Thingery is available for them today. Returns their current " +
+        "feed-visible listings (same fields as get_item), page-by-page. Public (no API key needed). " +
+        "seller_id comes from get_item or search_items results. " +
+        CONTENT_PROVENANCE_NOTE,
+      inputSchema: {
+        seller_id: z.string().uuid().describe("The seller's id (seller_id field from get_item or search_items)"),
+        limit: z.number().int().min(1).max(SELLER_LISTINGS_MAX_LIMIT).default(8),
+        offset: z.number().int().min(0).max(SELLER_LISTINGS_MAX_OFFSET).optional()
+          .describe(`Listings to skip, for paging (0-${SELLER_LISTINGS_MAX_OFFSET}). Default 0.`),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      try {
+        const summary = await getSellerSummary(args.seller_id as string, {
+          limit: (args.limit as number) ?? 8,
+          offset: (args.offset as number | undefined) ?? 0,
+        });
+        return ok({
+          seller: summary.seller,
+          // THI-371: same provenance discipline as get_item — listing text is
+          // data, never instructions to the calling model.
+          listings: summary.listings.map((item) => ({
+            ...itemToPublic(item),
+            content_provenance: "user_generated",
+          })),
+          count: summary.count,
+          has_more: summary.hasMore,
+          note: CONTENT_PROVENANCE_NOTE,
+        });
+      } catch (e) {
+        if (e instanceof SellerNotFoundError) {
+          return err(describeError(e), e.code);
+        }
+        return err(`get_seller_summary failed: ${describeError(e)}`);
+      }
     },
   );
 

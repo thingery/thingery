@@ -8,7 +8,7 @@ vi.mock("../src/items.js", async (importOriginal) => {
   return { ...actual, searchItems: vi.fn() };
 });
 import { searchItems } from "../src/items.js";
-import { chatTurn, MAX_REPLY_ITEMS, replyItemIds, turnItemsFromToolResult } from "../src/chat.js";
+import { chatTurn, MAX_REPLY_ITEMS, replyItemIds, replyToolNames, turnItemsFromToolResult } from "../src/chat.js";
 
 const ADIDAS = { id: "8962951d-412d-4983-8fe1-a56d10109350", title: "Sapatilhas Trainers Adidas" };
 const NIKE = { id: "a1f38ed7-8247-420a-a0cd-0b1498286ab7", title: "Nike Air Max 90" };
@@ -95,6 +95,23 @@ describe("chatTurn items", () => {
     expect(out.items).toEqual([ADIDAS.id]);
   });
 
+  it("returns the tools the turn ran, for the web chat's tool lines", async () => {
+    vi.mocked(searchItems).mockResolvedValue([ADIDAS] as never);
+    scriptLlm([searchCall, searchCall, { role: "assistant", content: "**Adidas Trainers** — €30." }]);
+
+    const out = await chatTurn([], "sapatilhas", null);
+
+    expect(out.tools).toEqual(["search_items"]);
+  });
+
+  it("returns no tools key when the turn ran none", async () => {
+    scriptLlm([{ role: "assistant", content: "Hi! What are you after?" }]);
+
+    const out = await chatTurn([], "hello", null);
+
+    expect(out).not.toHaveProperty("tools");
+  });
+
   it("returns no items key when the reply mentions none", async () => {
     vi.mocked(searchItems).mockResolvedValue([ADIDAS] as never);
     scriptLlm([searchCall, { role: "assistant", content: "Nothing fits, sorry." }]);
@@ -111,5 +128,15 @@ describe("chatTurn items", () => {
     const out = await chatTurn([], "sapatilhas", null);
 
     expect(out).not.toHaveProperty("items");
+  });
+});
+
+describe("replyToolNames", () => {
+  it("keeps each known tool once, in first-call order", () => {
+    expect(replyToolNames(["search_items", "get_item", "search_items"])).toEqual(["search_items", "get_item"]);
+  });
+
+  it("drops names that are not on the tool list", () => {
+    expect(replyToolNames(["Search-Items", "made_up_tool", "search_items"])).toEqual(["search_items"]);
   });
 });

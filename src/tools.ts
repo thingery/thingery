@@ -1663,8 +1663,32 @@ export function registerTools(
       const seller = requireSeller();
       if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
       try {
+        // The zod schema above validates from_address as snake_case
+        // (postal_code); the domain type EasyPostAddressInput is camelCase
+        // (postalCode) and toWireAddress reads that exact field — a bare cast
+        // here sent zip: undefined to EasyPost and failed every live quote
+        // (THI-953). Map explicitly, same as the chat path
+        // (executeConfirmedOrderOp) and storedAddressToDomain for the stored
+        // buyer address.
+        const from = args.from_address as {
+          name: string;
+          line1: string;
+          line2?: string;
+          city: string;
+          postal_code: string;
+          country: string;
+          phone?: string;
+        };
         const result = await buyShippingLabel(args.order_id as string, seller.id, {
-          fromAddress: args.from_address as Parameters<typeof buyShippingLabel>[2]["fromAddress"],
+          fromAddress: {
+            name: from.name,
+            line1: from.line1,
+            ...(from.line2 !== undefined ? { line2: from.line2 } : {}),
+            city: from.city,
+            postalCode: from.postal_code,
+            country: from.country,
+            ...(from.phone !== undefined ? { phone: from.phone } : {}),
+          },
           weightGrams: args.weight_grams as number | undefined,
           dimensionsMm: args.dimensions_mm as Parameters<typeof buyShippingLabel>[2]["dimensionsMm"],
           carrierPreference: args.carrier_preference as string | undefined,

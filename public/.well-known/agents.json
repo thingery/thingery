@@ -88,8 +88,8 @@
       ],
       "order_tools": {
         "get_payout_setup": "seller payout setup: Stripe Express onboarding URL + status; optional, enables platform payment",
-        "create_order": "order an item; stripe mode returns a Checkout URL, off_platform tracks the order only; check get_item's payment_available/orderable first",
-        "get_order": "one of your orders (buyer or seller side); parties only; the seller also gets shipping_address while a shipped order is sold or label_issued (off-platform: only after the buyer shares it)",
+        "create_order": "order an item; stripe mode returns a Checkout URL, off_platform tracks the order only; check get_item's payment_available/orderable first; a carrier address check may suggest a correction (code address_verification_suggested, no order created) — ask the buyer, re-call with that address or pass verification_choice keep_original",
+        "get_order": "one of your orders (buyer or seller side); parties only; the seller also gets shipping_address while a shipped order is sold or label_issued (off-platform: only after the buyer shares it); orders carry shipping_verification (status/checked_at both parties, a kept suggestion like shipping_address)",
         "my_orders": "your orders, newest first; role buyer|seller|both, optional status, limit 1-100 (default 20), cursor from next_cursor",
         "share_shipping_address": "buyer agrees to show the seller the address of one off-platform order while it is sold or label_issued; only on the buyer's explicit instruction, cannot be withdrawn",
         "cancel_order": "cancel while cancellable (pending/sold/label_issued); paid stripe orders refund instead",

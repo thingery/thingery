@@ -339,8 +339,18 @@ phishing concerns — threat-model them before building, not after.
   the Security agent; author agents push as `isaac1972` and cannot reach the
   credential, so reviewer ≠ author holds by credential reach, not convention. Merge
   flow: author agent opens PR → CI green → independent reviewer approves → author
-  merges. The "never push to main" convention is enforced by GitHub, not just
-  discipline. R1 in §9 is struck (gate live).
+  merges. **Approve-last discipline** (2026-11-17, PR #316, THI-957): push branch
+  updates *before* requesting approval, never push between approval and merge, and
+  the reviewer pins the exact head SHA in the review body — a mismatch between that
+  verified SHA and the review's `commit_id` invalidates the approval (re-request
+  review). This closes a race neither branch-protection setting catches: a push
+  landing seconds *before* the approval is submitted attaches the approval to the
+  new head with **no dismissal event** (`dismiss_stale_reviews` only reacts to pushes
+  after approval) while the approval's verification record still names the older,
+  actually-verified SHA, and `require_last_push_approval` checks submission time, not
+  verification time — observed live on PR #316, where an approval verifying 0941cc2
+  silently covered c6c5b47. The "never push to main" convention is enforced by
+  GitHub, not just discipline. R1 in §9 is struck (gate live).
   `deploy` is intentionally not a required check (it runs push-to-main only and never on
   PRs).
 - `npm audit --omit=dev` on the current lockfile: **0 production vulnerabilities**.

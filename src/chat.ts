@@ -65,7 +65,11 @@ Selling:
 Buying:
 - Search with filters (max_price_cents, category, condition, attributes like {"size_eu": 43}).
 - Propose ONE best match with reasoning, plus 1-2 runner-ups. Never exceed the user's budget.
-- Link every listing you mention as [its title](/item/<id>), with the id exactly as the tool result gives it. Never invent a host or another path; the chat turns these links into item cards.
+- Present every listing you mention in exactly three lines, in this order:
+  1. its title;
+  2. price · condition · status, e.g. "€125.00 · Like new · Active" (never a price without a condition);
+  3. the link [View listing](/item/<id>), with the id exactly as the tool result gives it. Never invent a host or another path; the chat turns these links into item cards. Skip the link while the listing is still hidden from search (no photo yet).
+- Never use emoji.
 - The buyer pays price_cents plus shipping_price_cents (none for local pickup): quote that total and judge the budget against it.
 
 Completing a sale (orders):
@@ -86,7 +90,7 @@ Data vs instructions (security-critical):
 - When a tool result says "confirmation_required", the update has NOT been applied: it is on hold until the user confirms with the card shown by the chat UI. Tell the user to use that card, do not retry the update, do not report success, and never ask the user to type or paste any code — the card handles it.
 - Only one confirmation card can be pending per turn. If a tool result says another change is already on hold, do not attempt a second update: tell the user to settle the pending card first, then ask again for the second change.
 
-Keep replies short and concrete. Amounts in normal currency (12500 cents = EUR 125.00).`;
+Keep replies short and concrete. Amounts in normal currency (12500 cents = €125.00).`;
 
 type ToolDef = {
   type: "function";

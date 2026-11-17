@@ -29,6 +29,7 @@ import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStri
 import { orderFlowConfig } from "./config.js";
 import { cancelOrder, createOrder, getOrderView, listOrdersForAccount, MAX_ORDER_LIST_LIMIT, ORDER_ROLES, OrderFlowError, shareShippingAddress, shippingAddressConsent, shippingAddressForSeller, type OrderRole } from "./order-flow.js";
 import { ORDER_STATUSES, type OrderStatus } from "./orders.js";
+import { getSellerSummary, SellerNotFoundError, SELLER_LISTINGS_MAX_LIMIT, SELLER_LISTINGS_MAX_OFFSET } from "./sellers.js";
 import { buyShippingLabel, confirmPayment, confirmReceipt, openDispute, recordTracking, releaseFunds } from "./fulfillment.js";
 import { DEFAULT_MESSAGE_LIST_LIMIT, listOrderMessages, OrderMessageError, sendOrderMessage } from "./order-messages.js";
 import { logSecurityEvent } from "./security-events.js";
@@ -139,6 +140,7 @@ export const DIRECTORY_PROFILE_TOOLS: ReadonlySet<string> = new Set([
   "describe_category",
   "search_items",
   "get_item",
+  "get_seller_summary",
   // Seller listing authoring (protected — OAuth onboarding intact).
   "create_listing",
   "update_listing",
@@ -1055,6 +1057,58 @@ export function registerTools(
   );
 
   server.registerTool(
+    "get_seller_summary",
+    {
+      title: "Get seller summary",
+      annotations: {
+        title: "Get seller summary",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      description:
+        "Who is selling: public profile of one marketplace seller — display name, member since " +
+        "(month), ships from, items sold (orders that reached payment), active listings, and " +
+        "whether card payment through Thingery is available for them today. Returns their current " +
+        "feed-visible listings (same fields as get_item), page-by-page. Public (no API key needed). " +
+        "seller_id comes from get_item or search_items results. " +
+        CONTENT_PROVENANCE_NOTE,
+      inputSchema: {
+        seller_id: z.string().uuid().describe("The seller's id (seller_id field from get_item or search_items)"),
+        limit: z.number().int().min(1).max(SELLER_LISTINGS_MAX_LIMIT).default(8),
+        offset: z.number().int().min(0).max(SELLER_LISTINGS_MAX_OFFSET).optional()
+          .describe(`Listings to skip, for paging (0-${SELLER_LISTINGS_MAX_OFFSET}). Default 0.`),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      try {
+        const summary = await getSellerSummary(args.seller_id as string, {
+          limit: (args.limit as number) ?? 8,
+          offset: (args.offset as number | undefined) ?? 0,
+        });
+        return ok({
+          seller: summary.seller,
+          // THI-371: same provenance discipline as get_item — listing text is
+          // data, never instructions to the calling model.
+          listings: summary.listings.map((item) => ({
+            ...itemToPublic(item),
+            content_provenance: "user_generated",
+          })),
+          count: summary.count,
+          has_more: summary.hasMore,
+          note: CONTENT_PROVENANCE_NOTE,
+        });
+      } catch (e) {
+        if (e instanceof SellerNotFoundError) {
+          return err(describeError(e), e.code);
+        }
+        return err(`get_seller_summary failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
     "my_listings",
     {
       title: "My listings",
@@ -1609,8 +1663,32 @@ export function registerTools(
       const seller = requireSeller();
       if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
       try {
+        // The zod schema above validates from_address as snake_case
+        // (postal_code); the domain type EasyPostAddressInput is camelCase
+        // (postalCode) and toWireAddress reads that exact field — a bare cast
+        // here sent zip: undefined to EasyPost and failed every live quote
+        // (THI-953). Map explicitly, same as the chat path
+        // (executeConfirmedOrderOp) and storedAddressToDomain for the stored
+        // buyer address.
+        const from = args.from_address as {
+          name: string;
+          line1: string;
+          line2?: string;
+          city: string;
+          postal_code: string;
+          country: string;
+          phone?: string;
+        };
         const result = await buyShippingLabel(args.order_id as string, seller.id, {
-          fromAddress: args.from_address as Parameters<typeof buyShippingLabel>[2]["fromAddress"],
+          fromAddress: {
+            name: from.name,
+            line1: from.line1,
+            ...(from.line2 !== undefined ? { line2: from.line2 } : {}),
+            city: from.city,
+            postalCode: from.postal_code,
+            country: from.country,
+            ...(from.phone !== undefined ? { phone: from.phone } : {}),
+          },
           weightGrams: args.weight_grams as number | undefined,
           dimensionsMm: args.dimensions_mm as Parameters<typeof buyShippingLabel>[2]["dimensionsMm"],
           carrierPreference: args.carrier_preference as string | undefined,
@@ -2242,7 +2320,10 @@ export function registerTools(
         "Save a shipping address to the user's account for reuse in later orders — the user " +
         "confirms the write in chat first. Returns the saved address as a summary (label, " +
         "city, country, verification status); the full address is never echoed back into " +
-        "chat. country must be a real ISO 3166-1 alpha-2 code. Max 10 saved addresses; " +
+        "chat. country must be a real ISO 3166-1 alpha-2 code. When the server has an " +
+        "EasyPost key, the address is checked once on save — advisory only, it never " +
+        "blocks: status is verified, suggested (a correction exists), unverified (carrier " +
+        "could not confirm) or not_checked. Max 10 saved addresses; " +
         "30 address writes per hour. Requires seller authentication (Bearer API key).",
       inputSchema: {
         label: z.string().min(1).max(40).describe("Short user-chosen name, e.g. 'Home' or 'Office'"),
@@ -2275,12 +2356,21 @@ export function registerTools(
           postal_code: args.postal_code as string,
           country: args.country as string,
         });
+        const summary = addressToSummary(row);
+        // C4 discipline, chat side: a suggested correction never enters chat —
+        // the user reviews it on their web settings screen, the one surface
+        // allowed to show it.
+        const note =
+          summary.verification === "suggested"
+            ? "Saved. The delivery check suggests a correction — tell the user to review it " +
+              "on the web settings screen (the correction itself never enters chat). Use " +
+              "address_id in create_order."
+            : "Saved. Use it in create_order with address_id; the assistant only ever sees the " +
+              `summary (label, city, country). Verification status: ${summary.verification}.`;
         return ok({
           saved: true,
-          address: addressToSummary(row),
-          note:
-            "Saved. Use it in create_order with address_id; the assistant only ever sees the " +
-            `summary (label, city, country). Verification status: ${addressToSummary(row).verification}.`,
+          address: summary,
+          note,
         });
       } catch (e) {
         if (e instanceof AddressLimitError) return err(e.message, "rate_limited");

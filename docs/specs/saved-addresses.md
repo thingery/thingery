@@ -1,6 +1,7 @@
 # Spec: saved shipping addresses
 
-Status: proposed · Touches protected paths `db/schema.sql`, `src/tools.ts`, `src/routes.ts`. See
+Status: accepted (rollout in progress — steps 1–3 shipped). Touches protected paths
+`db/schema.sql`, `src/tools.ts`, `src/routes.ts`. See
 AGENTS.md for the review those need.
 
 ## Problem
@@ -164,16 +165,21 @@ as today; the same check can be added there later as a warning.
 
 ## Rollout
 
-Each step is one PR and ships on its own:
+Each step is one PR and ships on its own. Repos follow the two-repo split (open-source
+core vs company side): the core ships in `thingery/thingery`; the website and
+consumer app ship in `thingery/platform`.
 
-1. Schema, the address module (`src/addresses.ts`), the ISO country check, tests.
-2. MCP tools (`list_addresses`, `save_address`, `delete_address`) and `address_id` on `create_order`,
-   then `npm run docs:tools`.
-3. HTTP routes for the web.
-4. EasyPost verification, the advisory statuses and the privacy-page text.
-5. Web: the settings screen and the buy form's picker and "Save this address" checkbox. The design is
-   drawn and approved first.
-6. Chat prompt: offer saved addresses before asking for a typed one.
+1. ✅ Schema, the address module (`src/addresses.ts`), the ISO country check, tests.
+   (thingery, #301)
+2. ✅ MCP tools (`list_addresses`, `save_address`, `delete_address`) and `address_id` on
+   `create_order`, then `npm run docs:tools`. (thingery, #303)
+3. ✅ HTTP routes for the web. (thingery, #306)
+4. EasyPost verification, the advisory statuses and the privacy-page text — **split**:
+   the verification code, the advisory statuses and the docs/security.md entry ship in
+   thingery together; the privacy-page text ships in platform.
+5. Web: the settings screen and the buy form's picker and "Save this address" checkbox.
+   The design is drawn and approved first. (platform)
+6. Chat prompt: offer saved addresses before asking for a typed one. (platform)
 
 ## Open questions
 

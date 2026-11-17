@@ -88,6 +88,9 @@ describe.skipIf(!available)("PROTECTED_TOOLS annotation (F7)", () => {
       "respond_to_wanted",
       // The buyer side of the wanted board.
       "create_wanted", "my_wanted", "update_wanted", "expire_wanted", "renew_wanted",
+      // Saved addresses (docs/specs/saved-addresses.md step 2): per-account
+      // address book — list/save/delete all carry account data (C1).
+      "list_addresses", "save_address", "delete_address",
       // Buyer consent for releasing a shipping address to the seller.
       "share_shipping_address"]) {
       expect(PROTECTED_TOOLS.has(name)).toBe(true);

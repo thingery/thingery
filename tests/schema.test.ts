@@ -111,6 +111,24 @@ describe.skipIf(!available)("db schema", () => {
         "created_at",
         "updated_at",
       ],
+      // Saved shipping addresses (spec docs/specs/saved-addresses.md,
+      // rollout step 1): the account-owned address store.
+      account_addresses: [
+        "id",
+        "account_id",
+        "label",
+        "name",
+        "line1",
+        "line2",
+        "city",
+        "postal_code",
+        "country",
+        "is_default",
+        "verification",
+        "created_at",
+        "updated_at",
+        "last_used_at",
+      ],
     };
     for (const [table, columns] of Object.entries(expected)) {
       const { rows } = await client.query<{ column_name: string }>(
@@ -128,6 +146,47 @@ describe.skipIf(!available)("db schema", () => {
       client.query(`INSERT INTO oauth_tokens (grant_id, kind, token_hash, expires_at)
                     VALUES (gen_random_uuid(), 'macaroon', 'x', now())`),
     ).rejects.toThrow();
+  });
+
+  // Saved addresses (spec docs/specs/saved-addresses.md, rollout step 1):
+  // the verification-status CHECK makes illegal states unrepresentable and
+  // the partial unique index pins one default per account.
+  it("enforces the account_addresses verification CHECK and one-default index", async () => {
+    const seller = await client.query<{ id: string }>(
+      `INSERT INTO sellers (display_name, email) VALUES ($1, $2) RETURNING id`,
+      ["schema-addresses", `schema-addr-${Date.now()}@test.thingery.dev`],
+    );
+    const sellerId = seller.rows[0].id;
+    const address = {
+      label: "Home",
+      name: "Ada Lovelace",
+      line1: "Via Roma 1",
+      city: "Milano",
+      postal_code: "20121",
+      country: "IT",
+    };
+    // An illegal verification status is rejected by the CHECK.
+    await expect(
+      client.query(
+        `INSERT INTO account_addresses (account_id, label, name, line1, city, postal_code, country, verification)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, '{"status":"definitely"}'::jsonb)`,
+        [sellerId, address.label, address.name, address.line1, address.city, address.postal_code, address.country],
+      ),
+    ).rejects.toThrow();
+    // Two defaults for one account violate the partial unique index.
+    await client.query(
+      `INSERT INTO account_addresses (account_id, label, name, line1, city, postal_code, country, is_default)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, true)`,
+      [sellerId, address.label, address.name, address.line1, address.city, address.postal_code, address.country],
+    );
+    await expect(
+      client.query(
+        `INSERT INTO account_addresses (account_id, label, name, line1, city, postal_code, country, is_default)
+         VALUES ($1, 'Work', $3, $4, $5, $6, $7, true)`,
+        [sellerId, address.name, address.line1, address.city, address.postal_code, address.country],
+      ),
+    ).rejects.toThrow();
+    await client.query(`DELETE FROM sellers WHERE id = $1`, [sellerId]);
   });
 
   // THI-193 §4 expand step (rev fa3288ff): the kind CHECK is widened to

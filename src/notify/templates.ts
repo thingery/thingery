@@ -410,6 +410,17 @@ export function renderSellerItemTakenDown(p: { itemTitle: string; itemUrl: strin
   return { subject, text, html };
 }
 
+/** `operator.*.v1` — internal alerts (THI-780 PR 4). Plain, id-first,
+ * PII-free: ids, statuses, error strings only. */
+export function renderOperatorAlert(p: { title: string; lines: string[] }): RenderedEmail {
+  const subject = subjectSafe(p.title);
+  const text = p.lines.join("\n") + `\n\n— ${CANONICAL_SENTENCE}\n`;
+  const html =
+    `<p>${escapeHtml(p.title)}</p>\n<ul>\n${p.lines.map((l) => `  <li>${escapeHtml(l)}</li>`).join("\n")}\n</ul>\n` +
+    `<p style="color:#666;font-size:12px">— ${CANONICAL_SENTENCE}</p>\n`;
+  return { subject, text, html };
+}
+
 /** Registry: a notification payload (the PII-free JSONB the fan-out stores)
  *  → the rendered email for its event type, with deep links built from the
  *  deployment base URL. One source of truth for content: fan-out stores the
@@ -493,6 +504,16 @@ export function renderOrderEmail(
         itemUrl: str("item_id") ? `${baseUrl}/item/${payload.item_id}` : baseUrl,
         reason: str("reason") ?? "policy violation",
       });
+    // THI-780 PR 4: operator alerts — account-less rows, bypass account
+    // gates (an operator address is not a marketplace account).
+    case "operator.stuck_money":
+    case "operator.stale_dispute":
+    case "operator.dead_letter": {
+      const lines = Array.isArray(payload.lines)
+        ? (payload.lines as unknown[]).map(String)
+        : [];
+      return renderOperatorAlert({ title: str("title") ?? "Thingery operator alert", lines });
+    }
     default:
       throw new Error(`renderOrderEmail: unknown event type ${eventType}`);
   }

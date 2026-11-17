@@ -179,6 +179,10 @@ export interface NotifyConfig {
   /** Digest scan cadence in minutes (THI-780 PR 2). Sends are still at
    * most once per period per recipient by dedupe key. */
   digestIntervalMinutes: number;                // 60
+  /** Operator alert mailbox (THI-780 PR 4). Unset ⇒ operator alerts are
+   * console-only (Phase 1 posture); set ⇒ sweep rules 7/9 + delivery
+   * dead-letters mirror there as account-less operator.* outbox rows. */
+  operatorAlertEmail: string | undefined;
 }
 
 export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig {
@@ -212,6 +216,7 @@ export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig
     maxSendsPerSweep: int("NOTIFY_MAX_SENDS_PER_SWEEP", 50),
     resendWebhookSecret: value("RESEND_WEBHOOK_SECRET"),
     digestIntervalMinutes: int("NOTIFY_DIGEST_INTERVAL_MINUTES", 60),
+    operatorAlertEmail: value("OPERATOR_ALERT_EMAIL") ?? undefined,
   };
 }
 

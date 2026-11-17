@@ -21,6 +21,7 @@ import { notifyConfig, type NotifyConfig } from "../config.js";
 import type { Mailer, MailSendResult } from "../mailer.js";
 import { renderOrderEmail } from "./templates.js";
 import { emailAllowedByPrefs, parseNotificationPrefs } from "./prefs.js";
+import { planOperatorAlert } from "./operator.js";
 
 /** Claim batch per pass (plan §4: "small batches"; per-run cap default 50
  *  bounds it further). */
@@ -110,6 +111,24 @@ async function markFailure(db: PoolClient, row: OutboxRow, error: string): Promi
       `UPDATE email_outbox SET status = 'dead', attempts = $2, last_error = $3 WHERE id = $1`,
       [row.id, attempts, error],
     );
+    // THI-780 PR 4: dead-letters surface in the operator mailbox too (once
+    // per outbox row, opalert dedupe; same transaction — the alert and the
+    // dead status commit together). Log-only posture when the env is unset.
+    await planOperatorAlert({
+      kind: "dead_letter",
+      ref: row.id,
+      subject: `Email dead-lettered (${row.template}) — Thingery`,
+      payload: {
+        title: `Outbox row dead after ${MAX_ATTEMPTS} attempts`,
+        lines: [
+          `Outbox: ${row.id}`,
+          `To: ${row.to_email || "(no address)"}`,
+          `Template: ${row.template}`,
+          `Error: ${error.slice(0, 300)}`,
+        ],
+      },
+      client: db,
+    });
     return "dead";
   }
   await db.query(

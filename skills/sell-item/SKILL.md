@@ -56,15 +56,17 @@ The Thingery MCP server must be connected. Listing requires the seller's API key
    max 5 MB per image. Public image URLs in `create_listing`'s `images` also work.
    The **first photo publishes** the listing — the first `add_item_image` result comes back
    with `visible: true` and the listing appears in search immediately after.
-7. **Report** — Give the user the item URL and say what happens next (questions from buyers
+7. **Report** — Show the listing in three lines — the title; price · condition · status
+   (e.g. `€40.00 · Good · Active`); the item URL — and say what happens next (questions from buyers
    will arrive; update to `reserved` when a deal is near, `sold` when done). If the listing is
-   still photoless, say it plainly: *created, but hidden from search until you add a photo* —
-   and either attach one more turn or point the user at the item page, where they can snap or
-   upload one (it publishes instantly).
+   still photoless, leave the URL off the listing lines and say it plainly: *created, but
+   hidden from search until you add a photo* — and either attach one more turn or give the
+   item page URL as the place to snap or upload one (it publishes instantly).
 
 ## Rules
 
 - Never invent condition details you cannot see; say what's unverifiable.
+- Never a price without a condition, and never an emoji, in anything you show the user.
 - Currency defaults to EUR; confirm before using anything else.
 - Keep `attributes` compact: max 64 entries, keys up to 128 chars, string values up to
   500 chars — anything larger fails with `invalid_attributes` on create and update alike.

@@ -745,11 +745,11 @@ describe.skipIf(!available)("chat buyer order writes behind the confirm gate (DB
     expect(turn.confirm).toBeDefined();
     expect(turn.confirm!.summary).toContain("preferred carrier: DHL");
     expect(decodeOrderPayload(turn.confirm!.op)).toEqual({
-      order_id: orderId,
       from_address: fromAddress,
       weight_grams: 900,
       carrier_preference: "DHL",
     });
+    // The order id rides as the token's subject, not in the payload.
     // Nothing bought before confirmation: still sold, no label snapshot.
     const before = await client.query("SELECT status, label_purchase FROM orders WHERE id = $1", [orderId]);
     expect(before.rows[0].status).toBe("sold");

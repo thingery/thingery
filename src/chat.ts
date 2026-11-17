@@ -32,6 +32,7 @@ import {
   sendOrderMessage,
 } from "./order-messages.js";
 import { logSecurityEvent } from "./security-events.js";
+import { isIso3166Alpha2, normalizeCountryCode } from "./iso3166.js";
 import { logChatTurnUsage, toolNameSlug, type LlmCallUsage } from "./chat-usage.js";
 import { chatLimits, dailyTokenBudget, parseLlmUsage, fallbackUsageEstimate, type LlmUsage as NormalizedUsage } from "./chat-limits.js";
 import type { ResolvedLlmCredential } from "./llm-credentials.js";
@@ -615,8 +616,15 @@ export function normalizeOrderArgs(
         const line2 = addr.line2 === undefined ? undefined : str(addr.line2, 200, "line2", 0);
         const city = str(addr.city, 80, "city");
         const postal = str(addr.postal_code, 20, "postal_code");
-        const country = typeof addr.country === "string" && addr.country.length === 2 ? addr.country : null;
-        if (!name || !line1 || !city || !postal || !country || (addr.line2 !== undefined && line2 === null)) {
+        // ISO 3166-1 parity with the MCP tool's zod schema: normalize trim +
+        // uppercase before the membership check (" it " → "IT"), and reject a
+        // real-looking but unassigned code with a field-only error — the
+        // rejected value is never echoed (PII/log hygiene).
+        const country = typeof addr.country === "string" ? normalizeCountryCode(addr.country) : null;
+        if (country !== null && country.length === 2 && !isIso3166Alpha2(country)) {
+          return { ok: false, error: "create_order: shipping_address.country must be an ISO 3166-1 alpha-2 country code" };
+        }
+        if (!name || !line1 || !city || !postal || !country || country.length !== 2 || (addr.line2 !== undefined && line2 === null)) {
           return { ok: false, error: "create_order: shipping_address needs name (1-120), line1 (1-200), optional line2 (≤200), city (1-80), postal_code (1-20) and a 2-letter country" };
         }
         out.shipping_address = { name, line1, ...(line2 !== undefined ? { line2 } : {}), city, postal_code: postal, country };

@@ -139,6 +139,7 @@ describe("manifest parity table (chat vs MCP arg validation)", () => {
     { tool: "create_order", args: {}, why: "missing item_id" },
     { tool: "create_order", args: { item_id: "11111111-1111-4111-8111-111111111111", payment_mode: "paypal" }, why: "payment_mode outside the enum" },
     { tool: "create_order", args: { item_id: "11111111-1111-4111-8111-111111111111", shipping_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "ITA" } }, why: "3-letter country" },
+    { tool: "create_order", args: { item_id: "11111111-1111-4111-8111-111111111111", shipping_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "XX" } }, why: "2-letter country outside ISO 3166-1" },
     { tool: "create_order", args: { item_id: "11111111-1111-4111-8111-111111111111", shipping_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT", phone: "123" } }, why: "unknown key in strict address object" },
     { tool: "create_order", args: { item_id: "11111111-1111-4111-8111-111111111111", shipping_address: { line1: "B", city: "C", postal_code: "D", country: "IT" } }, why: "address missing name" },
     { tool: "confirm_receipt", args: {}, why: "missing order_id (receipt)" },
@@ -174,6 +175,16 @@ describe("manifest parity table (chat vs MCP arg validation)", () => {
     const okAddress = { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT" };
     expect(mcp.shape("create_order").safeParse({ item_id: "11111111-1111-4111-8111-111111111111", shipping_address: okAddress }).success).toBe(true);
     expect(normalizeOrderArgs("create_order", { item_id: "11111111-1111-4111-8111-111111111111", shipping_address: okAddress }).ok).toBe(true);
+    // ISO normalization parity (order-address-verification §1): padded and
+    // lowercase countries are accepted and normalized on both surfaces.
+    for (const country of ["it", " it "] as const) {
+      const mcpParsed = mcp.shape("create_order").safeParse({ item_id: "11111111-1111-4111-8111-111111111111", shipping_address: { ...okAddress, country } });
+      expect(mcpParsed.success, country).toBe(true);
+      expect((mcpParsed.data as { shipping_address: { country: string } }).shipping_address.country).toBe("IT");
+      const chatParsed = normalizeOrderArgs("create_order", { item_id: "11111111-1111-4111-8111-111111111111", shipping_address: { ...okAddress, country } });
+      expect(chatParsed.ok, country).toBe(true);
+      expect((chatParsed.args as { shipping_address: { country: string } }).shipping_address.country).toBe("IT");
+    }
     expect(mcp.shape("open_dispute").safeParse({ order_id: "11111111-1111-4111-8111-111111111111", reason: "never arrived" }).success).toBe(true);
     expect(normalizeOrderArgs("open_dispute", { order_id: "11111111-1111-4111-8111-111111111111", reason: "never arrived" }).ok).toBe(true);
     expect(mcp.shape("cancel_order").safeParse({ order_id: "11111111-1111-4111-8111-111111111111" }).success).toBe(true);

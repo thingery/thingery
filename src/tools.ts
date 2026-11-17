@@ -20,6 +20,7 @@ import { DEFAULT_MESSAGE_LIST_LIMIT, listOrderMessages, OrderMessageError, sendO
 import { logSecurityEvent } from "./security-events.js";
 import { listConnectedApps, revokeConnectedApp } from "./oauth.js";
 import { apiKeyInfo } from "./auth.js";
+import { isIso3166Alpha2 } from "./iso3166.js";
 
 /** Which credential authenticated the /mcp request (thg_ API key, thgo_ OAuth
  *  token, thgs_ login session) — see authenticateRequest in src/auth.ts. */
@@ -1243,8 +1244,9 @@ export function registerTools(
         "Buy an item: place an order on a second-hand listing. Default payment_mode is 'stripe' (Checkout URL returned) when the " +
         "deployment has payments AND the seller finished payout onboarding; otherwise " +
         "'off_platform' — you and the seller settle payment yourselves (check get_item's " +
-        "payment_available first). Shippable items need a shipping_address; local-pickup " +
-        "items ignore it. The result's total_price_cents is what the buyer pays (price plus any " +
+        "payment_available first). Shippable items need a shipping_address whose country must be a " +
+        "real ISO 3166-1 alpha-2 code (case/whitespace-insensitive: ' it ' ships as 'IT'); " +
+        "local-pickup items ignore it. The result's total_price_cents is what the buyer pays (price plus any " +
         "shipping_price_cents); Stripe Checkout shows shipping as its own line. On off_platform " +
         "orders the seller cannot see the address until you agree with share_shipping_address " +
         "after they confirm payment. Requires authentication (buyer account).",
@@ -1256,7 +1258,13 @@ export function registerTools(
           line2: z.string().max(200).optional(),
           city: z.string().min(1).max(80),
           postal_code: z.string().min(1).max(20),
-          country: z.string().length(2).describe("ISO 3166-1 alpha-2, e.g. 'IT'"),
+          // Trim + uppercase before the membership check (" it " → "IT"), so
+          // padded/lowercase input is accepted and the handler receives the
+          // normalized code. The refine message names the field, never the
+          // rejected value (SDK renders it as "… at shipping_address.country").
+          country: z.string().trim().toUpperCase().length(2)
+            .refine(isIso3166Alpha2, "must be an ISO 3166-1 alpha-2 country code")
+            .describe("ISO 3166-1 alpha-2, e.g. 'IT' (case/whitespace-insensitive; stored normalized)"),
         }).strict().optional().describe("Required for shippable items"),
         payment_mode: z.enum(["stripe", "off_platform"]).optional()
           .describe("Leave unset for the best available path"),

@@ -11,7 +11,7 @@ Every order tool needs an account, and only the two parties of an order can see 
 
 **Create order** · Needs an account · Writes
 
-Buy an item: place an order on a second-hand listing. Default payment_mode is 'stripe' (Checkout URL returned) when the deployment has payments AND the seller finished payout onboarding; otherwise 'off_platform' — you and the seller settle payment yourselves (check get_item's payment_available first). Shippable items need a shipping_address; local-pickup items ignore it. The result's total_price_cents is what the buyer pays (price plus any shipping_price_cents); Stripe Checkout shows shipping as its own line. On off_platform orders the seller cannot see the address until you agree with share_shipping_address after they confirm payment. Requires authentication (buyer account).
+Buy an item: place an order on a second-hand listing. Default payment_mode is 'stripe' (Checkout URL returned) when the deployment has payments AND the seller finished payout onboarding; otherwise 'off_platform' — you and the seller settle payment yourselves (check get_item's payment_available first). Shippable items need a shipping_address whose country must be a real ISO 3166-1 alpha-2 code (case/whitespace-insensitive: ' it ' ships as 'IT'); local-pickup items ignore it. The result's total_price_cents is what the buyer pays (price plus any shipping_price_cents); Stripe Checkout shows shipping as its own line. On off_platform orders the seller cannot see the address until you agree with share_shipping_address after they confirm payment. Requires authentication (buyer account).
 
 **Parameters**
 
@@ -37,7 +37,7 @@ Buy an item: place an order on a second-hand listing. Default payment_mode is 's
       Up to 20 characters.
     </ParamField>
     <ParamField body="country" type="string" required>
-      ISO 3166-1 alpha-2, e.g. 'IT'. Exactly 2 characters.
+      ISO 3166-1 alpha-2, e.g. 'IT' (case/whitespace-insensitive; stored normalized). Exactly 2 characters.
     </ParamField>
   </Expandable>
 </ParamField>

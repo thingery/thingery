@@ -8,7 +8,16 @@ vi.mock("../src/items.js", async (importOriginal) => {
   return { ...actual, searchItems: vi.fn() };
 });
 import { searchItems } from "../src/items.js";
-import { chatTurn, MAX_REPLY_ITEMS, replyItemIds, replyToolNames, turnItemsFromToolResult } from "../src/chat.js";
+import {
+  chatTurn,
+  MAX_REPLY_ITEMS,
+  MAX_REPLY_SUGGESTIONS,
+  MAX_SUGGESTION_LENGTH,
+  replyItemIds,
+  replyToolNames,
+  splitReplySuggestions,
+  turnItemsFromToolResult,
+} from "../src/chat.js";
 
 const ADIDAS = { id: "8962951d-412d-4983-8fe1-a56d10109350", title: "Sapatilhas Trainers Adidas" };
 const NIKE = { id: "a1f38ed7-8247-420a-a0cd-0b1498286ab7", title: "Nike Air Max 90" };
@@ -138,5 +147,73 @@ describe("replyToolNames", () => {
 
   it("drops names that are not on the tool list", () => {
     expect(replyToolNames(["Search-Items", "made_up_tool", "search_items"])).toEqual(["search_items"]);
+  });
+});
+
+describe("splitReplySuggestions", () => {
+  it("removes the suggestions line and returns its follow-ups", () => {
+    const reply = "Two similar pens are listed.\n<suggestions>Show me the other two | Order this one</suggestions>";
+    expect(splitReplySuggestions(reply)).toEqual({
+      text: "Two similar pens are listed.",
+      suggestions: ["Show me the other two", "Order this one"],
+    });
+  });
+
+  it("leaves a reply without the line untouched", () => {
+    expect(splitReplySuggestions("Hi! What are you after?")).toEqual({ text: "Hi! What are you after?", suggestions: [] });
+  });
+
+  it("drops links, markup, over-long and repeated suggestions, and keeps at most three", () => {
+    const long = "a".repeat(MAX_SUGGESTION_LENGTH + 1);
+    const reply = [
+      "Here you go.",
+      `<suggestions>Open https://evil.example | Visit evil.com | [Order](/item/x) | <b>Hi</b> | ${long} |`,
+      " **Order this one** | order this one | Show me cheaper ones | Any in size 43? | One more</suggestions>",
+    ].join("\n");
+    const out = splitReplySuggestions(reply);
+    expect(out.text).toBe("Here you go.");
+    expect(out.suggestions).toEqual(["Order this one", "Show me cheaper ones", "Any in size 43?"]);
+    expect(out.suggestions.length).toBeLessThanOrEqual(MAX_REPLY_SUGGESTIONS);
+  });
+
+  it("strips control and invisible characters", () => {
+    expect(splitReplySuggestions("Ok\n<suggestions>Order‮ this\u0007 one</suggestions>").suggestions).toEqual([
+      "Order this one",
+    ]);
+  });
+
+  it("removes an unclosed line and every repeated line from the text", () => {
+    expect(splitReplySuggestions("Ok <suggestions>A</suggestions>\nMore\n<suggestions>Order this one")).toEqual({
+      text: "Ok \nMore",
+      suggestions: ["Order this one"],
+    });
+  });
+});
+
+describe("chatTurn suggestions", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function replyWith(content: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }), { status: 200 })),
+    );
+  }
+
+  it("returns the reply's suggestions and keeps the line out of the text", async () => {
+    replyWith("What size?\n<suggestions>Size 42 | Size 43</suggestions>");
+
+    const out = await chatTurn([], "trainers", null);
+
+    expect(out.text).toBe("What size?");
+    expect(out.suggestions).toEqual(["Size 42", "Size 43"]);
+  });
+
+  it("returns no suggestions key when the reply has none", async () => {
+    replyWith("What size?");
+
+    const out = await chatTurn([], "trainers", null);
+
+    expect(out).not.toHaveProperty("suggestions");
   });
 });

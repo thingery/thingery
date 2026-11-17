@@ -48,6 +48,10 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       | "/api/me/preferences"
       // THI-780 PR 2: digest one-click unsubscribe limiter slug.
       | "/api/notifications/unsubscribe"
+      // THI-914 (spec docs/specs/saved-addresses.md, step 3): saved-address
+      // limiter slugs — reads and writes, one slug per route shape.
+      | "/api/me/addresses"
+      | "/api/me/addresses/:id"
     >();
     const routes: SecurityEventRoute[] = [
       "/api/signup",
@@ -65,6 +69,8 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       "/api/wanted/:id/renew",
       "/api/verify-email",
       "/api/me/resend-email-verification",
+      "/api/me/addresses",
+      "/api/me/addresses/:id",
     ];
     expectTypeOf(routes).toEqualTypeOf<SecurityEventRoute[]>();
   });

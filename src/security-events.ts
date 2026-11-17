@@ -49,7 +49,11 @@ export type SecurityEventRoute =
   // THI-780 (THI-760 Phase 2): preferences limiter 429s.
   | "/api/me/preferences"
   // THI-780 PR 2: digest one-click unsubscribe limiter 429s.
-  | "/api/notifications/unsubscribe";
+  | "/api/notifications/unsubscribe"
+  // THI-914 (spec docs/specs/saved-addresses.md, rollout step 3): saved-address
+  // limiter 429s — reads and writes share this slug pair with the routes.
+  | "/api/me/addresses"
+  | "/api/me/addresses/:id";
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a

@@ -93,10 +93,9 @@ import crypto from "node:crypto";
 import { pool } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
 import { applyTransition, IllegalTransitionError, type OrderRow } from "./orders.js";
-import { sellerPayoutReady } from "./order-flow.js";
 import { logSecurityEvent } from "./security-events.js";
 import { page, escapeHtml } from "./web-pages.js";
-import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer } from "./stripe.js";
+import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer, getPayoutSetup } from "./stripe.js";
 
 const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/logins per IP per hour
 const apiKeyRotateLimiter = new RateLimiter(10, 60 * 60_000); // 10 key rotations per seller per hour (THI-114)
@@ -301,16 +300,22 @@ api.get("/me", asyncHandler(async (req: Request, res: Response) => {
   // Read-only payout state so a client can render Payout setup on load without
   // calling get_payout_setup, which creates the Stripe account and mints a
   // single-use onboarding link. Booleans only — never the Stripe account id.
-  // A lookup fault reads as "not onboarded": the setup action stays available.
+  // `started` (a connected account exists) lets the client show setup as in
+  // progress before the account.updated webhook sets onboarded. A lookup fault
+  // reads as "not started": the setup action stays available.
   const payoutsConfigured = orderFlowConfig().stripePaymentsEnabled;
-  const payoutsOnboarded = await sellerPayoutReady(seller.id).catch(() => false);
+  const payoutSetup = await getPayoutSetup(seller.id).catch(() => null);
   res.json({
     seller: {
       name: seller.display_name,
       email: seller.email,
       email_verified: seller.email_verified_at !== null,
       unread_notifications: Number(unread.rows[0]?.c ?? 0),
-      payouts: { configured: payoutsConfigured, onboarded: payoutsOnboarded },
+      payouts: {
+        configured: payoutsConfigured,
+        started: payoutSetup !== null,
+        onboarded: payoutSetup?.onboardedAt != null,
+      },
     },
   });
 }));

@@ -1,8 +1,8 @@
 # ADR 0007: Second reviewer identity (`thingery-review-bot`) and the 1-review merge gate
 
-- **Status:** Accepted, amended 2026-10-31 (board ruling THI-225; security review THI-224; implementation THI-446). Reviewer identity amended from GitHub App to machine user after live drill evidence — see Decision.
+- **Status:** Accepted, amended 2026-10-31 (board ruling THI-225; security review THI-224; implementation THI-446). Reviewer identity amended from GitHub App to machine user after live drill evidence — see Decision. Amended 2026-11-17 (THI-957): Decision 3 credential-delivery wording aligned with the implemented runtime-scoped env mechanism; approve-last rule added to Consequences (review-attachment race observed on PR #316).
 - **Date:** 2026-10
-- **Related:** THI-36 (agents merge, no human in the loop), THI-224 (deploy-credential security review), THI-225 (merge-gate ruling), THI-449 (drill: bot approval submitted, not counted)
+- **Related:** THI-36 (agents merge, no human in the loop), THI-224 (deploy-credential security review), THI-225 (merge-gate ruling), THI-449 (drill: bot approval submitted, not counted), THI-957 (approve-last rule; Decision 3 delivery wording)
 
 ## Context
 
@@ -40,10 +40,20 @@ merge without waiting for a human).
    required checks (`verify`, `Secret scan (gitleaks)`) and `enforce_admins: true` are
    unchanged.
 3. The reviewer's credential (the fine-grained PAT) lives as a managed secret granted **only
-   to the reviewer role** via an access binding — never as an environment variable and
-   never to any PR-authoring agent. Reviewer ≠ author is enforced by credential reach: the
-   credential reaches exactly the one agent that never pushes code. Security never authors
-   PRs; every author pushes as `isaac1972` and cannot reach the reviewer credential.
+   to the reviewer role**, delivered into the reviewer agent's runtime as an environment
+   variable scoped to reviewer-role runs only (`THINGERY_REVIEW_BOT_PAT`; its value never
+   appears in this repo, in logs, or in docs) and never to any PR-authoring agent.
+   Reviewer ≠ author is enforced by credential reach: the credential reaches exactly the
+   one agent that never pushes code. Security never authors PRs; every author pushes as
+   `isaac1972` and cannot reach the reviewer credential.
+
+   *Amendment (2026-11-17, THI-957):* Decision 3 originally required delivery "via an
+   access binding — never as an environment variable". The implemented mechanism is
+   runtime-scoped env delivery: the managed secret is injected as an environment variable
+   into the reviewer role's agent runtime only, so the credential is unreachable from
+   any PR-authoring agent's runtime. The security property Decision 3 protects —
+   reviewer-only credential reach — is preserved; this amendment aligns the ADR text
+   with the mechanism as implemented.
 4. Merge SOP: author agent opens PR → CI green → Security approves via the bot → author
    merges. Security remains the mandatory reviewer for the protected paths
    (`db/schema.sql`, `src/tools.ts`, `src/auth.ts`, `src/routes.ts`) and any
@@ -80,6 +90,15 @@ merge without waiting for a human).
   without touching GitHub.
 - `dismiss_stale_reviews` + `require_last_push_approval` mean a push after approval invalidates
   it: approve last, merge immediately; re-approve after any new push.
+- **Approve-last discipline (2026-11-17, PR #316, THI-957):** a push landing *before* the
+  approval is submitted is caught by neither setting — GitHub attaches the approval to
+  the new head with **no dismissal event** (`dismiss_stale_reviews` only reacts to pushes
+  after approval), and `require_last_push_approval` checks submission time, not
+  verification time. Observed live: an approval whose verification record named `0941cc2`
+  was silently covering head `c6c5b47`. Discipline: push branch updates *before*
+  requesting approval; never push between approval and merge; approvers pin and check
+  the exact head SHA — a mismatch between a review body's verified SHA and the review's
+  `commit_id` invalidates the approval (re-request review).
 - Compromise of the PAT allows *approval* of PRs on this one repo only — no code write
   (fine-grained token carries only `pull_requests`). Response: revoke the token in the
   machine user's developer settings (instant), remove the collaborator if needed, generate a

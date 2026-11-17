@@ -425,6 +425,42 @@ off by default: no provider key configured → no mail leaves the host, and no p
 relationship is created. Operators who enable it choose the provider and from-address
 and carry the corresponding obligations.
 
+## 4b. Order-time address verification — privacy & retention statement
+
+Order-time address verification (docs/specs/order-address-verification.md) sends the
+buyer's shipping address to EasyPost once, at order creation, for an advisory delivery
+check. Same "live/planned" discipline as §4a so the statement cannot overstate.
+
+**What is sent — live.** Exactly the typed shipping address fields (name, street lines,
+city, postal code, ISO country) as one `POST /v2/addresses` with a delivery check. No
+shipment is created; no money moves; the request IS the check. Phone is never sent (the
+field is not part of `create_order`).
+
+**When — live.** Only for shippable orders (never local pickup), only when
+`EASYPOST_API_KEY` is configured (unset key → the feature is entirely absent: no call, no
+storage, no suggestion flow — pre-rollout behavior byte for byte), and bounded: at most one
+provider call per create attempt (10-minute dedup cache), 20 checks/account/day shared with
+the saved-addresses path, and a platform-wide daily ceiling defaulting to 1,000/day
+(`ADDRESS_VERIFICATION_DAILY_CAP`; `0` disables the feature entirely).
+
+**What is stored — live.** One JSONB column on the order row (`orders.shipping_verification`):
+outcome status, an ISO timestamp, and — only when the buyer kept a suggested correction —
+the corrected address, re-validated to the exact `create_order` schema before storage
+(provider payloads never travel raw: a malformed suggestion downgrades to `unverified`).
+Provider responses and error bodies are never stored, logged, or returned.
+
+**Who sees it — planned (verification_choice PR).** The record rides the order parties'
+existing read rules plus a property-level visibility matrix (§5a of the spec): status and
+timestamp to both parties; the suggestion to the buyer always (their own data) and to the
+seller exactly under the existing address-release rule. Until that PR, the record is stored
+but not surfaced in tool output — nothing here widens who can read an address.
+
+**Retention — live.** The record lives and dies with the order row — same retention as the
+shipping address it describes; no side table, no separate policy.
+
+**Self-hosting — live.** Like tracking and labels, verification is off unless the operator
+configures an EasyPost key. No key → today's behavior.
+
 ## 5. Secrets hygiene policy
 
 **Policy: keys and secrets live only in GitHub Secrets (CI/CD) or the VPS
@@ -840,6 +876,48 @@ are met and names where the remediation is tracked.
   Historical context: accepted as interim 2026-10-31 (board confirmation of THI-225,
   CEO ruling = phased Option 1; compensating controls: strict checks, `enforce_admins`,
   mandatory Security pre-merge review for sensitive changes, THI-224 F1–F5).
+
+### R2 — Order-time address verification is a bounded address-validation oracle — ACCEPTED 2026-11-18
+
+- **What:** with `EASYPOST_API_KEY` set, an authenticated account can use `create_order` as
+  a yes/no oracle about whether EasyPost considers an address deliverable (and get the
+  provider's normalization when it does not). Since signup is open, the real bound is the
+  global daily ceiling, not the per-account budget (docs/specs/
+  order-address-verification.md, residual risks).
+- **Bounds:** at most one provider call per create attempt (10-minute dedup cache keyed by
+  account + normalized address), 20 checks/account/day (`addrverify:{accountId}` bucket,
+  shared with the saved-addresses path), platform-wide default ceiling 1,000/day
+  (`ADDRESS_VERIFICATION_DAILY_CAP`, `0` = off). The oracle's answers are yes/no plus the
+  normalization of an address the submitter already had — no third-party data is exposed.
+  Over-cap days degrade to `not_checked` (order proceeds unverified), never fail orders.
+- **Removal criteria:** on any abuse signal, lower the ceiling default and/or the
+  per-account budget first (config-only); removing the check is not planned (typo/fraud
+  value exceeds the bounded probing risk). Tracked: this register; revisit on abuse signals.
+
+### R3 — Verification dedup cache and budgets are single-instance (in-memory) — ACCEPTED 2026-11-18
+
+- **What:** the 10-minute dedup cache, the per-account `RateLimiter` bucket, and the daily
+  ceiling counter in `src/address-verification.ts` live in one process's memory. A
+  multi-instance deployment would multiply effective budgets by the instance count.
+- **Compensating controls:** single-instance is the documented deployment shape; the
+  ceiling still bounds per-instance provider spend; every cap path degrades to
+  `not_checked` rather than failing orders.
+- **Removal criteria:** move cache + budget + ceiling counter to shared storage (Redis/
+  Postgres) as a hard precondition of the first multi-instance deployment. Tracked here.
+
+### R4 — The buyer's choice between typed and suggested address is agent-relayed — ACCEPTED 2026-11-18
+
+- **What:** nothing in the protocol can cryptographically prove the BUYER chose the
+  correction; the agent relays the choice. A careless agent could re-submit the suggested
+  address without asking, or keep the typed one against the buyer's wish.
+- **Bounds:** both candidates derive from the buyer's own typed submission (the suggestion
+  is the provider's normalization of it); the suggested-branch result instructs the agent
+  to ask the buyer and carries the suggestion as data for the conversation (the buyer sees
+  it in the transcript before paying); the stored record says which happened (`accepted` vs
+  `kept`) for support review; `verification_choice:"keep_original"` gives the buyer an
+  explicit, logged keep path once surfaced.
+- **Removal criteria:** none planned — inherent to agent-mediated commerce; revisit on a
+  buyer-complaint pattern. Tracked here.
 
 ## 10. Keeping this document honest
 

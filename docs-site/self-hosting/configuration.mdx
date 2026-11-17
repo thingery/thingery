@@ -46,7 +46,8 @@ The chat API (`POST /api/chat`) runs on a model you configure. The server ships 
 | Variable | Purpose |
 |---|---|
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Stripe Connect payments. With no key, orders run off-platform. With a key but no webhook secret, payments stay pending until the webhook is set up |
-| `EASYPOST_API_KEY`, `EASYPOST_WEBHOOK_SECRET` | Optional automatic carrier tracking. Without it, buyers confirm delivery |
+| `EASYPOST_API_KEY`, `EASYPOST_WEBHOOK_SECRET` | Optional automatic carrier tracking, label purchase, and order-time address verification (an advisory delivery check when a shippable order is created — with no key, buyers confirm delivery and no address check runs). See docs/specs/order-address-verification.md |
+| `ADDRESS_VERIFICATION_DAILY_CAP` | Max order-time address checks per UTC day, platform-wide (default `1000`). `0` disables address verification entirely; orders then always proceed without a check |
 | `ADMIN_API_KEY` | Turns on the admin route for resolving disputes. Must be at least 32 characters |
 
 ## Order windows

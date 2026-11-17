@@ -453,6 +453,15 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_address_shared_at TIMESTAMP
 -- unchanged. bought_at (ISO UTC) is the A2 daily-budget aggregation key.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS label_purchase JSONB;
 -- {shipment_id, rate_id, carrier, service, cost_cents, currency, bought_at}
+-- Order-time address verification (docs/specs/order-address-verification.md):
+-- the advisory EasyPost delivery-check outcome, stored once at creation (the
+-- createOrder INSERT) and never transition-set. NULL = not_checked: every
+-- pre-rollout row, pickups, unset EASYPOST_API_KEY, provider error/timeout,
+-- over-cap days — degraded mode is byte-identical to pre-rollout. Any record
+-- inside is platform-authored ({status, checked_at} plus the F2-validated
+-- suggestion only when the buyer kept a correction) — never the provider's
+-- raw response, never error bodies.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_verification JSONB;
 DO $$
 BEGIN
   -- Widen the status CHECK with 'completed' (off_platform terminal state, §11.2).

@@ -17,6 +17,7 @@
 
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
+import { emitReviewPairAnomalyIfCrossing, REVIEW_ELIGIBLE_STATUSES } from "./reviews.js";
 
 export type OrderStatus =
   | "pending"
@@ -356,11 +357,34 @@ export async function applyTransition(input: ApplyTransitionInput): Promise<Orde
     }
   };
 
-  if (input.client) return run(input.client, false);
-  const db = await pool.connect();
-  try {
-    return await run(db, true);
-  } finally {
-    db.release();
+  let next: OrderRow;
+  if (input.client) {
+    next = await run(input.client, false);
+  } else {
+    const db = await pool.connect();
+    try {
+      next = await run(db, true);
+    } finally {
+      db.release();
+    }
   }
+
+  // Order-reviews spec (docs/specs/order-reviews.md, farming defense b):
+  // after a successful transition INTO a review-eligible terminal state,
+  // count the buyer→seller pair's terminal orders and emit the one-shot
+  // `review_pair_anomaly` signal when the count crosses N. Best-effort by
+  // contract — a signal must never fail or block an order transition — and
+  // it reads committed data, so for caller-owned transactions (none target
+  // these states today) the count can lag one order; monotonicity still
+  // makes the crossing fire exactly once.
+  if (REVIEW_ELIGIBLE_STATUSES.includes(next.status)) {
+    try {
+      await emitReviewPairAnomalyIfCrossing(next.buyer_id, next.seller_id);
+    } catch (err) {
+      console.warn(
+        `[orders] review pair anomaly check failed for order ${next.id}: ${(err as Error).message}`,
+      );
+    }
+  }
+  return next;
 }

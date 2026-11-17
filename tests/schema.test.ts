@@ -262,6 +262,10 @@ describe.skipIf(!available)("db schema", () => {
     await expect(insert("rating, text", "$5, $6", [4, "x".repeat(501)])).rejects.toThrow();
     // One review per order, ever: a second row for the same order 23505s.
     await expect(insert("rating", "4", [])).rejects.toThrow();
+    // Cleanup: orders.seller_id/items.seller_id FKs don't cascade to sellers,
+    // so remove the order (cascades the review) and the item first.
+    await client.query(`DELETE FROM orders WHERE id = $1`, [order.rows[0].id]);
+    await client.query(`DELETE FROM items WHERE id = $1`, [item.rows[0].id]);
     await client.query(`DELETE FROM sellers WHERE id = $1`, [sellerId]);
   });
 

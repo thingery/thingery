@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import type { Request, Response } from "express";
 import { pool } from "../src/db.js";
 import { createItem, updateItem, ItemTransitionError, visibleInFeeds } from "../src/items.js";
@@ -248,7 +249,11 @@ function toolsFor(seller: SellerRow | null): Map<string, Captured> {
 }
 
 async function callTool(tools: Map<string, Captured>, name: string, args: Record<string, unknown>) {
-  const result = (await tools.get(name)!.handler(args)) as {
+  // SDK parity (THI-958): the real server parses args through the tool's
+  // zod shape (applying schema defaults) before the handler runs — mirror
+  // that here, since handlers now trust their parsed args type.
+  const parsed = z.object(tools.get(name)!.config.inputSchema as z.ZodRawShape).parse(args) as Record<string, unknown>;
+  const result = (await tools.get(name)!.handler(parsed)) as {
     isError?: boolean;
     content: { text: string }[];
   };

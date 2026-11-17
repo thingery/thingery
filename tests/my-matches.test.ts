@@ -13,6 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
+import { z } from "zod";
 import { registerTools, PROTECTED_TOOLS } from "../src/tools.js";
 import type { SellerRow } from "../src/db.js";
 
@@ -30,7 +31,17 @@ type Handler = (args: Record<string, unknown>) => Promise<unknown>;
 function captureTools(seller: SellerRow | null): Map<string, Handler> {
   const handlers = new Map<string, Handler>();
   registerTools(
-    { registerTool(name: string, _config: unknown, handler: Handler) { handlers.set(name, handler); } },
+    {
+      registerTool(name: string, config: { inputSchema: z.ZodRawShape }, handler: Handler) {
+        // SDK parity (THI-958): parse args through the tool's zod shape
+        // (applying schema defaults) before the handler runs, like the
+        // real server — handlers now trust their parsed args type.
+        handlers.set(
+          name,
+          async (args) => handler(z.object(config.inputSchema).parse(args) as Record<string, unknown>),
+        );
+      },
+    },
     { seller },
   );
   return handlers;

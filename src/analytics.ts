@@ -30,7 +30,9 @@
 // container logs and are not backed up offsite.
 
 import type { Request } from "express";
-import type { ToolContext } from "./tools.js";
+import type { z } from "zod";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { ParsedToolArgs, ToolContext, ToolRegistrar, ToolRegistrationConfig } from "./tools.js";
 
 /** Minimal shape of a tool-handler result (the `ok`/`err` helpers in tools.ts). */
 export interface ToolHandlerResult {
@@ -38,13 +40,13 @@ export interface ToolHandlerResult {
   isError?: boolean;
 }
 
-/** The wrapped handler signature every registerTools callback already has. */
-export type ToolHandler = (args: Record<string, unknown>) => Promise<ToolHandlerResult>;
-
-/** Server subset registerTools needs. tools.ts already types this boundary
- *  as `{ registerTool: Function }` (the SDK's registerTool is heavily
- *  generic); we mirror that same loose type rather than fighting variance —
- *  the proxy only ever forwards (name, config, cb) unchanged. */
+/** Server subset registerTools needs. The INPUT side stays loose
+ *  (`registerTool: Function`): the SDK's McpServer.registerTool is heavily
+ *  generic (two type params, wide config) and not structurally comparable to
+ *  a single signature — we mirror that loose type rather than fighting
+ *  variance, and the proxy only ever forwards (name, config, cb) unchanged.
+ *  The typed boundary (ToolRegistrar) lives on this proxy's OUTPUT side,
+ *  which is what registerTools consumes (THI-958). */
 // eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
 export interface RegisterToolTarget {
   registerTool: Function;
@@ -117,15 +119,20 @@ export function logToolResult(
 /** Wrap a registerTool target so every tool handler logs one `tool_result`
  *  line after execution (success, structured error, or throw). The proxy is
  *  structural — registerTools never notices it — so tool signatures, schemas
- *  and responses are byte-identical to an unwrapped registration. */
-export function withToolResultLogging(server: RegisterToolTarget, ctx: ToolContext): RegisterToolTarget {
-  const register: (name: string, config: unknown, handler: ToolHandler) => void =
-    (name, config, handler) => server.registerTool(name, config, handler);
+ *  and responses are byte-identical to an unwrapped registration. Output is
+ *  the typed ToolRegistrar: the generic `S` is inferred from each tool's
+ *  inputSchema shape, so handlers keep their schema-derived args end to end
+ *  (THI-958); the wrapped forward into the loose target stays unchecked. */
+export function withToolResultLogging(server: RegisterToolTarget, ctx: ToolContext): ToolRegistrar {
   return {
-    registerTool(name: string, config: unknown, handler: ToolHandler) {
-      register(name, config, async (args: Record<string, unknown>) => {
+    registerTool<S extends z.ZodRawShape>(
+      name: string,
+      config: ToolRegistrationConfig<S>,
+      handler: (args: ParsedToolArgs<S>) => CallToolResult | Promise<CallToolResult>,
+    ): void {
+      server.registerTool(name, config, async (args: ParsedToolArgs<S>) => {
         const startedAt = Date.now();
-        let result: ToolHandlerResult | undefined;
+        let result: CallToolResult | undefined;
         try {
           result = await handler(args);
           return result;

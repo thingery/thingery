@@ -12,8 +12,8 @@ an address.
 
 ## Context
 
-- Orders are created through one path, the `create_order` MCP tool (`src/tools.ts`). The chat calls it
-  behind a confirmation card. The web buy form calls it through the platform's tool client.
+- Orders are created through one path, the `create_order` MCP tool (`src/tools.ts`). The chat calls it only after the user confirms the
+  write. The web buy form calls it through the platform's tool client.
 - `create_order` takes `shipping_address` (`name`, `line1`, `line2?`, `city`, `postal_code`,
   `country`), checked by zod for presence and length only, with unknown keys rejected. `country` must
   be two letters; it is not checked against ISO 3166-1, so `XX` passes.
@@ -77,8 +77,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS account_addresses_one_default
 An address is never saved as a side effect of an order.
 - **Web:** the buy form gains a "Save this address" checkbox, off by default. The settings screen adds,
   edits and deletes addresses.
-- **Chat:** after an order with a typed address, the assistant may offer to save it. Saving goes
-  through the existing confirmation card, like every chat write.
+- **Chat:** after an order with a typed address, the assistant may offer to save it. Saving asks
+  the user to confirm in chat, like every other chat write.
 
 ### Using a saved address
 
@@ -109,8 +109,8 @@ A new read tool, `list_addresses`, returns a summary only:
 | Tool | Auth | Notes |
 |---|---|---|
 | `list_addresses` | account | Summary only, as above |
-| `save_address` | account | Chat: confirmation card. Returns the verification result |
-| `delete_address` | account | Chat: confirmation card |
+| `save_address` | account | Chat: user confirms the write. Returns the verification result |
+| `delete_address` | account | Chat: user confirms the write |
 | `create_order` | account | Adds optional `address_id` (additive; no existing field changes) |
 
 Setting the default and editing are web-only in the first version: one form, no chat flow to design.

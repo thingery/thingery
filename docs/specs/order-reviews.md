@@ -108,19 +108,29 @@ open questions).
 The public review object is exactly:
 
 ```json
-{ "rating": 4, "text": "Well packed and as described.",
+{ "id": "c35d0e52-…-uuid…", "rating": 4, "text": "Well packed and as described.",
   "first_name": "Luca", "item_title": "Film camera", "created_at": "2026-11-17T…" }
 ```
 
+- `id` is the review's own UUID. The report route needs it, and the only
+  valid reporter — a third party — learns it from the public list; without
+  it in the public object the report route would be unreachable. It is
+  unguessable and correlates to nothing: no buyer id, email, or order id is
+  derivable from it.
 - `first_name` and `item_title` are **snapshots taken at post time** —
-  derived from the buyer's `display_name` (first whitespace-separated token,
-  capped at 40 chars) and the item's `title`, written by the server from DB
-  rows, never accepted from the client. Display stays stable across later
+  derived from the buyer's `display_name` (trim, then the first
+  whitespace-separated token, capped at 40 chars) and the item's `title`,
+  written by the server from DB rows, never accepted from the client.
+  **Fallback:** a `display_name` that is empty after trimming yields the
+  literal `"Buyer"` — a whitespace-only name must not turn the INSERT into
+  a 500, and with the fallback the NOT NULL + 1–40 length CHECK always
+  holds. Display stays stable across later
   name edits and item edits, and survives item soft-deletion.
 - The month label ("Nov 2026") is client-side formatting of `created_at`
   (frontend i18n); the API returns the timestamp.
 - **Public responses never carry** the buyer's account id, email, or full
-  display name, and never the order id. The buyer's own view (GET on their
+  display name, and never the order id — the review's own `id` (above) is
+  the only identifier exposed. The buyer's own view (GET on their
   order) returns their own review in full — it is their data.
 - Review text is stored raw and JSON-encoded in responses; rendering escapes
   it (the existing web-pages pattern). No HTML is ever interpreted.
@@ -233,20 +243,39 @@ view. 200 `{ review: null }` when the order is the caller's but unreviewed;
 
 **`GET /api/sellers/:id/reviews`** — public, unauthenticated. Query:
 `limit` (0–50, default 10; **0 = summary only**, for the item-page seller
-card) and `before` (ISO timestamp cursor, exclusive). 404 for an unknown
-seller id. Response, newest first, published only:
+card) and `before` (opaque pagination cursor — exactly the value a previous
+response returned as `next_before`). 404 for an unknown seller id; 400 for
+a malformed `before`. Response, newest first, published only:
 
 ```json
 { "seller_id": "…",
   "summary": { "average": 4.8, "count": 12 },
-  "reviews": [ { "rating": 5, "text": "…", "first_name": "Luca",
+  "reviews": [ { "id": "…", "rating": 5, "text": "…", "first_name": "Luca",
                  "item_title": "Film camera", "created_at": "…" } ],
   "next_before": "… | null" }
 ```
 
-`average` is rounded to one decimal; `count` counts published reviews. No
-review list pagination beyond `before`; a profile page that outgrows it can
-grow a search-style cursor later (YAGNI now).
+**Ordering and cursor.** Rows are ordered `(created_at DESC, id DESC)` and
+the `before` cursor encodes that pair — `"<created_at ISO 8601>|<review
+id>"` — so the page predicate is the row-value comparison
+`(created_at, id) < (cursor.created_at, cursor.id)`. Same-timestamp rows
+are never skipped and never repeated across pages. (A bare exclusive ISO
+timestamp cursor was considered and rejected: with same-second inserts it
+silently skips rows; the tie-break costs one expression and removes the
+ambiguity.) `next_before` is the cursor of the last row of the page,
+`null` at the end.
+
+**Summary is capped per pair (K).** `average` (one decimal) and `count`
+are computed over the per-pair capped set: among the seller's published
+reviews, take at most the **K = 3 newest** per distinct buyer (same
+ordering as above) — `ROW_NUMBER() OVER (PARTITION BY buyer_id ORDER BY
+created_at DESC, id DESC) <= K`. `count` is the size of that capped set.
+The **list is not capped** — every published review appears. K is the
+named constant `REVIEW_AGGREGATE_PAIR_CAP = 3` in `src/reviews.ts` (v1
+value); see "Off-platform farming defenses" for why.
+
+No review list pagination beyond `before`; a profile page that outgrows it
+can grow a search-style cursor later (YAGNI now).
 
 ### Reading — MCP tool (`src/tools.ts`)
 
@@ -255,9 +284,13 @@ class as `get_item`), full profile only in v1 (directory-profile inclusion
 is an open question).
 
 - Input: `seller_id` (uuid, required), `limit` (1–50, default 10), `before`
-  (ISO 8601, optional).
-- Output: the exact shape of the HTTP read above (one shared function in
-  `src/reviews.ts`; the tool adds nothing and hides nothing).
+  (opaque cursor — the `next_before` value from a previous call, optional).
+- Output: the HTTP read shape above plus `content_provenance:
+  "user_generated"` stamped at the tool layer — parity with `get_item` and
+  the wanted board: buyer-authored text reaches agents, so the same
+  provenance marker travels with it. One shared function in `src/reviews.ts`
+  builds the response; the tool adds exactly that one field and hides
+  nothing (capped summary, ordering, and cursor are identical to HTTP).
 - Rationale: agent clients evaluating a seller ("is this seller any good?")
   is a real browse-path use case — it is the trust answer the item summary
   compresses. Reading is safe to expose; writing is not (below).
@@ -273,10 +306,52 @@ write tool, if ever wanted, is additive later.
 **Docs:** `npm run docs:tools` regenerates `docs-site/tools/` — run in the
 tool PR (repo map rule).
 
+### Off-platform farming defenses
+
+The vector: two colluding accounts can reach terminal `completed` with zero
+platform money — the `self_order` guard stops one account, not a pair — and
+unbounded, each farmed order mints a permanent published 5★ into the
+aggregate trust signal shown on the item card. Two defenses, both fixed
+here:
+
+**(a) Per-pair aggregate cap (K = 3).** The summary — average and count, on
+the profile and the item card — counts at most the K newest published
+reviews per distinct buyer→seller pair (definition in the read section
+above). A pair's aggregate influence is bounded at K no matter how many
+terminal orders it stacks. Rationale: distinct relationships are the trust
+signal; an honest repeat buyer loses nothing — all their reviews stay in
+the public list, only the aggregate compresses them.
+
+**(b) Pair anomaly signal (N = 10).** When a buyer→seller pair reaches
+≥ N = 10 terminal *review-eligible* orders (`completed` or `paid_out`),
+emit one `security_events` line — the stdout JSON convention of
+`src/security-events.ts` (a new compile-time-literal union member, ids and
+count only, no payload): `{ type: "review_pair_anomaly", buyer_id,
+seller_id, terminal_orders }`. Hook: after a successful transition into
+`completed`/`paid_out` (the `applyTransition` commit path), count the
+pair's review-eligible orders and emit exactly when the count **crosses**
+N (`= N` at the check) — one line per pair crossing, never per order.
+Idempotent by monotonicity: no transition leaves a terminal state, so a
+pair's count only grows and the crossing fires once. (Edge: an order row
+deleted by CASCADE can drop a pair below N; a later terminal order
+re-crosses and re-fires — correct, still bounded.) N is the named constant
+`REVIEW_PAIR_ANOMALY_THRESHOLD = 10` in `src/reviews.ts` (v1 value). This
+is an operator signal, not user-facing: it surfaces nothing publicly and
+takes no action on its own.
+
+**Residual risk, stated:** farming below the cap (a pair still moves the
+aggregate by up to K) and sybil farming across many distinct fake accounts
+(the cap is per pair — distinct buyers each count) remain. Bounds: the
+anomaly signal at pair granularity, the report → triage → hide path,
+contact-info screening, and the account-creation posture. The aggregate is
+a trust signal, not a guarantee.
+
 ### Reporting a review (abuse)
 
 **`POST /api/reviews/:id/report`** — JSON `{ reason, motivation }`, same
-canned slugs and 10–1000 motivation rule as item reports. Signed-in only
+canned slugs and 10–1000 motivation rule as item reports. The `:id` is the
+public review object's `id` — a third-party reporter has it from the public
+list (that is why the public object carries it). Signed-in only
 (401); 404 unknown review; **400 if the caller authored the review**
 (self-report is a client bug, same stance as item self-reports); 409
 duplicate; 429 rate limited. Creates a `reports` row with
@@ -302,16 +377,24 @@ operator actions mirror takedown; see open questions.
   PATCH), `reviews:acct:<account id>`, 20/hour — bounded well above honest
   use (a post per order + a handful of edits) and far below scripted
   sweeping. 429 + `security_events` row, the existing convention. Reads of
-  the buyer's own review sit behind the session surface's standing 240/h
-  per-account posture; the public list is unthrottled public data (same
-  class as item pages).
+  the buyer's own review (`GET /api/orders/:id/review`) are **unthrottled
+  by design**: the payload is the caller's own data, unknown/not-owned ids
+  404 (no oracle for others' orders), and the query is a cheap indexed
+  lookup — the same posture as the order-status page it serves. The public
+  list is unthrottled public data (same class as item pages).
 - **One review per order:** `UNIQUE (order_id)`, DB-enforced; races map to
   the friendly 409.
+- **Per-pair aggregate cap (K = 3) + pair anomaly signal (N = 10):** the
+  off-platform farming defenses, spec'd in "Off-platform farming defenses"
+  above — the aggregate counts at most K published reviews per distinct
+  buyer→seller pair, and a pair reaching ≥ N terminal review-eligible
+  orders emits exactly one operator `security_events` line.
 - **Contact screening:** review text goes through the same reject-never-
-  rewrite screening as wanted listings (`src/contact-scrub.ts`) — public
-  buyer-authored text is the same off-platform-extraction vector. The
-  screened-field union gains `review` additively; the generic message never
-  names which rule tripped.
+  rewrite screening as wanted listings (`src/contact-scrub.ts`), on POST
+  and PATCH alike — public buyer-authored text is the same
+  off-platform-extraction vector, and an edit is as much a publish as the
+  original post. The screened-field union gains `review` additively; the
+  generic message never names which rule tripped.
 - **No reviews on cancelled or disputed orders:** follows from eligibility
   — only `completed`/`paid_out` are reviewable, and neither is reachable
   from a disputed/cancelled arm. Made explicit by the 400 above.
@@ -364,8 +447,11 @@ unaffected; no contract step.
    insert hitting the UNIQUE).
 5. rating 0 / 6 / non-integer → 400; text 501 chars → 400; whitespace text
    → stored NULL.
-6. Contact screening: text containing an email/URL → 400 with the generic
-   message; clean text passes.
+6. Contact screening on POST: text containing an email/URL → 400 with the
+   generic message; clean text passes.
+6b. Contact screening on **edit** (PATCH): the same payloads through PATCH
+    → 400 generic; a clean edit passes — written to drive the PATCH path
+    so it fails against code that screens POST only.
 7. Edit within window → 200, `created_at` unchanged, `edited_at` set,
    `editable_until` stable; past 30 days (injected clock) → 403; hidden
    review edit → 403; rating omitted → 400.
@@ -374,10 +460,13 @@ unaffected; no contract step.
    flips false past the window; non-buyer → 404.
 10. Public list: newest-first published only; `limit=0` → summary only;
     summary average rounded to one decimal, count excludes hidden; unknown
-    seller → 404; payload contains no buyer ids, emails, or order ids
-    (asserted by key absence).
+    seller → 404; malformed `before` → 400; payload contains no buyer ids,
+    emails, or order ids (asserted by key absence) — each review's own `id`
+    **is** present: unguessable, no correlation value, and the value the
+    report route accepts (closes the reporting loop).
 11. `get_seller_reviews` (anonymous server): same shape and rules as the
-    HTTP read.
+    HTTP read, plus `content_provenance: "user_generated"` on the tool
+    response.
 12. Review report: 201 → `reports` row with `target_review_id` and NULL
     `target_item_id`; duplicate → 409; own review → 400; item report
     endpoint unchanged (regression row).
@@ -385,6 +474,16 @@ unaffected; no contract step.
     hidden, gone from list + summary, author notified; second hide → 404.
 14. `tests/schema.test.ts`: migration replays idempotently with both
     steps (existing pattern).
+15. Aggregate cap (K): a pair with 5 published reviews → `count` = 3 and
+    `average` over the 3 newest only, while the list still returns all 5;
+    two distinct buyers × 3 published reviews each → `count` = 6.
+16. Pair anomaly (N): a pair's 10th terminal review-eligible order →
+    exactly one `review_pair_anomaly` line; 11th and 12th terminal orders
+    → no further lines; a 10-order pair whose extras are `cancelled` → no
+    line (not review-eligible).
+17. Cursor tie-break: two reviews sharing `created_at` (injected clock) →
+    ordering is `(created_at, id)`; walking pages via `next_before`
+    returns both — no skip, no duplicate.
 
 ## Rollout + rollback
 
@@ -416,11 +515,12 @@ behavior. Hidden moderation state survives a frontend revert untouched.
 ## PR breakdown (PR-sized steps)
 
 1. `feat(reviews)` — `order_reviews` schema + `src/reviews.ts` module +
-   POST/PATCH/GET `/api/orders/:id/review` + tests. Protected:
-   `db/schema.sql`, `src/routes.ts`.
-2. `feat(reviews)` — `GET /api/sellers/:id/reviews` + `get_seller_reviews`
-   MCP tool + `npm run docs:tools` regen + tests. Protected: `src/routes.ts`,
-   `src/tools.ts`.
+   POST/PATCH/GET `/api/orders/:id/review` + terminal-pair anomaly hook
+   (`review_pair_anomaly`, N) on the transition commit path + tests.
+   Protected: `db/schema.sql`, `src/routes.ts`.
+2. `feat(reviews)` — `GET /api/sellers/:id/reviews` (per-pair capped
+   summary K, tie-break cursor) + `get_seller_reviews` MCP tool + `npm run
+   docs:tools` regen + tests. Protected: `src/routes.ts`, `src/tools.ts`.
 3. `feat(reviews)` — reports widening + `POST /api/reviews/:id/report` +
    `POST /api/admin/reviews/:id/hide` + tests. Protected: `db/schema.sql`,
    `src/routes.ts`.

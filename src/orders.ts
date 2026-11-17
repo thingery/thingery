@@ -82,6 +82,22 @@ export const LIVE_ORDER_ITEM_STATUSES: readonly OrderStatus[] = [
   "refunding", "payout_pending",
 ];
 
+/** Order statuses that count as "reached payment" for the public seller
+ *  summary's sold_count (THI-923 spec v2, F3 single source of truth). The
+ *  exact 8-status set, defined once here and consumed by the SQL builder
+ *  (src/sellers.ts), the test matrix (tests/seller-summary.test.ts) and the
+ *  tool docs — the literal list is never restated (drift = buyers misled
+ *  about who actually sells). Named exclusions, so every one of the 12
+ *  order statuses is accounted for: pending (no payment yet), cancelled
+ *  (never was), refunding + refunded (sale unwinding / unwound). Disputed
+ *  is included: "reached payment" is approximated for it (a chargeback can
+ *  reach disputed from pending, never paid) — accepted for a public stat.
+ *  Sealed matrix per spec v2; future statuses must be classified explicitly. */
+export const SOLD_COUNT_STATUSES: readonly OrderStatus[] = [
+  "sold", "label_issued", "in_transit", "delivered", "disputed",
+  "payout_pending", "paid_out", "completed",
+];
+
 const NON_TERMINAL_EXCEPT_REFUNDING: readonly OrderStatus[] = [
   "pending", "sold", "label_issued", "in_transit", "delivered", "disputed", "payout_pending",
 ];

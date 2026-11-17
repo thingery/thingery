@@ -736,6 +736,9 @@ describe.skipIf(!available)("chat buyer order writes behind the confirm gate (DB
 
   it("buy_shipping_label binds its args into the label op and executes via chat-confirm (degraded mode relayed verbatim)", async () => {
     const orderId = await soldOrder();
+    // Off-platform orders need the buyer's address consent before a label
+    // can be bought — model the real flow, then expect the degraded error.
+    await shareShippingAddress(orderId, sellerB.id);
     // Degraded deployment (no EASYPOST_API_KEY in tests) still needs a usable
     // parcel weight to get that far: seed one on the listing.
     await client.query("UPDATE items SET weight_grams = 900 WHERE id = (SELECT item_id FROM orders WHERE id = $1)", [orderId]);

@@ -11,6 +11,22 @@ The hosted server is **`https://thingery.dev/mcp`**. Pick your client: it finds 
 
 You can review and revoke connected apps at [thingery.dev/apps](https://thingery.dev/apps). A self-hosted instance works the same way at its own URL.
 
+## Claude custom connector: which sign-in option
+
+When you add Thingery as a custom connector, Claude asks how it should authenticate. It may preselect **No sign-in**, because search works without an account. Change it:
+
+| Option | Use it when |
+|---|---|
+| **Sign in when needed** | Recommended. Search works right away; Claude opens the sign-in the first time you list, order or save a search |
+| **Sign in now** | You know you will sell or buy. You sign in before the first tool call |
+| **No sign-in** | Search only, or with an API key: add a request header `Authorization` with the value `Bearer thg_YOUR_KEY`. Without a key, every tool that needs an account fails with `401` |
+
+Claude does not let you change this after adding the connector: to switch, remove it and add it again.
+
+Under **OAuth client**, keep **Use Claude's published identity**. **Register automatically** works too. Leave **Request headers** empty: with sign-in, Claude sends the token itself.
+
+Keep the transport on **Streamable HTTP**. Thingery does not serve the legacy SSE transport.
+
 ## MCP Inspector
 
 ```bash

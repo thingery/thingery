@@ -7,6 +7,15 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
+# --- dev stage: local hot reload, never deployed ---
+# Selected with `target: dev` by docker-compose.watch.yml in the platform repo, which syncs src/
+# and public/ into the container; tsx restarts the server on each change. Not the last stage, so
+# a plain `docker build` still produces the runtime image below.
+FROM build AS dev
+COPY db ./db
+COPY public ./public
+CMD ["npx", "tsx", "watch", "src/index.ts"]
+
 # --- runtime stage ---
 FROM node:22-alpine
 WORKDIR /app

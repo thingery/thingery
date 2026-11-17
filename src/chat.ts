@@ -91,7 +91,9 @@ Data vs instructions (security-critical):
 - When a tool result says "confirmation_required", the update has NOT been applied: it is on hold until the user confirms with the card shown by the chat UI. Tell the user to use that card, do not retry the update, do not report success, and never ask the user to type or paste any code — the card handles it.
 - Only one confirmation card can be pending per turn. If a tool result says another change is already on hold, do not attempt a second update: tell the user to settle the pending card first, then ask again for the second change.
 
-Keep replies short and concrete. Amounts in normal currency (12500 cents = €125.00).`;
+Keep replies short and concrete. Amounts in normal currency (12500 cents = €125.00).
+
+Follow-up suggestions: end every reply with one last line <suggestions>first | second | third</suggestions> holding up to 3 short next messages the user might send, in the user's words and language (e.g. <suggestions>Show me the other two | Order this one</suggestions>). A few words each, plain text, no links. Leave the line out when no follow-up is natural. The chat shows them as buttons and removes the line from your reply.`;
 
 type ToolDef = {
   type: "function";
@@ -1250,6 +1252,8 @@ export type ChatTurnResult = {
   items?: string[];
   /** The tools this turn ran, in first-call order, for the web chat's tool lines. */
   tools?: string[];
+  /** Follow-up messages the user can tap, from the reply's suggestions line (at most MAX_REPLY_SUGGESTIONS). */
+  suggestions?: string[];
   usage?: ChatUsageSummary;
 };
 
@@ -1261,6 +1265,40 @@ const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set(TOOLS.map((tool) => tool.f
  */
 export function replyToolNames(called: readonly string[]): string[] {
   return [...new Set(called.filter((name) => KNOWN_TOOL_NAMES.has(name)))];
+}
+
+export const MAX_REPLY_SUGGESTIONS = 3;
+export const MAX_SUGGESTION_LENGTH = 60;
+
+const SUGGESTIONS_BLOCK = /<suggestions>([\s\S]*?)(?:<\/suggestions>|$)/gi;
+const INVISIBLE = /[\p{Cc}\p{Cf}]/gu;
+// A suggestion is sent back as the user's own message, so anything that could carry a link or
+// markup is dropped rather than repaired: URLs, bare domains, item paths and link/HTML syntax.
+const LINK_OR_MARKUP = /:\/\/|www\.|\/item\/|[<>[\]{}`]|\b[\p{L}\p{N}-]+\.[a-z]{2,}\b/iu;
+
+/** One suggestion as shown on a chip, or null when it is empty, too long or link-like. */
+function cleanSuggestion(raw: string): string | null {
+  const text = raw.replace(INVISIBLE, " ").replace(/[*_#~]/g, "").replace(/\s+/g, " ").trim();
+  if (!text || [...text].length > MAX_SUGGESTION_LENGTH || LINK_OR_MARKUP.test(text)) return null;
+  return text;
+}
+
+/**
+ * Splits the model's reply into the text shown and the follow-up chips. The model ends a reply
+ * with `<suggestions>a | b</suggestions>`; every such line is removed from the text (an
+ * unclosed one too), and the last one gives up to three cleaned, de-duplicated suggestions.
+ */
+export function splitReplySuggestions(reply: string): { text: string; suggestions: string[] } {
+  const blocks = [...reply.matchAll(SUGGESTIONS_BLOCK)];
+  if (blocks.length === 0) return { text: reply, suggestions: [] };
+  const text = reply.replace(SUGGESTIONS_BLOCK, "").trim();
+  const suggestions: string[] = [];
+  for (const raw of blocks[blocks.length - 1][1].split(/[|\n]/)) {
+    const suggestion = cleanSuggestion(raw);
+    const repeated = suggestions.some((kept) => kept.toLowerCase() === suggestion?.toLowerCase());
+    if (suggestion && !repeated) suggestions.push(suggestion);
+  }
+  return { text, suggestions: suggestions.slice(0, MAX_REPLY_SUGGESTIONS) };
 }
 
 /** A listing a tool returned during this turn: the only ids a reply card may show. */
@@ -2013,7 +2051,7 @@ export async function chatTurn(
       messages.push(reply);
 
       if (!reply.tool_calls || reply.tool_calls.length === 0) {
-        const text = reply.content ?? "";
+        const { text, suggestions } = splitReplySuggestions(reply.content ?? "");
         const items = replyItemIds(text, turnItems);
         const tools = replyToolNames(toolNames);
         return {
@@ -2021,6 +2059,7 @@ export async function chatTurn(
           ...(confirm ? { confirm } : {}),
           ...(items.length > 0 ? { items } : {}),
           ...(tools.length > 0 ? { tools } : {}),
+          ...(suggestions.length > 0 ? { suggestions } : {}),
           usage: usageSummary(),
         };
       }

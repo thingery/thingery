@@ -21,6 +21,7 @@ import { logConfigBootReport, notifyConfig, orderFlowConfig } from "./config.js"
 import { startSweepScheduler } from "./orders-sweep.js";
 import { startNotifyFanoutTimer } from "./notify/fanout.js";
 import { startNotifyDeliveryTimer } from "./notify/delivery.js";
+import { startNotifyDigestTimer } from "./notify/digest.js";
 import { buildMailer } from "./mailer.js";
 import { statsHandler } from "./stats.js";
 import { homeSearchHandler } from "./home-search.js";
@@ -207,6 +208,10 @@ function runHttp(): void {
     // Delivery sweep: walks email_outbox pending→sent|skipped|dead. Claims
     // nothing while NOTIFY_EMAIL_ENABLED=false (dark deploy — THI-760 §4).
     startNotifyDeliveryTimer(notifyConfig(), buildMailer());
+    // Digest sweep (THI-780 PR 2): opt-in daily/weekly digests planned as
+    // account-less outbox rows; hourly scan, dedupe key enforces at-most-once
+    // per recipient per period.
+    startNotifyDigestTimer(notifyConfig());
     console.log(`Thingery MCP server listening on http://localhost:${PORT}`);
     console.log(`  MCP endpoint:     http://localhost:${PORT}/mcp`);
     console.log(`  Health check:     http://localhost:${PORT}/healthz`);

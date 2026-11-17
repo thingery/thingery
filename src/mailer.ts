@@ -19,6 +19,11 @@ export interface MailMessage {
   text: string;
   html: string;
   idempotencyKey: string;
+  /** Optional provider headers (THI-780 PR 2: List-Unsubscribe on opt-in
+   * bulk mail). Adapters ignore unknown headers; nothing here is
+   * security-relevant — auth headers are set by the adapter, never taken
+   * from a message. */
+  headers?: Record<string, string>;
 }
 
 export type MailSendResult =

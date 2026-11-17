@@ -47,7 +47,9 @@ export type SecurityEventRoute =
   | "/api/items/:id/report"
   | "/api/notifications/read-all"
   // THI-780 (THI-760 Phase 2): preferences limiter 429s.
-  | "/api/me/preferences";
+  | "/api/me/preferences"
+  // THI-780 PR 2: digest one-click unsubscribe limiter 429s.
+  | "/api/notifications/unsubscribe";
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a

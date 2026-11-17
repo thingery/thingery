@@ -23,6 +23,7 @@ import {
 import { sendMail, type MailMessage } from "./mailer.js";
 import { renderEmailVerification } from "./notify/templates.js";
 import { parseNotificationPrefs, sanitizePrefsUpdate } from "./notify/prefs.js";
+import { verifyDigestUnsubscribeToken } from "./notify/digest.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import {
@@ -96,6 +97,9 @@ const notificationsLimiter = new RateLimiter(240, 60 * 60_000);
 // far above any human settings page while bounding scripted churn (the
 // PATCH is a profile write, so it gets its own bucket, not the read bucket).
 const preferencesLimiter = new RateLimiter(60, 60 * 60_000);
+// THI-780 PR 2: digest one-click unsubscribe link consumption — generous
+// per-IP bucket (mail clients prefetch GETs, humans click twice).
+const digestUnsubLimiter = new RateLimiter(60, 60 * 60_000);
 export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
 export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 image upload attempts per IP per hour (THI-140 / THI-123 obs 2)
 export const imageMutationLimiter = new RateLimiter(60, 60 * 60_000); // 60 image delete/reorder mutations per seller per hour (THI-308 F6: churn here must never consume upload quota)
@@ -428,6 +432,45 @@ api.patch("/me/preferences", asyncHandler(async (req: Request, res: Response) =>
     [seller.id, JSON.stringify(prefs)],
   );
   res.json({ preferences: parseNotificationPrefs(updated.rows[0]?.prefs) });
+}));
+
+// THI-780 PR 2 (plan §5): one-click digest unsubscribe — GET (mail-client
+// prefetchable, List-Unsubscribe-Post=One-Click compatible) with an HMAC
+// token minted by the digest sweep. The token authorizes exactly one
+// action: digest pref → 'none'. Idempotent (already-off is still ok), and
+// unsubscribing also stops any not-yet-sent digest at the delivery gate.
+// Unlike order email, this MUST work without a session — the reader of the
+// email is clicking a link, not calling the API.
+api.get("/notifications/unsubscribe", asyncHandler(async (req: Request, res: Response) => {
+  if (!digestUnsubLimiter.allow(`ip:${clientIp(req)}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/notifications/unsubscribe" }, { ip: clientIp(req) });
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const token = typeof req.query.token === "string" ? req.query.token : "";
+  const sellerId = verifyDigestUnsubscribeToken(token);
+  if (!sellerId) {
+    res.status(400).json({ error: "Invalid unsubscribe link." });
+    return;
+  }
+  // Uniform ok for valid tokens — whether or not digests were on. Only the
+  // digest key is touched; other preferences (and the locked money class)
+  // are never modified by this route.
+  await pool.query(
+    `UPDATE sellers
+        SET profile = jsonb_set(
+              COALESCE(profile, '{}'::jsonb),
+              '{notification_prefs,digest}',
+              '"none"'::jsonb
+            )
+      WHERE id = $1`,
+    [sellerId],
+  );
+  const rows = await pool.query<{ prefs: unknown }>(
+    "SELECT profile->'notification_prefs' AS prefs FROM sellers WHERE id = $1", [sellerId],
+  );
+  const preferences = parseNotificationPrefs(rows.rows[0]?.prefs);
+  res.json({ ok: true, message: "Digests are off. Transactional email about your orders and money stays on.", preferences });
 }));
 
 // THI-760 Phase 0 / THI-762: consume a verification token from an email link

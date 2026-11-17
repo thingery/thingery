@@ -176,6 +176,9 @@ export interface NotifyConfig {
   // webhook answers fail-closed 503 (Phase 2 / THI-780) — same posture as
   // STRIPE_WEBHOOK_SECRET / EASYPOST_WEBHOOK_SECRET.
   resendWebhookSecret: string | undefined;
+  /** Digest scan cadence in minutes (THI-780 PR 2). Sends are still at
+   * most once per period per recipient by dedupe key. */
+  digestIntervalMinutes: number;                // 60
 }
 
 export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig {
@@ -208,6 +211,7 @@ export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig
     maxEmailsPerRecipientPerHour: int("NOTIFY_MAX_EMAILS_PER_RECIPIENT_PER_HOUR", 6),
     maxSendsPerSweep: int("NOTIFY_MAX_SENDS_PER_SWEEP", 50),
     resendWebhookSecret: value("RESEND_WEBHOOK_SECRET"),
+    digestIntervalMinutes: int("NOTIFY_DIGEST_INTERVAL_MINUTES", 60),
   };
 }
 

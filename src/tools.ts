@@ -2242,7 +2242,10 @@ export function registerTools(
         "Save a shipping address to the user's account for reuse in later orders — the user " +
         "confirms the write in chat first. Returns the saved address as a summary (label, " +
         "city, country, verification status); the full address is never echoed back into " +
-        "chat. country must be a real ISO 3166-1 alpha-2 code. Max 10 saved addresses; " +
+        "chat. country must be a real ISO 3166-1 alpha-2 code. When the server has an " +
+        "EasyPost key, the address is checked once on save — advisory only, it never " +
+        "blocks: status is verified, suggested (a correction exists), unverified (carrier " +
+        "could not confirm) or not_checked. Max 10 saved addresses; " +
         "30 address writes per hour. Requires seller authentication (Bearer API key).",
       inputSchema: {
         label: z.string().min(1).max(40).describe("Short user-chosen name, e.g. 'Home' or 'Office'"),
@@ -2275,12 +2278,21 @@ export function registerTools(
           postal_code: args.postal_code as string,
           country: args.country as string,
         });
+        const summary = addressToSummary(row);
+        // C4 discipline, chat side: a suggested correction never enters chat —
+        // the user reviews it on their web settings screen, the one surface
+        // allowed to show it.
+        const note =
+          summary.verification === "suggested"
+            ? "Saved. The delivery check suggests a correction — tell the user to review it " +
+              "on the web settings screen (the correction itself never enters chat). Use " +
+              "address_id in create_order."
+            : "Saved. Use it in create_order with address_id; the assistant only ever sees the " +
+              `summary (label, city, country). Verification status: ${summary.verification}.`;
         return ok({
           saved: true,
-          address: addressToSummary(row),
-          note:
-            "Saved. Use it in create_order with address_id; the assistant only ever sees the " +
-            `summary (label, city, country). Verification status: ${addressToSummary(row).verification}.`,
+          address: summary,
+          note,
         });
       } catch (e) {
         if (e instanceof AddressLimitError) return err(e.message, "rate_limited");

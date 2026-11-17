@@ -24,7 +24,7 @@ import {
   saveAddress,
   type AccountAddressRow,
 } from "./addresses.js";
-import { CountryCodeError, normalizeCountryCode } from "./countries.js";
+import { CountryCodeError, isIsoCountryCode, normalizeCountryCode } from "./countries.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
 import { cancelOrder, createOrder, getOrderView, listOrdersForAccount, MAX_ORDER_LIST_LIMIT, ORDER_ROLES, OrderFlowError, shareShippingAddress, shippingAddressConsent, shippingAddressForSeller, type OrderRole } from "./order-flow.js";
@@ -1267,7 +1267,7 @@ export function registerTools(
         "payment_available first). Shippable items need a shipping_address, or address_id to " +
         "reuse a saved address (see list_addresses — summaries only; the full address is " +
         "copied into the order server-side, never shown in chat). country must be a real " +
-        "ISO 3166-1 alpha-2 code ('IT', not 'XX'). Local-pickup items ignore both. The result's " +
+        "ISO 3166-1 alpha-2 code ('IT', not 'XX'; case/whitespace-insensitive: ' it ' ships as 'IT'). Local-pickup items ignore both. The result's " +
         "total_price_cents is what the buyer pays (price plus any " +
         "shipping_price_cents); Stripe Checkout shows shipping as its own line. On off_platform " +
         "orders the seller cannot see the address until you agree with share_shipping_address " +
@@ -1283,7 +1283,9 @@ export function registerTools(
           line2: z.string().max(200).optional(),
           city: z.string().min(1).max(80),
           postal_code: z.string().min(1).max(20),
-          country: z.string().length(2).describe("ISO 3166-1 alpha-2, e.g. 'IT'"),
+          country: z.string().trim().toUpperCase().length(2)
+            .refine(isIsoCountryCode, "must be an ISO 3166-1 alpha-2 country code")
+            .describe("ISO 3166-1 alpha-2, e.g. 'IT' (case/whitespace-insensitive; stored normalized)"),
         }).strict().optional().describe("Required for shippable items unless address_id is given"),
         payment_mode: z.enum(["stripe", "off_platform"]).optional()
           .describe("Leave unset for the best available path"),
@@ -2249,7 +2251,9 @@ export function registerTools(
         line2: z.string().max(200).optional().describe("Apartment, suite, c/o — omitted if empty"),
         city: z.string().min(1).max(80),
         postal_code: z.string().min(1).max(20),
-        country: z.string().length(2).describe("ISO 3166-1 alpha-2, e.g. 'IT'"),
+        country: z.string().trim().toUpperCase().length(2)
+          .refine(isIsoCountryCode, "must be an ISO 3166-1 alpha-2 country code")
+          .describe("ISO 3166-1 alpha-2, e.g. 'IT' (case/whitespace-insensitive; stored normalized)"),
       },
     },
     async (args: Record<string, unknown>) => {

@@ -89,6 +89,18 @@ export const TOOL_PAGES: ToolPage[] = [
     ],
   },
   {
+    slug: "notifications",
+    title: "Notifications",
+    description: "Read the account's notification inbox (order events, account notices).",
+    intro:
+      "Agents read the notification inbox to see what happened on their account — " +
+      "sales, deadlines, account changes. Same data as the notification center on " +
+      "thingery.dev; only the caller's own notifications are ever returned.",
+    tools: [
+      "list_notifications",
+    ],
+  },
+  {
     slug: "alerts",
     title: "Buyer alerts",
     description: "Save what a buyer is looking for and read new matching listings.",

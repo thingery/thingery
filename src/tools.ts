@@ -6,6 +6,7 @@ import { aliasResolutionNote, describeCategoryNote } from "./categories.js";
 import { buyerShippingCents, categoryChildren, getCategory, getItem, createItem, listCategories, ItemTransitionError, ListingLimitError, listingQuota, type ListingQuota, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, SEARCH_MAX_OFFSET, ShippingPriceError, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
 import { validateAttributes, AttributeValidationError, attributeShapeErrors, type Attributes } from "./attributes.js";
 import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
+import { listNotificationsForAccount } from "./notify/queries.js";
 import { addItemImageBase64 } from "./images.js";
 import { respondToWanted, WantedResponseError } from "./wanted-responses.js";
 import { ContactInfoError, getWantedById, listMyWanted, searchWanted, updateWanted, wantedToPublic, WantedLimitError, WantedNotFoundError, WantedValidationError, type WantedFieldUpdate, type WantedRow } from "./wanted.js";
@@ -70,6 +71,9 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   // 401-challenge treatment as the order tools above.
   "send_order_message",
   "list_order_messages",
+  // THI-780 (THI-760 plan §5): notification inbox read — per-account data,
+  // same 401-challenge treatment.
+  "list_notifications",
   // Buyer-alert intent tools (THI-360 PR 2, spec rev 2): per-account
   // data — the 401-challenge set covers them so anonymous hosts get the
   // method-aware onboarding challenge instead of a tool-level refusal.
@@ -1766,6 +1770,59 @@ export function registerTools(
       } catch (e) {
         if (e instanceof OrderMessageError) return err(e.message, e.code);
         return err(`list_order_messages failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  // -----------------------------------------------------------------------
+  // Notification inbox (THI-760 plan Phase 2 / THI-780): the agent-facing
+  // read side of the notification center. Read-only listing of the CALLER's
+  // notifications — recipient is always the authenticated account, so
+  // cross-account reads are impossible by construction (no id-based fetch:
+  // a wrong guess can't reveal another account's row). Payloads are the
+  // PII-free JSONB the fan-out stores. Mark-read stays on the HTTP API
+  // (session cookie) in this phase — agents don't need it to stay informed.
+
+  server.registerTool(
+    "list_notifications",
+    {
+      title: "List my notifications",
+      annotations: {
+        title: "List my notifications",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      description:
+        "List the authenticated account's notifications (order events, payout and account " +
+        "notices), newest first, with unread_count. Use unread_only=true to see what changed " +
+        "since the last read. Payloads are PII-free event facts (item title, amount, status). " +
+        "Requires authentication; only the caller's own notifications are ever returned. " +
+        CONTENT_PROVENANCE_NOTE,
+      inputSchema: {
+        unread_only: z.boolean().default(false).describe("Return only notifications not yet marked read."),
+        limit: z.number().int().min(1).max(100).default(50),
+        offset: z.number().int().min(0).default(0),
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      try {
+        const { notifications, unreadCount } = await listNotificationsForAccount({
+          accountId: seller.id,
+          unreadOnly: args.unread_only === true,
+          limit: (args.limit as number | undefined) ?? 50,
+          offset: (args.offset as number | undefined) ?? 0,
+        });
+        return ok({
+          count: notifications.length,
+          notifications,
+          unread_count: unreadCount,
+        });
+      } catch (e) {
+        return err(`list_notifications failed: ${describeError(e)}`);
       }
     },
   );

@@ -10,7 +10,7 @@
 //   2. `?profile=directory` must register exactly those 15 tools — a new
 //      money-touching tool added to src/tools.ts cannot silently leak into
 //      the directory listing because it is not on the include list.
-//   3. The canonical /mcp (no param) is unchanged: the full surface (34
+//   3. The canonical /mcp (no param) is unchanged: the full surface (35
 //      registered tools for anonymous/API-key/OAuth callers, plus 3 more
 //      session-only account tools under the web session — #249/#250), with
 //      every excluded order/payment/payout/intent/account tool still present.
@@ -89,6 +89,7 @@ const EXCLUDED_PIN: readonly string[] = [
   "get_order",
   "get_payout_setup",
   "list_connected_apps",
+  "list_notifications",
   "list_order_messages",
   "my_intents",
   "my_matches",
@@ -179,14 +180,14 @@ describe("directory profile pin (registration-time gating)", () => {
     }
   });
 
-  it("default registration (no profile arg) is unchanged: all 34 base tools incl. every excluded one", () => {
+  it("default registration (no profile arg) is unchanged: all 35 base tools incl. every excluded one", () => {
     const { server, registered } = captureServer();
     registerTools(server, { seller: null });
-    expect(registered.size).toBe(34);
+    expect(registered.size).toBe(35);
     // The base surface carries every non-session excluded tool; the 3
     // session-only ones join only under a web session (next test).
     const baseExcluded = EXCLUDED_PIN.filter((n) => !SESSION_ONLY_TOOLS.has(n));
-    expect(baseExcluded.length).toBe(19);
+    expect(baseExcluded.length).toBe(20);
     for (const name of baseExcluded) {
       expect(registered.has(name)).toBe(true);
     }
@@ -207,20 +208,20 @@ describe("directory profile pin (registration-time gating)", () => {
   });
 
   it("session-only account tools (#249/#250) register on full but NEVER on directory", () => {
-    // The web session adds 3 account-settings tools to the full profile (34
-    // → 37); on the directory profile the same session still gets exactly
+    // The web session adds 3 account-settings tools to the full profile (35
+    // → 38); on the directory profile the same session still gets exactly
     // the 15 — account management cannot leak into the directory listing.
     const fakeSeller = { id: "11111111-1111-1111-1111-111111111111" } as import("../src/db.js").SellerRow;
     const full = captureServer();
     registerTools(full.server, { seller: fakeSeller, credential: "session" });
-    expect(full.registered.size).toBe(37);
+    expect(full.registered.size).toBe(38);
     for (const name of SESSION_ONLY_TOOLS) {
       expect(full.registered.has(name)).toBe(true);
     }
     const dir = captureServer();
     registerTools(dir.server, { seller: fakeSeller, credential: "session" }, "directory");
     expect([...dir.registered.keys()].sort()).toEqual([...DIRECTORY_PIN]);
-    // And the full session surface is exactly the funnel set (37).
+    // And the full session surface is exactly the funnel set (38).
     expect([...full.registered.keys()].sort()).toEqual([...TOOL_NAMES].sort());
   });
 
@@ -304,9 +305,9 @@ describe("/mcp?profile=directory (HTTP, DB-free)", () => {
     }
   });
 
-  it("default /mcp (no param) still serves the full surface (34 tools for a non-session caller)", async () => {
+  it("default /mcp (no param) still serves the full surface (35 tools for a non-session caller)", async () => {
     const names = await toolNames("/mcp");
-    expect(names.length).toBe(34);
+    expect(names.length).toBe(35);
     for (const name of EXCLUDED_PIN.filter((n) => !SESSION_ONLY_TOOLS.has(n))) {
       expect(names).toContain(name);
     }
@@ -314,12 +315,12 @@ describe("/mcp?profile=directory (HTTP, DB-free)", () => {
 
   it("?profile=full is the same canonical full surface", async () => {
     const names = await toolNames("/mcp?profile=full");
-    expect(names.length).toBe(34);
+    expect(names.length).toBe(35);
   });
 
   it("empty ?profile= value falls back to the full surface", async () => {
     const names = await toolNames("/mcp?profile=");
-    expect(names.length).toBe(34);
+    expect(names.length).toBe(35);
   });
 
   it("initialize works anonymously on the profile URL (public reads stay free)", async () => {

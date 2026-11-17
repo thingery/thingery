@@ -65,6 +65,7 @@ Selling:
 Buying:
 - Search with filters (max_price_cents, category, condition, attributes like {"size_eu": 43}).
 - Propose ONE best match with reasoning, plus 1-2 runner-ups. Never exceed the user's budget.
+- Link every listing you mention as [its title](/item/<id>), with the id exactly as the tool result gives it. Never invent a host or another path; the chat turns these links into item cards.
 - The buyer pays price_cents plus shipping_price_cents (none for local pickup): quote that total and judge the budget against it.
 
 Completing a sale (orders):
@@ -1126,7 +1127,76 @@ export interface ChatConfirmCard {
   summary: string;
 }
 
-export type ChatTurnResult = { text: string; confirm?: ChatConfirmCard; usage?: ChatUsageSummary };
+export type ChatTurnResult = {
+  text: string;
+  confirm?: ChatConfirmCard;
+  /** Listings the reply talks about, for the web chat's item cards (at most MAX_REPLY_ITEMS). */
+  items?: string[];
+  usage?: ChatUsageSummary;
+};
+
+/** A listing a tool returned during this turn: the only ids a reply card may show. */
+export type TurnItem = { id: string; title: string };
+
+export const MAX_REPLY_ITEMS = 3;
+
+/**
+ * The listings this turn's tools returned, from one tool result. Ids come only from our own
+ * tool results, never from the model's prose, so a card can't show an id the model invented.
+ */
+export function turnItemsFromToolResult(
+  name: string,
+  args: Record<string, unknown>,
+  result: unknown,
+): TurnItem[] {
+  if (!result || typeof result !== "object") return [];
+  const fields = result as Record<string, unknown>;
+  const asTurnItem = (value: unknown): TurnItem[] => {
+    if (!value || typeof value !== "object") return [];
+    const { id, title } = value as Record<string, unknown>;
+    return typeof id === "string" ? [{ id, title: typeof title === "string" ? title : "" }] : [];
+  };
+  if (name === "search_items" && Array.isArray(fields.results)) return fields.results.flatMap(asTurnItem);
+  if (name === "get_item") return asTurnItem(fields.item);
+  if (name === "create_listing" && fields.created === true) {
+    return asTurnItem({ id: fields.id, title: args.title });
+  }
+  return [];
+}
+
+const WORD = /[\p{L}\p{N}]{3,}/gu;
+
+/**
+ * Which of the turn's listings the reply is about, in the order the reply mentions them. A
+ * listing counts when the reply carries its id (any link shape) or names it: its whole title,
+ * or at least two of its title's words, since replies shorten titles ("Adidas Trainers" for
+ * "Sapatilhas Trainers Adidas"). Nothing is shown just for having been searched: a reply that
+ * says nothing fits must not sit above cards that say otherwise.
+ */
+export function replyItemIds(text: string, found: readonly TurnItem[]): string[] {
+  const lower = text.toLowerCase();
+  const replyWords = new Set(lower.match(WORD) ?? []);
+  const firstMention = (item: TurnItem): number => {
+    const byId = lower.indexOf(item.id.toLowerCase());
+    if (byId >= 0) return byId;
+    const title = item.title.trim().toLowerCase();
+    if (!title) return -1;
+    const byTitle = lower.indexOf(title);
+    if (byTitle >= 0) return byTitle;
+    const titleWords = [...new Set(title.match(WORD) ?? [])];
+    const named = titleWords.filter((word) => replyWords.has(word));
+    if (titleWords.length < 2 || named.length < 2) return -1;
+    return Math.min(...named.map((word) => lower.search(new RegExp(`(?<![\\p{L}\\p{N}])${word}`, "u"))));
+  };
+  const seen = new Set<string>();
+  return found
+    .filter((item) => !seen.has(item.id) && seen.add(item.id))
+    .map((item) => ({ id: item.id, at: firstMention(item) }))
+    .filter((mention) => mention.at >= 0)
+    .sort((a, b) => a.at - b.at)
+    .slice(0, MAX_REPLY_ITEMS)
+    .map((mention) => mention.id);
+}
 
 /** THI-180 §3.3: internal per-turn usage summary for the routes layer's
  * `chat_usage` security event (PR-C). `source` is "estimate_fallback" when
@@ -1730,6 +1800,7 @@ export async function chatTurn(
   const usageSummary = () => ({ rounds: llmCalls, tokensIn, tokensOut, source, model: turnModel, credentialSource, provider });
 
   let confirm: ChatConfirmCard | undefined;
+  const turnItems: TurnItem[] = [];
   try {
     for (let round = 0; round < chatLimits.roundsPerTurn; round++) {
       // THI-180 §3.2 checkpoint 2 — between rounds. In-flight turns each
@@ -1767,7 +1838,14 @@ export async function chatTurn(
       messages.push(reply);
 
       if (!reply.tool_calls || reply.tool_calls.length === 0) {
-        return { text: reply.content ?? "", ...(confirm ? { confirm } : {}), usage: usageSummary() };
+        const text = reply.content ?? "";
+        const items = replyItemIds(text, turnItems);
+        return {
+          text,
+          ...(confirm ? { confirm } : {}),
+          ...(items.length > 0 ? { items } : {}),
+          usage: usageSummary(),
+        };
       }
 
       toolRounds++;
@@ -1867,6 +1945,7 @@ export async function chatTurn(
             result = { error: verdict.error };
           } else {
             result = await executeTool(call.function.name, canonicalArgs, seller);
+            turnItems.push(...turnItemsFromToolResult(call.function.name, canonicalArgs, result));
           }
         }
         } catch (e) {

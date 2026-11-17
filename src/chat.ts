@@ -16,6 +16,7 @@ import {
   MAX_ORDER_LIST_LIMIT,
   OrderFlowError,
   ORDER_ROLES,
+  sellerPayoutReady,
   shareShippingAddress,
   shippingAddressConsent,
   shippingAddressForSeller,
@@ -23,6 +24,7 @@ import {
   type ShippingAddress,
 } from "./order-flow.js";
 import { ORDER_STATUSES } from "./orders.js";
+import { stripeConfigured } from "./stripe.js";
 import { confirmPayment, confirmReceipt, openDispute, recordTracking, releaseFunds } from "./fulfillment.js";
 import {
   listOrderMessages,
@@ -71,7 +73,7 @@ Buying:
 Completing a sale (orders):
 - Orders run the full protected flow: the buyer pays via a payment link, the seller ships after the order is sold, tracking arrives automatically once recorded, the buyer confirms receipt, and money is released after the dispute window (or early on request).
 - Check order state with my_orders (filter by role: buyer/seller) and get_order (status, price breakdown, tracking, deadlines).
-- Buyer actions: create_order places an order (you then give the user the payment_url as a link to pay), confirm_receipt when the item arrived, release_funds to pay the seller early, open_dispute if something is wrong, share_shipping_address on off-platform orders once the seller confirmed payment (it cannot be undone), cancel_order while the order is still cancellable. Every one of these only runs after the user confirms the card in the chat — never report them as done before that.
+- Buyer actions: create_order places an order (you then give the user the payment_url as a link to pay), confirm_receipt when the item arrived, release_funds to pay the seller early, open_dispute if something is wrong, share_shipping_address on off-platform orders once the seller confirmed payment (it cannot be undone), cancel_order while the order is still cancellable, and send_order_message / list_order_messages to talk to the seller about one of their orders (on off-platform orders this is how payment gets arranged). Every one of these only runs after the user confirms the card in the chat — never report them as done before that.
 - Seller actions: confirm_payment once an off-platform payment (cash, transfer) actually arrived, record_tracking after shipping an order (carrier + tracking code), and send_order_message / list_order_messages to coordinate with the buyer on any of your orders. These run after the user's confirmation card too.
 - Payment happens on the Stripe payment page through the order's payment link — you NEVER ask the user for card details or any payment information; the link collects everything.
 - If the user asks for something the chat cannot do yet (e.g. buying shipping labels where the deployment has no carrier keys), say so plainly — never improvise a workaround.
@@ -1538,12 +1540,19 @@ async function orderWriteGate(
     const shipping = item.shipping_tier === "local" ? 0 : item.shipping_price_cents;
     const total = fmtMoney(item.price_cents + shipping, item.currency);
     const how = item.shipping_tier === "local" ? " (local pickup)" : "";
+    // Same rule as createOrder: card checkout when the deployment and the seller can take it.
+    const paysByCard =
+      args.payment_mode === "stripe" ||
+      (args.payment_mode === undefined && stripeConfigured() && (await sellerPayoutReady(item.seller_id).catch(() => false)));
+    const payment = paysByCard
+      ? "the user pays via the link after confirming"
+      : "paid directly to the seller, outside Thingery (no card checkout); the user arranges it with them";
     return {
       outcome: "gate",
       op,
       subjectId: item.id,
       itemId: item.id,
-      summary: `Order "${item.title}" for ${total}${how} — the user pays via the link after confirming`,
+      summary: `Order "${item.title}" for ${total}${how} — ${payment}`,
     };
   }
 
@@ -1657,7 +1666,11 @@ async function executeConfirmedOrderOp(subjectId: string, op: string, seller: Se
         if (paymentUrl) {
           return `✅ Order placed for ${what} — pay here: ${paymentUrl}\n(The link expires in 24h and opens the secure payment page: card details go there, never in chat.)`;
         }
-        return `✅ Order placed for ${what} — off-platform payment: settle directly with the seller as you agreed. Once they confirm payment, we'll ask you here to share the shipping address.`;
+        const address =
+          order.fulfillment === "shipping"
+            ? " Your shipping address is saved with the order and hidden from the seller until they confirm your payment. Then I'll ask whether to show it to them, so you won't need to type it again."
+            : "";
+        return `✅ Order placed for ${what}. This seller takes payment directly, outside Thingery (no card checkout here): to arrange it, ask me to message the seller.${address}`;
       } catch (err) {
         return `⚠️ ${friendly(err)}`;
       }

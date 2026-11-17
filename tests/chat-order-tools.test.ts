@@ -592,9 +592,15 @@ describe.skipIf(!available)("chat buyer order writes behind the confirm gate (DB
     mockLlm([toolCallMsg("c1", "create_order", { item_id: item.rows[0].id, payment_mode: "off_platform", shipping_address: address }), FINAL]);
     const turn = await chatTurn([], "buy the boat", sellerB);
     expect(turn.confirm!.summary).toContain("EUR 128.00");
+    // Off-platform: the card says so before the order exists, and never promises a payment link.
+    expect(turn.confirm!.summary).toContain("paid directly to the seller");
+    expect(turn.confirm!.summary).not.toContain("via the link");
     expect(decodeOrderPayload(turn.confirm!.op)).toEqual({ payment_mode: "off_platform", shipping_address: address });
     const done = await chatTurn([], `chat-confirm ${turn.confirm!.token}`, sellerB);
     expect(done.text).toMatch(/✅ Order placed/);
+    // The address was already given: the reply says it is kept, not that it will be asked for.
+    expect(done.text).toContain("won't need to type it again");
+    expect(done.text).not.toContain("as you agreed");
     const row = await client.query("SELECT payment_mode, status FROM orders ORDER BY created_at DESC LIMIT 1");
     expect(row.rows[0].payment_mode).toBe("off_platform");
     expect(row.rows[0].status).toBe("pending");

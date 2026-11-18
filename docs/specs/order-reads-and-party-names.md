@@ -1,9 +1,12 @@
 # Spec: order read markers and party display names
 
-Status: proposed · Touches protected paths `db/schema.sql`, `src/tools.ts`
-(read-only extensions in `src/order-messages.ts`, `src/order-flow.ts`) — see
-AGENTS.md for the review requirements those files carry. Implementation is
-gated on that review of this spec; nothing here ships first.
+Status: proposed (rev 2) · Touches protected paths `db/schema.sql`,
+`src/tools.ts` (read-only extensions in `src/order-messages.ts`,
+`src/order-flow.ts`) — see AGENTS.md for the review requirements those files
+carry. Implementation is gated on that review of this spec; nothing here
+ships first. Rev 2 (2026-11-18) addresses the Security REQUEST-CHANGES
+verdict on rev 1 (PR #319 head `b80b8b7`): SR-1 (F1 masking of display
+names) and SR-2 (`readOnlyHint` honesty) — see the Security review record.
 
 ## Problem
 
@@ -26,10 +29,19 @@ capability:
   locked order row at insert, keyset-paginated newest-first, readable in every
   order status (history stays readable after the order finishes). Bounded:
   ≤ 30 messages per party per order, bodies 1–2000 chars.
-- Accounts are the `sellers` table. `display_name` is the account's public
-  name (1–80 chars at signup): public item payloads already expose the
-  seller's; order reviews already show the buyer's first name publicly. Emails
-  and handles are never in any item/order payload.
+- Accounts are the `sellers` table. `display_name` is chosen at signup
+  (1–80 chars), but when the name field is skipped, signup defaults it to
+  the **email local-part** (`src/routes.ts` /signup →
+  `email.split("@")[0]`): a raw `display_name` can therefore be an
+  email-derived handle. The F1 guard (`src/sellers.ts`,
+  `MASKED_DISPLAY_NAME`) exists for exactly this: on the one
+  surface that publishes a name today (`get_seller_summary` via
+  `sellerToPublic`), a display name that exactly equals the account's email
+  local-part is masked to a neutral constant. Item and order payloads
+  expose no party names today; order reviews expose `buyer_first_name`,
+  which carries a pre-existing F1 gap (tracked separately on the review
+  side) — an acknowledged gap, not a precedent. Emails and handles are
+  never in any payload.
 - `list_order_messages` and `get_order` are party-only; a missing order and
   another party's order are the same `not_found` — no oracle.
 - The web order page is one server render for desktop and phone (responsive
@@ -52,8 +64,10 @@ capability:
   messages and reads "Messages with <counterparty display name>".
 - The messages screen and the desktop inline conversation show each message
   sender's display name in the meta line ("You · 10:42", "Marta · 11:05").
-- **Names only.** Display names sourced from account profiles. Never emails
-  or handles — nothing here may enable off-platform contact.
+- **Names only.** Display names sourced from account profiles, and every
+  name published by this spec passes the same F1 exact-match mask as
+  `get_seller_summary` before any counterparty sees it. Never emails or
+  handles — nothing here may enable off-platform contact.
 - The count clears when the conversation is actually seen: on phones by
   opening the messages screen; on desktop by the inline conversation being
   visible. Merely opening the phone order page must not clear it.
@@ -118,15 +132,34 @@ read receipts (v1 non-goal stands).
 
 ### Display names
 
-- `get_order` output gains `buyer_display_name` and `seller_display_name`
-  (`sellers.display_name`, joined server-side in `getOrderView`).
+- **Shared F1 helper (SR-1).** Extract the exact-match mask already inside
+  `sellerToPublic` (`src/sellers.ts`) into one exported helper, e.g.
+  `maskEmailDerivedHandle(displayName: string, email: string | null):
+  string` — returns `MASKED_DISPLAY_NAME` when `displayName ===
+  email.split("@")[0]`, the name otherwise. `sellerToPublic` and every new
+  join below call the same helper: one rule, one constant, no per-surface
+  drift. The email is fetched as mask input only and never crosses into a
+  public object (allowlist construction, same discipline as
+  `sellerToPublic`).
+- `get_order` output gains `buyer_display_name` and `seller_display_name`:
+  `getOrderView` joins both party accounts for `display_name` **and
+  `email`** (mask input only) and publishes the masked names.
 - Message objects in `list_order_messages` and `send_order_message` outputs
-  gain `sender_display_name` (join the sender account; the admin dispute
-  pages already join `sellers.display_name` this way).
+  gain `sender_display_name`: the message query joins the sender account
+  for `display_name` + `email` and publishes the masked name. (The admin
+  dispute pages join raw `display_name`, but they are admin-session-gated
+  internal surfaces — explicitly not a precedent for party-visible
+  payloads.)
+- Masked-name UX: an account that never chose a name renders as
+  `MASKED_DISPLAY_NAME` ("Thingery seller"). Accepted over-blocking, the
+  same decision that introduced the mask on seller summaries; the web
+  treats the mask constant as a role-word fallback ("Messages with the
+  seller"), since no chosen name exists to show.
 - Party-only visibility rides the existing party checks; nothing becomes
   readable by outsiders. The buyer's display name becomes visible to the
-  order's seller and vice versa — **names only**: emails and handles are not
-  in any order payload (structurally: the source column is `display_name`).
+  order's seller and vice versa — **names only**: emails and handles are
+  not in any order payload (structurally: the source column is
+  `display_name`, masked whenever it is email-derived).
 
 ## Data model changes (protected: `db/schema.sql`)
 
@@ -174,10 +207,14 @@ do not opt in (API evolution lens: extend, never mutate meaning).
    - Description updated: reading the first page marks the thread read for
      the caller's account unless `mark_read: false`; `last_read` carries the
      caller's read position.
-   - `readOnlyHint` stays true: the tool never modifies order or thread
-     content; it records only the caller's own reading position — a
-     bookkeeping row keyed to the authenticated account, same authorization
-     surface as before.
+   - Annotations turn honest (SR-2): `readOnlyHint: false`. With
+     `mark_read` defaulting true, the tool writes a durable `order_reads`
+     row on an ordinary call, and MCP clients use `readOnlyHint` for
+     auto-approval and prefetch decisions — a read-only claim would let
+     those layers silently clear the caller's unread state.
+     `idempotentHint: true` (the upsert is a replay no-op) and
+     `destructiveHint: false` are unchanged and remain true to the tool's
+     actual behavior.
 2. **Message objects** (both message tools): gain `sender_display_name`
    (string).
 3. **`get_order`**: gains `buyer_display_name` and `seller_display_name`
@@ -198,8 +235,9 @@ perpetually unread.
 
 - `apps/web` tool-client zod schemas extend additively (`mark_read` input;
   `last_read`, `sender_display_name`, `buyer_display_name`,
-  `seller_display_name` outputs). Role words stay the fallback whenever the
-  fields are absent (older backend): degrade, never break.
+  `seller_display_name` outputs). Role words stay the fallback whenever
+  the fields are absent (older backend) **or when the name equals
+  `MASKED_DISPLAY_NAME`** (no chosen name to show): degrade, never break.
 - Order page: loads the thread with `mark_read: false`; derives the unread
   count from `last_read` + counterparty messages; phone row shows
   "Messages with {name}" and the count badge; desktop conversation meta shows
@@ -234,6 +272,13 @@ inert without them. No contract step exists or is needed.
 - Names: `sender_display_name` on list and send outputs;
   `get_order` `buyer_display_name`/`seller_display_name`; key-absence
   assertions: no email or handle field anywhere in order/message payloads.
+- F1 masking (SR-1, regression-blocking): a signup that skipped the name
+  field (`display_name === email` local-part) gets `MASKED_DISPLAY_NAME`
+  for **all three** name fields — buyer side, seller side, message sender;
+  a deliberately chosen name that differs from the local-part passes
+  through unmasked. These tests fail against an unmasked join
+  implementation; they are how the spec enforces "names only, never
+  handles".
 - Tools: response shapes are additive supersets (existing fields unchanged);
   `mark_read` is an optional boolean (invalid type rejected by zod);
   regenerated tool docs (`npm run docs:tools`) match the new descriptions.
@@ -248,6 +293,30 @@ docs regen), (3) display names (service + tool + tests + docs regen),
 fields but degrades gracefully (zod strips unknown keys) — a partial rollout
 shows today's role-word UX, never an error. Prod deploy of each merge is the
 existing agent-authority runbook path.
+
+## Security review record
+
+Formal security review of rev 1 (PR #319, head `b80b8b7`):
+**REQUEST-CHANGES**. Rev 2 addresses the findings; the verdict and full
+discussion live on the review side.
+
+- **SR-1 (Medium, must-fix)** — raw `sellers.display_name` is an
+  email-derived handle for signups that skipped the name field, so the
+  rev-1 joins would have leaked handles to counterparties. Addressed in
+  rev 2: shared F1 exact-match helper in every new join + masking tests
+  that fail against an unmasked implementation; the refuted precedent
+  claims ("item payloads already expose the seller name", "admin pages
+  join it this way") are corrected in Context.
+- **SR-2 (Low, must-fix)** — `readOnlyHint: true` on a tool that now writes
+  by default misleads MCP auto-approval/prefetch layers. Addressed in
+  rev 2: `readOnlyHint: false`; other annotations unchanged.
+- **SR-3 / SR-4 (info)** — accepted as-is: `created_at`-only comparison
+  consistency (same-millisecond edge documented above); the
+  candidate-deleted race fails closed (marker cascades away, badge
+  recounts older messages — bounded, self-correcting on next read).
+- **Follow-ups (out of scope, ticketed on the review side):** the
+  pre-existing F1 gap on order reviews' `buyer_first_name`; a scrub for
+  contact strings inside deliberately chosen display names.
 
 ## Open questions
 
@@ -265,9 +334,11 @@ existing agent-authority runbook path.
 2. Read marker: `src/order-messages.ts` (upsert + `last_read` read-back),
    `src/tools.ts` (`mark_read` input, `last_read` output, descriptions),
    DB + tool tests, docs-site regen. Protected.
-3. Display names: `src/order-flow.ts` (`getOrderView` party join),
+3. Display names: `src/sellers.ts` (extract the shared F1 helper from
+   `sellerToPublic`), `src/order-flow.ts` (`getOrderView` party join),
    `src/order-messages.ts` (sender join), `src/tools.ts` (`orderToPublic` +
-   message shape + descriptions), tests, docs-site regen. Protected.
+   message shape + descriptions), F1 masking tests + docs-site regen.
+   Protected.
 4. platform `apps/web`: client schemas, phone-row badge + "Messages with
    {name}", desktop names + seen-beacon, i18n, e2e. Private repo, same
    engineering rules.

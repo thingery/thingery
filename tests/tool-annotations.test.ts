@@ -40,6 +40,10 @@ const EXPECTED: Record<
   // a same-args replay on a label_issued order returns the stored label
   // without a second purchase, hence idempotentHint.
   buy_shipping_label: { title: "Buy shipping label", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Buyer-paid shipping spec §9 (PR 5): read-only estimate over the quoting
+  // core (carrier call → openWorldHint); replays re-quote, binding:false —
+  // idempotentHint; nothing is persisted or spent.
+  quote_shipping: { title: "Quote shipping", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   confirm_payment: { title: "Confirm payment", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   confirm_receipt: { title: "Confirm receipt", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   open_dispute: { title: "Open dispute", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },

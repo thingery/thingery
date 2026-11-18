@@ -2,6 +2,8 @@ import { z } from "zod";
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { ItemRow, SellerRow } from "./db.js";
 import { CONDITIONS, CREATE_ITEM_STATUSES, SHIPPING_TIERS, STATUSES } from "./db.js";
+import { pool } from "./db.js";
+import { resolveShippingQuote, getSellerDefaultOrigin } from "./shipping-quotes.js";
 import { resolveCategory } from "./categories.js";
 import { aliasResolutionNote, describeCategoryNote } from "./categories.js";
 import { buyerShippingCents, categoryChildren, getCategory, getItem, createItem, listCategories, ItemTransitionError, ListingLimitError, listingQuota, type ListingQuota, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, SEARCH_MAX_OFFSET, ShippingPriceError, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
@@ -116,6 +118,7 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   // Order-flow tools (spec THI-10) must be added here when they land.
   "get_payout_setup",
   "create_order",
+  "quote_shipping",
   "get_order",
   "share_shipping_address",
   "my_orders",
@@ -290,6 +293,24 @@ export function itemToPublic(item: ItemRow & { score?: number }) {
 const ok = (data: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
 });
+
+// quote_shipping rate limit (spec docs/specs/buyer-paid-shipping.md §9):
+// without it the tool is an auth-free oracle for carrier quotes — 20 calls
+// per account per sliding hour. In-memory and per process (v1 deploys are
+// single-instance); the cap is a constant, not env — the spec names no knob.
+const QUOTE_SHIPPING_PER_HOUR = 20;
+const quoteShippingWindow = new Map<string, number[]>();
+function quoteShippingAllowed(accountId: string, now = Date.now()): boolean {
+  const hourAgo = now - 60 * 60_000;
+  const hits = (quoteShippingWindow.get(accountId) ?? []).filter((t) => t > hourAgo);
+  if (hits.length >= QUOTE_SHIPPING_PER_HOUR) {
+    quoteShippingWindow.set(accountId, hits);
+    return false;
+  }
+  hits.push(now);
+  quoteShippingWindow.set(accountId, hits);
+  return true;
+}
 
 /** Order payload for tool responses — parties only; address is PII (F16) and
  *  always stripped here. get_order alone re-adds it, via shippingAddressForSeller. */
@@ -1709,6 +1730,134 @@ export function registerTools(
         if (e instanceof OrderFlowError) return err(e.message, e.code);
         return err(`share_shipping_address failed: ${describeError(e)}`);
       }
+    },
+  );
+
+  // -----------------------------------------------------------------------
+  // quote_shipping (spec docs/specs/buyer-paid-shipping.md §9, PR 5) — the
+  // pre-checkout estimate surface. Read-only over the same quoting core
+  // create_order runs; binding:false always (checkout re-quotes server-side
+  // and the paid amount is that snapshot, never this number).
+
+  server.registerTool(
+    "quote_shipping",
+    {
+      title: "Quote shipping",
+      annotations: {
+        title: "Quote shipping",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      description:
+        "Pre-checkout shipping estimate for a shippable item to one address — exactly what " +
+        "create_order would quote at checkout (same carrier selection: cheapest EUR rate under " +
+        "the per-label cap). Returns { quotable: true, estimate: { amount_cents, currency, " +
+        "carrier, service }, valid_for_minutes, binding: false } or { quotable: false, reason } " +
+        "(no_weight, no_seller_default_address, easypost_not_configured, no_eur_rate, " +
+        "rate_above_cap, not_shippable, …). Estimates are display-only: the amount charged at " +
+        "checkout is re-quoted server-side and may differ. Rate-limited per account (20/hour). " +
+        "Requires authentication.",
+      inputSchema: {
+        item_id: z.string().uuid().describe("Item to estimate shipping for"),
+        address_id: z.string().uuid().optional().describe(
+          "Estimate to a saved address (from list_addresses); mutually exclusive with shipping_address",
+        ),
+        shipping_address: z.object({
+          name: z.string().min(1).max(120),
+          line1: z.string().min(1).max(200),
+          line2: z.string().max(200).optional(),
+          city: z.string().min(1).max(80),
+          postal_code: z.string().min(1).max(20),
+          country: z.string().trim().toUpperCase().length(2)
+            .refine(isIsoCountryCode, "must be an ISO 3166-1 alpha-2 country code")
+            .describe("ISO 3166-1 alpha-2, e.g. 'IT' (case/whitespace-insensitive; stored normalized)"),
+        }).strict().optional().describe("Ship-to address; mutually exclusive with address_id"),
+      },
+    },
+    async (args) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      // Same exactly-one rule as create_order: address_id and
+      // shipping_address are two sources for the same field.
+      const addressId = args.address_id;
+      const typed = args.shipping_address;
+      if (addressId && typed) {
+        return err("Provide either address_id or shipping_address, not both.", "invalid_request");
+      }
+      let shippingAddress: Record<string, unknown> | undefined;
+      if (addressId) {
+        let saved: AccountAddressRow;
+        try {
+          saved = await getOwnedAddress(seller.id, addressId);
+        } catch (e) {
+          if (e instanceof AddressNotFoundError) return err("Address not found", "not_found");
+          throw e;
+        }
+        shippingAddress = saved as unknown as Record<string, unknown>;
+      } else if (typed) {
+        try {
+          shippingAddress = { ...typed, country: normalizeCountryCode(typed.country) };
+        } catch (e) {
+          if (e instanceof CountryCodeError) return err(e.message, "invalid_address");
+          throw e;
+        }
+      } else {
+        return err("Provide address_id or shipping_address.", "invalid_request");
+      }
+      // §9 rate limit: without it this tool is an unauthenticated-free
+      // oracle for carrier quotes. Sliding hour window, per account,
+      // in-memory (v1 deploys single-instance).
+      if (!quoteShippingAllowed(seller.id)) {
+        return err("quote_shipping rate limit reached (20/hour per account). Try again later.", "rate_limited");
+      }
+      const cfg = orderFlowConfig();
+      const item = await pool.query(
+        "SELECT id, seller_id, shipping_tier, currency, weight_grams, dimensions_mm, status FROM items WHERE id = $1",
+        [args.item_id],
+      );
+      const row = item.rows[0] as
+        | { id: string; seller_id: string; shipping_tier: string; currency: string; weight_grams: number | null; dimensions_mm: string | null; status: string }
+        | undefined;
+      if (!row) return err("Item not found", "not_found");
+      if (row.status !== "active") return ok({ quotable: false, reason: "item_not_available" });
+      const sellerOrigin = await getSellerDefaultOrigin(row.seller_id);
+      let outcome: Awaited<ReturnType<typeof resolveShippingQuote>>;
+      try {
+        outcome = await resolveShippingQuote({
+          // The estimate describes the checkout path, which is the stripe
+          // quote mode; paymentMode is fed as such (the listing itself never
+          // carries a payment mode).
+          paymentMode: "stripe",
+          fulfillment: row.shipping_tier === "local" ? "pickup" : "shipping",
+          orderCurrency: row.currency,
+          weightGrams: row.weight_grams,
+          dimensionsMm: row.dimensions_mm,
+          buyerAddress: shippingAddress,
+          sellerOrigin,
+          easypostEnabled: cfg.easypostEnabled,
+          labelMaxCostCents: cfg.labelMaxCostCents,
+          quoteTimeoutMs: cfg.shippingQuoteTimeoutMs,
+        });
+      } catch (e) {
+        // Same defense-in-depth posture as createOrder: the estimate path
+        // can never throw out; an exceptional bug reads as unquotable.
+        console.error(`[quote_shipping] quoting threw for item ${row.id}: ${(e as Error).message}`);
+        outcome = { mode: "flat", reason: "quote_failed" };
+      }
+      if (outcome.mode === "flat") return ok({ quotable: false, reason: outcome.reason });
+      return ok({
+        quotable: true,
+        binding: false,
+        estimate: {
+          amount_cents: outcome.quote.amount_cents,
+          currency: outcome.quote.currency,
+          carrier: outcome.quote.carrier,
+          service: outcome.quote.service,
+        },
+        valid_for_minutes: cfg.shippingQuoteEstimateTtlMinutes,
+      });
     },
   );
 

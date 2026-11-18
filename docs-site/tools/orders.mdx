@@ -48,6 +48,44 @@ Buy an item: place an order on a second-hand listing. Default payment_mode is 's
   Leave unset for the best available path. One of `stripe`, `off_platform`.
 </ParamField>
 
+## `quote_shipping`
+
+**Quote shipping** · Needs an account · Read-only
+
+Pre-checkout shipping estimate for a shippable item to one address — exactly what create_order would quote at checkout (same carrier selection: cheapest EUR rate under the per-label cap). Returns &#123; quotable: true, estimate: &#123; amount_cents, currency, carrier, service &#125;, valid_for_minutes, binding: false &#125; or &#123; quotable: false, reason &#125; (no_weight, no_seller_default_address, easypost_not_configured, no_eur_rate, rate_above_cap, not_shippable, …). Estimates are display-only: the amount charged at checkout is re-quoted server-side and may differ. Rate-limited per account (20/hour). Requires authentication.
+
+**Parameters**
+
+<ParamField body="item_id" type="string" required>
+  Item to estimate shipping for.
+</ParamField>
+<ParamField body="address_id" type="string">
+  Estimate to a saved address (from list_addresses); mutually exclusive with shipping_address.
+</ParamField>
+<ParamField body="shipping_address" type="object">
+  Ship-to address; mutually exclusive with address_id.
+  <Expandable title="fields">
+    <ParamField body="name" type="string" required>
+      Up to 120 characters.
+    </ParamField>
+    <ParamField body="line1" type="string" required>
+      Up to 200 characters.
+    </ParamField>
+    <ParamField body="line2" type="string">
+      Up to 200 characters.
+    </ParamField>
+    <ParamField body="city" type="string" required>
+      Up to 80 characters.
+    </ParamField>
+    <ParamField body="postal_code" type="string" required>
+      Up to 20 characters.
+    </ParamField>
+    <ParamField body="country" type="string" required>
+      ISO 3166-1 alpha-2, e.g. 'IT' (case/whitespace-insensitive; stored normalized). Exactly 2 characters.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
 ## `get_order`
 
 **Get order** · Needs an account · Read-only

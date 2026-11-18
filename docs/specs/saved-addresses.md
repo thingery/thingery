@@ -1,6 +1,7 @@
 # Spec: saved shipping addresses
 
-Status: accepted (rollout in progress — steps 1–3 shipped). Touches protected paths
+Status: accepted (rollout in progress — thingery steps 1–4 shipped; platform steps
+pending). Touches protected paths
 `db/schema.sql`, `src/tools.ts`, `src/routes.ts`. See
 AGENTS.md for the review those need.
 
@@ -174,9 +175,9 @@ consumer app ship in `thingery/platform`.
 2. ✅ MCP tools (`list_addresses`, `save_address`, `delete_address`) and `address_id` on
    `create_order`, then `npm run docs:tools`. (thingery, #303)
 3. ✅ HTTP routes for the web. (thingery, #306)
-4. EasyPost verification, the advisory statuses and the privacy-page text — **split**:
-   the verification code, the advisory statuses and the docs/security.md entry ship in
-   thingery together; the privacy-page text ships in platform.
+4. ✅ EasyPost verification, the advisory statuses and the privacy-page text — **split**:
+   the verification code, the advisory statuses and the docs/security.md entry shipped in
+   thingery together (#310); the privacy-page text ships in platform (pending).
 5. Web: the settings screen and the buy form's picker and "Save this address" checkbox.
    The design is drawn and approved first. (platform)
 6. Chat prompt: offer saved addresses before asking for a typed one. (platform)

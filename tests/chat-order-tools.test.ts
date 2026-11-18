@@ -85,10 +85,14 @@ describe("chat order manifest (pure)", () => {
     const names = TOOLS.map((t) => t.function.name);
     expect(names).toContain("my_orders");
     expect(names).toContain("get_order");
+    expect(names).toContain("buy_shipping_label");
     const myOrders = TOOLS.find((t) => t.function.name === "my_orders")!.function;
     expect(Object.keys(myOrders.parameters.properties)).toEqual(["role", "status", "limit", "cursor"]);
     const getOrder = TOOLS.find((t) => t.function.name === "get_order")!.function;
     expect(getOrder.parameters.required).toEqual(["order_id"]);
+    const buyLabel = TOOLS.find((t) => t.function.name === "buy_shipping_label")!.function;
+    expect(buyLabel.parameters.required).toEqual(["order_id", "from_address"]);
+    expect(Object.keys(((buyLabel.parameters.properties as Record<string, unknown>).from_address as Record<string, unknown>).properties as never)).toEqual(["name", "line1", "line2", "city", "postal_code", "country", "phone"]);
   });
 
   it("prompt regression: the system prompt carries the completing-a-sale section and the no-card-details rule", async () => {
@@ -154,6 +158,17 @@ describe("manifest parity table (chat vs MCP arg validation)", () => {
     { tool: "send_order_message", args: { order_id: "11111111-1111-4111-8111-111111111111", body: "x".repeat(2001) }, why: "body over 2000 chars" },
     { tool: "list_order_messages", args: { order_id: "11111111-1111-4111-8111-111111111111", limit: 51 }, why: "limit above 50" },
     { tool: "list_order_messages", args: { order_id: "11111111-1111-4111-8111-111111111111", cursor: "zzz" }, why: "malformed cursor uuid" },
+    { tool: "buy_shipping_label", args: { order_id: "11111111-1111-4111-8111-111111111111" }, why: "missing from_address" },
+    { tool: "buy_shipping_label", args: { order_id: "11111111-1111-4111-8111-111111111111", from_address: { line1: "B", city: "C", postal_code: "D", country: "IT" } }, why: "from_address missing name" },
+    { tool: "buy_shipping_label", args: { order_id: "11111111-1111-4111-8111-111111111111", from_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "ITA" } }, why: "3-character from_address country" },
+    { tool: "buy_shipping_label", args: { order_id: "11111111-1111-4111-8111-111111111111", from_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT", phone: "123", extra: "x" } }, why: "unknown key in strict from_address" },
+    { tool: "buy_shipping_label", args: { order_id: "11111111-1111-4111-8111-111111111111", from_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT", phone: "" } }, why: "empty from_address phone" },
+    { tool: "buy_shipping_label", args: { order_id: "11111111-1111-4111-8111-111111111111", from_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT" }, weight_grams: 0 }, why: "weight_grams below 1" },
+    { tool: "buy_shipping_label", args: { order_id: "11111111-1111-4111-8111-111111111111", from_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT" }, weight_grams: 70001 }, why: "weight_grams above 70000" },
+    { tool: "buy_shipping_label", args: { order_id: "11111111-1111-4111-8111-111111111111", from_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT" }, weight_grams: 100.5 }, why: "non-integer weight_grams" },
+    { tool: "buy_shipping_label", args: { order_id: "11111111-1111-4111-8111-111111111111", from_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT" }, dimensions_mm: { length: 10, width: 10 } }, why: "dimensions_mm missing height" },
+    { tool: "buy_shipping_label", args: { order_id: "11111111-1111-4111-8111-111111111111", from_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT" }, dimensions_mm: { length: 1, width: 1, height: 2001 } }, why: "dimensions_mm height above 2000" },
+    { tool: "buy_shipping_label", args: { order_id: "11111111-1111-4111-8111-111111111111", from_address: { name: "A", line1: "B", city: "C", postal_code: "D", country: "IT" }, carrier_preference: "" }, why: "empty carrier_preference" },
   ];
 
   for (const c of cases) {
@@ -204,6 +219,16 @@ describe("manifest parity table (chat vs MCP arg validation)", () => {
     expect(normalizeOrderArgs("send_order_message", { order_id: okArgs.order_id, body: "hi" }).ok).toBe(true);
     expect(mcp.shape("list_order_messages").safeParse({ order_id: okArgs.order_id, limit: 10 }).success).toBe(true);
     expect(normalizeOrderArgs("list_order_messages", { order_id: okArgs.order_id, limit: 10 }).ok).toBe(true);
+    // buy_shipping_label: full optional set passes both surfaces
+    const labelArgs = {
+      order_id: okArgs.order_id,
+      from_address: { name: "S", line1: "1 Main St", line2: "Scala B", city: "Milan", postal_code: "20122", country: "IT", phone: "+39 02 1234567" },
+      weight_grams: 800,
+      dimensions_mm: { length: 300, width: 200, height: 150 },
+      carrier_preference: "DHL",
+    };
+    expect(mcp.shape("buy_shipping_label").safeParse(labelArgs).success).toBe(true);
+    expect(normalizeOrderArgs("buy_shipping_label", labelArgs).ok).toBe(true);
   });
 });
 
@@ -216,7 +241,9 @@ describe("order confirm-op verbs (pure)", () => {
   const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
 
   it("round-trips every buyer-write verb through a token", () => {
-    for (const op of ["receipt", "release", "address", "payment", `dispute=${encoded}`, `cancel=${encoded}`, "order=eyJwYXltZW50X21vZGUiOiJvZmZfcGxhdGZvcm0ifQ", `tracking=${encoded}`, `message=${Buffer.from(JSON.stringify({ body: "shipping tomorrow" }), "utf8").toString("base64url")}`]) {
+    const labelPayload = { order_id: "11111111-1111-4111-8111-111111111111", from_address: { name: "S", line1: "1 Main St", city: "Milan", postal_code: "20122", country: "IT" }, weight_grams: 800 };
+    const labelEncoded = Buffer.from(JSON.stringify(labelPayload), "utf8").toString("base64url");
+    for (const op of ["receipt", "release", "address", "payment", `dispute=${encoded}`, `cancel=${encoded}`, "order=eyJwYXltZW50X21vZGUiOiJvZmZfcGxhdGZvcm0ifQ", `tracking=${encoded}`, `message=${Buffer.from(JSON.stringify({ body: "shipping tomorrow" }), "utf8").toString("base64url")}`, `label=${labelEncoded}`]) {
       const token = signChatConfirmToken("11111111-1111-4111-8111-111111111111", op, (NOW + 60_000) / 1000);
       expect(verifyChatConfirmToken(token, NOW)).toEqual({ itemId: "11111111-1111-4111-8111-111111111111", op });
     }
@@ -655,11 +682,12 @@ describe.skipIf(!available)("chat buyer order writes behind the confirm gate (DB
     expect(row.rows[0].status).toBe("sold");
   });
 
-  it("seller writes hold first too (confirm_payment, record_tracking, send_order_message)", async () => {
+  it("seller writes hold first too (confirm_payment, record_tracking, buy_shipping_label, send_order_message)", async () => {
     const orderId = await soldOrder();
     const cases: Array<{ name: string; args: Record<string, unknown> }> = [
       { name: "confirm_payment", args: { order_id: orderId, note: "cash received" } },
       { name: "record_tracking", args: { order_id: orderId, carrier: "DHL", tracking_code: "TRACK9" } },
+      { name: "buy_shipping_label", args: { order_id: orderId, from_address: { name: "S", line1: "1 Main St", city: "Milan", postal_code: "20122", country: "IT" }, weight_grams: 900 } },
       { name: "send_order_message", args: { order_id: orderId, body: "shipping tomorrow morning" } },
     ];
     for (const c of cases) {
@@ -704,6 +732,39 @@ describe.skipIf(!available)("chat buyer order writes behind the confirm gate (DB
     expect(row.rows[0].status).toBe("label_issued");
     expect(row.rows[0].carrier).toBe("DPD");
     expect(row.rows[0].tracking_code).toBe("XYZ123");
+  });
+
+  it("buy_shipping_label binds its args into the label op and executes via chat-confirm (degraded mode relayed verbatim)", async () => {
+    const orderId = await soldOrder();
+    // Off-platform orders need the buyer's address consent before a label
+    // can be bought — model the real flow, then expect the degraded error.
+    await shareShippingAddress(orderId, sellerB.id);
+    // Degraded deployment (no EASYPOST_API_KEY in tests) still needs a usable
+    // parcel weight to get that far: seed one on the listing.
+    await client.query("UPDATE items SET weight_grams = 900 WHERE id = (SELECT item_id FROM orders WHERE id = $1)", [orderId]);
+    const fromAddress = { name: "S", line1: "1 Main St", line2: "Scala B", city: "Milan", postal_code: "20122", country: "IT", phone: "+39 02 1234567" };
+    mockLlm([toolCallMsg("c1", "buy_shipping_label", { order_id: orderId, from_address: fromAddress, weight_grams: 900, carrier_preference: "DHL" }), FINAL]);
+    const turn = await chatTurn([], "buy a label", sellerA);
+    expect(turn.confirm).toBeDefined();
+    expect(turn.confirm!.summary).toContain("preferred carrier: DHL");
+    expect(decodeOrderPayload(turn.confirm!.op)).toEqual({
+      from_address: fromAddress,
+      weight_grams: 900,
+      carrier_preference: "DHL",
+    });
+    // The order id rides as the token's subject, not in the payload.
+    // Nothing bought before confirmation: still sold, no label snapshot.
+    const before = await client.query("SELECT status, label_purchase FROM orders WHERE id = $1", [orderId]);
+    expect(before.rows[0].status).toBe("sold");
+    expect(before.rows[0].label_purchase).toBeNull();
+    const done = await chatTurn([], `chat-confirm ${turn.confirm!.token}`, sellerA);
+    // The service's degraded-mode error is user-facing and relayed verbatim
+    // (spec §Parity statement: the assistant says plainly what it can't do).
+    expect(done.text).toContain("Shipping labels are not configured on this deployment");
+    expect(done.text).toContain("record_tracking");
+    const after = await client.query("SELECT status, label_purchase FROM orders WHERE id = $1", [orderId]);
+    expect(after.rows[0].status).toBe("sold");
+    expect(after.rows[0].label_purchase).toBeNull();
   });
 
   it("send_order_message executes via chat-confirm and list_order_messages reads it back identically to MCP", async () => {

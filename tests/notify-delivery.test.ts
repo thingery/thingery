@@ -6,7 +6,7 @@
 // The outbox transitions asserted here are exactly plan §2.2:
 //   pending → sent | skipped{no_address,not_verified} | pending(backoff) | dead
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
 import crypto from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -157,6 +157,14 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
     await db.connect();
     const schema = readFileSync(path.resolve(__dirname, "..", "db", "schema.sql"), "utf8");
     await db.query(schema);
+  });
+  beforeEach(async () => {
+    // Hermetic reset (THI-993 PR 4): this file asserts exact provider ids on
+    // rows it seeds itself, but the delivery sweep claims ALL due rows
+    // (created_at ASC) — a due pending row left by an earlier test file
+    // steals the single scripted mailer response and the assertion reads a
+    // null provider id. Files share one DB; clean slate per test.
+    await db.query("TRUNCATE email_outbox, notifications RESTART IDENTITY CASCADE");
   });
   afterAll(async () => {
     await db.end().catch(() => {});

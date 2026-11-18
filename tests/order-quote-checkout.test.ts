@@ -12,7 +12,7 @@ import pg from "pg";
 import type Stripe from "stripe";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { pool } from "../src/db.js";
-import { createOrder } from "../src/order-flow.js";
+import { createOrder, listOrdersForAccount } from "../src/order-flow.js";
 import { setStripeForTests } from "../src/stripe.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -238,5 +238,21 @@ describe.skipIf(!available)("createOrder buyer-paid shipping quote (DB)", () => 
     const ev = await db.query("SELECT count(*)::int AS c FROM order_events WHERE event_type LIKE 'label_quote%' AND order_id = $1", [order.id]);
     expect(ev.rows[0].c).toBe(0);
     expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+  });
+
+  it("§9 my_orders carries the quote so the list projection matches get_order (B1 regression)", async () => {
+    easypostOk();
+    const itemId = await seed({ defaultAddress: true });
+    const { order } = await createOrder({
+      buyerId, itemId, shippingAddress: BUYER_ADDRESS, paymentMode: "stripe",
+    });
+    expect(order.label_quote).not.toBeNull();
+    const { orders } = await listOrdersForAccount({ accountId: buyerId, role: "buyer", limit: 10 });
+    expect(orders).toHaveLength(1);
+    // Without label_quote on the list row, orderToPublic would project
+    // flat/0 and drop the label line from total_price_cents (Security B1).
+    expect(orders[0].label_quote).toMatchObject({ amount_cents: 733 });
+    expect(orders[0].shipping_price_cents).toBe(0);
+    expect(orders[0].price_cents + orders[0].shipping_price_cents + (orders[0].label_quote?.amount_cents ?? 0)).toBe(10733);
   });
 });

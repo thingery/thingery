@@ -286,7 +286,7 @@ const ROLE_PREDICATES: Record<OrderRole, string> = {
 export type OrderListEntry = Pick<
   OrderRow,
   | "id" | "item_id" | "status" | "payment_mode" | "price_cents" | "shipping_price_cents" | "currency"
-  | "fulfillment" | "carrier" | "tracking_code" | "label_url" | "payment_deadline" | "dispute_deadline"
+  | "fulfillment" | "carrier" | "tracking_code" | "label_url" | "label_quote" | "payment_deadline" | "dispute_deadline"
   | "status_changed_at" | "created_at" | "updated_at"
 > & { item_title: string };
 
@@ -309,7 +309,7 @@ export async function listOrdersForAccount(params: {
   const limit = Math.min(Math.max(params.limit, 1), MAX_ORDER_LIST_LIMIT);
   const { rows } = await pool.query<OrderListEntry>(
     `SELECT o.id, o.item_id, o.status, o.payment_mode, o.price_cents, o.shipping_price_cents, o.currency,
-            o.fulfillment, o.carrier, o.tracking_code, o.label_url, o.payment_deadline, o.dispute_deadline,
+            o.fulfillment, o.carrier, o.tracking_code, o.label_url, o.label_quote, o.payment_deadline, o.dispute_deadline,
             o.status_changed_at, o.created_at, o.updated_at, i.title AS item_title
      FROM orders o JOIN items i ON i.id = o.item_id
      WHERE ${ROLE_PREDICATES[role]}

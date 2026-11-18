@@ -214,11 +214,16 @@ function parseRate(raw: unknown): EasyPostRate | null {
 
 /**
  * Creates a shipment and returns its quoted rates (no purchase happens
- * here). Returns null in degraded mode (key unset).
+ * here). Returns null in degraded mode (key unset). `signal` bounds the
+ * HTTP call — order-time quoting passes AbortSignal.timeout(
+ * SHIPPING_QUOTE_TIMEOUT_MS) (spec docs/specs/buyer-paid-shipping.md §2,
+ * carry-forward C3) so a hanging provider can never hold the caller's
+ * transaction; a timeout rejects (callers treat it as flat-mode fallback).
  */
 export async function createEasyPostShipment(
   input: CreateEasyPostShipmentInput,
   opts: EasyPostOptions = {},
+  signal?: AbortSignal,
 ): Promise<EasyPostShipment | null> {
   const apiKey = opts.apiKey ?? envValue("EASYPOST_API_KEY");
   if (apiKey === undefined) return null;
@@ -247,6 +252,7 @@ export async function createEasyPostShipment(
     },
     opts,
     "shipment creation",
+    signal,
   );
   const id = typeof body.id === "string" ? body.id : undefined;
   if (!id) throw new Error("easypost shipment creation failed: no shipment id");

@@ -92,6 +92,7 @@ import { createItemReport, ItemReportError, MAX_MOTIVATION_CHARS, MIN_MOTIVATION
 import {
   editReview,
   getOrderReview,
+  listSellerReviews,
   MAX_REVIEW_TEXT_CHARS,
   postReview,
   ReviewError,
@@ -1453,6 +1454,47 @@ api.get("/orders/:id/review", asyncHandler(async (req: Request, res: Response) =
   } catch (err) {
     if (err instanceof ReviewError) {
       reviewErrorResponse(err, res);
+      return;
+    }
+    throw err;
+  }
+}));
+
+// --- order reviews, public read (spec docs/specs/order-reviews.md, PR 2) ---
+// The profile list + item-card summary surface: anonymous, published-only,
+// cacheable public data (a short window — the write side is 30-day-editable,
+// so staleness is bounded and harmless). The capped summary (K), the
+// tie-broken cursor and the privacy shape all live in src/reviews.ts
+// listSellerReviews — the one shared function the get_seller_reviews MCP
+// tool also calls, so the two surfaces cannot drift.
+
+const sellerReviewsQuerySchema = z.object({
+  limit: z.coerce
+    .number()
+    .int("limit must be a whole number.")
+    .min(0, "limit must be between 0 and 50.")
+    .max(50, "limit must be between 0 and 50.")
+    .default(10),
+  before: z.string().max(200).optional(),
+});
+
+api.get("/sellers/:id/reviews", asyncHandler(async (req: Request, res: Response) => {
+  const parsed = sellerReviewsQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid query." });
+    return;
+  }
+  try {
+    const body = await listSellerReviews({
+      sellerId: req.params.id,
+      limit: parsed.data.limit,
+      before: parsed.data.before,
+    });
+    res.set("Cache-Control", "public, max-age=60");
+    res.json(body);
+  } catch (err) {
+    if (err instanceof ReviewError) {
+      reviewErrorResponse(err, res); // not_found → 404, validation → 400
       return;
     }
     throw err;

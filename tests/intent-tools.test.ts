@@ -15,6 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { afterEach, describe, expect, it, beforeAll, afterAll, vi } from "vitest";
+import { z } from "zod";
 import { registerTools, PROTECTED_TOOLS } from "../src/tools.js";
 import type { SellerRow } from "../src/db.js";
 
@@ -31,7 +32,17 @@ type Handler = (args: Record<string, unknown>) => Promise<unknown>;
 function captureTools(seller: SellerRow | null): Map<string, Handler> {
   const handlers = new Map<string, Handler>();
   registerTools(
-    { registerTool(name: string, _config: unknown, handler: Handler) { handlers.set(name, handler); } },
+    {
+      registerTool(name: string, config: { inputSchema: z.ZodRawShape }, handler: Handler) {
+        // SDK parity (THI-958): parse args through the tool's zod shape
+        // (applying schema defaults) before the handler runs, like the
+        // real server — handlers now trust their parsed args type.
+        handlers.set(
+          name,
+          async (args) => handler(z.object(config.inputSchema).parse(args) as Record<string, unknown>),
+        );
+      },
+    },
     { seller },
   );
   return handlers;
@@ -113,8 +124,17 @@ describe.skipIf(!available)("intent tools (DB)", () => {
 
   it("rejects anonymous callers with unauthorized", async () => {
     const anon = captureTools(null);
+    // Schema-valid args per tool (THI-958): the real SDK parses args before
+    // the handler runs, so the handler's own auth check only fires when the
+    // call parses — mirror that here.
+    const anonArgs: Record<string, Record<string, unknown>> = {
+      save_intent: { q: "anything at all" },
+      my_intents: {},
+      update_intent: { intent_id: randomUUID(), muted: true },
+      delete_intent: { intent_id: randomUUID() },
+    };
     for (const name of ["save_intent", "my_intents", "update_intent", "delete_intent"]) {
-      const r = await call(anon, name, name === "save_intent" ? { q: "anything at all" } : {});
+      const r = await call(anon, name, anonArgs[name]);
       expect(r.isError).toBe(true);
       expect(r.body.code).toBe("unauthorized");
     }

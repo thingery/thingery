@@ -5,6 +5,7 @@
 
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { pool, type SellerRow } from "../src/db.js";
 import {
   MAX_ACTIVE_LISTINGS_PER_SELLER,
@@ -34,8 +35,14 @@ function tools(seller: SellerRow): Map<string, { description?: string; handler: 
   const registered = new Map<string, { description?: string; handler: Handler }>();
   registerTools(
     {
-      registerTool(name: string, config: { description?: string }, handler: Handler) {
-        registered.set(name, { description: config.description, handler });
+      registerTool(name: string, config: { description?: string; inputSchema: z.ZodRawShape }, handler: Handler) {
+        // SDK parity (THI-958): parse args through the tool's zod shape
+        // (applying schema defaults) before the handler runs, like the
+        // real server — handlers now trust their parsed args type.
+        registered.set(name, {
+          description: config.description,
+          handler: async (args) => handler(z.object(config.inputSchema).parse(args) as Record<string, unknown>),
+        });
       },
     },
     { seller },

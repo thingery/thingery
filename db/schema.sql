@@ -453,6 +453,21 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_address_shared_at TIMESTAMP
 -- unchanged. bought_at (ISO UTC) is the A2 daily-budget aggregation key.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS label_purchase JSONB;
 -- {shipment_id, rate_id, carrier, service, cost_cents, currency, bought_at}
+-- Buyer-paid shipping (spec docs/specs/buyer-paid-shipping.md, data model): the
+-- order-time label quote snapshot. Present only on label-quote-mode orders
+-- (Stripe + shippable + EasyPost configured + listing weight + seller default
+-- address + live EUR quote under the per-label cap, spec §1); NULL = flat
+-- mode and every pre-deploy order, which keep their exact current semantics.
+-- destination is the buyer address the quote was computed for — it equals
+-- orders.shipping_address at creation and is re-checked at label purchase
+-- (spec §5.3). line_refund_id / line_refunded_at are written once, when the
+-- labelrefund:{order_id} partial refund fires (spec §6) — the durable
+-- settle-awareness state the refund helper reads. No CHECK constraint, same
+-- as label_purchase (shape enforced in code where it is read).
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS label_quote JSONB;
+-- {shipment_id, rate_id, carrier, service, amount_cents, currency,
+--  weight_grams, dimensions_mm, origin{...}, destination{...}, quoted_at,
+--  line_refund_id?, line_refunded_at?}
 DO $$
 BEGIN
   -- Widen the status CHECK with 'completed' (off_platform terminal state, §11.2).
@@ -794,10 +809,53 @@ CREATE TABLE IF NOT EXISTS notify_watermarks (
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Order reviews (spec docs/specs/order-reviews.md). One review per order,
+-- ever (UNIQUE order_id): only the buyer of an order whose terminal state
+-- left the seller paid and the buyer keeping the item — completed
+-- (off_platform) / paid_out (stripe) — may post; eligibility is enforced in
+-- src/reviews.ts against those exact terminal states (they have no outgoing
+-- transitions, so an order can never leave eligibility after a review).
+-- seller_id/buyer_id/item_id are server-side snapshots of the order row
+-- (INSERT…SELECT FROM orders JOIN items — never client-supplied), written
+-- once at post time: the profile aggregate reads one partial index scan and
+-- the display survives item soft-deletion and later edits.
+-- buyer_first_name/item_title are display snapshots for the public meta
+-- line ("Luca · Nov 2026 · Film camera"): first token of the buyer's
+-- display_name (literal 'Buyer' fallback when empty after trim), the item
+-- title; both CHECKed to the lengths the public payload renders. status:
+-- published | hidden (moderation; hidden rows are invisible to the public
+-- list, count and average — the partial index below serves all three).
+-- ON DELETE CASCADE everywhere: reviews are attached data, not archives.
+-- Sits above `reports` because reports.target_review_id references it
+-- (order-reviews spec PR 3).
+CREATE TABLE IF NOT EXISTS order_reviews (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id         UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  seller_id        UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,  -- snapshot of orders.seller_id
+  buyer_id         UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,  -- author; snapshot of orders.buyer_id
+  item_id          UUID NOT NULL REFERENCES items(id) ON DELETE CASCADE,    -- for the meta line
+  rating           SMALLINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  text             TEXT CHECK (text IS NULL OR char_length(text) <= 500),
+  status           TEXT NOT NULL DEFAULT 'published'
+                   CHECK (status IN ('published','hidden')),
+  buyer_first_name TEXT NOT NULL CHECK (char_length(buyer_first_name) BETWEEN 1 AND 40),
+  item_title       TEXT NOT NULL CHECK (char_length(item_title) BETWEEN 3 AND 200),
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),  -- 30-day edit-window anchor; never moved
+  edited_at        TIMESTAMPTZ,
+  UNIQUE (order_id)                                     -- one review per order, ever
+);
+-- Public seller profile list + the count/average aggregate: published rows
+-- newest-first per seller. Hidden rows are excluded from the index itself.
+CREATE INDEX IF NOT EXISTS order_reviews_seller_idx
+  ON order_reviews (seller_id, created_at DESC) WHERE status = 'published';
+
 -- Item reports (spec docs/specs/item-reports.md, THI-788 step 2 / THI-617
--- MVP): a signed-in reporter flags one item with a canned cause + required
--- motivation; every row is one board-triage unit. Dedupe is durable:
--- UNIQUE (reporter, item) — one report per reporter per item, ever.
+-- MVP; widened by order-reviews spec PR 3): a signed-in reporter flags one
+-- target — an item, or an order review — with a canned cause + required
+-- motivation; every row is one board-triage unit. Exactly one target per
+-- row (reports_one_target_check); dedupe is durable per target kind: one
+-- partial UNIQUE per (reporter, target) — a table-level UNIQUE cannot
+-- express "one of two nullable targets" because NULLs are distinct there.
 -- State machine: open → resolved | dismissed; v1 only INSERTs (open), the
 -- CHECK makes illegal values unrepresentable and no v1 path mutates status.
 -- board_issue_ref is the external triage task ref, NULL until the
@@ -805,14 +863,88 @@ CREATE TABLE IF NOT EXISTS notify_watermarks (
 CREATE TABLE IF NOT EXISTS reports (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   reporter_account_id UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
-  target_item_id      UUID NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  target_item_id      UUID REFERENCES items(id) ON DELETE CASCADE,
+  target_review_id    UUID REFERENCES order_reviews(id) ON DELETE CASCADE,
   reason              TEXT NOT NULL CHECK (reason IN ('explicit_images','scam_fraud','other')),
   motivation          TEXT NOT NULL CHECK (char_length(motivation) BETWEEN 10 AND 1000),
   status              TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved','dismissed')),
   board_issue_ref     TEXT,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (reporter_account_id, target_item_id)
+  CONSTRAINT reports_one_target_check CHECK (num_nonnulls(target_item_id, target_review_id) = 1)
 );
--- Triage read path (spec): all reports for an item, newest first.
+
+-- Reports widening replay (order-reviews spec PR 3; the items_status_check
+-- pattern): databases created before the widening carry target_item_id
+-- NOT NULL, no target_review_id, and the two-column table UNIQUE
+-- (reporter_account_id, target_item_id). These converge an existing
+-- database to the canonical shape above; every step is idempotent and
+-- skipped (or a no-op) on fresh and already-widened databases. Expand-only:
+-- no destructive step, item reports and their endpoint are unaffected.
+-- Runs before the indexes below so the referenced columns exist on legacy
+-- databases too.
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS target_review_id UUID REFERENCES order_reviews(id) ON DELETE CASCADE;
+ALTER TABLE reports ALTER COLUMN target_item_id DROP NOT NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'reports_one_target_check'
+      AND conrelid = 'reports'::regclass
+  ) THEN
+    ALTER TABLE reports ADD CONSTRAINT reports_one_target_check
+      CHECK (num_nonnulls(target_item_id, target_review_id) = 1);
+  END IF;
+END $$;
+ALTER TABLE reports DROP CONSTRAINT IF EXISTS reports_reporter_account_id_target_item_id_key;
+
+-- One report per reporter per target, ever — partial per kind (see above).
+CREATE UNIQUE INDEX IF NOT EXISTS reports_reporter_item_unique
+  ON reports (reporter_account_id, target_item_id) WHERE target_item_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS reports_reporter_review_unique
+  ON reports (reporter_account_id, target_review_id) WHERE target_review_id IS NOT NULL;
+-- Triage read path (spec): all reports for a target, newest first.
 CREATE INDEX IF NOT EXISTS reports_target_created_idx
   ON reports (target_item_id, created_at);
+CREATE INDEX IF NOT EXISTS reports_review_created_idx
+  ON reports (target_review_id, created_at);
+
+-- Saved shipping addresses (spec docs/specs/saved-addresses.md, rollout
+-- step 1). One store per account (the sellers table holds buyers and
+-- sellers alike): at most 10 rows per account — enforced in
+-- src/addresses.ts with a race-safe single-statement INSERT…SELECT —
+-- owner-only reads, hard delete, and ON DELETE CASCADE so account deletion
+-- (when it exists) removes them. Orders keep their own snapshot in
+-- orders.shipping_address: an edit here never rewrites a past order.
+-- PII minimization (docs/security.md): no address content ever reaches
+-- logs, security events, emails or notifications — ids and statuses only.
+-- `verification` is the advisory EasyPost result (rollout step 4): status
+-- verified | suggested | unverified | not_checked, default not_checked; the
+-- CHECK makes illegal statuses unrepresentable, and the raw provider
+-- response is never stored. `country` is ISO 3166-1 alpha-2, validated in
+-- code (src/countries.ts) — CHAR(2) is only the shape, not the check.
+CREATE TABLE IF NOT EXISTS account_addresses (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id    UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+  label         TEXT NOT NULL CHECK (char_length(label) BETWEEN 1 AND 40),  -- "Home", "Work"
+  name          TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 120),
+  line1         TEXT NOT NULL CHECK (char_length(line1) BETWEEN 1 AND 200),
+  line2         TEXT CHECK (line2 IS NULL OR char_length(line2) <= 200),
+  city          TEXT NOT NULL CHECK (char_length(city) BETWEEN 1 AND 80),
+  postal_code   TEXT NOT NULL CHECK (char_length(postal_code) BETWEEN 1 AND 20),
+  country       CHAR(2) NOT NULL,
+  is_default    BOOLEAN NOT NULL DEFAULT false,
+  verification  JSONB NOT NULL DEFAULT '{"status":"not_checked"}'::jsonb
+                CHECK (verification->>'status' IN ('verified','suggested','unverified','not_checked')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at  TIMESTAMPTZ
+);
+-- Owner listing (list_addresses summary + the web settings screen).
+CREATE INDEX IF NOT EXISTS account_addresses_account_idx
+  ON account_addresses (account_id, created_at);
+-- At most one default per account. Setting a default clears the previous
+-- one in the same transaction (src/addresses.ts, review note N5) so the
+-- partial unique index can never reject a legal write with a 500.
+CREATE UNIQUE INDEX IF NOT EXISTS account_addresses_one_default
+  ON account_addresses (account_id) WHERE is_default;
+

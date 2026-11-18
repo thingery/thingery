@@ -44,9 +44,9 @@ export async function planAccountNotification(p: {
     }
     await client.query(
       `INSERT INTO email_outbox (notification_id, to_email, subject, template, payload, dedupe_key)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $1)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
        ON CONFLICT (dedupe_key) DO NOTHING`,
-      [notif.rows[0].id, p.toEmail ?? "", p.subject, templateKeyFor(p.eventType), JSON.stringify(p.payload)],
+      [notif.rows[0].id, p.toEmail ?? "", p.subject, templateKeyFor(p.eventType), JSON.stringify(p.payload), `${notif.rows[0].id}`],
     );
     if (own) await client.query("COMMIT");
     return notif.rows[0].id;

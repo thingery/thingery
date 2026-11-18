@@ -31,6 +31,7 @@ It is maintained by the Security role; changes go through PR like everything els
 | Uploaded images (`/app/uploads`) | Listing content | Disk exhaustion, illegal content hosting |
 | Infrastructure secrets (`SESSION_SECRET`, `POSTGRES_PASSWORD`, `EMBED_API_KEY`, `LLM_API_KEY`) | Trust anchors + cost-bearing credentials | Session forgery, DB access, provider bill |
 | Platform trust (spam-free, non-malicious listings) | Why agents and humans use Thingery at all | Slow death by spam; agent users poisoned |
+| Saved shipping addresses (`account_addresses`) | PII: recipient name, street, city, postal code — owner-scoped | Address disclosure beyond the owner (leak = PII breach) |
 
 **Actors:** anonymous buyers (browser + agents), authenticated sellers (MCP clients with
 API keys, browsers with sessions), the chat assistant (server-side LLM agent acting for a
@@ -338,8 +339,18 @@ phishing concerns — threat-model them before building, not after.
   the Security agent; author agents push as `isaac1972` and cannot reach the
   credential, so reviewer ≠ author holds by credential reach, not convention. Merge
   flow: author agent opens PR → CI green → independent reviewer approves → author
-  merges. The "never push to main" convention is enforced by GitHub, not just
-  discipline. R1 in §9 is struck (gate live).
+  merges. **Approve-last discipline** (2026-11-17, PR #316, THI-957): push branch
+  updates *before* requesting approval, never push between approval and merge, and
+  the reviewer pins the exact head SHA in the review body — a mismatch between that
+  verified SHA and the review's `commit_id` invalidates the approval (re-request
+  review). This closes a race neither branch-protection setting catches: a push
+  landing seconds *before* the approval is submitted attaches the approval to the
+  new head with **no dismissal event** (`dismiss_stale_reviews` only reacts to pushes
+  after approval) while the approval's verification record still names the older,
+  actually-verified SHA, and `require_last_push_approval` checks submission time, not
+  verification time — observed live on PR #316, where an approval verifying 0941cc2
+  silently covered c6c5b47. The "never push to main" convention is enforced by
+  GitHub, not just discipline. R1 in §9 is struck (gate live).
   `deploy` is intentionally not a required check (it runs push-to-main only and never on
   PRs).
 - `npm audit --omit=dev` on the current lockfile: **0 production vulnerabilities**.
@@ -356,6 +367,11 @@ phishing concerns — threat-model them before building, not after.
   replay-safe); email outbox with verified-address gate, rate caps, backoff +
   dead-letter; provider adapter = Resend, channel off unless `NOTIFY_EMAIL_ENABLED=true`
   (default **false** — in-app only until enabled). Privacy and retention statement: §4a.
+- Saved shipping addresses with advisory EasyPost delivery verification (spec
+  docs/specs/saved-addresses.md): owner-scoped `account_addresses` store; MCP tools
+  return summaries only (name, street and postal code never reach a model provider);
+  30 writes/hour and ~20 verification checks/day per account; verification is
+  advisory and never blocks a save. Privacy & processor statement: §4b.
 
 **Missing (each maps to a backlog item below):**
 
@@ -424,6 +440,42 @@ delivered message follows the provider's own retention, not ours.
 off by default: no provider key configured → no mail leaves the host, and no processor
 relationship is created. Operators who enable it choose the provider and from-address
 and carry the corresponding obligations.
+
+## 4b. Saved shipping addresses — privacy & processor statement
+
+Saved addresses (spec `docs/specs/saved-addresses.md`; table `account_addresses`) are
+personal data: recipient name, street, city, postal code, country, and a user-chosen
+label. Saving is always an explicit act (a confirmed chat write or a web form), never a
+side effect of ordering; the address is processed to perform the sale it is used for
+(GDPR art. 6(1)(b)).
+
+**What is stored and who can read it — live.** One row per saved address, owned by the
+account and deleted with it (`ON DELETE CASCADE`). Full rows are readable by the owner
+only: the web settings routes (`/api/me/addresses` — session-authenticated, owner-scoped,
+`no-store`). Every other surface sees less: the MCP address tools return summaries only
+(label, city, country, default flag, verification status) — name, street and postal code
+never reach a model provider or the chat history. Using a saved address copies it into
+the order's own snapshot, which keeps the order's existing access rules (the order's
+parties only; on off-platform orders the seller sees it only after the buyer agrees).
+Addresses never appear in logs, `security_events` (address write events carry ids and
+statuses only), emails, or notifications.
+
+**EasyPost as a processor — live, only when the operator configures `EASYPOST_API_KEY`.**
+Saving or editing an address asks EasyPost to run its delivery check once
+(`verifyEasyPostAddress`, `src/easypost.ts`): the full typed address is sent to EasyPost
+**before any label exists**, and possibly for an address never shipped to. Label purchase
+already sent order addresses to EasyPost — verification widens that to save time. The
+check is advisory (it never blocks or rejects a save) and runs at most about 20 times per
+account per day (token-bucket average rate; over the ceiling the status is simply
+`not_checked`). Only the status, the time of the check and a length-capped suggested
+correction are stored — never the provider's raw response — and the correction text is
+never returned through MCP tools. Self-hosters without the key never send anything and
+see `not_checked` only; no processor relationship is created.
+
+**Deletion — live, with the backup caveat.** Deleting an address is a hard delete;
+deleting the account removes all of its addresses. The encrypted nightly database
+backups are point-in-time copies: a deleted address persists in existing backups until
+they age out of the retention rotation. Erasure requests must account for that window.
 
 ## 5. Secrets hygiene policy
 

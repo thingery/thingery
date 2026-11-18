@@ -22,7 +22,7 @@ export type ContactScrubRule =
   | "service_word"
   | "contact_link";
 
-export type ScreenedField = "title" | "notes" | "reference_images";
+export type ScreenedField = "title" | "notes" | "reference_images" | "review";
 
 export interface ContactScrubHit {
   rule: ContactScrubRule;
@@ -91,6 +91,19 @@ function screenText(text: string, field: ScreenedField): ContactScrubHit | null 
  *  before service words so the most specific rule names the problem. */
 export function screenContactInfo(fields: { title: string; notes: string }): ContactScrubHit | null {
   return screenText(fields.title, "title") ?? screenText(fields.notes, "notes");
+}
+
+// Order reviews (spec docs/specs/order-reviews.md): review text is public
+// buyer-authored content — the same off-platform-extraction vector as wanted
+// listings — so it goes through the same reject-never-rewrite rules on POST
+// and PATCH alike (an edit is as much a publish as the original post). The
+// rejection message is owned by src/reviews.ts and is fully generic: it
+// never names which rule tripped, so a hit cannot be used as an oracle to
+// evade the screening one rule at a time.
+
+/** Screens one review text; returns the first hit or null. */
+export function screenReviewText(text: string): ContactScrubHit | null {
+  return screenText(text, "review");
 }
 
 // THI-442 rider W1: reference_images are http(s) URLs by construction, so

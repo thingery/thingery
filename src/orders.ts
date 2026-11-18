@@ -17,6 +17,7 @@
 
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
+import { emitReviewPairAnomalyIfCrossing, REVIEW_ELIGIBLE_STATUSES } from "./reviews.js";
 
 export type OrderStatus =
   | "pending"
@@ -70,6 +71,32 @@ export const ORDER_STATUSES: readonly OrderStatus[] = [
 
 export const TERMINAL_STATUSES: readonly OrderStatus[] = [
   "refunded", "paid_out", "cancelled", "completed",
+];
+
+/** Order statuses that count as "a live order on the item" — the exact set of
+ *  the `one_live_order_per_item` partial unique index (db/schema.sql). The
+ *  item-status guard in updateItem (ADR 0010) reuses it for the
+ *  active → stored rejection: an item with a live order must stay buyable.
+ *  Keep the two lists in lockstep with the schema index. */
+export const LIVE_ORDER_ITEM_STATUSES: readonly OrderStatus[] = [
+  "pending", "sold", "label_issued", "in_transit", "delivered", "disputed",
+  "refunding", "payout_pending",
+];
+
+/** Order statuses that count as "reached payment" for the public seller
+ *  summary's sold_count (THI-923 spec v2, F3 single source of truth). The
+ *  exact 8-status set, defined once here and consumed by the SQL builder
+ *  (src/sellers.ts), the test matrix (tests/seller-summary.test.ts) and the
+ *  tool docs — the literal list is never restated (drift = buyers misled
+ *  about who actually sells). Named exclusions, so every one of the 12
+ *  order statuses is accounted for: pending (no payment yet), cancelled
+ *  (never was), refunding + refunded (sale unwinding / unwound). Disputed
+ *  is included: "reached payment" is approximated for it (a chargeback can
+ *  reach disputed from pending, never paid) — accepted for a public stat.
+ *  Sealed matrix per spec v2; future statuses must be classified explicitly. */
+export const SOLD_COUNT_STATUSES: readonly OrderStatus[] = [
+  "sold", "label_issued", "in_transit", "delivered", "disputed",
+  "payout_pending", "paid_out", "completed",
 ];
 
 const NON_TERMINAL_EXCEPT_REFUNDING: readonly OrderStatus[] = [
@@ -346,11 +373,34 @@ export async function applyTransition(input: ApplyTransitionInput): Promise<Orde
     }
   };
 
-  if (input.client) return run(input.client, false);
-  const db = await pool.connect();
-  try {
-    return await run(db, true);
-  } finally {
-    db.release();
+  let next: OrderRow;
+  if (input.client) {
+    next = await run(input.client, false);
+  } else {
+    const db = await pool.connect();
+    try {
+      next = await run(db, true);
+    } finally {
+      db.release();
+    }
   }
+
+  // Order-reviews spec (docs/specs/order-reviews.md, farming defense b):
+  // after a successful transition INTO a review-eligible terminal state,
+  // count the buyer→seller pair's terminal orders and emit the one-shot
+  // `review_pair_anomaly` signal when the count crosses N. Best-effort by
+  // contract — a signal must never fail or block an order transition — and
+  // it reads committed data, so for caller-owned transactions (none target
+  // these states today) the count can lag one order; monotonicity still
+  // makes the crossing fire exactly once.
+  if (REVIEW_ELIGIBLE_STATUSES.includes(next.status)) {
+    try {
+      await emitReviewPairAnomalyIfCrossing(next.buyer_id, next.seller_id);
+    } catch (err) {
+      console.warn(
+        `[orders] review pair anomaly check failed for order ${next.id}: ${(err as Error).message}`,
+      );
+    }
+  }
+  return next;
 }

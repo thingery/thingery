@@ -117,6 +117,8 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   // THI-567: order messaging tools join the funnel events.
   "send_order_message",
   "list_order_messages",
+  // THI-780: notification inbox read joins the funnel events.
+  "list_notifications",
   // Buyer-alert intent tools (THI-360 spec rev 2, PR 2) — counted in the
   // funnel events instead of falling into the _unknown bucket.
   "save_intent",
@@ -133,12 +135,21 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   // THI-814 (P1-2 draft_listing extraction): joins the funnel set — the
   // extraction spend is measurable per call like every other tool.
   "draft_listing",
+  // THI-923: public seller summary (item-page seller card).
+  "get_seller_summary",
+  // THI-941 (order reviews PR 2): public seller reviews read.
+  "get_seller_reviews",
   // The buyer side of the wanted board.
   "create_wanted",
   "my_wanted",
   "update_wanted",
   "expire_wanted",
   "renew_wanted",
+  // Saved addresses (spec docs/specs/saved-addresses.md, step 2): the
+  // account address book joins the funnel events.
+  "list_addresses",
+  "save_address",
+  "delete_address",
   // First-party session-only account settings (SESSION_ONLY_TOOLS).
   "list_connected_apps",
   "revoke_connected_app",

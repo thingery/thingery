@@ -19,10 +19,15 @@
 
 import type { ItemReport } from "./reports.js";
 
-/** Report fields the notification needs (kept narrow for testability). */
+/** Report fields the notification needs (kept narrow for testability).
+ *  Exactly one of itemId / reviewId is set — the reports XOR target CHECK
+ *  guarantees it at the source (order-reviews spec PR 3); a caller that
+ *  passes neither gets an unusable task body, which the operator notices
+ *  immediately. */
 export interface ReportReviewInput {
   report: Pick<ItemReport, "id">;
-  itemId: string;
+  itemId?: string;
+  reviewId?: string;
   reason: string;
   motivation: string;
   reporterAccountId: string;
@@ -35,6 +40,9 @@ export interface ReportReviewConfig {
   assigneeId?: string;
   /** e.g. "https://example.com/item/{id}" — {id} is replaced with the item id. */
   itemUrlTemplate?: string;
+  /** e.g. "https://example.com/review/{id}" — the review-report analog
+   *  (order-reviews spec PR 3); falls back to `review <id>` when unset. */
+  reviewUrlTemplate?: string;
 }
 
 /** Reads the deployment config; null ⇒ notification disabled (spec). */
@@ -47,6 +55,7 @@ export function reportReviewConfig(): ReportReviewConfig | null {
     apiToken,
     assigneeId: process.env.REPORT_REVIEW_ASSIGNEE_ID || undefined,
     itemUrlTemplate: process.env.REPORT_REVIEW_ITEM_URL_TEMPLATE || undefined,
+    reviewUrlTemplate: process.env.REPORT_REVIEW_REVIEW_URL_TEMPLATE || undefined,
   };
 }
 
@@ -59,13 +68,20 @@ function truncate(s: string, max: number): string {
 }
 
 export function reportReviewDescription(input: ReportReviewInput, config: ReportReviewConfig): string {
-  const itemRef = config.itemUrlTemplate
-    ? config.itemUrlTemplate.replace("{id}", input.itemId)
-    : `item ${input.itemId}`;
+  // One flow, one operator inbox (order-reviews spec PR 3): review reports
+  // ride the same task shape, only the target line differs.
+  const isReview = input.reviewId !== undefined;
+  const targetRef = isReview
+    ? (config.reviewUrlTemplate
+        ? config.reviewUrlTemplate.replace("{id}", input.reviewId as string)
+        : `review ${input.reviewId}`)
+    : (config.itemUrlTemplate
+        ? config.itemUrlTemplate.replace("{id}", input.itemId as string)
+        : `item ${input.itemId}`);
   return [
-    "## Item report",
+    isReview ? "## Review report" : "## Item report",
     "",
-    `- Item: ${itemRef}`,
+    `- ${isReview ? "Review" : "Item"}: ${targetRef}`,
     `- Reason: ${input.reason}`,
     `- Reporter account: ${input.reporterAccountId}`,
     `- Reported at: ${input.createdAt.toISOString()}`,
@@ -88,8 +104,10 @@ export async function createReportReviewTask(
   input: ReportReviewInput,
   config: ReportReviewConfig,
 ): Promise<string | null> {
+  const targetKind = input.reviewId !== undefined ? "review" : "item";
+  const targetId = input.reviewId ?? input.itemId ?? "?";
   const body = {
-    title: `Board review: item ${input.itemId} — ${input.reason}`,
+    title: `Board review: ${targetKind} ${targetId} — ${input.reason}`,
     description: reportReviewDescription(input, config),
     ...(config.assigneeId ? { assigneeAgentId: config.assigneeId } : {}),
     idempotencyKey: `report-review:${input.report.id}`,

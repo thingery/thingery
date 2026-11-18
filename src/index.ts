@@ -16,10 +16,12 @@ import { mountApiRoutes } from "./routes.js";
 import { mountOpenaiAppsChallenge } from "./openai-apps-challenge.js";
 import { stripeWebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
+import { resendWebhookRouter } from "./webhooks-resend.js";
 import { logConfigBootReport, notifyConfig, orderFlowConfig } from "./config.js";
 import { startSweepScheduler } from "./orders-sweep.js";
 import { startNotifyFanoutTimer } from "./notify/fanout.js";
 import { startNotifyDeliveryTimer } from "./notify/delivery.js";
+import { startNotifyDigestTimer } from "./notify/digest.js";
 import { buildMailer } from "./mailer.js";
 import { statsHandler } from "./stats.js";
 import { homeSearchHandler } from "./home-search.js";
@@ -104,6 +106,12 @@ function runHttp(): void {
   // Carrier webhook (spec THI-3 §4.3/§5): same raw-body-before-JSON
   // constraint; fail-closed 503 stub until EASYPOST_WEBHOOK_SECRET is set.
   app.use(carrierWebhookRouter(cfg));
+
+  // Resend bounce webhook (THI-760 plan Phase 2 / THI-780): raw-body HMAC,
+  // fail-closed 503 stub until RESEND_WEBHOOK_SECRET is set — bounce →
+  // email_bounced_at + pending-outbox suppression (delivery sweep gates the
+  // rest). Config knob lives in notifyConfig, not OrderFlowConfig.
+  app.use(resendWebhookRouter());
 
   // Browser API (accounts + chat). /mcp above consumes the raw body stream,
   // so the JSON parser starts here and never touches MCP traffic.
@@ -200,6 +208,10 @@ function runHttp(): void {
     // Delivery sweep: walks email_outbox pending→sent|skipped|dead. Claims
     // nothing while NOTIFY_EMAIL_ENABLED=false (dark deploy — THI-760 §4).
     startNotifyDeliveryTimer(notifyConfig(), buildMailer());
+    // Digest sweep (THI-780 PR 2): opt-in daily/weekly digests planned as
+    // account-less outbox rows; hourly scan, dedupe key enforces at-most-once
+    // per recipient per period.
+    startNotifyDigestTimer(notifyConfig());
     console.log(`Thingery MCP server listening on http://localhost:${PORT}`);
     console.log(`  MCP endpoint:     http://localhost:${PORT}/mcp`);
     console.log(`  Health check:     http://localhost:${PORT}/healthz`);

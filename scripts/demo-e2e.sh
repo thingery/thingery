@@ -12,6 +12,8 @@
 #   5. add photo       tools/call add_item_image            → published, visible in feeds
 #   6. buyer query #2  tools/call search_items (anonymous)  → finds the item
 #   7. public page     GET /item/:id                        → 200, title + og:image present
+#   8. inventory       create_listing status:"stored"       → invisible to buyers,
+#                      update_listing stored ⇄ active       → zero-re-entry flip (ADR 0010)
 #
 # Every step is scriptable — no manual magic. Anonymous buyer queries carry no
 # credentials at all, proving search is public. Runs against any deployment:
@@ -125,11 +127,57 @@ grep -q "Nike Air Max 90" "/tmp/demo-page-$STAMP.html" && ok "page shows the ite
 grep -q "og:image" "/tmp/demo-page-$STAMP.html" && ok "page carries the photo (og:image)" || bad "page carries the photo (og:image)"
 rm -f "/tmp/demo-page-$STAMP.html"
 
+section "8 · inventory roundtrip — saved as stored, invisible, flipped to for-sale (ADR 0010)"
+STITLE="Demo inventory: Salomon XT-6, EU 42 ($STAMP)"
+R=$(mcp "$KEY" create_listing "{\"title\":\"$STITLE\",\"description\":\"Saved straight to private inventory — the seller is not selling this yet.\",\"category\":\"sneakers\",\"condition\":\"good\",\"price_cents\":4500,\"currency\":\"EUR\",\"shipping_tier\":\"parcel\",\"attributes\":{\"size_eu\":42},\"status\":\"stored\"}")
+SITEM=$(mcp_get "$R" '.item.id')
+assert_eq "created with status stored" "$(mcp_get "$R" '.item.status')" "stored"
+assert_eq "visible:false — inventory is never feed-visible" "$(mcp_get "$R" '.visible')" "false"
+log "        stored item: $SITEM"
+
+# The demo photo attaches while stored: uploading is not publishing — the
+# flip is (visibleInFeeds keeps status active as a term, so a stored item
+# with photos is still invisible).
+B64=$(base64 -i "$PHOTO" | tr -d '\n')
+R=$(mcp "$KEY" add_item_image "{\"item_id\":\"$SITEM\",\"image_base64\":\"data:image/jpeg;base64,$B64\",\"media_type\":\"image/jpeg\"}")
+assert_eq "photo added while stored" "$(mcp_get "$R" '.added')" "true"
+
+R=$(mcp "" search_items "{\"q\":\"salomon xt-6\",\"limit\":20}")
+FOUND_STORED=$(printf '%s' "$(sse_json "$R")" | jq -r ".result.content[0].text | fromjson | .results[]?.id // empty" | grep -c "^$SITEM$" || true)
+assert_eq "stored item absent from anonymous search" "$FOUND_STORED" "0"
+R=$(mcp "" get_item "{\"id\":\"$SITEM\"}")
+assert_eq "anonymous get_item: not_found" "$(err_code "$R")" "not_found"
+SPAGE=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/item/$SITEM")
+assert_eq "public page 404s stored items" "$SPAGE" "404"
+
+R=$(mcp "$KEY" my_listings "{\"status\":\"stored\",\"limit\":50}")
+MINE=$(printf '%s' "$(sse_json "$R")" | jq -r ".result.content[0].text | fromjson | .items[]?.id // empty" | grep -c "^$SITEM$" || true)
+assert_eq "owner sees it via my_listings status:stored" "$MINE" "1"
+
+R=$(mcp "$KEY" update_listing "{\"id\":\"$SITEM\",\"status\":\"active\"}")
+assert_eq "flip to for-sale: status active" "$(mcp_get "$R" '.item.status')" "active"
+R=$(mcp "" search_items "{\"q\":\"salomon xt-6\",\"limit\":20}")
+FOUND_LIVE=$(printf '%s' "$(sse_json "$R")" | jq -r ".result.content[0].text | fromjson | .results[]?.id // empty" | grep -c "^$SITEM$" || true)
+assert_eq "flipped item instantly queryable (zero re-entry)" "$FOUND_LIVE" "1"
+SPAGE=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/item/$SITEM")
+assert_eq "public page 200 once active" "$SPAGE" "200"
+
+R=$(mcp "$KEY" update_listing "{\"id\":\"$SITEM\",\"status\":\"stored\"}")
+assert_eq "flip back to inventory: status stored" "$(mcp_get "$R" '.item.status')" "stored"
+R=$(mcp "" search_items "{\"q\":\"salomon xt-6\",\"limit\":20}")
+FOUND_BACK=$(printf '%s' "$(sse_json "$R")" | jq -r ".result.content[0].text | fromjson | .results[]?.id // empty" | grep -c "^$SITEM$" || true)
+assert_eq "re-stored item invisible again" "$FOUND_BACK" "0"
+
 if [ -z "${KEEP:-}" ]; then
-  section "cleanup — mark the demo listing reserved (keeps prod search tidy)"
+  section "cleanup — mark the demo listings reserved/deleted (keeps prod search tidy)"
   R=$(mcp "$KEY" update_listing "{\"id\":\"$ITEM\",\"status\":\"reserved\"}")
   assert_eq "status reserved" "$(mcp_get "$R" '.item.status // empty')" "reserved"
-  log "        (set KEEP=1 to leave it active)"
+  if [ -n "${SITEM:-}" ]; then
+    R=$(mcp "$KEY" update_listing "{\"id\":\"$SITEM\",\"status\":\"active\"}")
+    R=$(mcp "$KEY" update_listing "{\"id\":\"$SITEM\",\"status\":\"deleted\"}")
+    assert_eq "stored demo item removed (stored → deleted is the legal exit)" "$(mcp_get "$R" '.item.status // empty')" "deleted"
+  fi
+  log "        (set KEEP=1 to leave them in place)"
 fi
 
 log ""

@@ -22,6 +22,10 @@ import {
 } from "./auth.js";
 import { sendMail, type MailMessage } from "./mailer.js";
 import { renderEmailVerification } from "./notify/templates.js";
+import { parseNotificationPrefs, sanitizePrefsUpdate } from "./notify/prefs.js";
+import { verifyDigestUnsubscribeToken } from "./notify/digest.js";
+import { planAccountNotification } from "./notify/items.js";
+import { subjectSafe } from "./notify/templates.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import {
@@ -78,14 +82,42 @@ import {
   WantedNotFoundError,
 } from "./wanted.js";
 import { createWantedWithAlert, wantedCreateSchema, wantedEditShape, wantedWriteLimiter } from "./wanted-writes.js";
-import { createItemReport, ItemReportError, MAX_MOTIVATION_CHARS, MIN_MOTIVATION_CHARS, REPORT_REASONS } from "./reports.js";
+import {
+  addressWriteLimiter,
+  deleteAddress,
+  listAddresses,
+  saveAddress,
+  updateAddress,
+  AddressLimitError,
+  AddressNotFoundError,
+  AddressValidationError,
+  type AccountAddressRow,
+} from "./addresses.js";
+import { CountryCodeError, isIsoCountryCode } from "./countries.js";
+import {
+  createItemReport,
+  createReviewReport,
+  ItemReportError,
+  MAX_MOTIVATION_CHARS,
+  MIN_MOTIVATION_CHARS,
+  REPORT_REASONS,
+  ReviewReportError,
+} from "./reports.js";
+import {
+  editReview,
+  getOrderReview,
+  listSellerReviews,
+  MAX_REVIEW_TEXT_CHARS,
+  postReview,
+  ReviewError,
+} from "./reviews.js";
 import crypto from "node:crypto";
 import { pool } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
 import { applyTransition, IllegalTransitionError, type OrderRow } from "./orders.js";
 import { logSecurityEvent } from "./security-events.js";
 import { page, escapeHtml } from "./web-pages.js";
-import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer } from "./stripe.js";
+import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer, getPayoutSetup } from "./stripe.js";
 
 const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/logins per IP per hour
 const apiKeyRotateLimiter = new RateLimiter(10, 60 * 60_000); // 10 key rotations per seller per hour (THI-114)
@@ -96,6 +128,13 @@ export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin
 // route on the session API gets a cap — 240/h per account is far above any
 // human poller while keeping scripted abuse bounded.
 const notificationsLimiter = new RateLimiter(240, 60 * 60_000);
+// THI-760 Phase 2 / THI-780: preference reads/writes — 60/h per account is
+// far above any human settings page while bounding scripted churn (the
+// PATCH is a profile write, so it gets its own bucket, not the read bucket).
+const preferencesLimiter = new RateLimiter(60, 60 * 60_000);
+// THI-780 PR 2: digest one-click unsubscribe link consumption — generous
+// per-IP bucket (mail clients prefetch GETs, humans click twice).
+const digestUnsubLimiter = new RateLimiter(60, 60 * 60_000);
 export const imageUploadLimiter = new RateLimiter(30, 60 * 60_000); // 30 image uploads per seller per hour (THI-110 / H3)
 export const imageUploadIpLimiter = new RateLimiter(120, 60 * 60_000); // 120 image upload attempts per IP per hour (THI-140 / THI-123 obs 2)
 export const imageMutationLimiter = new RateLimiter(60, 60 * 60_000); // 60 image delete/reorder mutations per seller per hour (THI-308 F6: churn here must never consume upload quota)
@@ -103,6 +142,12 @@ export const llmCredentialLimiter = new RateLimiter(10, 60 * 60_000); // 10 BYO 
 export const chatgptConnectLimiter = new RateLimiter(10, 60 * 60_000); // 10 ChatGPT connect starts per seller per hour (THI-193 §3.2)
 const emailVerifyLimiter = new RateLimiter(60, 60 * 60_000); // 60 verify-link attempts per IP per hour (THI-762 — link-consumption surface; tokens are unguessable, the cap protects the DB)
 const emailResendLimiter = new RateLimiter(3, 60 * 60_000); // 3 verification resends per seller per hour (THI-762)
+// Saved-address reads for the settings screen (spec docs/specs/saved-addresses.md,
+// rollout step 3): reads share the existing authenticated-limits posture
+// (240/h per seller, same class as notifications). Writes do NOT use this —
+// they draw from the shared 30/h addressWriteLimiter in src/addresses.ts so
+// MCP-tool writes and web writes cannot double the allowance.
+const addressesReadLimiter = new RateLimiter(240, 60 * 60_000);
 
 /** Public base for email links (THI-760 plan §3): NOTIFY_PUBLIC_BASE_URL
  * overrides, PUBLIC_BASE_URL next, then the dev default — dry-run bodies need
@@ -274,12 +319,25 @@ api.get("/me", asyncHandler(async (req: Request, res: Response) => {
       [seller.id],
     )
     .catch(() => ({ rows: [{ c: "0" }] }));
+  // Read-only payout state so a client can render Payout setup on load without
+  // calling get_payout_setup, which creates the Stripe account and mints a
+  // single-use onboarding link. Booleans only — never the Stripe account id.
+  // `started` (a connected account exists) lets the client show setup as in
+  // progress before the account.updated webhook sets onboarded. A lookup fault
+  // reads as "not started": the setup action stays available.
+  const payoutsConfigured = orderFlowConfig().stripePaymentsEnabled;
+  const payoutSetup = await getPayoutSetup(seller.id).catch(() => null);
   res.json({
     seller: {
       name: seller.display_name,
       email: seller.email,
       email_verified: seller.email_verified_at !== null,
       unread_notifications: Number(unread.rows[0]?.c ?? 0),
+      payouts: {
+        configured: payoutsConfigured,
+        started: payoutSetup !== null,
+        onboarded: payoutSetup?.onboardedAt != null,
+      },
     },
   });
 }));
@@ -362,6 +420,274 @@ api.post("/notifications/read-all", asyncHandler(async (req: Request, res: Respo
     [seller.id],
   );
   res.json({ ok: true, updated: updated.rows.length });
+}));
+
+// THI-760 Phase 2 / THI-780 (plan §5): notification preferences, stored in
+// `sellers.profile.notification_prefs` (the column's reserved key). GET
+// returns the effective preferences — per-key defaults for anything not yet
+// stored, so the shape is stable from day one. PATCH validates strictly
+// (sanitizePrefsUpdate): the money class is LOCKED ('email+in_app') — every
+// attempt to change it is a 400, never a silent drop; policy enforcement
+// itself lives in the delivery sweep (src/notify/delivery.ts accountGate),
+// the single choke point every outbound email passes.
+api.get("/me/preferences", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to see notification preferences." });
+    return;
+  }
+  if (!preferencesLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/preferences" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const rows = await pool.query<{ prefs: unknown }>(
+    "SELECT profile->'notification_prefs' AS prefs FROM sellers WHERE id = $1",
+    [seller.id],
+  );
+  res.json({ preferences: parseNotificationPrefs(rows.rows[0]?.prefs) });
+}));
+
+api.patch("/me/preferences", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to change notification preferences." });
+    return;
+  }
+  if (!preferencesLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/preferences" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const { prefs, errors } = sanitizePrefsUpdate(req.body);
+  if (errors.length > 0) {
+    res.status(400).json({ error: errors[0].reason, errors });
+    return;
+  }
+  // Atomic JSONB merge (no read-modify-write race on the rest of profile):
+  // stored notification_prefs || validated patch, written back under the
+  // reserved key. An empty patch is a no-op returning current state.
+  const updated = await pool.query<{ prefs: unknown }>(
+    `UPDATE sellers
+        SET profile = jsonb_set(
+              COALESCE(profile, '{}'::jsonb),
+              '{notification_prefs}',
+              COALESCE(profile->'notification_prefs', '{}'::jsonb) || $2::jsonb
+            )
+      WHERE id = $1
+      RETURNING profile->'notification_prefs' AS prefs`,
+    [seller.id, JSON.stringify(prefs)],
+  );
+  res.json({ preferences: parseNotificationPrefs(updated.rows[0]?.prefs) });
+}));
+
+// Saved shipping addresses — web settings routes (spec docs/specs/
+// saved-addresses.md, rollout step 3; protected path). Session-authenticated,
+// owner-scoped. Unlike the MCP tools (C2: summaries only), these return the
+// FULL address: this is the owner's own settings screen, the one surface the
+// spec allows to see name, street and postal code. Everything else mirrors
+// the tool surface: validation + the 10-row cap + the one-default invariant
+// live in src/addresses.ts (never duplicated here), writes draw from the
+// shared 30/h bucket, foreign or malformed ids answer a uniform 404, and
+// responses are no-store (PII must never sit in a shared cache).
+const addressIdRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const addressInputShape = {
+  label: z.string().min(1).max(40),
+  name: z.string().min(1).max(120),
+  line1: z.string().min(1).max(200),
+  // Optional: an empty string is accepted here and normalized to NULL by the
+  // module — same as the MCP tool's `line2` handling.
+  line2: z.string().max(200).optional(),
+  city: z.string().min(1).max(80),
+  postal_code: z.string().min(1).max(20),
+  // Same schema-level normalization the create_order tool uses: trim +
+  // uppercase, then a real ISO 3166-1 alpha-2 check (src/countries.ts).
+  country: z.string().trim().toUpperCase().length(2).refine(
+    isIsoCountryCode,
+    "country must be an ISO 3166-1 alpha-2 code",
+  ),
+};
+const addressCreateSchema = z.object({
+  ...addressInputShape,
+  // Setting the default is web-only in v1 (spec "New MCP tools"); the
+  // MCP save tool never sends this.
+  is_default: z.boolean().optional(),
+});
+// Wholesale replacement semantics (updateAddress contract): the form sends
+// the merged target state, so is_default is required — an edit can never
+// silently unset an existing default.
+const addressUpdateSchema = z.object({ ...addressInputShape, is_default: z.boolean() });
+
+/** The owner-facing full shape (dates as ISO strings). This serializer is
+ *  the web counterpart of addressToSummary — deliberately NOT shared with
+ *  the MCP surface; C2's allowlist keeps its own single pinned serializer. */
+function addressWebJson(row: AccountAddressRow) {
+  return {
+    id: row.id,
+    label: row.label,
+    name: row.name,
+    line1: row.line1,
+    line2: row.line2,
+    city: row.city,
+    postal_code: row.postal_code,
+    country: row.country,
+    is_default: row.is_default,
+    verification: row.verification ?? { status: "not_checked" as const },
+    created_at: row.created_at.toISOString(),
+    updated_at: row.updated_at.toISOString(),
+    last_used_at: row.last_used_at?.toISOString() ?? null,
+  };
+}
+
+function addressErrorResponse(e: unknown, res: Response): boolean {
+  if (e instanceof AddressLimitError) {
+    res.status(429).json({ error: e.message });
+    return true;
+  }
+  if (e instanceof AddressValidationError || e instanceof CountryCodeError) {
+    res.status(400).json({ error: e.message });
+    return true;
+  }
+  if (e instanceof AddressNotFoundError) {
+    res.status(404).json({ error: "Address not found." });
+    return true;
+  }
+  return false;
+}
+
+async function addressSeller(req: Request, res: Response) {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to manage saved addresses." });
+    return null;
+  }
+  return seller;
+}
+
+api.get("/me/addresses", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await addressSeller(req, res);
+  if (!seller) return;
+  if (!addressesReadLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/addresses" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const rows = await listAddresses(seller.id);
+  res.set("Cache-Control", "no-store");
+  res.json({ addresses: rows.map(addressWebJson) });
+}));
+
+api.post("/me/addresses", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await addressSeller(req, res);
+  if (!seller) return;
+  if (!addressWriteLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/addresses" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many address changes. Try again later." });
+    return;
+  }
+  const parsed = addressCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid address." });
+    return;
+  }
+  const { is_default, ...input } = parsed.data;
+  try {
+    const row = await saveAddress(seller.id, input, { isDefault: is_default ?? false });
+    res.set("Cache-Control", "no-store");
+    res.status(201).json({ address: addressWebJson(row) });
+  } catch (e) {
+    if (!addressErrorResponse(e, res)) throw e;
+  }
+}));
+
+api.patch("/me/addresses/:id", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await addressSeller(req, res);
+  if (!seller) return;
+  if (!addressWriteLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/addresses/:id" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many address changes. Try again later." });
+    return;
+  }
+  // Malformed ids 404 like unknown ones — no uuid parse error, no oracle.
+  const id = typeof req.params.id === "string" ? req.params.id : "";
+  if (!addressIdRe.test(id)) {
+    res.status(404).json({ error: "Address not found." });
+    return;
+  }
+  const parsed = addressUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid address." });
+    return;
+  }
+  const { is_default, ...input } = parsed.data;
+  try {
+    const row = await updateAddress(seller.id, id, { address: input, is_default });
+    res.set("Cache-Control", "no-store");
+    res.json({ address: addressWebJson(row) });
+  } catch (e) {
+    if (!addressErrorResponse(e, res)) throw e;
+  }
+}));
+
+api.delete("/me/addresses/:id", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await addressSeller(req, res);
+  if (!seller) return;
+  if (!addressWriteLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/me/addresses/:id" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many address changes. Try again later." });
+    return;
+  }
+  const id = typeof req.params.id === "string" ? req.params.id : "";
+  if (!addressIdRe.test(id)) {
+    res.status(404).json({ error: "Address not found." });
+    return;
+  }
+  try {
+    await deleteAddress(seller.id, id);
+    res.json({ ok: true });
+  } catch (e) {
+    if (!addressErrorResponse(e, res)) throw e;
+  }
+}));
+
+// THI-780 PR 2 (plan §5): one-click digest unsubscribe — GET (mail-client
+// prefetchable, List-Unsubscribe-Post=One-Click compatible) with an HMAC
+// token minted by the digest sweep. The token authorizes exactly one
+// action: digest pref → 'none'. Idempotent (already-off is still ok), and
+// unsubscribing also stops any not-yet-sent digest at the delivery gate.
+// Unlike order email, this MUST work without a session — the reader of the
+// email is clicking a link, not calling the API.
+api.get("/notifications/unsubscribe", asyncHandler(async (req: Request, res: Response) => {
+  if (!digestUnsubLimiter.allow(`ip:${clientIp(req)}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/notifications/unsubscribe" }, { ip: clientIp(req) });
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const token = typeof req.query.token === "string" ? req.query.token : "";
+  const sellerId = verifyDigestUnsubscribeToken(token);
+  if (!sellerId) {
+    res.status(400).json({ error: "Invalid unsubscribe link." });
+    return;
+  }
+  // Uniform ok for valid tokens — whether or not digests were on. Only the
+  // digest key is touched; other preferences (and the locked money class)
+  // are never modified by this route.
+  await pool.query(
+    `UPDATE sellers
+        SET profile = jsonb_set(
+              COALESCE(profile, '{}'::jsonb),
+              '{notification_prefs,digest}',
+              '"none"'::jsonb
+            )
+      WHERE id = $1`,
+    [sellerId],
+  );
+  const rows = await pool.query<{ prefs: unknown }>(
+    "SELECT profile->'notification_prefs' AS prefs FROM sellers WHERE id = $1", [sellerId],
+  );
+  const preferences = parseNotificationPrefs(rows.rows[0]?.prefs);
+  res.json({ ok: true, message: "Digests are off. Transactional email about your orders and money stays on.", preferences });
 }));
 
 // THI-760 Phase 0 / THI-762: consume a verification token from an email link
@@ -1006,6 +1332,232 @@ api.post("/items/:id/report", asyncHandler(async (req: Request, res: Response) =
   }
 }));
 
+// --- order reviews, write side (spec docs/specs/order-reviews.md, PR 1) ---
+// Session-authed browser surface for the order page: post / edit / read
+// your own review. Logic (eligibility, dedupe, snapshots, screening, the
+// hourly write bucket) lives in src/reviews.ts — these handlers only wire
+// auth, validation and status mapping (same layering as reports/wanted).
+// All three are no-store (personal page data).
+
+const reviewWriteSchema = z.object({
+  rating: z.number().int().min(1).max(5),
+  text: z.string().max(MAX_REVIEW_TEXT_CHARS).optional(),
+});
+
+/** Zod failure → field-specific message (spec: field-specific, generic for
+ *  contact info — that one comes from the module and never names a rule). */
+function reviewParseError(issues: z.ZodIssue[]): string {
+  if (issues[0]?.path[0] === "text") {
+    return `Review text is limited to ${MAX_REVIEW_TEXT_CHARS} characters.`;
+  }
+  return "Pick a star rating from 1 to 5.";
+}
+
+/** Review-module error → response (spec error tables). */
+function reviewErrorResponse(err: ReviewError, res: Response): void {
+  switch (err.code) {
+    case "not_found":
+    case "none_yet":
+      res.status(404).json({ error: err.message });
+      return;
+    case "duplicate":
+      res.status(409).json({ error: err.message });
+      return;
+    case "rate_limited":
+      res.status(429).json({ error: err.message });
+      return;
+    case "edit_window_closed":
+    case "hidden":
+      res.status(403).json({ error: err.message });
+      return;
+    default: // validation | contact_info | not_eligible
+      res.status(400).json({ error: err.message });
+      return;
+  }
+}
+
+/** The 201/200 review body: rating, text, created_at, editable_until. */
+function reviewWriteBody(view: { rating: number; text: string | null; created_at: Date; editable_until: Date }) {
+  return {
+    rating: view.rating,
+    text: view.text,
+    created_at: view.created_at.toISOString(),
+    editable_until: view.editable_until.toISOString(),
+  };
+}
+
+api.post("/orders/:id/review", asyncHandler(async (req: Request, res: Response) => {
+  res.set("Cache-Control", "no-store");
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to review your orders." });
+    return;
+  }
+  const parsed = reviewWriteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: reviewParseError(parsed.error.issues) });
+    return;
+  }
+  try {
+    const { view } = await postReview({
+      orderId: req.params.id,
+      buyerId: seller.id,
+      rating: parsed.data.rating,
+      text: parsed.data.text,
+    });
+    res.status(201).json({ ok: true, review: reviewWriteBody(view) });
+  } catch (err) {
+    if (err instanceof ReviewError) {
+      reviewErrorResponse(err, res);
+      return;
+    }
+    throw err;
+  }
+}));
+
+api.patch("/orders/:id/review", asyncHandler(async (req: Request, res: Response) => {
+  res.set("Cache-Control", "no-store");
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to review your orders." });
+    return;
+  }
+  const parsed = reviewWriteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: reviewParseError(parsed.error.issues) });
+    return;
+  }
+  try {
+    // Form semantics (spec): replaces both fields; text omitted ⇒ NULL.
+    const { view } = await editReview({
+      orderId: req.params.id,
+      buyerId: seller.id,
+      rating: parsed.data.rating,
+      text: parsed.data.text,
+    });
+    res.json({ ok: true, review: reviewWriteBody(view) });
+  } catch (err) {
+    if (err instanceof ReviewError) {
+      reviewErrorResponse(err, res);
+      return;
+    }
+    throw err;
+  }
+}));
+
+api.get("/orders/:id/review", asyncHandler(async (req: Request, res: Response) => {
+  res.set("Cache-Control", "no-store");
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to review your orders." });
+    return;
+  }
+  try {
+    const review = await getOrderReview({ orderId: req.params.id, callerId: seller.id });
+    res.json({
+      review: review && {
+        rating: review.rating,
+        text: review.text,
+        status: review.status,
+        created_at: review.created_at.toISOString(),
+        edited_at: review.edited_at ? review.edited_at.toISOString() : null,
+        editable_until: review.editable_until.toISOString(),
+        editable: review.editable,
+      },
+    });
+  } catch (err) {
+    if (err instanceof ReviewError) {
+      reviewErrorResponse(err, res);
+      return;
+    }
+    throw err;
+  }
+}));
+
+// --- order reviews, public read (spec docs/specs/order-reviews.md, PR 2) ---
+// The profile list + item-card summary surface: anonymous, published-only,
+// cacheable public data (a short window — the write side is 30-day-editable,
+// so staleness is bounded and harmless). The capped summary (K), the
+// tie-broken cursor and the privacy shape all live in src/reviews.ts
+// listSellerReviews — the one shared function the get_seller_reviews MCP
+// tool also calls, so the two surfaces cannot drift.
+
+const sellerReviewsQuerySchema = z.object({
+  limit: z.coerce
+    .number()
+    .int("limit must be a whole number.")
+    .min(0, "limit must be between 0 and 50.")
+    .max(50, "limit must be between 0 and 50.")
+    .default(10),
+  before: z.string().max(200).optional(),
+});
+
+api.get("/sellers/:id/reviews", asyncHandler(async (req: Request, res: Response) => {
+  const parsed = sellerReviewsQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid query." });
+    return;
+  }
+  try {
+    const body = await listSellerReviews({
+      sellerId: req.params.id,
+      limit: parsed.data.limit,
+      before: parsed.data.before,
+    });
+    res.set("Cache-Control", "public, max-age=60");
+    res.json(body);
+  } catch (err) {
+    if (err instanceof ReviewError) {
+      reviewErrorResponse(err, res); // not_found → 404, validation → 400
+      return;
+    }
+    throw err;
+  }
+}));
+
+// Review reports (order-reviews spec PR 3): any signed-in account except the
+// author flags a review — same canned causes and 10–1000 motivation rule as
+// item reports, same shared hourly bucket (5/h per account). Logic lives in
+// src/reports.ts (createReviewReport); this handler only wires auth,
+// validation and status mapping (the item-report layering).
+const reviewReportSchema = z.object({
+  reason: z.enum(REPORT_REASONS),
+  motivation: z.string().min(MIN_MOTIVATION_CHARS).max(MAX_MOTIVATION_CHARS), // required free text; DB CHECK mirrors
+});
+
+api.post("/reviews/:id/report", asyncHandler(async (req: Request, res: Response) => {
+  res.set("Cache-Control", "no-store");
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to report reviews." });
+    return;
+  }
+  const parsed = reviewReportSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: `Pick a reason and describe the problem in ${MIN_MOTIVATION_CHARS}–${MAX_MOTIVATION_CHARS} characters.` });
+    return;
+  }
+  try {
+    const report = await createReviewReport({
+      reviewId: req.params.id,
+      reporterAccountId: seller.id,
+      reason: parsed.data.reason,
+      motivation: parsed.data.motivation,
+    });
+    res.status(201).json({ ok: true, report_id: report.id });
+  } catch (err) {
+    if (err instanceof ReviewReportError) {
+      const status =
+        err.code === "not_found" ? 404 :
+        err.code === "duplicate" ? 409 :
+        err.code === "rate_limited" ? 429 : 400; // validation | own_review
+      res.status(status).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+}));
+
 // --- wanted listings, browser CRUD (spec THI-439 §6.3 — protected path) ------
 // Session-authed browser surface for the funnel form + my-wanted management
 // (public/wanted.js). Every body routes through src/wanted.ts only — caps,
@@ -1307,6 +1859,119 @@ const resolveDisputeSchema = z.object({
   outcome: z.enum(["refund", "release"]),
   note: z.string().min(1).max(500),
 });
+
+// THI-780 PR 3 (plan §5): moderation takedown — Bearer ADMIN_API_KEY like
+// the dispute route, same boot gate (unset/short key ⇒ 404, route
+// indistinguishable from absent, F1/F7). Takes an item out of all feeds by
+// status (listings are never row-deleted) and notifies the seller exactly
+// once (dedupe takedown:{item_id}); the email is orders-class, so the
+// seller's prefs and the account gate apply at send time.
+const takedownSchema = z.object({ reason: z.string().min(1).max(500) });
+
+api.post("/admin/items/:id/takedown", asyncHandler(async (req: Request, res: Response) => {
+  if (!orderFlowConfig().adminRouteEnabled) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const header = req.get("Authorization");
+  const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : undefined;
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
+    res.status(401).json({ error: "Not authorized." });
+    return;
+  }
+  const parsed = takedownSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "reason (1-500 chars) required." });
+    return;
+  }
+  const taken = await pool.query<{ seller_id: string; title: string }>(
+    `UPDATE items SET status = 'deleted', updated_at = now()
+      WHERE id = $1 AND status IN ('active', 'stored')
+      RETURNING seller_id, title`,
+    [String(req.params.id)],
+  );
+  if (!taken.rows[0]) {
+    res.status(404).json({ error: "Item not found or not takedown-eligible." });
+    return;
+  }
+  const item = taken.rows[0];
+  const seller = await pool.query<{ email: string | null }>(
+    "SELECT email FROM sellers WHERE id = $1", [item.seller_id],
+  );
+  await planAccountNotification({
+    recipientId: item.seller_id,
+    toEmail: seller.rows[0]?.email,
+    eventType: "seller.item_taken_down",
+    role: "seller",
+    subject: subjectSafe(`Listing removed: ${item.title} — Thingery`),
+    payload: { item_title: item.title, item_id: String(req.params.id), reason: parsed.data.reason },
+    dedupeKey: `takedown:${String(req.params.id)}`,
+  });
+  res.set("Cache-Control", "no-store");
+  res.json({ item_id: String(req.params.id), status: "deleted", seller_notified: true });
+}));
+
+// Review moderation (order-reviews spec PR 3): hide one review — the
+// takedown pattern exactly. Bearer ADMIN_API_KEY + boot gate (unset/short
+// key ⇒ 404, route indistinguishable from absent), adminAttemptLimiter on
+// the client IP, one-row UPDATE published → hidden (the explicit state
+// machine; hidden rows vanish from the public list, count and average via
+// the partial index), and the author notified exactly once
+// (dedupeKey review-hidden:<id>). The email is orders-class: prefs and the
+// account gate apply at send time. A second hide hits the status guard and
+// 404s — idempotent to callers as "already gone".
+const hideReviewSchema = z.object({ reason: z.string().min(1).max(500) });
+
+api.post("/admin/reviews/:id/hide", asyncHandler(async (req: Request, res: Response) => {
+  if (!orderFlowConfig().adminRouteEnabled) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const header = req.get("Authorization");
+  const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : undefined;
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
+    res.status(401).json({ error: "Not authorized." });
+    return;
+  }
+  const parsed = hideReviewSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "reason (1-500 chars) required." });
+    return;
+  }
+  const hidden = await pool.query<{ buyer_id: string; seller_id: string; item_title: string }>(
+    `UPDATE order_reviews SET status = 'hidden'
+      WHERE id = $1 AND status = 'published'
+      RETURNING buyer_id, seller_id, item_title`,
+    [String(req.params.id)],
+  );
+  if (!hidden.rows[0]) {
+    res.status(404).json({ error: "Review not found or not hide-eligible." });
+    return;
+  }
+  const review = hidden.rows[0];
+  const author = await pool.query<{ email: string | null }>(
+    "SELECT email FROM sellers WHERE id = $1", [review.buyer_id],
+  );
+  await planAccountNotification({
+    recipientId: review.buyer_id,
+    toEmail: author.rows[0]?.email,
+    eventType: "buyer.review_hidden",
+    role: "buyer",
+    subject: subjectSafe(`Review removed: ${review.item_title} — Thingery`),
+    payload: { item_title: review.item_title, review_id: String(req.params.id), seller_id: review.seller_id, reason: parsed.data.reason },
+    dedupeKey: `review-hidden:${String(req.params.id)}`,
+  });
+  res.set("Cache-Control", "no-store");
+  res.json({ review_id: String(req.params.id), status: "hidden", author_notified: true });
+}));
 
 const ADMIN = { type: "admin" as const };
 

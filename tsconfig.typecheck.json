@@ -4,6 +4,6 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "tests/security-events.test-d.ts"],
+  "include": ["src/**/*.ts", "tests/security-events.test-d.ts", "tests/tools-args-typecheck.test-d.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -87,6 +87,15 @@ export interface OrderFlowConfig {
   // Both read env + defaults only — no client input can widen them.
   labelMaxCostCents: number;             // 3000 ≈ €30 per label (A1)
   labelDailyBudgetCents: number;         // 20000 ≈ €200/day platform-wide; 0 = kill switch (A2)
+  // Buyer-paid shipping (spec docs/specs/buyer-paid-shipping.md §2, data
+  // model). SHIPPING_QUOTE_TIMEOUT_MS bounds the order-time EasyPost quote
+  // call with an AbortSignal — a hanging provider must never hold the
+  // item-reservation row lock / a pool client (the address-verification
+  // timeout is the precedent). SHIPPING_QUOTE_ESTIMATE_TTL_MINUTES is the
+  // display-only freshness note for quote_shipping estimates (§9) — advisory,
+  // never a binding expiry.
+  shippingQuoteTimeoutMs: number;        // 5000 — quote-call AbortSignal bound
+  shippingQuoteEstimateTtlMinutes: number; // 15 — estimate display freshness
 }
 
 function stripeModeFor(key: string | undefined): StripeMode | null {
@@ -146,6 +155,8 @@ export function orderFlowConfig(): OrderFlowConfig {
     reorderCooldownMinutes: envInt("REORDER_COOLDOWN_MINUTES", 60),
     labelMaxCostCents: envInt("LABEL_MAX_COST_CENTS", 3000),
     labelDailyBudgetCents: envNonNegativeInt("LABEL_DAILY_BUDGET_CENTS", 20000),
+    shippingQuoteTimeoutMs: envInt("SHIPPING_QUOTE_TIMEOUT_MS", 5000),
+    shippingQuoteEstimateTtlMinutes: envInt("SHIPPING_QUOTE_ESTIMATE_TTL_MINUTES", 15),
   };
 }
 
@@ -172,6 +183,17 @@ export interface NotifyConfig {
   maxEmailsPerRecipientPerHour: number;         // 6
   // Per-run global send cap (protects the provider free tier, plan §4).
   maxSendsPerSweep: number;                     // 50
+  // Inbound bounce-webhook secret (RESEND_WEBHOOK_SECRET). Unset ⇒ the
+  // webhook answers fail-closed 503 (Phase 2 / THI-780) — same posture as
+  // STRIPE_WEBHOOK_SECRET / EASYPOST_WEBHOOK_SECRET.
+  resendWebhookSecret: string | undefined;
+  /** Digest scan cadence in minutes (THI-780 PR 2). Sends are still at
+   * most once per period per recipient by dedupe key. */
+  digestIntervalMinutes: number;                // 60
+  /** Operator alert mailbox (THI-780 PR 4). Unset ⇒ operator alerts are
+   * console-only (Phase 1 posture); set ⇒ sweep rules 7/9 + delivery
+   * dead-letters mirror there as account-less operator.* outbox rows. */
+  operatorAlertEmail: string | undefined;
 }
 
 export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig {
@@ -203,6 +225,9 @@ export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig
     sweepIntervalMinutes: int("NOTIFY_SWEEP_INTERVAL_MINUTES", 1),
     maxEmailsPerRecipientPerHour: int("NOTIFY_MAX_EMAILS_PER_RECIPIENT_PER_HOUR", 6),
     maxSendsPerSweep: int("NOTIFY_MAX_SENDS_PER_SWEEP", 50),
+    resendWebhookSecret: value("RESEND_WEBHOOK_SECRET"),
+    digestIntervalMinutes: int("NOTIFY_DIGEST_INTERVAL_MINUTES", 60),
+    operatorAlertEmail: value("OPERATOR_ALERT_EMAIL") ?? undefined,
   };
 }
 

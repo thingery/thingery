@@ -129,7 +129,7 @@ describe("tool signatures unchanged (additive, pure)", () => {
       [
         "title", "description", "category", "condition", "brand", "price_cents",
         "shipping_price_cents", "currency", "location", "weight_grams", "dimensions_mm", "shipping_tier",
-        "images", "attributes",
+        "images", "attributes", "status",
       ].sort(),
     );
   });

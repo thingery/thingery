@@ -61,6 +61,7 @@ export class ResendMailer implements Mailer {
           subject: message.subject,
           text: message.text,
           html: message.html,
+          ...(message.headers ? { headers: message.headers } : {}),
         }),
       });
       if (!res.ok) {

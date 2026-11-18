@@ -318,14 +318,18 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
   const RATE_USPS_EUR = { id: "rate_usps_eur", carrier: "USPS", service: "Priority", rate: "12.30", currency: "EUR" };
 
   /** EasyPost fetch stub: quotes `rates` on /v2/shipments, buys on /buy.
-   *  `onBuy` runs inside the /buy handler — the hook for the cancel race. */
+   *  `onBuy` runs inside the /buy handler — the hook for the cancel race.
+   *  `bodies` captures each /v2/shipments POST body so tests can assert the
+   *  exact wire address fields (THI-953 regression hook). */
   function easypostFetch(rates: Array<Record<string, unknown>>, opts: { onBuy?: () => Promise<void>; shipId?: string } = {}) {
     const shipId = opts.shipId ?? `shp_${Math.random().toString(36).slice(2, 8)}`;
     const calls: string[] = [];
+    const bodies: Record<string, unknown>[] = [];
     const fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       const u = String(url);
       calls.push(`${init?.method ?? "GET"} ${u}`);
       if (u.endsWith("/v2/shipments") && init?.method === "POST") {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
         return new Response(JSON.stringify({ id: shipId, rates }), { status: 200 });
       }
       if (/\/v2\/shipments\/[^/]+\/buy$/.test(u)) {
@@ -343,7 +347,7 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
       }
       return new Response(JSON.stringify({ error: { message: "unexpected call", code: "UNEXPECTED" } }), { status: 404 });
     }) as typeof fetch;
-    return { fetch, calls, shipId, buyCalls: () => calls.filter((c) => c.endsWith("/buy")).length };
+    return { fetch, calls, bodies, shipId, buyCalls: () => calls.filter((c) => c.endsWith("/buy")).length };
   }
 
   function spyLog() {
@@ -718,5 +722,33 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
     expect(degraded.isError).toBe(true);
     expect(degraded.body.code).toBe("easypost_not_configured");
     expect(String(degraded.body.error)).toContain("record_tracking");
+  });
+
+  // THI-953 regression: the MCP handler used to pass the snake_case
+  // from_address straight through as EasyPostAddressInput, so toWireAddress
+  // read a.postalCode (camelCase) and the live quote went out with
+  // zip: undefined — every real label purchase failed with easypost_error.
+  // Assert the exact wire body built from the handler's snake_case args.
+  it("buy_shipping_label tool maps snake_case from_address onto the wire body: from_address.zip equals the caller's postal_code (THI-953)", async () => {
+    const { order, ep, restore } = await seedSoldOrderWithLabels(undefined, { mode: "stripe" });
+    try {
+      const tools = captureTools({ id: sellerId } as never);
+      const res = await call(tools, "buy_shipping_label", {
+        order_id: order.id,
+        from_address: { name: "Seller", line1: "Corso Buenos Aires 2", line2: "Int 4", city: "Milan", postal_code: "20122", country: "IT", phone: "+39 333 1112223" },
+        weight_grams: 800,
+      });
+      expect(res.isError).toBe(false);
+      const quote = ep.bodies[0] as { shipment: { from_address: Record<string, unknown> } };
+      expect(quote.shipment.from_address.zip).toBe("20122");
+      expect(quote.shipment.from_address.name).toBe("Seller");
+      expect(quote.shipment.from_address.street1).toBe("Corso Buenos Aires 2");
+      expect(quote.shipment.from_address.street2).toBe("Int 4");
+      expect(quote.shipment.from_address.city).toBe("Milan");
+      expect(quote.shipment.from_address.country).toBe("IT");
+      expect(quote.shipment.from_address.phone).toBe("+39 333 1112223");
+    } finally {
+      restore();
+    }
   });
 });

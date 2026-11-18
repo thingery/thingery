@@ -132,6 +132,8 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   // Public reads of the wanted board.
   "search_wanted",
   "get_wanted",
+  // THI-923: public seller summary (item-page seller card).
+  "get_seller_summary",
   // The buyer side of the wanted board.
   "create_wanted",
   "my_wanted",

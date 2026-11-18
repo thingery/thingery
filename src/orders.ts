@@ -418,3 +418,29 @@ export async function applyTransition(input: ApplyTransitionInput): Promise<Orde
   }
   return next;
 }
+
+/** B1 (Security review THI-1013): complete a nothing-due refund unwind. A
+ * zero-remainder refund creates no Stripe refund, so no charge.refunded
+ * webhook will ever arrive to confirm it — fire refund_confirmed inline so
+ * the order reaches `refunded` instead of wedging in `refunding` until the
+ * rule-7 stuck-money alert. Returns the confirmed row, or null when not
+ * applicable (something was due, or the primary transition did not land in
+ * refunding). A concurrent webhook confirm losing the race is not an error:
+ * the terminal state (refunded) is identical either way. */
+export async function settleNothingDueRefund(
+  next: OrderRow,
+  refund: { nothingDue?: boolean; id?: string | null } | null | undefined,
+): Promise<OrderRow | null> {
+  if (!refund?.nothingDue || next.status !== "refunding") return null;
+  try {
+    return await applyTransition({
+      orderId: next.id,
+      trigger: "refund_confirmed",
+      actor: { type: "stripe", id: "zero_remainder" },
+      reason: "zero-remainder refund — nothing due, settled without a Stripe refund",
+    });
+  } catch (err) {
+    if (err instanceof IllegalTransitionError) return null;
+    throw err;
+  }
+}

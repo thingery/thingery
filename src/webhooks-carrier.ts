@@ -32,7 +32,7 @@ import express, { type Request, type Response, type Router } from "express";
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { orderFlowConfig, type OrderFlowConfig } from "./config.js";
-import { applyTransition, IllegalTransitionError, type ItemStatus, type OrderRow } from "./orders.js";
+import { applyTransition, IllegalTransitionError, settleNothingDueRefund, type ItemStatus, type OrderRow } from "./orders.js";
 import { createRefundForOrder, getStripe } from "./stripe.js";
 
 /** F4 ambiguous resolution: multiple live orders match (carrier, tracking_code)
@@ -359,23 +359,34 @@ export async function processCarrierEvent(
       // deleted (goods presumed gone); RTS → item back active (spec table).
       // Stripe mode: refund FIRST under refund:{order_id} idempotency (F3) —
       // reconcile, never recreate, if a refund already exists.
+      // §6 carrier-failure split: with a platform label the buyer's line is
+      // refunded (the deployment's procurement failed — carrier claim is the
+      // remedy); after own-label record_tracking the line was already
+      // refunded via labelrefund, and the settle-aware helper deducts it.
       const sets: { refund_id?: string } = {};
+      let refund: Awaited<ReturnType<typeof createRefundForOrder>> | null = null;
       if (order.payment_mode === "stripe" && !order.refund_id) {
         if (!order.payment_intent_id) {
           throw new Error(`order ${order.id} is paid but has no payment_intent_id; refusing to refund blindly`);
         }
         const stripe = getStripe();
         if (!stripe) throw new Error("stripe unavailable for carrier-failure refund");
-        const refund = await createRefundForOrder(order, order.payment_intent_id, stripe);
-        sets.refund_id = refund.id;
+        refund = await createRefundForOrder(order, order.payment_intent_id, stripe, "include_label");
+        // B1 (THI-1013): a zero remainder settles with no refund_id — the
+        // transition must still fire; nothing_due replays stay idempotent.
+        if (refund.id) sets.refund_id = refund.id;
       }
       const override: { itemStatusOverride?: ItemStatus } =
         ev.status === "return_to_sender" ? { itemStatusOverride: "active" as ItemStatus } : {};
-      await applyTransition({
+      const next = await applyTransition({
         orderId: order.id, trigger: "carrier_failure", actor,
         reason: `carrier reported ${ev.status}`,
         dedupeKey: `carrier:${externalId}`, ...(sets.refund_id ? { sets } : {}), ...override, client: db,
       });
+      // B1 (THI-1013): a nothing-due refund never produces the webhook that
+      // would confirm it — settle the unwind inline instead of wedging in
+      // `refunding` until the rule-7 alert.
+      await settleNothingDueRefund(next, refund);
       return;
     }
   }

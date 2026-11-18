@@ -11,7 +11,8 @@ import type Stripe from "stripe";
 import { afterEach, beforeAll, afterAll, describe, expect, it } from "vitest";
 import {
   getOrCreateStripeAccount,
-  orderAmountCents,
+  chargeTotalCents,
+  payoutBaseCents,
   setStripeForTests,
   createCheckoutSession,
 } from "../src/stripe.js";
@@ -61,10 +62,26 @@ afterEach(() => {
   delete process.env.STRIPE_SECRET_KEY;
 });
 
-describe("orderAmountCents (rev 3 §11.4)", () => {
-  it("buyer pays and seller receives price + shipping", () => {
-    expect(orderAmountCents({ price_cents: 10000, shipping_price_cents: 500 })).toBe(10500);
-    expect(orderAmountCents({ price_cents: 10000, shipping_price_cents: 0 })).toBe(10000);
+describe("charge/payout money helpers (rev 3 §11.4 + buyer-paid-shipping §3)", () => {
+  it("flat orders: buyer charge and payout base are both price + shipping", () => {
+    expect(chargeTotalCents({ price_cents: 10000, shipping_price_cents: 500 })).toBe(10500);
+    expect(payoutBaseCents({ price_cents: 10000, shipping_price_cents: 500 })).toBe(10500);
+    expect(chargeTotalCents({ price_cents: 10000, shipping_price_cents: 0 })).toBe(10000);
+  });
+
+  it("quote-mode orders: the label line joins the charge, never the payout base", () => {
+    const order = {
+      price_cents: 10000,
+      shipping_price_cents: 0, // stored 0 in quote mode (§3)
+      label_quote: { amount_cents: 733 },
+    };
+    expect(chargeTotalCents(order)).toBe(10733);
+    expect(payoutBaseCents(order)).toBe(10000);
+  });
+
+  it("a null/absent label_quote (pre-feature and flat orders) adds nothing", () => {
+    expect(chargeTotalCents({ price_cents: 10000, shipping_price_cents: 500, label_quote: null })).toBe(10500);
+    expect(chargeTotalCents({ price_cents: 10000, shipping_price_cents: 500, label_quote: undefined })).toBe(10500);
   });
 });
 

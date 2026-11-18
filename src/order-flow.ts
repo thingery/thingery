@@ -17,6 +17,11 @@ import { applyTransition, IllegalTransitionError } from "./orders.js";
 import { orderFlowConfig } from "./config.js";
 import { AddressSuggestedError, verifyOrderAddress, type ShippingVerificationRecord } from "./address-verification.js";
 import {
+  getSellerDefaultOrigin,
+  resolveShippingQuote,
+  type ShippingQuoteOutcome,
+} from "./shipping-quotes.js";
+import {
   createCheckoutSession,
   createRefundForOrder,
   expireCheckoutSession,
@@ -79,7 +84,7 @@ export async function createOrder(input: CreateOrderInput): Promise<{ order: Ord
   try {
     await db.query("BEGIN");
     const item = await db.query(
-      "SELECT id, seller_id, title, price_cents, shipping_price_cents, currency, shipping_tier FROM items WHERE id = $1",
+      "SELECT id, seller_id, title, price_cents, shipping_price_cents, currency, shipping_tier, weight_grams, dimensions_mm FROM items WHERE id = $1",
       [input.itemId],
     );
     const row = item.rows[0];
@@ -200,6 +205,60 @@ export async function createOrder(input: CreateOrderInput): Promise<{ order: Ord
       [order.id, input.buyerId],
     );
 
+    // Buyer-paid shipping quote (spec §1–§2): decided once, here, inside the
+    // same transaction that created the order — the same
+    // external-call-in-transaction precedent as the Stripe call below.
+    // Quoting can never fail an order: every unmet condition (and, by the
+    // caller's own catch, even a code bug) lands the order in flat mode with
+    // a named reason. Events carry amounts and reasons only — never address
+    // data (§1, PII minimization).
+    let labelQuoteAmountCents = 0;
+    if (mode === "stripe" && fulfillment === "shipping") {
+      const sellerOrigin = await getSellerDefaultOrigin(row.seller_id);
+      let outcome: ShippingQuoteOutcome;
+      try {
+        outcome = await resolveShippingQuote({
+          paymentMode: mode,
+          fulfillment,
+          orderCurrency: row.currency,
+          weightGrams: row.weight_grams,
+          dimensionsMm: row.dimensions_mm,
+          buyerAddress: (input.shippingAddress ?? {}) as Record<string, unknown>,
+          sellerOrigin,
+          easypostEnabled: cfg.easypostEnabled,
+          labelMaxCostCents: cfg.labelMaxCostCents,
+          quoteTimeoutMs: cfg.shippingQuoteTimeoutMs,
+        });
+      } catch (e) {
+        // resolveShippingQuote contains every provider outcome; this catch is
+        // defense in depth — an exceptional bug still cannot fail the order.
+        console.error(`[order ${order.id}] shipping quote threw unexpectedly — flat fallback: ${(e as Error).message}`);
+        outcome = { mode: "flat", reason: "quote_failed" };
+      }
+      if (outcome.mode === "label_quote") {
+        // §3: quote mode supersedes the flat amount — it is not charged, not
+        // in the payout base, and the charge/refund helpers read the split
+        // straight off the row afterwards.
+        await db.query(
+          "UPDATE orders SET label_quote = $2::jsonb, shipping_price_cents = 0 WHERE id = $1",
+          [order.id, JSON.stringify(outcome.quote)],
+        );
+        order = { ...order, label_quote: outcome.quote, shipping_price_cents: 0 };
+        labelQuoteAmountCents = outcome.quote.amount_cents;
+        await db.query(
+          `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload)
+           VALUES ($1, 'label_quote_created', 'system', NULL, 'buyer_paid_quote', $2::jsonb)`,
+          [order.id, JSON.stringify({ carrier: outcome.quote.carrier, amount_cents: outcome.quote.amount_cents })],
+        );
+      } else {
+        await db.query(
+          `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload)
+           VALUES ($1, 'label_quote_fallback', 'system', NULL, $2, $3::jsonb)`,
+          [order.id, outcome.reason, JSON.stringify({ reason: outcome.reason })],
+        );
+      }
+    }
+
     if (mode === "stripe") {
       const stripe = getStripe();
       if (!stripe) throw new OrderFlowError("payments_not_configured", "Stripe payments are not configured on this deployment.");
@@ -208,6 +267,7 @@ export async function createOrder(input: CreateOrderInput): Promise<{ order: Ord
           orderId: order.id,
           item: { title: row.title, currency: row.currency, price_cents: row.price_cents },
           shippingPriceCents: order.shipping_price_cents,
+          labelQuoteAmountCents: labelQuoteAmountCents,
           expiresAt: deadline,
           baseUrl: (process.env.PUBLIC_BASE_URL ?? "http://localhost:3000").replace(/\/$/, ""),
         },
@@ -263,7 +323,7 @@ const ROLE_PREDICATES: Record<OrderRole, string> = {
 export type OrderListEntry = Pick<
   OrderRow,
   | "id" | "item_id" | "status" | "payment_mode" | "price_cents" | "shipping_price_cents" | "currency"
-  | "fulfillment" | "carrier" | "tracking_code" | "label_url" | "payment_deadline" | "dispute_deadline"
+  | "fulfillment" | "carrier" | "tracking_code" | "label_url" | "label_quote" | "payment_deadline" | "dispute_deadline"
   | "status_changed_at" | "created_at" | "updated_at"
 > & { item_title: string };
 
@@ -286,7 +346,7 @@ export async function listOrdersForAccount(params: {
   const limit = Math.min(Math.max(params.limit, 1), MAX_ORDER_LIST_LIMIT);
   const { rows } = await pool.query<OrderListEntry>(
     `SELECT o.id, o.item_id, o.status, o.payment_mode, o.price_cents, o.shipping_price_cents, o.currency,
-            o.fulfillment, o.carrier, o.tracking_code, o.label_url, o.payment_deadline, o.dispute_deadline,
+            o.fulfillment, o.carrier, o.tracking_code, o.label_url, o.label_quote, o.payment_deadline, o.dispute_deadline,
             o.status_changed_at, o.created_at, o.updated_at, i.title AS item_title
      FROM orders o JOIN items i ON i.id = o.item_id
      WHERE ${ROLE_PREDICATES[role]}

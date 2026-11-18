@@ -27,8 +27,10 @@
 #   BASE_URL=https://staging.example bash scripts/prod-smoke.sh
 #   EXPECT_COMMIT=<sha> bash scripts/prod-smoke.sh  # deploy workflow passes github.sha
 #
-# Retries each HTTP step briefly: right after `up -d` Caddy can 502 for a few
-# seconds while the app container settles.
+# Retries each HTTP step briefly: right after `up -d` Caddy can 502 (or return an
+# empty reply) for a few seconds while the app container settles — and curl
+# exits 0 on those, so every step retries on bad STATUS/payload, not just on
+# transport failure.
 
 set -euo pipefail
 
@@ -80,26 +82,30 @@ mcp_retry() {
 echo "prod-smoke: target $BASE_URL (expect commit: ${EXPECT_COMMIT:-<none>})"
 
 # --- 1. healthz ---------------------------------------------------------------
-health=""
+# Retry until /healthz answers 200 with ok:true JSON: during the restart window
+# Caddy can 502 or close the connection with curl still exiting 0, so transport
+# success alone is not health.
+health="" last_code=""
 for ((i = 1; i <= ATTEMPTS; i++)); do
-  if health=$(curl -sS --max-time 15 "$BASE_URL/healthz" 2>/dev/null); then
+  resp=$(curl -sS --max-time 15 -w '\n%{http_code}' "$BASE_URL/healthz" 2>/dev/null) || { sleep "$SLEEP_SECS"; continue; }
+  last_code="${resp##*$'\n'}"
+  body="${resp%$'\n'*}"
+  if [ "$last_code" = "200" ] \
+     && health_ok=$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ok"))' 2>/dev/null) \
+     && [ "$health_ok" = "True" ]; then
+    health="$body"
     break
   fi
   sleep "$SLEEP_SECS"
 done
 if [ -z "$health" ]; then
-  fail "healthz unreachable"
+  fail "healthz not healthy after $ATTEMPTS attempts (last http ${last_code:-no-answer}) — still inside the restart window, or a real outage"
 else
-  ok=$(printf '%s' "$health" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ok"))')
-  if [ "$ok" = "True" ]; then
-    live_commit=$(printf '%s' "$health" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("commit",""))')
-    if [ -n "$EXPECT_COMMIT" ] && [ "$live_commit" != "$EXPECT_COMMIT" ]; then
-      fail "healthz commit $live_commit != expected $EXPECT_COMMIT (deploy did not land?)"
-    else
-      pass "healthz ok at commit ${live_commit:0:12}"
-    fi
+  live_commit=$(printf '%s' "$health" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("commit",""))')
+  if [ -n "$EXPECT_COMMIT" ] && [ "$live_commit" != "$EXPECT_COMMIT" ]; then
+    fail "healthz commit $live_commit != expected $EXPECT_COMMIT (deploy did not land?)"
   else
-    fail "healthz not ok: $health"
+    pass "healthz ok at commit ${live_commit:0:12}"
   fi
 fi
 

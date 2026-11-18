@@ -28,7 +28,7 @@ import type Stripe from "stripe";
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { orderFlowConfig, type OrderFlowConfig } from "./config.js";
-import { getStripe, createRefundForOrder, orderAmountCents } from "./stripe.js";
+import { getStripe, createRefundForOrder, chargeTotalCents } from "./stripe.js";
 import { planAccountNotification } from "./notify/items.js";
 import { applyTransition, IllegalTransitionError, type OrderRow, type OrderStatus } from "./orders.js";
 
@@ -224,11 +224,13 @@ async function handlePaymentSuccess(db: PoolClient, event: Stripe.Event, cfg: Or
   if (session) {
     // F5 defense in depth: the session must match the order's stored
     // checkout_session_id (checked by resolution) AND the amount+currency.
+    // chargeTotalCents (§3): flat orders price+shipping, quote-mode orders
+    // price+label — the exact figure the Checkout lines were built from.
     const sessionAmount = (session as unknown as { amount_total?: number }).amount_total;
     const sessionCurrency = (session as unknown as { currency?: string }).currency;
-    if (sessionAmount !== orderAmountCents(order) || sessionCurrency !== order.currency.toLowerCase()) {
+    if (sessionAmount !== chargeTotalCents(order) || sessionCurrency !== order.currency.toLowerCase()) {
       throw new WebhookRejectError(
-        `session amount/currency mismatch: expected ${orderAmountCents(order)} ${order.currency}, got ${sessionAmount} ${sessionCurrency}`,
+        `session amount/currency mismatch: expected ${chargeTotalCents(order)} ${order.currency}, got ${sessionAmount} ${sessionCurrency}`,
       );
     }
   }

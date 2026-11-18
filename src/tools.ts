@@ -289,10 +289,14 @@ function orderToPublic(order: Parameters<typeof getOrderView>[0] extends never ?
   carrier: string | null; tracking_code: string | null; label_url: string | null;
   payment_deadline: Date | null; dispute_deadline: Date | null;
   status_changed_at: Date; created_at: Date; updated_at: Date; payment_url?: string | null;
+  label_quote?: { amount_cents: number; currency: string; carrier: string; service: string } | null;
 }) {
   // Explicit allowlist: a new orders column stays private until it is added
   // here on purpose. item_title and payment_url exist only on OrderView rows;
   // when undefined, JSON.stringify drops them from the tool response.
+  // label_quote (the §2 snapshot) is NEVER exposed — its only public
+  // projection is the `shipping` block below (§9): mode + amount, never the
+  // origin/destination addresses (party PII).
   return {
     id: order.id,
     item_id: order.item_id,
@@ -312,7 +316,22 @@ function orderToPublic(order: Parameters<typeof getOrderView>[0] extends never ?
     updated_at: order.updated_at,
     item_title: order.item_title,
     payment_url: order.payment_url,
-    total_price_cents: order.price_cents + order.shipping_price_cents,
+    shipping: order.label_quote
+      ? {
+          mode: "label_quote" as const,
+          amount_cents: order.label_quote.amount_cents,
+          currency: order.label_quote.currency,
+          carrier: order.label_quote.carrier,
+          service: order.label_quote.service,
+        }
+      : {
+          mode: "flat" as const,
+          amount_cents: order.shipping_price_cents,
+          currency: order.currency,
+        },
+    // What the buyer is charged (§9): flat price+shipping; quote mode
+    // price+label (shipping_price_cents is stored 0 there).
+    total_price_cents: order.price_cents + order.shipping_price_cents + (order.label_quote?.amount_cents ?? 0),
   };
 }
 /** THI-360 PR 2 (spec rev 2): buyer-intent payload for tool output — id,
@@ -1432,8 +1451,10 @@ export function registerTools(
         "reuse a saved address (see list_addresses — summaries only; the full address is " +
         "copied into the order server-side, never shown in chat). country must be a real " +
         "ISO 3166-1 alpha-2 code ('IT', not 'XX'; case/whitespace-insensitive: ' it ' ships as 'IT'). Local-pickup items ignore both. The result's " +
-        "total_price_cents is what the buyer pays (price plus any " +
-        "shipping_price_cents); Stripe Checkout shows shipping as its own line. On off_platform " +
+        "total_price_cents is what the buyer pays — flat shipping is the listing's " +
+        "shipping_price_cents; on shipping-quote mode (see the result's `shipping` block, " +
+        "mode 'label_quote') it is the carrier label amount quoted for this order, shown " +
+        "as its own Shipping line in Stripe Checkout. On off_platform " +
         "orders the seller cannot see the address until you agree with share_shipping_address " +
         "after they confirm payment. Requires authentication (buyer account).",
       inputSchema: {
@@ -1512,7 +1533,16 @@ export function registerTools(
           order: orderToPublic(order),
           payment_url: paymentUrl,
           next_steps: paymentUrl
-            ? ["Open payment_url to pay with card (the order expires unpaid in 24h)", "Track with get_order"]
+            ? order.label_quote
+              ? [
+                  "Open payment_url to pay with card (the order expires unpaid in 24h)",
+                  "The Shipping line is the buyer-paid carrier label (see order.shipping: carrier + service) — it is not the seller's flat shipping price",
+                  "Track with get_order",
+                ]
+              : [
+                  "Open payment_url to pay with card (the order expires unpaid in 24h)",
+                  "Track with get_order",
+                ]
             : ["Agree payment directly with the seller (off-platform)", "The seller confirms receipt with confirm_payment", "Track with get_order"],
         });
       } catch (e) {

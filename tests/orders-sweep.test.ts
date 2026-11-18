@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 import type Stripe from "stripe";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { setStripeForTests, orderAmountCents } from "../src/stripe.js";
+import { setStripeForTests, chargeTotalCents } from "../src/stripe.js";
 import { runSweeps } from "../src/orders-sweep.js";
 import { orderFlowConfig, type OrderFlowConfig } from "../src/config.js";
 import { applyTransition, type PaymentMode } from "../src/orders.js";
@@ -286,7 +286,7 @@ describe.skipIf(!available)("deadline sweeps (DB)", () => {
     const evt = {
       id: `evt_${n}`,
       type: "checkout.session.completed",
-      data: { object: { id: o.checkout_session_id, payment_status: "paid", payment_intent: `pi_r${n}`, amount_total: orderAmountCents(o), currency: "eur", metadata: { order_id: o.id } } },
+      data: { object: { id: o.checkout_session_id, payment_status: "paid", payment_intent: `pi_r${n}`, amount_total: chargeTotalCents(o), currency: "eur", metadata: { order_id: o.id } } },
     } as unknown as Stripe.Event;
     const { client, calls } = fakeStripe({ retrieveEvent: evt });
     setStripeForTests(client);

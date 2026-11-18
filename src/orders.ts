@@ -18,6 +18,7 @@
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { emitReviewPairAnomalyIfCrossing, REVIEW_ELIGIBLE_STATUSES } from "./reviews.js";
+import type { LabelQuoteSnapshot } from "./shipping-quotes.js";
 
 export type OrderStatus =
   | "pending"
@@ -198,6 +199,11 @@ export interface OrderRow {
   /** EasyPost purchase snapshot (#5b) — NULL on record_tracking-originated rows.
    *  {shipment_id, rate_id, carrier, service, cost_cents, currency, bought_at} */
   label_purchase: Record<string, unknown> | null;
+  /** Buyer-paid shipping quote snapshot (spec buyer-paid-shipping §2) — NULL on
+   *  flat-mode and pre-feature orders. PII-bearing (origin/destination): never
+   *  exposed through any public surface; the §9 `shipping` block is its only
+   *  public projection. */
+  label_quote: LabelQuoteSnapshot | null;
   shipping_address_shared_at: Date | null;
   checkout_session_id: string | null;
   payment_intent_id: string | null;

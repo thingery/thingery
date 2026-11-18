@@ -405,6 +405,39 @@ describe("money path includes shipping", () => {
     ).rejects.toThrow(/payout_charge_mismatch/);
     expect(transfers).toHaveLength(0);
   });
+
+  it("B1 (THI-1013): a zero remainder refunds nothing due — no Stripe call, no throw", async () => {
+    // Free item + bought label, excluding policy: the charge IS the label
+    // line, so the remainder is 0 — Stripe would reject amount 0 with
+    // invalid_request_error and the old code threw, wedging every refund
+    // site. Regression: the helper settles without calling Stripe.
+    const created: number[] = [];
+    const client = {
+      refunds: { create: async (p: { amount: number }) => { created.push(p.amount); return { id: "re_never" }; } },
+    } as unknown as Stripe;
+    const free = { id: "o1", payment_intent_id: "pi_1", price_cents: 0, shipping_price_cents: 0, currency: "EUR", label_quote: { amount_cents: 733 }, label_purchase: { shipment_id: "shp_1" } };
+    const r = await createRefundForOrder(free, "pi_1", client, "exclude_label");
+    expect(created).toEqual([]); // no zero-amount refund attempt ever reaches Stripe
+    expect(r).toEqual({ nothingDue: true, id: null });
+    // Same zero remainder with the own-label line already refunded: the line
+    // refund id surfaces so refund_id reconcile guards stay sound.
+    const lineRefunded = { ...free, label_purchase: null, label_quote: { amount_cents: 733, line_refund_id: "re_line" } };
+    const r2 = await createRefundForOrder(lineRefunded, "pi_1", client, "exclude_label");
+    expect(created).toEqual([]);
+    expect(r2).toEqual({ nothingDue: true, id: "re_line" });
+  });
+
+  it("B1-sibling (THI-1013): a zero payout base settles without a transfer", async () => {
+    // Free listing in quote mode: the buyer's charge is the label line only,
+    // which never enters the payout base. The old netting throw wedged the
+    // order in payout_pending forever; now it is an explicit zero-base
+    // outcome with no Stripe call (Stripe rejects amount-0 transfers too).
+    const { client, transfers } = stripeWithCharge(733, 88);
+    const free = { ...order, price_cents: 0, shipping_price_cents: 0, label_quote: { amount_cents: 733 } };
+    const t = await createTransferForOrder(free, "acct_1", client);
+    expect(transfers).toHaveLength(0);
+    expect(t).toEqual({ zeroBase: true, id: null });
+  });
 });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -544,6 +577,50 @@ describe.skipIf(!available)("shipping price through the order flow (DB)", () => 
 
     await cancelOrder(orderId, buyerId, "changed mind");
     expect(refunded).toBe(12700);
+  });
+
+  it("B1 regression (THI-1013): free item + bought label — cancel settles the zero remainder without a Stripe refund", async () => {
+    // Fails against pre-fix code: the charge is the label line only, so the
+    // cancel-site remainder is 0 and Stripe (here: the fake, mirroring the
+    // real invalid_request_error on amount 0) rejects it — cancelOrder threw
+    // and the order stayed wedged in `sold`. With the fix the transition
+    // fires and no zero-amount refund is ever attempted.
+    process.env.STRIPE_SECRET_KEY = "sk_test_b1";
+    await db.query("UPDATE sellers SET stripe_account_id = 'acct_x', stripe_onboarded_at = now() WHERE id = $1", [sellerId]);
+    const created: number[] = [];
+    const client = {
+      checkout: { sessions: { create: async () => ({ id: "cs_b1", url: "https://pay.test/b1" }) } },
+      refunds: {
+        create: async (p: { amount: number }) => {
+          created.push(p.amount);
+          if (p.amount <= 0) throw new Error("invalid_request_error: amount must be greater than 0");
+          return { id: "re_b1" };
+        },
+      },
+    } as unknown as Stripe;
+    setStripeForTests(client);
+
+    // Free listing in the quote-mode shape: price 0, flat shipping stored 0 —
+    // the buyer's charge is the label line only (snapshot the label purchase
+    // onto the row below, as the §5 flow leaves it after buying the label).
+    const item = await list({ price_cents: 0, shipping_price_cents: 0 });
+    const ordered = await callTool(buyerTools, "create_order", { item_id: item.id, shipping_address: address });
+    expect(ordered.body.order).toMatchObject({ payment_mode: "stripe" });
+    const orderId = ordered.body.order.id as string;
+    await db.query(
+      `UPDATE orders SET status = 'sold', payment_intent_id = 'pi_b1', status_changed_at = now(),
+         label_quote = '{"amount_cents":733}', label_purchase = '{"shipment_id":"shp_1"}' WHERE id = $1`,
+      [orderId],
+    );
+    await db.query("UPDATE items SET status = 'sold' WHERE id = $1", [item.id]);
+
+    await cancelOrder(orderId, buyerId, "changed mind"); // must not throw
+    const row = (await db.query("SELECT status, refund_id FROM orders WHERE id = $1", [orderId])).rows[0];
+    // #8 cancel → refunding, then the inline settle fires #21 refund_confirmed —
+    // the same terminal the charge.refunded webhook produces for a real refund.
+    expect(row.status).toBe("refunded"); // the unwind completed — the path never breaks
+    expect(row.refund_id).toBeNull(); // nothing due, nothing recorded
+    expect(created).toEqual([]); // no refunds.create with amount <= 0 ever reached Stripe
   });
 
     it("§6 + C1: a stacked row (label_purchase ∧ line_refund_id) still refunds, clamped, and files one operator alert", async () => {

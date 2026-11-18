@@ -225,6 +225,16 @@ Same fail-closed behavior as today on any unknown (missing intent/charge/balance
 currency mismatch, net < 1¢ → order stays `payout_pending`, sweep retries). The result stays
 deterministic per order, keeping the idempotency key sound.
 
+3. **Zero payout base.** A zero payout base (a schema-legal free listing — `price_cents = 0`
+   with no flat shipping) settles `paid_out` with **no transfer**: nothing is due to the
+   seller, Stripe cannot express an amount-0 transfer, and nothing exists at Stripe to
+   reconcile. The settle fires the `transfer_paid` transition at the payout convergence
+   point (buyer release, admin release, and the money-retry sweep all converge there; a
+   concurrent settle is tolerated, never re-errored) and records a deduped
+   `payout_zero_base` operator note as the audit trail. The netting path above never runs —
+   with no funds moving there is nothing to mismatch — so a free listing can never wedge in
+   `payout_pending`. Zero-value money movements are settled states, not error states.
+
 Escrow/dispute note: the label line settles into the platform balance like the rest of the
 charge and is spent on the label at purchase (§5). It is not escrowed for the seller and is
 never transferable to them.
@@ -299,9 +309,11 @@ lineRetained(order)   = label_purchase exists                    // platform lab
 lineRefunded(order)   = label_quote.line_refund_id IS NOT NULL   // own-label refund fired
 
 refundCents(order, policy) =
-  chargeTotalCents(order)
-  − (lineRetained AND policy excludes the label line ? labelLineCents : 0)
-  − (lineRefunded ? labelLineCents : 0)
+  max(0, min(
+    chargeTotalCents(order)
+    − (lineRetained AND policy excludes the label line ? labelLineCents : 0)
+    − (lineRefunded ? labelLineCents : 0),
+    chargeTotalCents(order)))
 ```
 
 `label_quote.line_refund_id` (the Stripe refund id) and `line_refunded_at` are persisted on
@@ -310,9 +322,25 @@ the order row in the same step that fires `labelrefund:{order_id}` — durable s
 deterministically at every site. The two deductions are structurally exclusive (the
 own-label refund fires only while `label_purchase` is absent, and once `record_tracking`
 moves the order past `sold` no purchase is possible); should a future feature ever let them
-stack, the helper over-deducts — refunds too little, alertable — and can never refund more
-than the charge. Invariant across both idempotency keys: cumulative refunds
+stack, the helper over-deducts — refunds too little — the clamp above holds the amount
+inside `[0, chargeTotalCents]` and a deduped `label_refund_stack` operator alert fires (C1
+made concrete), never breaking the refund path over the alert itself. Invariant across both
+idempotency keys: cumulative refunds
 (`refund:{order_id}` + `labelrefund:{order_id}`) never exceed `chargeTotalCents`.
+
+**Zero remainder — nothing-due.** `refundCents` can legally bottom out at zero: a
+schema-legal free listing (`price_cents = 0`) bought with a paid label in quote mode (the
+charge is the label line alone), or the stacked-state clamp above bottoming out. Stripe
+rejects `amount: 0` — "refund $0" is not an operation, it is a settled state — so the site
+settles as **nothing-due**: no Stripe refund object is created, the refund transition
+still fires, and the unwind completes inline (`refund_confirmed` without waiting on a
+webhook that can never arrive). When the own-label line refund already returned the
+buyer's label money, the nothing-due outcome surfaces that `line_refund_id` (refund-id
+reconcile guards stay sound); otherwise its id is null, and replaying the site recomputes
+the same outcome with no Stripe call — idempotent. Nothing-due is a **typed success
+outcome** at every full-refund site, distinguishable from a failed refund — never a
+swallowed error — and it adds zero, so the cumulative invariant above is untouched.
+Zero-value money movements are settled states, not error states.
 
 In flat mode there is no label line and every refund is the full amount, exactly as today.
 In label-quote mode the line is excluded **only when a platform label was actually bought**
@@ -440,7 +468,9 @@ New `tests/shipping-quote.test.ts` + extensions to `order-flow` / `stripe` / `fu
    flat mode unchanged; F5 check accepts `chargeTotalCents` on both modes.
 3. Payout: proportional fee share (ceil, seller never subsidizes the label line's fee;
    deployment never absorbs rounding); net clamped at payout base; charge mismatch
-   (`bt.amount ≠ chargeTotalCents`) fails closed; label amount never in the transfer.
+   (`bt.amount ≠ chargeTotalCents`) fails closed; label amount never in the transfer;
+   zero payout base settles `paid_out` with no transfer + a `payout_zero_base` operator
+   note (regression test: fails against code that demands a transfer/netting for base 0).
 4. Refunds: no-label-bought → full incl. line; label-bought cancel/stuck-transit → line
    excluded; carrier failure → full (platform label) / remainder only (own label);
    `refund:{order_id}` replays keep the same amount; `labelrefund:{order_id}` fires exactly
@@ -450,7 +480,10 @@ New `tests/shipping-quote.test.ts` + extensions to `order-flow` / `stripe` / `fu
    `chargeTotalCents − labelLineCents` (the remainder), so the two refunds pair up to the
    charge — cumulative refunds across both keys never exceed `chargeTotalCents`; a failed
    `labelrefund` is retried by the sweep rule and the helper stays deterministic (line
-   already refunded ⇒ excluded again).
+   already refunded ⇒ excluded again); **zero remainder settles nothing-due** — the
+   transition fires and the unwind completes inline with no Stripe refund call, surfacing
+   `line_refund_id` when the own-label line refund fired (regression test: fails against
+   code that calls `stripe.refunds.create` with amount 0).
 5. Label purchase: exact-rate buy; re-quote on rejection builds solely from snapshot fields
    (editing the saved buyer address between quote and label does not change the shipment);
    `label_quote.destination ≠ orders.shipping_address` → `label_destination_mismatch`, no

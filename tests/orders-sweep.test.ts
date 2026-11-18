@@ -291,6 +291,34 @@ describe.skipIf(!available)("deadline sweeps (DB)", () => {
     expect(ev.rowCount).toBe(1); // deduped — one failure record, not one per pass
   });
 
+  it("rule 4 B1-sibling (THI-1013): zero payout base (free listing) settles paid_out with an operator note, no transfer", async () => {
+    // Free listing in quote mode: the charge is the label line only, which
+    // never enters the payout base. Pre-fix, netting threw
+    // payout_netting_unavailable forever (nothing could ever satisfy it) and
+    // the order wedged in payout_pending with rule-7 noise. Now the sweep
+    // settles it paid_out with a payout_zero_base note and no Stripe call.
+    const { client, calls } = fakeStripe();
+    setStripeForTests(client);
+    const seed1 = await seed("stripe");
+    await db.query("UPDATE items SET price_cents = 0 WHERE id = $1", [seed1.itemId]);
+    await db.query(
+      `UPDATE orders SET price_cents = 0, shipping_price_cents = 0, label_quote = '{"amount_cents":733}' WHERE id = $1`,
+      [seed1.orderId],
+    );
+    await toSold(seed1.orderId, seed1.sellerEmail);
+    await applyTransition({ orderId: seed1.orderId, trigger: "record_tracking", actor: { type: "seller", id: "s" }, sets: { carrier: "DHL", tracking_code: "T5", tracker_id: "trk_5" } });
+    await applyTransition({ orderId: seed1.orderId, trigger: "carrier_update", actor: { type: "carrier", id: "trk_5" } });
+    await applyTransition({ orderId: seed1.orderId, trigger: "carrier_update", actor: { type: "carrier", id: "trk_5" } });
+    await db.query("UPDATE orders SET dispute_deadline = now() - interval '1 hour' WHERE id = $1", [seed1.orderId]);
+    await runSweeps(cfg);
+    const o = await order(seed1.orderId);
+    expect(o.status).toBe("paid_out"); // settled — not wedged in payout_pending
+    expect(o.transfer_id).toBeNull(); // nothing exists at Stripe to reconcile
+    expect(calls.some((c) => c.startsWith("transfers.create:"))).toBe(false);
+    const ev = await db.query("SELECT 1 FROM order_events WHERE order_id = $1 AND event_type = 'payout_zero_base'", [seed1.orderId]);
+    expect(ev.rowCount).toBe(1); // operator note recorded once (deduped)
+  });
+
   it("rule 5: pickup sold past autoconfirm → delivered with the long (F10) window", async () => {
     const seed1 = await seed("off_platform");
     await db.query("UPDATE orders SET fulfillment = 'pickup' WHERE id = $1", [seed1.orderId]);

@@ -45,6 +45,8 @@ export type SecurityEventRoute =
   | "/api/notifications/:id/read"
   // THI-788 step 2 (spec docs/specs/item-reports.md): report limiter 429s.
   | "/api/items/:id/report"
+  // Order-reviews spec PR 3: review-report limiter 429s (shared bucket).
+  | "/api/reviews/:id/report"
   | "/api/notifications/read-all"
   // THI-780 (THI-760 Phase 2): preferences limiter 429s.
   | "/api/me/preferences"
@@ -56,8 +58,11 @@ export type SecurityEventRoute =
   | "/api/me/addresses/:id"
   // Order reviews (spec docs/specs/order-reviews.md, PR 1): review-write
   // limiter 429s — one slug for the POST/PATCH pair (one bucket).
-  | "/api/orders/:id/review";
-
+  | "/api/orders/:id/review"
+  | "/api/notifications/read-all"
+  // THI-814 (P1-2 draft_listing extraction): per-seller limiter 429s on the
+  // session-authenticated web-UI draft route (the MCP surface logs "/mcp").
+  | "/api/draft-listing";
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a
  *  reviewed one-line addition, which is the point of this union).
@@ -185,8 +190,36 @@ export type SecurityEvent =
    *  (completed/paid_out). Emitted exactly once when the count crosses
    *  REVIEW_PAIR_ANOMALY_THRESHOLD on the transition commit path — operator
    *  signal only, nothing user-facing. Ids and count only, no payload. */
-  | { type: "review_pair_anomaly"; buyer_id: string; seller_id: string; terminal_orders: number };
-
+  | { type: "review_pair_anomaly"; buyer_id: string; seller_id: string; terminal_orders: number }
+  /** THI-814 (P1-2, ADR 0009): one line per completed draft_listing extraction
+   *  call. Numbers and slugs only — model slug, token counts, daily budget
+   *  state, photo count (0 or 1); never input text, photo bytes or provider
+   *  I/O (no-payload rule, §6). Mirrors the chat_usage shape so the weekly
+   *  metrics digest can read both surfaces with one query. */
+  | {
+      type: "extraction_usage";
+      model: string;
+      photo_count: number;
+      tokens_in: number;
+      tokens_out: number;
+      daily_calls: number;
+      call_cap: number;
+      daily_tokens: number;
+      token_budget: number;
+      usage_source: "provider" | "estimate_fallback";
+    }
+  /** THI-814 (P1-2, ADR 0009 §4/D7): budget-guard events — the 80%-consumed
+   *  auto-throttle warning (once per UTC day), the two exhaustion rejections,
+   *  and the provider insufficient-balance alert (the operator-actionable
+   *  one). Numbers only; no seller content by construction. */
+  | {
+      type: "extraction_budget";
+      action: "throttle_warning" | "call_cap_exhausted" | "token_budget_exhausted" | "provider_insufficient_balance";
+      daily_calls?: number;
+      call_cap?: number;
+      daily_tokens?: number;
+      token_budget?: number;
+    };
 export interface SecurityEventContext {
   sellerId?: string;
   ip?: string;
@@ -233,6 +266,28 @@ export function logSecurityEvent(event: SecurityEvent, ctx: SecurityEventContext
           daily_total: event.daily_total,
           budget: event.budget,
           usage_source: event.usage_source,
+        }
+      : {}),
+    ...(event.type === "extraction_usage"
+      ? {
+          model: event.model,
+          photo_count: event.photo_count,
+          tokens_in: event.tokens_in,
+          tokens_out: event.tokens_out,
+          daily_calls: event.daily_calls,
+          call_cap: event.call_cap,
+          daily_tokens: event.daily_tokens,
+          token_budget: event.token_budget,
+          usage_source: event.usage_source,
+        }
+      : {}),
+    ...(event.type === "extraction_budget"
+      ? {
+          action: event.action,
+          ...(event.daily_calls !== undefined ? { daily_calls: event.daily_calls } : {}),
+          ...(event.call_cap !== undefined ? { call_cap: event.call_cap } : {}),
+          ...(event.daily_tokens !== undefined ? { daily_tokens: event.daily_tokens } : {}),
+          ...(event.token_budget !== undefined ? { token_budget: event.token_budget } : {}),
         }
       : {}),
     sellerId: ctx.sellerId ?? null,

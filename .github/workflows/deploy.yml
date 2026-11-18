@@ -27,6 +27,10 @@ jobs:
     environment: production
     if: vars.DEPLOY_ENABLED == 'true'
     steps:
+      - name: Check out the smoke script
+        # SHA-pinned (deploy-workflow discipline, THI-224 F2): this workflow can
+        # touch production, so its actions are pinned, not floating tags.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Deploy over SSH
         uses: appleboy/ssh-action@823bd89e131d8d508129f9443cad5855e9ba96f0 # v1.2.4, SHA-pinned (THI-224 F2)
         with:
@@ -37,3 +41,12 @@ jobs:
           # canonical server-side wrapper instead — its output appears below.
           script: |
             echo "deploy requested; server-side wrapper /usr/local/bin/thingery-deploy.sh executes the documented steps"
+      - name: Post-deploy functional smoke (a deploy is done only when this passes)
+        # THI-909: healthz alone proved a silently degraded tool layer is
+        # invisible between Growth's scheduled probes. This exercises the real
+        # contract — initialize, tools/list, and search_items q discipline —
+        # read-only and anonymous, from the runner against the public endpoint.
+        # A red smoke means the deploy is NOT done: treat as an open incident.
+        run: bash scripts/prod-smoke.sh
+        env:
+          EXPECT_COMMIT: ${{ github.sha }}

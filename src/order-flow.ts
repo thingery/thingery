@@ -13,7 +13,7 @@
 
 import { pool } from "./db.js";
 import type { OrderRow, OrderStatus } from "./orders.js";
-import { applyTransition, IllegalTransitionError } from "./orders.js";
+import { applyTransition, IllegalTransitionError, settleNothingDueRefund } from "./orders.js";
 import { orderFlowConfig } from "./config.js";
 import { AddressSuggestedError, verifyOrderAddress, type ShippingVerificationRecord } from "./address-verification.js";
 import {
@@ -525,10 +525,15 @@ export async function cancelOrder(orderId: string, actorId: string, reason?: str
     // buyer's (procured with their money) — the line stays out of the
     // refund; with no label bought the full charge goes back.
     const refund = await createRefundForOrder(order, order.payment_intent_id, stripe, "exclude_label");
-    return applyTransition({
+    // B1 (THI-1013): a zero remainder (free item + bought label, the C1
+    // clamp) settles with no refund_id — the cancel transition still fires,
+    // and the unwind completes inline (no charge.refunded webhook can come
+    // for a refund that was never created).
+    const next = await applyTransition({
       orderId, trigger: "cancel_order", actor: { type: actorType, id: actorId }, reason,
-      sets: { refund_id: refund.id },
+      ...(refund.id ? { sets: { refund_id: refund.id } } : {}),
     });
+    return (await settleNothingDueRefund(next, refund)) ?? next;
   }
 
   // #3 / #8b / #11b — off_platform twins and stripe pre-payment cancel.

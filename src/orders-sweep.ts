@@ -12,6 +12,7 @@ import { orderFlowConfig, type OrderFlowConfig } from "./config.js";
 import {
   applyTransition,
   IllegalTransitionError,
+  settleNothingDueRefund,
   type OrderRow,
 } from "./orders.js";
 import {
@@ -20,6 +21,7 @@ import {
   expireCheckoutSession,
   createRefundForOrder,
   createTransferForOrder,
+  payoutBaseCents,
 } from "./stripe.js";
 import { processCarrierEvent } from "./webhooks-carrier.js";
 import { processStripeEvent } from "./webhooks-stripe.js";
@@ -50,13 +52,16 @@ const days = (n: number) => hours(n * 24);
  * the transition that records it; a replay retrieves the same refund.
  * §6 policy (stale-sale / never-shipped): a platform label bought for the
  * order is the buyer's — exclude_label; with no label bought the buyer's
- * full charge (label line included) goes back. */
-async function refundFirst(order: OrderRow): Promise<string> {
+ * full charge (label line included) goes back.
+ * B1 (THI-1013): a zero remainder settles as nothingDue with a null id —
+ * callers omit the refund_id set so the transition still fires, then
+ * settle the unwind inline (no webhook can confirm a refund that was
+ * never created). */
+async function refundFirst(order: OrderRow) {
   const stripe = getStripe();
   if (!stripe) throw new Error("payments_not_configured");
   if (!order.payment_intent_id) throw new Error("inconsistent_state: paid order missing payment intent");
-  const refund = await createRefundForOrder(order, order.payment_intent_id, stripe, "exclude_label");
-  return refund.id;
+  return createRefundForOrder(order, order.payment_intent_id, stripe, "exclude_label");
 }
 
 async function alertEvent(orderId: string, type: string, message: string, dedupeKey?: string) {
@@ -163,8 +168,9 @@ async function rule2(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   );
   for (const order of rows) {
     try {
-      const sets = order.payment_mode === "stripe" ? { refund_id: await refundFirst(order) } : undefined;
-      await applyTransition({
+      const refund = order.payment_mode === "stripe" ? await refundFirst(order) : null;
+      const sets = refund?.id ? { refund_id: refund.id } : undefined;
+      const next = await applyTransition({
         orderId: order.id,
         trigger: "stale_sale",
         actor: SYSTEM,
@@ -172,6 +178,7 @@ async function rule2(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
         dedupeKey: `sweep:2:${order.id}`,
         ...(sets ? { sets } : {}),
       });
+      await settleNothingDueRefund(next, refund); // B1: nothing-due unwinds complete inline
       tally(report, "2-stale-sale", "acted");
     } catch (err) {
       if (err instanceof IllegalTransitionError) tally(report, "2-stale-sale", "skipped");
@@ -210,8 +217,9 @@ async function rule3(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   );
   for (const order of rows) {
     try {
-      const sets = order.payment_mode === "stripe" ? { refund_id: await refundFirst(order) } : undefined;
-      await applyTransition({
+      const refund = order.payment_mode === "stripe" ? await refundFirst(order) : null;
+      const sets = refund?.id ? { refund_id: refund.id } : undefined;
+      const next = await applyTransition({
         orderId: order.id,
         trigger: "stuck_transit",
         actor: SYSTEM,
@@ -219,6 +227,7 @@ async function rule3(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
         dedupeKey: `sweep:3:${order.id}`,
         ...(sets ? { sets } : {}),
       });
+      await settleNothingDueRefund(next, refund); // B1: nothing-due unwinds complete inline
       tally(report, "3-stuck-transit", "acted");
     } catch (err) {
       if (err instanceof IllegalTransitionError) tally(report, "3-stuck-transit", "skipped");
@@ -235,6 +244,33 @@ async function rule3(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
 async function attemptPayout(order: OrderRow): Promise<boolean> {
   const stripe = getStripe();
   if (!stripe) throw new Error("payments_not_configured");
+  // B1-sibling (Security review THI-1013): a zero payout base (free
+  // listing) settles here — this rule's retry arm is the convergence point
+  // for every payout entry path (release, admin, sweep). No transfer exists
+  // or will ever arrive to settle it, and demanding an onboarded seller
+  // account would wedge a free listing forever, so settle with an operator
+  // note before the destination lookup.
+  if (payoutBaseCents(order) <= 0) {
+    await alertEvent(
+      order.id,
+      "payout_zero_base",
+      "payout base is 0 (free listing) — settled paid_out without a transfer",
+      `payout_zero_base:${order.id}`,
+    );
+    try {
+      await applyTransition({
+        orderId: order.id,
+        trigger: "transfer_paid",
+        actor: { type: "stripe", id: "zero_base" },
+        reason: "zero payout base — nothing to transfer",
+      });
+    } catch (err) {
+      // A concurrent settle (admin reconcile) already moved the row — the
+      // outcome (paid_out, no transfer) is identical; never re-error the sweep.
+      if (!(err instanceof IllegalTransitionError)) throw err;
+    }
+    return true;
+  }
   const dest = await pool.query<{ stripe_account_id: string | null }>(
     "SELECT stripe_account_id FROM sellers WHERE id = $1",
     [order.seller_id],
@@ -434,8 +470,9 @@ async function rule8(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   );
   for (const order of rows) {
     try {
-      const sets = order.payment_mode === "stripe" ? { refund_id: await refundFirst(order) } : undefined;
-      await applyTransition({
+      const refund = order.payment_mode === "stripe" ? await refundFirst(order) : null;
+      const sets = refund?.id ? { refund_id: refund.id } : undefined;
+      const next = await applyTransition({
         orderId: order.id,
         trigger: "dispute_autoresolve",
         actor: SYSTEM,
@@ -443,6 +480,7 @@ async function rule8(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
         dedupeKey: `sweep:8:${order.id}`,
         ...(sets ? { sets } : {}),
       });
+      await settleNothingDueRefund(next, refund); // B1: nothing-due unwinds complete inline
       console.error(`[sweep:8] operator alert: order ${order.id} auto-refunded (never_shipped, §11.3 rule 8)`);
       tally(report, "8-never-shipped", "acted");
     } catch (err) {

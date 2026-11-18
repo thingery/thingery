@@ -45,6 +45,9 @@ const EXPECTED: Record<
   // caller's own thread — same posture as my_orders.
   send_order_message: { title: "Send order message", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   list_order_messages: { title: "List order messages", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // THI-780 (notification inbox): pure read of the caller's own rows —
+  // same posture as my_orders.
+  list_notifications: { title: "List my notifications", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   // THI-360 spec rev 2 PR 2 (buyer alerts): my_intents is a pure read;
   // save/update are plain writes; delete_intent removes the intent and its
   // match records — destructiveHint, same posture as cancel_order.
@@ -62,6 +65,14 @@ const EXPECTED: Record<
   // Public wanted-board reads: same posture as search_items / get_item.
   search_wanted: { title: "Search wanted posts", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   get_wanted: { title: "Get wanted post", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // THI-923 (seller summary): pure public read of the seller profile + a
+  // page of their feed-visible listings — same posture as get_item.
+  get_seller_summary: { title: "Get seller summary", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // THI-941 (order reviews, PR 2): pure public read of a seller's published
+  // reviews — same posture as get_seller_summary.
+  get_seller_reviews: { title: "Get seller reviews", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // THI-923 (seller summary): pure public read of the seller profile + a
+  // page of their feed-visible listings — same posture as get_item.
   // Buyer-side wanted tools: my_wanted is a pure read; expire_wanted ends a
   // live public post, so it carries destructiveHint like cancel_order.
   create_wanted: { title: "Create wanted post", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -69,6 +80,14 @@ const EXPECTED: Record<
   update_wanted: { title: "Update wanted post", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   expire_wanted: { title: "Expire wanted post", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   renew_wanted: { title: "Renew wanted post", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  // Saved addresses (docs/specs/saved-addresses.md step 2): list_addresses
+  // is a pure read of the caller's own summaries; save_address is a plain
+  // write; delete_address removes a row the user can re-create — same
+  // destructiveHint posture as delete_intent. No tool here can touch an
+  // order's snapshot, so nothing order-destructive exists on this surface.
+  list_addresses: { title: "My saved addresses", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  save_address: { title: "Save a shipping address", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  delete_address: { title: "Delete a saved address", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
 };
 
 // Session-only tools (registered for the first-party web session alone, so

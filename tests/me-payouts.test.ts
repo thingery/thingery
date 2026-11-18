@@ -30,13 +30,14 @@ async function dbAvailable(): Promise<boolean> {
 
 const available = await dbAvailable();
 
-type MeBody = { seller: null | { payouts?: { configured: boolean; onboarded: boolean } } & Record<string, unknown> };
+type MeBody = { seller: null | { payouts?: { configured: boolean; started: boolean; onboarded: boolean } } & Record<string, unknown> };
 
 describe.skipIf(!available)("/api/me payouts state", () => {
   let db: pg.Client;
   let server: Server;
   let base = "";
   let onboardedCookie = "";
+  let startedCookie = "";
   let newCookie = "";
   const savedKey = process.env.STRIPE_SECRET_KEY;
 
@@ -52,21 +53,22 @@ describe.skipIf(!available)("/api/me payouts state", () => {
     await db.query(readFileSync(path.resolve(__dirname, "..", "db", "schema.sql"), "utf8"));
 
     const tag = crypto.randomBytes(4).toString("hex");
-    const mk = async (name: string, onboarded: boolean): Promise<string> => {
+    const mk = async (name: string, stage: "new" | "started" | "onboarded"): Promise<string> => {
       const r = await db.query<{ id: string }>(
         `INSERT INTO sellers (email, password_hash, display_name, stripe_account_id, stripe_onboarded_at)
          VALUES ($1, 'x', $2, $3, $4) RETURNING id`,
         [
           `mepayouts-${tag}-${crypto.randomUUID().slice(0, 8)}@example.test`,
           name,
-          onboarded ? `acct_test_${tag}` : null,
-          onboarded ? new Date() : null,
+          stage === "new" ? null : `acct_test_${tag}_${stage}`,
+          stage === "onboarded" ? new Date() : null,
         ],
       );
       return r.rows[0].id;
     };
-    onboardedCookie = `${SESSION_COOKIE}=${signSession(await mk("Onboarded", true))}`;
-    newCookie = `${SESSION_COOKIE}=${signSession(await mk("New", false))}`;
+    onboardedCookie = `${SESSION_COOKIE}=${signSession(await mk("Onboarded", "onboarded"))}`;
+    startedCookie = `${SESSION_COOKIE}=${signSession(await mk("Started", "started"))}`;
+    newCookie = `${SESSION_COOKIE}=${signSession(await mk("New", "new"))}`;
 
     const app = express();
     app.use(express.json({ limit: "100kb" }));
@@ -94,21 +96,26 @@ describe.skipIf(!available)("/api/me payouts state", () => {
   });
 
   it.each([
-    { stripe: false, who: "new", expected: { configured: false, onboarded: false } },
-    { stripe: false, who: "onboarded", expected: { configured: false, onboarded: true } },
-    { stripe: true, who: "new", expected: { configured: true, onboarded: false } },
-    { stripe: true, who: "onboarded", expected: { configured: true, onboarded: true } },
+    { stripe: false, who: "new", expected: { configured: false, started: false, onboarded: false } },
+    { stripe: false, who: "started", expected: { configured: false, started: true, onboarded: false } },
+    { stripe: false, who: "onboarded", expected: { configured: false, started: true, onboarded: true } },
+    { stripe: true, who: "new", expected: { configured: true, started: false, onboarded: false } },
+    { stripe: true, who: "started", expected: { configured: true, started: true, onboarded: false } },
+    { stripe: true, who: "onboarded", expected: { configured: true, started: true, onboarded: true } },
   ])("payments configured=$stripe, $who seller → $expected", async ({ stripe, who, expected }) => {
     if (stripe) process.env.STRIPE_SECRET_KEY = "sk_test_me_payouts";
     else delete process.env.STRIPE_SECRET_KEY;
-    const body = await me(who === "onboarded" ? onboardedCookie : newCookie);
+    const cookies = { new: newCookie, started: startedCookie, onboarded: onboardedCookie };
+    const body = await me(cookies[who as keyof typeof cookies]);
     expect(body.seller?.payouts).toEqual(expected);
   });
 
   it("never exposes Stripe identifiers", async () => {
     process.env.STRIPE_SECRET_KEY = "sk_test_me_payouts";
-    const raw = JSON.stringify(await me(onboardedCookie));
-    expect(raw).not.toMatch(/acct_/);
-    expect(raw).not.toMatch(/stripe/i);
+    for (const cookie of [startedCookie, onboardedCookie]) {
+      const raw = JSON.stringify(await me(cookie));
+      expect(raw).not.toMatch(/acct_/);
+      expect(raw).not.toMatch(/stripe/i);
+    }
   });
 });

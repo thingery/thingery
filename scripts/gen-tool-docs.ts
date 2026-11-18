@@ -57,6 +57,8 @@ export const TOOL_PAGES: ToolPage[] = [
     tools: [
       "search_items",
       "get_item",
+      "get_seller_summary",
+      "get_seller_reviews",
       "describe_category",
       "create_listing",
       "add_item_image",
@@ -87,6 +89,28 @@ export const TOOL_PAGES: ToolPage[] = [
       "send_order_message",
       "list_order_messages",
     ],
+  },
+  {
+    slug: "notifications",
+    title: "Notifications",
+    description: "Read the account's notification inbox (order events, account notices).",
+    intro:
+      "Agents read the notification inbox to see what happened on their account — " +
+      "sales, deadlines, account changes. Same data as the notification center on " +
+      "thingery.dev; only the caller's own notifications are ever returned.",
+    tools: [
+      "list_notifications",
+    ],
+  },
+  {
+    slug: "addresses",
+    title: "Saved addresses",
+    description: "Save shipping addresses once and reuse them on every order.",
+    intro:
+      "An account keeps up to 10 saved shipping addresses. The tool surface only ever returns a " +
+      "summary — label, city, country and verification status; the recipient name, street and " +
+      "postal code stay on the server and are copied into the order when the address is used.",
+    tools: ["list_addresses", "save_address", "delete_address"],
   },
   {
     slug: "alerts",

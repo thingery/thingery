@@ -20,6 +20,8 @@ import type { PoolClient } from "pg";
 import { notifyConfig, type NotifyConfig } from "../config.js";
 import type { Mailer, MailSendResult } from "../mailer.js";
 import { renderOrderEmail } from "./templates.js";
+import { emailAllowedByPrefs, parseNotificationPrefs } from "./prefs.js";
+import { planOperatorAlert } from "./operator.js";
 
 /** Claim batch per pass (plan §4: "small batches"; per-run cap default 50
  *  bounds it further). */
@@ -50,7 +52,7 @@ export interface DeliveryReport {
   rateLimited: number;
 }
 
-type SkipReason = "no_address" | "not_verified";
+type SkipReason = "no_address" | "not_verified" | "bounced" | "opted_out";
 
 // All three markers run on the sweep's transaction client: the claim holds
 // FOR UPDATE locks on these rows, so a pool connection would deadlock
@@ -71,6 +73,37 @@ async function markSkipped(db: PoolClient, id: string, reason: SkipReason): Prom
   );
 }
 
+/** Account gates resolved by `to_email` (unique in sellers): one lookup
+ *  returns verification, bounce suppression, and preferences together —
+ *  THE one place plan §5's policy classes are enforced (Phase 2 / THI-780):
+ *  unverified → skip (Phase 0 gate), bounced → skip (never hammer a
+ *  bouncing address), opted-out per class → skip (money class locked on).
+ *  Rows whose address matches no account (stale snapshot, removed account)
+ *  skip as not_verified — fail closed. */
+async function accountGate(
+  db: PoolClient,
+  row: OutboxRow,
+): Promise<{ ok: true } | { ok: false; reason: SkipReason }> {
+  // Internal operator rows (notification_id NULL, operator.* template) ride
+  // the outbox for delivery/retry but are not account mail — no account
+  // gates apply (operator-alerts PR of this phase).
+  if (row.notification_id === null && row.template.startsWith("operator.")) return { ok: true };
+  const acct = await db.query<{ verified: boolean; bounced: boolean; prefs: unknown }>(
+    `SELECT (email_verified_at IS NOT NULL) AS verified,
+            (email_bounced_at IS NOT NULL) AS bounced,
+            profile->'notification_prefs' AS prefs
+       FROM sellers WHERE email = $1`,
+    [row.to_email],
+  );
+  const a = acct.rows[0];
+  if (!a || !a.verified) return { ok: false, reason: "not_verified" };
+  if (a.bounced) return { ok: false, reason: "bounced" };
+  if (!emailAllowedByPrefs(parseNotificationPrefs(a.prefs), row.template)) {
+    return { ok: false, reason: "opted_out" };
+  }
+  return { ok: true };
+}
+
 async function markFailure(db: PoolClient, row: OutboxRow, error: string): Promise<"retried" | "dead"> {
   const attempts = row.attempts + 1;
   if (attempts >= MAX_ATTEMPTS) {
@@ -78,6 +111,24 @@ async function markFailure(db: PoolClient, row: OutboxRow, error: string): Promi
       `UPDATE email_outbox SET status = 'dead', attempts = $2, last_error = $3 WHERE id = $1`,
       [row.id, attempts, error],
     );
+    // THI-780 PR 4: dead-letters surface in the operator mailbox too (once
+    // per outbox row, opalert dedupe; same transaction — the alert and the
+    // dead status commit together). Log-only posture when the env is unset.
+    await planOperatorAlert({
+      kind: "dead_letter",
+      ref: row.id,
+      subject: `Email dead-lettered (${row.template}) — Thingery`,
+      payload: {
+        title: `Outbox row dead after ${MAX_ATTEMPTS} attempts`,
+        lines: [
+          `Outbox: ${row.id}`,
+          `To: ${row.to_email || "(no address)"}`,
+          `Template: ${row.template}`,
+          `Error: ${error.slice(0, 300)}`,
+        ],
+      },
+      client: db,
+    });
     return "dead";
   }
   await db.query(
@@ -138,16 +189,12 @@ export async function runNotifyDelivery(
         report.skipped++;
         continue;
       }
-      // Verification gate (Phase 0's email_verified_at): one join per row —
-      // the recipient snapshot lives on the notification.
-      const verified = await client.query<{ verified: boolean }>(
-        `SELECT (s.email_verified_at IS NOT NULL) AS verified
-           FROM notifications n JOIN sellers s ON s.id = n.recipient_id
-          WHERE n.id = $1`,
-        [row.notification_id],
-      );
-      if (!verified.rows[0]?.verified) {
-        await markSkipped(client, row.id, "not_verified");
+      // Account gates — Phase 0 verification, bounce suppression, and the
+      // Phase 2 preference policy classes, all in one place (accountGate):
+      // not_verified / bounced / opted_out are permanent skips.
+      const gate = await accountGate(client, row);
+      if (!gate.ok) {
+        await markSkipped(client, row.id, gate.reason);
         report.skipped++;
         continue;
       }
@@ -160,12 +207,25 @@ export async function runNotifyDelivery(
       let result: MailSendResult;
       try {
         const rendered = renderOrderEmail(row.template.replace(/\.v1$/, ""), row.payload, cfg.publicBaseUrl);
+        // THI-780 PR 2: opt-in mail (digests) carries a one-click unsubscribe
+        // URL in its payload — stamp the standard headers when present. The
+        // body always carries the link too (provider header-stripping hedge).
+        const unsubscribeUrl =
+          typeof row.payload.unsubscribe_url === "string" ? row.payload.unsubscribe_url : undefined;
         result = await mailer.send({
           to: row.to_email,
           subject: rendered.subject,
           text: rendered.text,
           html: rendered.html,
           idempotencyKey: `outbox-${row.id}`, // stable across retries
+          ...(unsubscribeUrl
+            ? {
+                headers: {
+                  "List-Unsubscribe": `<${unsubscribeUrl}>`,
+                  "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+                },
+              }
+            : {}),
         });
       } catch (err) {
         result = { ok: false, error: err instanceof Error ? err.message : String(err) };

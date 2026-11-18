@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import type { ZodTypeAny } from "zod";
+import { z, type ZodTypeAny } from "zod";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeUpdateArgs, TOOLS } from "../src/chat.js";
 import { CONDITIONS, pool, type SellerRow } from "../src/db.js";
@@ -35,7 +35,11 @@ function toolsFor(seller: Pick<SellerRow, "id" | "display_name"> | null): Map<st
 }
 
 const callTool = async (tools: Map<string, RegisteredTool>, name: string, args: Record<string, unknown>) => {
-  const result = await tools.get(name)!.handler(args);
+  // SDK parity (THI-958): the real server parses args through the tool's
+  // zod shape (applying schema defaults) before the handler runs — mirror
+  // that here, since handlers now trust their parsed args type.
+  const parsed = z.object(tools.get(name)!.schema).parse(args) as Record<string, unknown>;
+  const result = await tools.get(name)!.handler(parsed);
   return { isError: result.isError === true, body: JSON.parse(result.content[0].text) };
 };
 

@@ -45,7 +45,20 @@ export type SecurityEventRoute =
   | "/api/notifications/:id/read"
   // THI-788 step 2 (spec docs/specs/item-reports.md): report limiter 429s.
   | "/api/items/:id/report"
-  | "/api/notifications/read-all";
+  // Order-reviews spec PR 3: review-report limiter 429s (shared bucket).
+  | "/api/reviews/:id/report"
+  | "/api/notifications/read-all"
+  // THI-780 (THI-760 Phase 2): preferences limiter 429s.
+  | "/api/me/preferences"
+  // THI-780 PR 2: digest one-click unsubscribe limiter 429s.
+  | "/api/notifications/unsubscribe"
+  // THI-914 (spec docs/specs/saved-addresses.md, rollout step 3): saved-address
+  // limiter 429s — reads and writes share this slug pair with the routes.
+  | "/api/me/addresses"
+  | "/api/me/addresses/:id"
+  // Order reviews (spec docs/specs/order-reviews.md, PR 1): review-write
+  // limiter 429s — one slug for the POST/PATCH pair (one bucket).
+  | "/api/orders/:id/review";
 
 /** Fixed rejection reasons for image_upload events (THI-133; extended with
  *  the THI-110 upload-abuse reasons that landed via PR #69 — each is a
@@ -162,7 +175,19 @@ export type SecurityEvent =
   /** THI-762 (THI-760 Phase 0): a verification token was consumed (the
    *  unverified → verified transition) — seller id only, no token material
    *  (hash or plaintext) ever reaches the event log. */
-  | { type: "email_verified"; outcome: "success" };
+  | { type: "email_verified"; outcome: "success" }
+  /** Saved-address write (spec docs/specs/saved-addresses.md, review note
+   *  N3): one line per account_addresses write — action + outcome, account
+   *  id via the context, the address uuid when one is in play. Ids only:
+   *  no label, name, street, city or postal code ever reaches the event
+   *  log (no-payload rule, §6). */
+  | { type: "address_write"; action: "save" | "update" | "delete"; outcome: "success" | "rejected"; addressId?: string }
+  /** Order reviews (spec docs/specs/order-reviews.md, farming defense b):
+   *  a buyer→seller pair reached ≥ N terminal review-eligible orders
+   *  (completed/paid_out). Emitted exactly once when the count crosses
+   *  REVIEW_PAIR_ANOMALY_THRESHOLD on the transition commit path — operator
+   *  signal only, nothing user-facing. Ids and count only, no payload. */
+  | { type: "review_pair_anomaly"; buyer_id: string; seller_id: string; terminal_orders: number };
 
 export interface SecurityEventContext {
   sellerId?: string;
@@ -195,6 +220,10 @@ export function logSecurityEvent(event: SecurityEvent, ctx: SecurityEventContext
     ...(event.type === "wanted_response" && event.count !== undefined ? { count: event.count } : {}),
     ...(event.type === "listing_write" && event.limit !== undefined ? { limit: event.limit } : {}),
     ...(event.type === "admin_pii_reveal" ? { orderId: event.orderId } : {}),
+    ...(event.type === "address_write" && event.addressId !== undefined ? { addressId: event.addressId } : {}),
+    ...(event.type === "review_pair_anomaly"
+      ? { buyer_id: event.buyer_id, seller_id: event.seller_id, terminal_orders: event.terminal_orders }
+      : {}),
     ...(event.type === "chat_usage"
       ? {
           model: event.model,

@@ -203,8 +203,11 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
   });
 
   it("failure ladder: retry with backoff, then dead at the cap", async () => {
-    const id = await seedOutbox({ to: "", verified: true, attempts: MAX_ATTEMPTS - 2 });
-    await db.query("UPDATE email_outbox SET to_email = $2 WHERE id = $1", [id, `ladder-${runTag}@example.test`]);
+    // THI-780 PR 1: the gate resolves accounts by to_email — the ladder row
+    // must point at a real verified account, else it is skipped:not_verified
+    // before any send attempt (correct behavior, wrong fixture here).
+    const account = await seedAccount(true);
+    const id = await seedOutbox({ to: account.email, verified: true, attempts: MAX_ATTEMPTS - 2, accountId: account.id });
     const failTwice = new ScriptedMailer([failing("boom"), failing("boom")]);
     const r1 = await runNotifyDelivery(enabledCfg, failTwice); // attempt 7 → pending w/ backoff
     expect(r1.retried).toBeGreaterThanOrEqual(1);
@@ -246,8 +249,9 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
   });
 
   it("idempotency key is stable across retries (no double provider send)", async () => {
-    const id = await seedOutbox({ to: "", verified: true });
-    await db.query("UPDATE email_outbox SET to_email = $2 WHERE id = $1", [id, `idem-${runTag}@example.test`]);
+    // Real verified account for the same THI-780 PR 1 reason as above.
+    const account = await seedAccount(true);
+    const id = await seedOutbox({ to: account.email, verified: true, accountId: account.id });
     const m1 = new ScriptedMailer([failing("timeout")]);
     await runNotifyDelivery(enabledCfg, m1);
     await db.query("UPDATE email_outbox SET next_attempt_at = now() WHERE id = $1", [id]);

@@ -44,6 +44,19 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       | "/api/notifications/read-all"
       // THI-788 step 2 (spec docs/specs/item-reports.md): report limiter slug.
       | "/api/items/:id/report"
+      // THI-780 (THI-760 Phase 2): preferences limiter slug.
+      | "/api/me/preferences"
+      // THI-780 PR 2: digest one-click unsubscribe limiter slug.
+      | "/api/notifications/unsubscribe"
+      // THI-914 (spec docs/specs/saved-addresses.md, step 3): saved-address
+      // limiter slugs — reads and writes, one slug per route shape.
+      | "/api/me/addresses"
+      | "/api/me/addresses/:id"
+      // Order reviews (spec docs/specs/order-reviews.md, PR 1): review-write
+      // limiter slug (POST/PATCH pair, one bucket).
+      | "/api/orders/:id/review"
+      // Order reviews PR 3: review-report limiter slug (shared reports bucket).
+      | "/api/reviews/:id/report"
     >();
     const routes: SecurityEventRoute[] = [
       "/api/signup",
@@ -61,6 +74,10 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       "/api/wanted/:id/renew",
       "/api/verify-email",
       "/api/me/resend-email-verification",
+      "/api/me/addresses",
+      "/api/me/addresses/:id",
+      "/api/orders/:id/review",
+      "/api/reviews/:id/report",
     ];
     expectTypeOf(routes).toEqualTypeOf<SecurityEventRoute[]>();
   });

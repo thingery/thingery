@@ -10,7 +10,7 @@
 //   2. `?profile=directory` must register exactly those 16 tools — a new
 //      money-touching tool added to src/tools.ts cannot silently leak into
 //      the directory listing because it is not on the include list.
-//   3. The canonical /mcp (no param) is unchanged: the full surface (39
+//   3. The canonical /mcp (no param) is unchanged: the full surface (40
 //      registered tools for anonymous/API-key/OAuth callers, plus 3 more
 //      session-only account tools under the web session — #249/#250), with
 //      every excluded order/payment/payout/intent/address/account tool still
@@ -187,10 +187,10 @@ describe("directory profile pin (registration-time gating)", () => {
     }
   });
 
-  it("default registration (no profile arg) is unchanged: all 39 base tools incl. every excluded one", () => {
+  it("default registration (no profile arg) is unchanged: all 40 base tools incl. every excluded one", () => {
     const { server, registered } = captureServer();
     registerTools(server, { seller: null });
-    expect(registered.size).toBe(39);
+    expect(registered.size).toBe(40);
     // The base surface carries every non-session excluded tool; the 3
     // session-only ones join only under a web session (next test).
     const baseExcluded = EXCLUDED_PIN.filter((n) => !SESSION_ONLY_TOOLS.has(n));
@@ -215,20 +215,20 @@ describe("directory profile pin (registration-time gating)", () => {
   });
 
   it("session-only account tools (#249/#250) register on full but NEVER on directory", () => {
-    // The web session adds 3 account-settings tools to the full profile (39
-    // → 42); on the directory profile the same session still gets exactly
+    // The web session adds 3 account-settings tools to the full profile (40
+    // → 43); on the directory profile the same session still gets exactly
     // the 16 — account management cannot leak into the directory listing.
     const fakeSeller = { id: "11111111-1111-1111-1111-111111111111" } as import("../src/db.js").SellerRow;
     const full = captureServer();
     registerTools(full.server, { seller: fakeSeller, credential: "session" });
-    expect(full.registered.size).toBe(42);
+    expect(full.registered.size).toBe(43);
     for (const name of SESSION_ONLY_TOOLS) {
       expect(full.registered.has(name)).toBe(true);
     }
     const dir = captureServer();
     registerTools(dir.server, { seller: fakeSeller, credential: "session" }, "directory");
     expect([...dir.registered.keys()].sort()).toEqual([...DIRECTORY_PIN]);
-    // And the full session surface is exactly the funnel set (42).
+    // And the full session surface is exactly the funnel set (43).
     expect([...full.registered.keys()].sort()).toEqual([...TOOL_NAMES].sort());
   });
 
@@ -312,9 +312,9 @@ describe("/mcp?profile=directory (HTTP, DB-free)", () => {
     }
   });
 
-  it("default /mcp (no param) still serves the full surface (39 tools for a non-session caller)", async () => {
+  it("default /mcp (no param) still serves the full surface (40 tools for a non-session caller)", async () => {
     const names = await toolNames("/mcp");
-    expect(names.length).toBe(39);
+    expect(names.length).toBe(40);
     for (const name of EXCLUDED_PIN.filter((n) => !SESSION_ONLY_TOOLS.has(n))) {
       expect(names).toContain(name);
     }
@@ -322,12 +322,12 @@ describe("/mcp?profile=directory (HTTP, DB-free)", () => {
 
   it("?profile=full is the same canonical full surface", async () => {
     const names = await toolNames("/mcp?profile=full");
-    expect(names.length).toBe(39);
+    expect(names.length).toBe(40);
   });
 
   it("empty ?profile= value falls back to the full surface", async () => {
     const names = await toolNames("/mcp?profile=");
-    expect(names.length).toBe(39);
+    expect(names.length).toBe(40);
   });
 
   it("initialize works anonymously on the profile URL (public reads stay free)", async () => {

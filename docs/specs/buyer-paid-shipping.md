@@ -119,8 +119,13 @@ no new address storage is introduced.)
 session is created (same transaction, same external-call-in-transaction precedent as the
 Stripe call): build the shipment from the buyer's address snapshot, the seller's default
 address, and the listing's `weight_grams` / `dimensions_mm`, quote via EasyPost, select the
-cheapest EUR rate with the existing selection helper. Failure of any step (EasyPost error,
-timeout, no EUR rate, rate above the cap) = flat-mode fallback, never an order error.
+cheapest EUR rate with the existing selection helper. The quote call carries an explicit
+bounded timeout — `AbortSignal.timeout(SHIPPING_QUOTE_TIMEOUT_MS)` (new env, default 5 000,
+same pattern as the existing `EASYPOST_VERIFY_TIMEOUT_MS`): `createEasyPostShipment` today
+passes no signal, and a hanging provider call would hold the item-reservation row lock and
+a pool client for as long as the fetch hangs, on a path (order creation) whose volume is
+attacker-triggerable. Failure of any step (EasyPost error, the timeout firing, no EUR rate,
+rate above the cap) = flat-mode fallback, never an order error.
 
 **Storage.** One JSONB snapshot on the order — the same pattern as `label_purchase`:
 
@@ -130,13 +135,19 @@ orders.label_quote = {
   amount_cents, currency,             // integer cents, EUR
   weight_grams, dimensions_mm,        // the parcel the quote was computed for
   origin: { name, line1, line2?, city, postal_code, country },  // seller default address at quote time
+  destination: { name, line1, line2?, city, postal_code, country },  // buyer address quoted for
   quoted_at                           // ISO UTC
 }
 ```
 
 The snapshot is the single source of truth. It is never exposed verbatim to buyers or sellers
-(the public shape is the `shipping` block of §9); the origin is the seller's PII and is used
-only to reproduce the quote at label time, never logged or evented.
+(the public shape is the `shipping` block of §9); the origin and destination are party PII
+and are used only to reproduce the quote at label time, never logged or evented. The
+destination snapshot closes the quote→label binding on the row itself: saved buyer
+addresses are editable after the fact, so "the buyer's address" at label time can only mean
+the frozen snapshot — never a re-resolved `account_addresses` row. At creation the snapshot
+destination equals `orders.shipping_address` (immutable); the purchase re-checks that
+equality and refuses on mismatch (§5.3).
 
 **Binding.** The Checkout session is built from the row snapshot (§3), so the buyer's charge
 amount equals the quote amount by construction. Once paid, the quote is bound to the order for
@@ -228,11 +239,16 @@ mode, read from the order row:
 1. Preconditions unchanged (seller party, `sold`, shippable, address visible).
 2. Try `buyEasyPostLabel(quote.shipment_id, quote.rate_id)` — the exact paid rate.
 3. If EasyPost rejects it (rate or shipment no longer purchasable), re-create the shipment
-   **from the snapshot** (same origin, same destination address, same weight/dimensions) and
-   select the cheapest EUR rate; a `carrier_preference` is honored only when its cheapest
-   match does not exceed the paid amount, otherwise it is ignored in favor of the cheapest
-   rate. An `order_events` row (`label_requoted`) records the replacement (ids + amounts
-   only).
+   **solely from snapshot fields** — `label_quote.origin`, `label_quote.destination`,
+   `weight_grams`, `dimensions_mm` — never from re-resolved account data (saved addresses
+   are editable; re-resolving could quote for address A and ship to B). Then select the
+   cheapest EUR rate; a `carrier_preference` is honored only when its cheapest match does
+   not exceed the paid amount, otherwise it is ignored in favor of the cheapest rate. An
+   `order_events` row (`label_requoted`) records the replacement (ids + amounts only).
+   Fail-closed invariant at purchase entry, on both buy paths: `label_quote.destination`
+   must equal `orders.shipping_address` field-for-field, or the purchase refuses — new
+   error `label_destination_mismatch`, no spend — belt-and-braces against any future
+   feature that mutates order addresses after the quote.
 4. **Rate-up rule:** the purchase proceeds only if the rate to buy costs ≤
    `label_quote.amount_cents`. The deployment never supplements a buyer-funded label. If the
    live cheapest rate exceeds the paid amount, fail closed with a new error code
@@ -244,7 +260,11 @@ mode, read from the order row:
 5. Spend guards, unchanged and before any `/buy`: per-label cap on the actual rate (a
    re-quoted cheaper rate can only pass more easily; the cap still bounds every purchase),
    daily budget aggregated over **all** `label_purchase` snapshots regardless of funding
-   source, per-seller quota. Refusals carry the same errors and events as today.
+   source, per-seller quota. Refusals carry the same errors and events as today. In quote
+   mode a guard refusal (`label_cost_exceeds_cap`, `label_budget_exceeded`, quota) strands
+   the buyer's paid line exactly like a rate failure, so the §5.4 remedy set applies
+   verbatim: retry later, cancel with a full refund (§6), or ship own-label via
+   `record_tracking` (the line is then refunded automatically, §6).
 6. On success: same single `/buy` call, same `sold → label_issued` transaction, and the
    `label_purchase` snapshot gains `funded_by: "buyer_quote"` (absent = operator-funded,
    so existing rows stay valid). If the bought rate is cheaper than the paid quote, the
@@ -254,19 +274,45 @@ mode, read from the order row:
    because no `label_purchase` was persisted (§6), so the orphaned label cost is the
    deployment's — same bounded exposure class as today.
 
+**Residual risk — carrier billing adjustments (named, accepted).** The rate-up rule bounds
+spend at purchase time only. Carriers re-weigh and re-measure after pickup, and
+post-purchase billing adjustments (typically understated seller weight/dimensions) land on
+the deployment's EasyPost account outside the per-label cap and daily budget — the same
+exposure class operator-funded labels already carry, not a regression from this spec.
+Mitigation is monitoring, not prevention: ingest EasyPost adjustment events / reconcile
+EasyPost invoices, flag repeat-offender sellers, surface them to the operator (rollout
+watch list below).
+
 **Flat mode and pre-existing orders (`label_quote` absent):** byte-for-byte today's path —
 live quote, cheapest EUR rate (or carrier preference), operator-funded, all guards. Legacy
 in-flight orders therefore keep their exact current behavior across the deploy.
 
 ### §6 Refunds and disputes — who bears the label line
 
-All refund sites funnel through `createRefundForOrder`, so the amount is one helper:
+All refund sites funnel through one settle-aware helper — the label line can be settled two
+mutually exclusive ways (bought ⇒ retained against a platform label; or already refunded by
+the own-label partial refund), and every site must see both from the row alone:
 
 ```
+labelLineCents(order) = label_quote ? label_quote.amount_cents : 0
+lineRetained(order)   = label_purchase exists                    // platform label bought
+lineRefunded(order)   = label_quote.line_refund_id IS NOT NULL   // own-label refund fired
+
 refundCents(order, policy) =
   chargeTotalCents(order)
-  − (label_purchase exists AND policy excludes the label line ? label_quote.amount_cents : 0)
+  − (lineRetained AND policy excludes the label line ? labelLineCents : 0)
+  − (lineRefunded ? labelLineCents : 0)
 ```
+
+`label_quote.line_refund_id` (the Stripe refund id) and `line_refunded_at` are persisted on
+the order row in the same step that fires `labelrefund:{order_id}` — durable state, not an
+`order_events` row (`orders.refund_id` holds only the full refund) — so the helper computes
+deterministically at every site. The two deductions are structurally exclusive (the
+own-label refund fires only while `label_purchase` is absent, and once `record_tracking`
+moves the order past `sold` no purchase is possible); should a future feature ever let them
+stack, the helper over-deducts — refunds too little, alertable — and can never refund more
+than the charge. Invariant across both idempotency keys: cumulative refunds
+(`refund:{order_id}` + `labelrefund:{order_id}`) never exceed `chargeTotalCents`.
 
 In flat mode there is no label line and every refund is the full amount, exactly as today.
 In label-quote mode the line is excluded **only when a platform label was actually bought**
@@ -278,19 +324,27 @@ from the row). Path by path:
 | Cancel while `pending` (unpaid) | n/a | nobody — nothing charged |
 | Cancel / stale-sale / never-shipped refund with **no label bought** | refunded | nobody — the deployment never spent |
 | Cancel / stuck-transit / dispute refund with **label bought** | not refunded | buyer — the label was procured with their money and is theirs (unused-label recovery is an operator concern, open question 2) |
-| Carrier failure refund (parcel lost/returned in transit) | refunded | deployment — the shipping service it procured failed; carrier claim is the deployment's remedy |
-| Chargeback (#22) | pulled by Stripe | deployment (merchant of record — unchanged exposure) |
-| Admin refund after transfer | per policy, default excludes | deployment reverses the transfer (payout base only) and refunds `refundCents`; the label line is retained against the EasyPost spend |
+| Any refund **after own-label `record_tracking`** (cancel from `label_issued`, never-shipped / stuck-transit sweeps, carrier failure, admin refund, dispute autoresolve) | already refunded via `labelrefund` | nobody — the helper refunds the remainder only (`chargeTotalCents − labelLineCents`); the two refunds pair up to exactly the charge |
+| Carrier failure refund (parcel lost/returned in transit) with a **platform label** | refunded | deployment — the shipping service it procured failed; carrier claim is the deployment's remedy |
+| Carrier failure after **own-label** `record_tracking` | already refunded via `labelrefund` | remainder only — the deployment procured nothing; the seller's own carrier arrangement is the seller's |
+| Chargeback (#22) | pulled by Stripe | deployment (merchant of record; unchanged class, changed composition in quote mode — the disputed amount includes the label line and, if a platform label was bought, that spend is already made; unused-label recovery stays open question 2) |
+| Admin refund after transfer | per policy, default excludes | deployment reverses the transfer (payout base only) and refunds `refundCents`; with a platform label the line is retained against the EasyPost spend; after own-label `record_tracking` it was already refunded |
 | Seller ships with own label on a quote-mode order (`record_tracking` with no `label_purchase`) | refunded | nobody — see below |
 
 **Unused-quote refund (new, small):** when `record_tracking` records a seller-own label on a
 label-quote order (`label_quote` present, `label_purchase` absent), the buyer's label line is
 refunded immediately as a partial refund under a new idempotency key
-`labelrefund:{order_id}` (retrieve-before-create, same replay discipline as `refund:`),
-logged as a `label_line_refunded` event. This is the fail-safe for "EasyPost broke (or was
-switched off) after payment" and the third remedy of `label_rate_exceeded`: the buyer never
-pays a label line that bought no label. Full-refund sites never need this — when no label was
-bought their amount already includes the line.
+`labelrefund:{order_id}` (retrieve-before-create, same replay discipline as `refund:`), with
+`label_quote.line_refund_id` + `line_refunded_at` persisted in the same commit and a
+`label_line_refunded` event. This is the fail-safe for "EasyPost broke (or was switched off)
+after payment" and the third remedy of `label_rate_exceeded` and of the quote-mode guard
+refusals (§5.5): the buyer never pays a label line that bought no label. **Retry owner:** a
+transient failure (or a crash between the Stripe call and the commit) leaves the order with
+tracking recorded, `label_purchase` absent, and `line_refund_id` null — the existing
+money-retry sweep gains exactly that rule: retry `labelrefund:{order_id}` for those orders
+(retrieve-before-create, reconcile-never-recreate; escalate to the operator alert if it
+persists). Full-refund sites never need this — when no label was bought their amount already
+includes the line; once the line refund has fired, the settle-aware helper excludes it again.
 
 ### §7 Off-platform (direct payment) orders: unchanged
 
@@ -307,7 +361,8 @@ No new order statuses or transitions — every change rides existing states and 
 webhook/sweep triggers). Illegal transitions keep being rejected by the transition core. New
 surface:
 
-- Error codes: `label_rate_exceeded` (§5.4). Everything else reuses existing codes
+- Error codes: `label_rate_exceeded` (§5.4), `label_destination_mismatch` (§5.3 fail-closed
+  destination invariant). Everything else reuses existing codes
   (`easypost_not_configured`, `label_no_rate`, `label_cost_exceeds_cap`,
   `label_budget_exceeded`, `rate_limited`).
 - `order_events` types: `label_quote_created`, `label_quote_fallback`, `label_requoted`,
@@ -345,13 +400,20 @@ One additive column, mirroring the `label_purchase` precedent:
 ```sql
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS label_quote JSONB;
 -- {shipment_id, rate_id, carrier, service, amount_cents, currency,
---  weight_grams, dimensions_mm, origin{...}, quoted_at}
+--  weight_grams, dimensions_mm, origin{...}, destination{...},
+--  quoted_at, line_refund_id?, line_refunded_at?}
 ```
 
-No CHECK constraint (same as `label_purchase` — shape is enforced in code where it is read).
+`destination` is the buyer address the quote was computed for — it equals
+`orders.shipping_address` at creation and is re-checked at purchase (§5.3).
+`line_refund_id` / `line_refunded_at` are written once, when `labelrefund:{order_id}` fires
+(§6) — the durable settle-awareness state the refund helper reads. No CHECK constraint
+(same as `label_purchase` — shape is enforced in code where it is read).
 No new tables: the quote origin reuses `account_addresses` (`is_default` row), and the budget
 aggregation keeps reading `label_purchase`. New env: `SHIPPING_QUOTE_ESTIMATE_TTL_MINUTES`
-(default 15, display-only). `db/schema.sql` is a protected path — this section is its spec.
+(default 15, display-only) and `SHIPPING_QUOTE_TIMEOUT_MS` (default 5 000, the order-time
+quote call's AbortSignal bound, §2). `db/schema.sql` is a protected path — this section is
+its spec.
 
 ## Migration plan (expand-contract)
 
@@ -371,20 +433,31 @@ New `tests/shipping-quote.test.ts` + extensions to `order-flow` / `stripe` / `fu
 1. Mode resolution: every fallback condition in §1 (no weight, no seller default address,
    EasyPost error/timeout, no EUR rate, rate > cap, non-EUR order) → order still created,
    flat charged, `label_quote_fallback` event with reason; happy path → quote stored,
-   `label_quote_created` event, charge = price + quote.
+   `label_quote_created` event, charge = price + quote; the quote call is bounded — an
+   EasyPost hang aborted at `SHIPPING_QUOTE_TIMEOUT_MS` falls back and the transaction
+   (row lock, pool client) is released within the bound, never hangs.
 2. Charge: quote-mode session has the label line and `label_quote_amount_cents` metadata;
    flat mode unchanged; F5 check accepts `chargeTotalCents` on both modes.
 3. Payout: proportional fee share (ceil, seller never subsidizes the label line's fee;
    deployment never absorbs rounding); net clamped at payout base; charge mismatch
    (`bt.amount ≠ chargeTotalCents`) fails closed; label amount never in the transfer.
 4. Refunds: no-label-bought → full incl. line; label-bought cancel/stuck-transit → line
-   excluded; carrier failure → full; `refund:{order_id}` replays keep the same amount;
-   `labelrefund:{order_id}` fires exactly once on `record_tracking` own-label path and never
-   on orders without a quote.
-5. Label purchase: exact-rate buy; re-quote on rejection; cheaper re-quote buys and records
-   `label_requoted`; more-expensive re-quote → `label_rate_exceeded`, no EasyPost `/buy`
-   call; all three guards enforced on the actual rate in both funding modes; overrides
-   ignored in quote mode; replay returns stored label; `funded_by` recorded.
+   excluded; carrier failure → full (platform label) / remainder only (own label);
+   `refund:{order_id}` replays keep the same amount; `labelrefund:{order_id}` fires exactly
+   once on `record_tracking` own-label path and never on orders without a quote;
+   **settle-awareness:** after own-label `record_tracking`, a later cancel / never-shipped /
+   stuck-transit / carrier-failure / admin refund refunds exactly
+   `chargeTotalCents − labelLineCents` (the remainder), so the two refunds pair up to the
+   charge — cumulative refunds across both keys never exceed `chargeTotalCents`; a failed
+   `labelrefund` is retried by the sweep rule and the helper stays deterministic (line
+   already refunded ⇒ excluded again).
+5. Label purchase: exact-rate buy; re-quote on rejection builds solely from snapshot fields
+   (editing the saved buyer address between quote and label does not change the shipment);
+   `label_quote.destination ≠ orders.shipping_address` → `label_destination_mismatch`, no
+   `/buy` call; cheaper re-quote buys and records `label_requoted`; more-expensive re-quote
+   → `label_rate_exceeded`, no EasyPost `/buy` call; all three guards enforced on the actual
+   rate in both funding modes; guard refusals in quote mode carry the §5.4 remedies;
+   overrides ignored in quote mode; replay returns stored label; `funded_by` recorded.
 6. Off-platform: no quote, no behavior change (regression fixtures).
 
 CI green = acceptance.
@@ -394,7 +467,9 @@ CI green = acceptance.
 Rollout: single deploy (code + additive column). No feature flag: a deployment without
 `EASYPOST_API_KEY` is inert by construction, and EasyPost deployments opt in by existing
 configuration. Watch after deploy: quote fallback rate (`label_quote_fallback` reasons),
-`label_rate_exceeded` frequency, `labelrefund` volume.
+`label_rate_exceeded` frequency, `labelrefund` volume, and EasyPost billing adjustments
+(seller-adjustment monitoring, §5 residual risk — adjustment events / invoice
+reconciliation, repeat-offender flagging).
 
 Rollback: revert the deploy; the column stays (additive). Orders created in the window with
 `label_quote IS NOT NULL AND status IN ('pending','sold')` are the exposed set — pending ones
@@ -423,15 +498,18 @@ the rollout PR.
 
 ## Implementation breakdown (PR-sized, each references sections)
 
-1. **Schema + quoting core** — `label_quote` column, `SHIPPING_QUOTE_ESTIMATE_TTL_MINUTES`,
-   `src/shipping-quotes.ts` (mode resolution, quote creation, selection reuse) + unit tests
-   (§1, §2, data model). No behavior change yet.
+1. **Schema + quoting core** — `label_quote` column (incl. destination and line-refund
+   fields), `SHIPPING_QUOTE_ESTIMATE_TTL_MINUTES`, `SHIPPING_QUOTE_TIMEOUT_MS`,
+   `src/shipping-quotes.ts` (mode resolution, quote creation with the bounded AbortSignal,
+   selection reuse) + unit tests (§1, §2, data model). No behavior change yet.
 2. **Checkout integration** — quote at `createOrder`, charge line + metadata,
    `chargeTotalCents` helper, F5 check re-base, `create_order`/`get_order`/`my_orders`
    `shipping` block (§2, §3, §9).
-3. **Money paths** — payout base + proportional fee share, `refundCents` policy helper
-   across all refund sites, carrier-failure full-refund rule (§4, §6).
-4. **Label purchase** — quote-mode branch, rate-up rule, guards on actual rate, snapshot
-   locking, `labelrefund` path on `record_tracking` (§5, §6).
+3. **Money paths** — payout base + proportional fee share, settle-aware `refundCents`
+   helper (line retained / already refunded) across all refund sites, carrier-failure rule
+   split platform label vs own label (§4, §6).
+4. **Label purchase** — quote-mode branch, rate-up rule, guards on actual rate,
+   snapshot-only re-quote + destination fail-closed check, `labelrefund` path with durable
+   persistence and sweep retry on `record_tracking` (§5, §6).
 5. **Estimate tool + docs** — `quote_shipping` with rate limit, `llms.txt`/reference updates
    for agents (§9).

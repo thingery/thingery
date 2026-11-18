@@ -158,6 +158,9 @@ describe.skipIf(!available)("Carrier webhook endpoint (HTTP)", () => {
     return rows[0];
   }
 
+  /** Refund amounts captured across the fake Stripe client (§6 split tests). */
+  let lastRefundAmount: number | undefined;
+
   beforeAll(async () => {
     db = new pg.Client({ connectionString });
     await db.connect();
@@ -188,8 +191,9 @@ describe.skipIf(!available)("Carrier webhook endpoint (HTTP)", () => {
           retrieve: async () => ({ payment_status: "unpaid" }),
         },
       },
-      refunds: { create: async () => ({ id: `re_${n0}_${Math.random().toString(36).slice(2, 6)}` }) },
+      refunds: { create: async (p?: { amount?: number }) => { lastRefundAmount = p?.amount; return { id: `re_${n0}_${Math.random().toString(36).slice(2, 6)}` }; } },
     } as unknown as Stripe);
+    lastRefundAmount = undefined;
   });
 
   it("returns 500 with no unhandled rejection when the DB fails at ingest — dedupe store (THI-66 V1 regression)", async () => {
@@ -347,6 +351,34 @@ describe.skipIf(!available)("Carrier webhook endpoint (HTTP)", () => {
     expect(after.refund_id).toMatch(/^re_/); // refund:{order_id} idempotent create
     const item = await db.query<{ status: string }>("SELECT status FROM items WHERE id=$1", [itemId]);
     expect(item.rows[0].status).toBe("deleted"); // lost — goods presumed gone
+  });
+
+  it("buyer-paid shipping §6: carrier failure with a platform label refunds the buyer's full charge including the label line", async () => {
+    // The deployment procured the label that failed — its carrier claim is
+    // the remedy; the buyer's line goes back with everything else.
+    const { order } = await seedOrder("in_transit", { trackerId: "trk_q1" });
+    await db.query(
+      "UPDATE orders SET label_quote = $2::jsonb, label_purchase = $3::jsonb, shipping_price_cents = 0 WHERE id = $1",
+      [order.id, JSON.stringify({ amount_cents: 733, currency: "EUR" }), JSON.stringify({ shipment_id: "shp_q1", funded_by: "buyer_quote" })],
+    );
+    const r = await post(app, trackerEvent("failure", "trk_q1"));
+    expect(r.status).toBe(200);
+    expect((await orderRow(order.id)).status).toBe("refunding");
+    expect(lastRefundAmount).toBe(10733); // 10000 + 733
+  });
+
+  it("buyer-paid shipping §6: carrier failure after own-label record_tracking refunds the remainder only", async () => {
+    // The own-label path already returned the line via labelrefund — the
+    // full refund pairs with it to exactly the charge, never repeats it.
+    const { order } = await seedOrder("in_transit", { trackerId: "trk_q2" });
+    await db.query(
+      "UPDATE orders SET label_quote = $2::jsonb, shipping_price_cents = 0 WHERE id = $1",
+      [order.id, JSON.stringify({ amount_cents: 733, currency: "EUR", line_refund_id: "re_line", line_refunded_at: "2026-11-18T00:00:00Z" })],
+    );
+    const r = await post(app, trackerEvent("failure", "trk_q2"));
+    expect(r.status).toBe(200);
+    expect((await orderRow(order.id)).status).toBe("refunding");
+    expect(lastRefundAmount).toBe(10000); // 10733 − the already-refunded 733
   });
 
   it("return_to_sender returns the item to active (#14 RTS override)", async () => {

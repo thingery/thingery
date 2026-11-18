@@ -19,7 +19,8 @@ import { OrderFlowError } from "./order-flow.js";
 import { shippingAddressForSeller } from "./order-flow.js";
 import { createTransferForOrder, getStripe } from "./stripe.js";
 import { createEasyPostTracker } from "./easypost.js";
-import { buyEasyPostLabel, createEasyPostShipment, pickEasyPostRate, EasyPostError, type EasyPostAddressInput, type EasyPostRate } from "./easypost.js";
+import { buyEasyPostLabel, createEasyPostShipment, pickEasyPostRate, EasyPostError, type EasyPostAddressInput, type EasyPostBoughtLabel, type EasyPostRate } from "./easypost.js";
+import type { LabelQuoteSnapshot, QuoteAddress } from "./shipping-quotes.js";
 import { logSecurityEvent } from "./security-events.js";
 
 export { OrderFlowError };
@@ -49,6 +50,39 @@ export interface RecordTrackingInput {
   carrier: string;
   trackingCode: string;
   labelUrl?: string;
+}
+
+/**
+ * §6 unused-quote refund: on a quote-mode order where the seller ships with
+ * their own label (record_tracking, no platform label bought), the buyer's
+ * label line goes back immediately as a partial refund under
+ * `labelrefund:{order_id}` — retrieve-before-create via the idempotency key —
+ * with line_refund_id + line_refunded_at persisted in the same step and a
+ * `label_line_refunded` event. Shared with the sweep retry rule: a transient
+ * failure (or a crash between the Stripe call and the commit) leaves the row
+ * with tracking recorded, label_purchase absent and line_refund_id null —
+ * exactly the states the sweep retries.
+ */
+export async function refundLabelLineForOrder(order: OrderRow): Promise<string> {
+  const quote = order.label_quote as LabelQuoteSnapshot | null;
+  if (!quote || quote.line_refund_id) throw new Error("inconsistent_state: label line refund already fired or no quote");
+  const stripe = getStripe();
+  if (!stripe || !order.payment_intent_id) throw new Error("payments_not_configured");
+  const refund = await stripe.refunds.create(
+    { payment_intent: order.payment_intent_id, amount: quote.amount_cents },
+    { idempotencyKey: `labelrefund:${order.id}` },
+  );
+  await pool.query(
+    `UPDATE orders SET label_quote = label_quote || $2::jsonb, updated_at = now()
+      WHERE id = $1 AND label_quote->>'line_refund_id' IS NULL`,
+    [order.id, JSON.stringify({ line_refund_id: refund.id, line_refunded_at: new Date().toISOString() })],
+  );
+  await pool.query(
+    `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload)
+     VALUES ($1, 'label_line_refunded', 'system', NULL, 'own label recorded — unused buyer shipping line refunded', $2::jsonb)`,
+    [order.id, JSON.stringify({ refund_id: refund.id, amount_cents: quote.amount_cents, currency: quote.currency })],
+  );
+  return refund.id;
 }
 
 /**
@@ -121,6 +155,32 @@ export async function recordTracking(
       reason: `carrier ${input.carrier}, code ${input.trackingCode}`,
       sets,
     });
+    // §6 unused-quote refund: the seller shipped with their own label on a
+    // quote-mode order — the buyer's label line bought no label and goes back
+    // now. Best-effort here (the order already advanced); the sweep retries.
+    if (
+      order.label_quote &&
+      !order.label_purchase &&
+      !order.label_quote.line_refund_id &&
+      order.payment_mode === "stripe" &&
+      order.payment_intent_id
+    ) {
+      try {
+        await refundLabelLineForOrder(order);
+        return {
+          order: next,
+          trackerRegistered,
+          note: `${note ?? ""}Tracking recorded. The buyer's unused shipping line (€${(order.label_quote.amount_cents / 100).toFixed(2)}) was refunded.`.trim(),
+        };
+      } catch (err) {
+        console.error(`[record_tracking] label line refund failed for order ${order.id} (sweep will retry):`, err);
+        return {
+          order: next,
+          trackerRegistered,
+          note: `${note ?? ""}Tracking recorded. The buyer's unused shipping-line refund is pending and will be retried automatically.`.trim(),
+        };
+      }
+    }
     return { order: next, trackerRegistered, note };
   } catch (err) {
     return rethrow(err);
@@ -182,6 +242,11 @@ export interface BuyShippingLabelResult {
   note?: string;
 }
 
+/** §5 remedy set — the message every quote-mode rate/guard refusal names:
+ *  retry later, cancel for a full refund, or ship own-label (line refunded). */
+const QUOTE_MODE_REMEDIES =
+  "Retry later (rates drift), cancel the order for a full refund (no label was bought), or ship with your own label via record_tracking (the buyer's shipping line is then refunded).";
+
 function labelCost(costCents: number, currency: string): string {
   return `${currency} ${(costCents / 100).toFixed(2)}`;
 }
@@ -235,6 +300,238 @@ async function todayLabelSpendCents(): Promise<number> {
 function nextUtcMidnight(): Date {
   const now = new Date();
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+}
+
+// ---------------------------------------------------------------------------
+// Buyer-paid label quote mode (spec docs/specs/buyer-paid-shipping.md §5).
+// The buyer paid the label line at checkout; the purchase buys against that
+// paid amount — never more (rate-up rule), never re-resolved from editable
+// account data (snapshot-only re-quote), never against a mutated address
+// (destination invariant). Guards still bound every purchase on the actual
+// rate (§5.5).
+// ---------------------------------------------------------------------------
+
+/** QuoteAddress (snapshot) → the provider's domain shape — the only mapping
+ *  used on the quote-mode paths so the snapshot fully determines the
+ *  shipment (§5.3: re-quote never reads re-resolved account data). */
+function quoteAddressToDomain(a: QuoteAddress): EasyPostAddressInput {
+  return {
+    name: a.name,
+    line1: a.line1,
+    ...(a.line2 ? { line2: a.line2 } : {}),
+    city: a.city,
+    postalCode: a.postal_code,
+    country: a.country,
+  };
+}
+
+/** §5.3 fail-closed invariant: the quote's destination must equal the
+ *  order's stored shipping address field-for-field. Belt-and-braces against
+ *  any future feature mutating order addresses after the quote. */
+function quoteDestinationMatches(quote: LabelQuoteSnapshot, stored: Record<string, unknown>): boolean {
+  const f = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  return (
+    f(quote.destination.name) === f(stored.name) &&
+    f(quote.destination.line1) === f(stored.line1) &&
+    f(quote.destination.line2 ?? "") === f(stored.line2) &&
+    f(quote.destination.city) === f(stored.city) &&
+    f(quote.destination.postal_code) === f(stored.postal_code) &&
+    f(quote.destination.country) === f(stored.country)
+  );
+}
+
+/** §5.5 spend guards on the actual rate, quote-mode remedy set (a guard
+ *  refusal strands the buyer's paid line exactly like a rate failure). Same
+ *  three bounds as the flat path, checked before any /buy. */
+async function enforceQuoteModeSpendGuards(
+  order: OrderRow,
+  rate: { costCents: number; currency: string },
+  cfg: ReturnType<typeof orderFlowConfig>,
+): Promise<void> {
+  if (rate.costCents > cfg.labelMaxCostCents) {
+    throw new OrderFlowError(
+      "label_cost_exceeds_cap",
+      `The label rate (${labelCost(rate.costCents, rate.currency)}) exceeds the per-label cap — LABEL_MAX_COST_CENTS=${cfg.labelMaxCostCents}. No label was purchased. ${QUOTE_MODE_REMEDIES}`,
+    );
+  }
+  const spentToday = await todayLabelSpendCents();
+  if (cfg.labelDailyBudgetCents <= 0 || spentToday + rate.costCents > cfg.labelDailyBudgetCents) {
+    logSecurityEvent(
+      { type: "label_budget_exceeded", cost_cents: rate.costCents, daily_total_cents: spentToday, budget_cents: cfg.labelDailyBudgetCents },
+      { sellerId: order.seller_id },
+    );
+    throw new OrderFlowError(
+      "label_budget_exceeded",
+      cfg.labelDailyBudgetCents <= 0
+        ? `Label purchases are disabled on this deployment (LABEL_DAILY_BUDGET_CENTS=0). No label was purchased. ${QUOTE_MODE_REMEDIES}`
+        : `The platform's daily label budget is exhausted — ${labelCost(spentToday, rate.currency)} of ${labelCost(cfg.labelDailyBudgetCents, rate.currency)} spent today. No label was purchased. ${QUOTE_MODE_REMEDIES}`,
+    );
+  }
+  const quota = await pool.query(
+    `INSERT INTO seller_label_quota (seller_id, day, used)
+     VALUES ($1, (now() AT TIME ZONE 'utc')::date, 1)
+     ON CONFLICT (seller_id, day) DO UPDATE
+       SET used = seller_label_quota.used + 1
+     WHERE seller_label_quota.used < $2
+     RETURNING used`,
+    [order.seller_id, MAX_LABELS_PER_SELLER_PER_DAY],
+  );
+  if (quota.rows.length === 0) {
+    throw new OrderFlowError(
+      "rate_limited",
+      `Daily label purchase quota reached (${MAX_LABELS_PER_SELLER_PER_DAY} per day) — resets at ${nextUtcMidnight().toISOString()}. ${QUOTE_MODE_REMEDIES}`,
+    );
+  }
+}
+
+/** Shared purchase tail: persist the snapshot (+funded_by on quote mode) and
+ *  move sold → label_issued in the same transaction. The cancel-race orphan
+ *  path is identical for both funding modes (§5.6). */
+async function persistBoughtLabel(
+  orderId: string,
+  sellerId: string,
+  label: EasyPostBoughtLabel,
+  fundedBy?: "buyer_quote",
+): Promise<BuyShippingLabelResult> {
+  const snapshot: LabelPurchaseSnapshot = {
+    shipment_id: label.shipmentId,
+    rate_id: label.rateId,
+    carrier: label.carrier,
+    service: label.service,
+    cost_cents: label.costCents,
+    currency: label.currency,
+    bought_at: new Date().toISOString(),
+    ...(fundedBy ? { funded_by: fundedBy } : {}),
+  };
+  try {
+    const next = await applyTransition({
+      orderId,
+      trigger: "label_purchased",
+      actor: { type: "seller", id: sellerId },
+      reason: `label bought via EasyPost (${label.carrier} ${label.service}, ${labelCost(label.costCents, label.currency)}${fundedBy ? ", buyer-funded" : ""})`,
+      sets: {
+        carrier: label.carrier,
+        tracking_code: label.trackingCode,
+        tracker_id: label.trackerId,
+        label_url: label.labelUrl,
+        label_purchase: snapshot as unknown as Record<string, unknown>,
+      },
+    });
+    return {
+      order: next,
+      label: {
+        label_url: label.labelUrl,
+        carrier: label.carrier,
+        tracking_code: label.trackingCode,
+        cost: labelCost(label.costCents, label.currency),
+      },
+    };
+  } catch (err) {
+    if (err instanceof IllegalTransitionError) {
+      logSecurityEvent({ type: "label_bought_orphan", order_id: orderId, shipment_id: label.shipmentId }, { sellerId });
+      throw new OrderFlowError(
+        "invalid_transition",
+        `${err.message} — the label was already bought (EasyPost shipment ${label.shipmentId}); an operator alert was filed for reconciliation and no tracking was recorded on this order.`,
+      );
+    }
+    throw err;
+  }
+}
+
+/** §5: buy against the paid quote. Guards on the actual rate → single /buy →
+ *  shared persistence with funded_by: "buyer_quote". */
+async function buyQuoteModeLabel(
+  order: OrderRow,
+  sellerId: string,
+  input: BuyShippingLabelInput,
+  quote: LabelQuoteSnapshot,
+): Promise<BuyShippingLabelResult> {
+  const cfg = orderFlowConfig();
+
+  if (!quoteDestinationMatches(quote, order.shipping_address)) {
+    throw new OrderFlowError(
+      "label_destination_mismatch",
+      "The order's shipping address no longer matches the address the buyer's shipping line was quoted for — refusing to buy (no spend). Cancel the order for a full refund or ship with your own label via record_tracking.",
+    );
+  }
+
+  // Path A — the exact paid rate: cost is the paid amount (guards bound it).
+  // If EasyPost rejects it (rate/shipment no longer purchasable) or the key
+  // is unset, fall through to the snapshot-only re-quote.
+  try {
+    await enforceQuoteModeSpendGuards(order, { costCents: quote.amount_cents, currency: quote.currency }, cfg);
+    const label = await buyEasyPostLabel(quote.shipment_id, quote.rate_id);
+    if (label) {
+      return await persistBoughtLabel(order.id, sellerId, label, "buyer_quote");
+    }
+    throw new OrderFlowError(
+      "easypost_not_configured",
+      "Shipping labels are not configured on this deployment (EASYPOST_API_KEY unset). Record your own carrier label with record_tracking instead — the buyer's shipping line is refunded when you do.",
+    );
+  } catch (err) {
+    if (!(err instanceof EasyPostError)) throw err;
+    // Rate or shipment no longer purchasable — re-quote solely from snapshot
+    // fields (§5.3): never re-resolved account data.
+    let shipment;
+    try {
+      const dims = parseDimensionsMm(quote.dimensions_mm);
+      shipment = await createEasyPostShipment({
+        toAddress: quoteAddressToDomain(quote.destination),
+        fromAddress: quoteAddressToDomain(quote.origin),
+        weightGrams: quote.weight_grams,
+        ...(dims ? { dimensionsMm: dims } : {}),
+      });
+    } catch (quoteErr) {
+      throw new OrderFlowError("easypost_error", `EasyPost refused to re-quote this shipment: ${describeProviderError(quoteErr)}`);
+    }
+    if (!shipment) {
+      throw new OrderFlowError(
+        "easypost_not_configured",
+        "Shipping labels are not configured on this deployment (EASYPOST_API_KEY unset). Record your own carrier label with record_tracking instead — the buyer's shipping line is refunded when you do.",
+      );
+    }
+    const selectable = shipment.rates.filter((r: EasyPostRate) => r.currency.toUpperCase() === LABEL_BASE_CURRENCY);
+    let rate = pickEasyPostRate(selectable); // cheapest EUR
+    if (!rate) {
+      throw new OrderFlowError(
+        "label_no_rate",
+        `No rates were re-quoted for this shipment in the account currency (${LABEL_BASE_CURRENCY}). ${QUOTE_MODE_REMEDIES}`,
+      );
+    }
+    // carrier_preference is honored only when its cheapest match does not
+    // exceed the paid amount (§5.3) — otherwise ignored for the cheapest.
+    if (input.carrierPreference) {
+      const preferred = pickEasyPostRate(selectable, input.carrierPreference);
+      if (preferred && preferred.costCents <= quote.amount_cents) rate = preferred;
+    }
+    // Rate-up rule (§5.4): the deployment never supplements a buyer-funded
+    // label — the live cheapest rate must cost ≤ the paid amount.
+    if (rate.costCents > quote.amount_cents) {
+      throw new OrderFlowError(
+        "label_rate_exceeded",
+        `The cheapest live rate (${labelCost(rate.costCents, rate.currency)}) now exceeds the shipping line the buyer paid (${labelCost(quote.amount_cents, quote.currency)}). No label was purchased. ${QUOTE_MODE_REMEDIES}`,
+      );
+    }
+    await enforceQuoteModeSpendGuards(order, rate, cfg);
+    let label;
+    try {
+      label = await buyEasyPostLabel(shipment.id, rate.id);
+    } catch (buyErr) {
+      throw new OrderFlowError("easypost_error", `EasyPost refused the label purchase: ${describeProviderError(buyErr)}`);
+    }
+    if (!label) {
+      throw new OrderFlowError(
+        "easypost_not_configured",
+        "Shipping labels are not configured on this deployment (EASYPOST_API_KEY unset). Record your own carrier label with record_tracking instead — the buyer's shipping line is refunded when you do.",
+      );
+    }
+    await pool.query(
+      `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload)
+       VALUES ($1, 'label_requoted', 'seller', $2, 'paid rate no longer purchasable — re-quoted from snapshot', $3::jsonb)`,
+      [order.id, sellerId, JSON.stringify({ shipment_id: shipment.id, rate_id: rate.id, amount_cents: rate.costCents, currency: rate.currency, paid_amount_cents: quote.amount_cents })],
+    );
+    return await persistBoughtLabel(order.id, sellerId, label, "buyer_quote");
+  }
 }
 
 /**
@@ -302,6 +599,13 @@ export async function buyShippingLabel(
       );
     }
     throw new OrderFlowError("inconsistent_state", "Shipping address unavailable; refusing to buy a label.");
+  }
+
+  // Buyer-paid quote mode (§5): everything below — flat-mode quote from live
+  // rates, operator-funded — is the unchanged legacy path. The quote-mode
+  // branch buys against the paid amount instead.
+  if (order.label_quote) {
+    return await buyQuoteModeLabel(order, sellerId, input, order.label_quote);
   }
 
   // Parcel defaults from the listing, seller-overridable (spec §2).
@@ -411,52 +715,7 @@ export async function buyShippingLabel(
     );
   }
 
-  const snapshot: LabelPurchaseSnapshot = {
-    shipment_id: label.shipmentId,
-    rate_id: label.rateId,
-    carrier: label.carrier,
-    service: label.service,
-    cost_cents: label.costCents,
-    currency: label.currency,
-    bought_at: new Date().toISOString(),
-  };
-
-  try {
-    const next = await applyTransition({
-      orderId,
-      trigger: "label_purchased",
-      actor: { type: "seller", id: sellerId },
-      reason: `label bought via EasyPost (${label.carrier} ${label.service}, ${labelCost(label.costCents, label.currency)})`,
-      sets: {
-        carrier: label.carrier,
-        tracking_code: label.trackingCode,
-        tracker_id: label.trackerId,
-        label_url: label.labelUrl,
-        label_purchase: snapshot as unknown as Record<string, unknown>,
-      },
-    });
-    return {
-      order: next,
-      label: {
-        label_url: label.labelUrl,
-        carrier: label.carrier,
-        tracking_code: label.trackingCode,
-        cost: labelCost(label.costCents, label.currency),
-      },
-    };
-  } catch (err) {
-    if (err instanceof IllegalTransitionError) {
-      // Cancel race (spec §“Blast radius”): the label is real and orphaned at
-      // EasyPost — alert with order + shipment ids for the reconcile runbook
-      // (A3); the order itself is untouched by this failed call.
-      logSecurityEvent({ type: "label_bought_orphan", order_id: orderId, shipment_id: label.shipmentId }, { sellerId });
-      throw new OrderFlowError(
-        "invalid_transition",
-        `${err.message} — the label was already bought (EasyPost shipment ${label.shipmentId}); an operator alert was filed for reconciliation and no tracking was recorded on this order.`,
-      );
-    }
-    throw err;
-  }
+  return await persistBoughtLabel(orderId, sellerId, label);
 }
 
 function describeProviderError(err: unknown): string {

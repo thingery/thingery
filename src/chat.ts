@@ -383,7 +383,10 @@ export const TOOLS: ToolDef[] = [
       description:
         "Seller buys a shipping label through the platform on a sold, shippable order (sold → label_issued): " +
         "the platform quotes carrier rates and buys the cheapest EUR one (or the cheapest matching " +
-        "carrier_preference), then stores carrier + tracking + label URL. Weight and parcel dimensions default to " +
+        "carrier_preference), then stores carrier + tracking + label URL. On an order whose shipping the " +
+        "buyer paid at checkout, the label is bought against the paid quote — origin/weight/dimensions are " +
+        "locked to the quote, and a live rate above the paid amount fails before anything is bought. " +
+        "Weight and parcel dimensions default to " +
         "the listing's estimates when present. Spend is guarded server-side: a per-label cap, a platform daily " +
         "budget, and 10 purchases per seller per day. Off_platform orders need the buyer's address consent first " +
         "(share_shipping_address). Replaying on a label-issued order returns the stored label without a second " +

@@ -1857,6 +1857,10 @@ export function registerTools(
         "Seller buys a shipping label through the platform on a sold, shippable order (sold → label_issued): " +
         "the platform quotes EasyPost rates, buys the cheapest EUR one (or the cheapest matching " +
         "carrier_preference), and stores carrier + tracking + label URL and a purchase snapshot. " +
+        "On an order whose shipping the buyer paid at checkout (label-quote mode), the label is bought " +
+        "against the paid quote — from_address/weight/dimensions are locked to the quoted snapshot, " +
+        "carrier_preference applies only if the paid rate is no longer purchasable, and a live rate " +
+        "above the paid amount fails with label_rate_exceeded before anything is bought. " +
         "Weight and parcel dimensions default to the listing's estimates when present. Spend is guarded " +
         "server-side: a per-label cap, a platform daily budget, and 10 purchases per seller per day — " +
         "over-limit calls fail with a clear error before anything is bought. Off_platform orders need the " +

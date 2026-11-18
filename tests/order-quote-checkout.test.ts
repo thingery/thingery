@@ -57,6 +57,15 @@ describe.skipIf(!available)("createOrder buyer-paid shipping quote (DB)", () => 
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => impl() as never);
 
   const easypostOk = () => fakeFetch(async () => ({ ok: true, json: async () => EASYPOST_OK }));
+
+  /** Since #305 (order-address-verification), createOrder may POST
+   *  /v2/addresses for the advisory delivery check; quoting traffic is only
+   *  ever /v2/shipments. Fallback tests assert the quote surface, not the
+   *  (legitimate) verification call. */
+  const expectNoQuoteTraffic = () => {
+    const urls = vi.mocked(globalThis.fetch).mock.calls.map((c) => String(c[0]));
+    expect(urls.filter((u) => u.includes("/v2/shipments"))).toEqual([]);
+  };
   const easypostDown = () => fakeFetch(async () => ({ ok: false, status: 503, json: async () => ({ error: { message: "down" } }) }));
 
   /** Stripe fake: only checkout.sessions.create is on the money path here. */
@@ -173,7 +182,7 @@ describe.skipIf(!available)("createOrder buyer-paid shipping quote (DB)", () => 
     expect(sessionParams!.metadata).toEqual({ order_id: order.id }); // no label split
     const ev = await db.query("SELECT event_type, reason FROM order_events WHERE event_type LIKE 'label_quote%' AND order_id = $1", [order.id]);
     expect(ev.rows).toEqual([{ event_type: "label_quote_fallback", reason: "no_weight" }]);
-    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+    expectNoQuoteTraffic();
   });
 
   it("falls back when the seller has no default origin address", async () => {
@@ -185,7 +194,7 @@ describe.skipIf(!available)("createOrder buyer-paid shipping quote (DB)", () => 
     expect(order.label_quote).toBeNull();
     const ev = await db.query("SELECT reason FROM order_events WHERE event_type = 'label_quote_fallback' AND order_id = $1", [order.id]);
     expect(ev.rows[0].reason).toBe("no_seller_default_address");
-    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+    expectNoQuoteTraffic();
   });
 
   it("falls back when the provider errors — quoting never fails the order", async () => {
@@ -237,7 +246,7 @@ describe.skipIf(!available)("createOrder buyer-paid shipping quote (DB)", () => 
     expect(order.label_quote).toBeNull();
     const ev = await db.query("SELECT count(*)::int AS c FROM order_events WHERE event_type LIKE 'label_quote%' AND order_id = $1", [order.id]);
     expect(ev.rows[0].c).toBe(0);
-    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+    expectNoQuoteTraffic(); // quoting is payment-gated; verification may still check the address
   });
 
   it("§9 my_orders carries the quote so the list projection matches get_order (B1 regression)", async () => {

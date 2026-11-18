@@ -127,6 +127,42 @@ describe("createEasyPostShipment", () => {
     const out = await createEasyPostShipment({ toAddress: TO, fromAddress: FROM, weightGrams: 500 }, { ...OPTS, fetchImpl: fetch });
     expect(out?.rates).toEqual([{ id: "rate_dhl", carrier: "DHLExpress", service: "ExpressWorldwide", costCents: 1045, currency: "USD" }]);
   });
+
+  // Buyer-paid shipping C3 (spec docs/specs/buyer-paid-shipping.md §2): the
+  // order-time quote is bounded by AbortSignal.timeout(SHIPPING_QUOTE_TIMEOUT_MS)
+  // — but only if the signal actually reaches the fetch. Regression: fails
+  // against a createEasyPostShipment that drops the signal (pre-C3 code — the
+  // fetch init would carry no signal at all).
+  it("C3: passes the caller's signal into the actual fetch", async () => {
+    const { calls, fetch } = fetchStub(shipmentResponse);
+    const controller = new AbortController();
+    await createEasyPostShipment(
+      { toAddress: TO, fromAddress: FROM, weightGrams: 500 },
+      { ...OPTS, fetchImpl: fetch },
+      controller.signal,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init.signal).toBe(controller.signal); // plumbed, not dropped
+  });
+
+  it("C3: an aborted signal rejects the quote call (a hanging provider can never hang the caller)", async () => {
+    // Fetch stub that emulates the real fetch abort contract: never resolves
+    // on its own, rejects when the signal fires.
+    const fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    }) as typeof fetch;
+    const controller = new AbortController();
+    const pending = createEasyPostShipment(
+      { toAddress: TO, fromAddress: FROM, weightGrams: 500 },
+      { ...OPTS, fetchImpl: fetch },
+      controller.signal,
+    );
+    controller.abort();
+    await expect(pending).rejects.toThrow("aborted");
+  });
 });
 
 describe("buyEasyPostLabel", () => {

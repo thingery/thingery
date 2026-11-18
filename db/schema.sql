@@ -453,6 +453,21 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_address_shared_at TIMESTAMP
 -- unchanged. bought_at (ISO UTC) is the A2 daily-budget aggregation key.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS label_purchase JSONB;
 -- {shipment_id, rate_id, carrier, service, cost_cents, currency, bought_at}
+-- Buyer-paid shipping (spec docs/specs/buyer-paid-shipping.md, data model): the
+-- order-time label quote snapshot. Present only on label-quote-mode orders
+-- (Stripe + shippable + EasyPost configured + listing weight + seller default
+-- address + live EUR quote under the per-label cap, spec §1); NULL = flat
+-- mode and every pre-deploy order, which keep their exact current semantics.
+-- destination is the buyer address the quote was computed for — it equals
+-- orders.shipping_address at creation and is re-checked at label purchase
+-- (spec §5.3). line_refund_id / line_refunded_at are written once, when the
+-- labelrefund:{order_id} partial refund fires (spec §6) — the durable
+-- settle-awareness state the refund helper reads. No CHECK constraint, same
+-- as label_purchase (shape enforced in code where it is read).
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS label_quote JSONB;
+-- {shipment_id, rate_id, carrier, service, amount_cents, currency,
+--  weight_grams, dimensions_mm, origin{...}, destination{...}, quoted_at,
+--  line_refund_id?, line_refunded_at?}
 DO $$
 BEGIN
   -- Widen the status CHECK with 'completed' (off_platform terminal state, §11.2).

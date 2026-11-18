@@ -339,7 +339,7 @@ export async function createRefundForOrder(
   // Settle-aware amount (§6): identical to chargeTotalCents in every state
   // where no label was bought (flat mode, quote mode before purchase, and
   // the pre-payment sites); the label line leaves the refund only when a
-  // platform label was actually bought under an excluding policy, or when
+  // platform label was bought under an excluding policy, or when
   // the own-label partial refund already returned it.
   return stripe.refunds.create(
     { payment_intent: paymentIntentId, amount: refundCents(order, labelLinePolicy) },

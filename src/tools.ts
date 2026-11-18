@@ -37,6 +37,7 @@ import { DEFAULT_MESSAGE_LIST_LIMIT, listOrderMessages, OrderMessageError, sendO
 import { logSecurityEvent } from "./security-events.js";
 import { listConnectedApps, revokeConnectedApp } from "./oauth.js";
 import { apiKeyInfo } from "./auth.js";
+import { AddressSuggestedError } from "./address-verification.js";
 
 /** Which credential authenticated the /mcp request (thg_ API key, thgo_ OAuth
  *  token, thgs_ login session) — see authenticateRequest in src/auth.ts. */
@@ -1450,7 +1451,11 @@ export function registerTools(
         "payment_available first). Shippable items need a shipping_address, or address_id to " +
         "reuse a saved address (see list_addresses — summaries only; the full address is " +
         "copied into the order server-side, never shown in chat). country must be a real " +
-        "ISO 3166-1 alpha-2 code ('IT', not 'XX'; case/whitespace-insensitive: ' it ' ships as 'IT'). Local-pickup items ignore both. The result's " +
+        "ISO 3166-1 alpha-2 code ('IT', not 'XX'; case/whitespace-insensitive: ' it ' ships as 'IT'). Local-pickup items ignore both. " +
+        "Before creating a shippable order the platform runs an advisory carrier address check: " +
+        "if it suggests a correction, NO order is created and the result carries code " +
+        "'address_verification_suggested' with verification.suggestion — ask the buyer which " +
+        "address to use, then re-call create_order with that address. The result's " +
         "total_price_cents is what the buyer pays — flat shipping is the listing's " +
         "shipping_price_cents; on shipping-quote mode (see the result's `shipping` block, " +
         "mode 'label_quote') it is the carrier label amount quoted for this order, shown " +
@@ -1546,6 +1551,15 @@ export function registerTools(
             : ["Agree payment directly with the seller (off-platform)", "The seller confirms receipt with confirm_payment", "Track with get_order"],
         });
       } catch (e) {
+        if (e instanceof AddressSuggestedError) {
+          // Suggested branch (spec §state machine): no order exists — surface
+          // the F2-validated suggestion as data so the buyer can choose.
+          // Address values appear only in the payload, never in the message.
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify({ error: e.message, code: e.code, verification: e.verification }, null, 2) }],
+            isError: true,
+          };
+        }
         if (e instanceof OrderFlowError) return err(e.message, e.code);
         return err(`create_order failed: ${describeError(e)}`);
       }

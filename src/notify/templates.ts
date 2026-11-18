@@ -410,6 +410,26 @@ export function renderSellerItemTakenDown(p: { itemTitle: string; itemUrl: strin
   return { subject, text, html };
 }
 
+/** `buyer.review_hidden.v1` — moderation hid a review the buyer wrote
+ *  (order-reviews spec PR 3). */
+export function renderBuyerReviewHidden(p: { itemTitle: string; sellerUrl: string; reason: string }): RenderedEmail {
+  const subject = subjectSafe(`Review removed: ${p.itemTitle} — Thingery`);
+  const lines = [`Item: ${p.itemTitle}`, `Reason: ${p.reason}`];
+  const text =
+    "A moderator removed your review from Thingery:\n\n" +
+    lines.join("\n") +
+    `\n\n${p.sellerUrl}\n\n` +
+    `If you believe this was a mistake, contact the marketplace operators.\n\n` +
+    `— ${CANONICAL_SENTENCE}\n`;
+  const html =
+    "<p>A moderator removed your review from Thingery:</p>\n" +
+    `<ul>\n${lines.map((l) => `  <li>${escapeHtml(l)}</li>`).join("\n")}\n</ul>\n` +
+    `<p><a href="${escapeHtml(p.sellerUrl)}">View the seller page</a></p>\n` +
+    "<p>If you believe this was a mistake, contact the marketplace operators.</p>\n" +
+    `<p style="color:#666;font-size:12px">— ${CANONICAL_SENTENCE}</p>\n`;
+  return { subject, text, html };
+}
+
 /** `operator.*.v1` — internal alerts (THI-780 PR 4). Plain, id-first,
  * PII-free: ids, statuses, error strings only. */
 export function renderOperatorAlert(p: { title: string; lines: string[] }): RenderedEmail {
@@ -502,6 +522,13 @@ export function renderOrderEmail(
       return renderSellerItemTakenDown({
         itemTitle: str("item_title") ?? "",
         itemUrl: str("item_id") ? `${baseUrl}/item/${payload.item_id}` : baseUrl,
+        reason: str("reason") ?? "policy violation",
+      });
+    // Order-reviews spec PR 3: moderation hid one of the buyer's reviews.
+    case "buyer.review_hidden":
+      return renderBuyerReviewHidden({
+        itemTitle: str("item_title") ?? "",
+        sellerUrl: str("seller_id") ? `${baseUrl}/seller/${payload.seller_id}` : baseUrl,
         reason: str("reason") ?? "policy violation",
       });
     // THI-780 PR 4: operator alerts — account-less rows, bypass account

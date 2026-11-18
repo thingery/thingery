@@ -15,6 +15,7 @@ import { pool } from "./db.js";
 import type { OrderRow, OrderStatus } from "./orders.js";
 import { applyTransition, IllegalTransitionError } from "./orders.js";
 import { orderFlowConfig } from "./config.js";
+import { AddressSuggestedError, verifyOrderAddress, type ShippingVerificationRecord } from "./address-verification.js";
 import {
   getSellerDefaultOrigin,
   resolveShippingQuote,
@@ -45,6 +46,11 @@ export interface ShippingAddress {
   country: string;
 }
 
+export type {
+  ShippingVerificationRecord,
+  OrderVerificationOutcome,
+} from "./address-verification.js";
+
 export type OrderView = OrderRow & {
   item_title: string;
   payment_url: string | null;
@@ -55,6 +61,9 @@ export interface CreateOrderInput {
   itemId: string;
   shippingAddress?: ShippingAddress;
   paymentMode?: "stripe" | "off_platform";
+  /** Buyer's choice after a correction was offered (PR3 wires it into
+   *  create_order's input). Only "keep_original" exists today. */
+  verificationChoice?: "keep_original";
 }
 
 /** payments configured deployment-wide AND seller payout-ready (§11.2). */
@@ -130,6 +139,32 @@ export async function createOrder(input: CreateOrderInput): Promise<{ order: Ord
       throw new OrderFlowError("shipping_address_required", "This item ships — provide shipping_address (name, line1, city, postal_code, country).");
     }
 
+    // Order-time address verification (docs/specs/order-address-verification.md):
+    // one advisory EasyPost delivery check BEFORE the reservation, inside this
+    // transaction. An offered correction throws AddressSuggestedError — the
+    // catch below rolls back having touched NOTHING (no reservation, no order
+    // row, no payment clock), so the item stays buyable. Any provider problem
+    // resolves to not_checked and the order proceeds exactly as before the
+    // rollout. address_id orders (saved addresses, THI-910) never hit this
+    // gate: the input does not exist yet, and that rollout will copy the
+    // saved address's stored verification instead of re-checking.
+    let shippingVerification: ShippingVerificationRecord | null = null;
+    if (fulfillment === "shipping" && input.shippingAddress) {
+      const outcome = await verifyOrderAddress({
+        accountId: input.buyerId,
+        address: input.shippingAddress,
+        ...(input.verificationChoice !== undefined ? { choice: input.verificationChoice } : {}),
+      });
+      if (outcome.kind === "suggested") {
+        throw new AddressSuggestedError({
+          status: "suggested",
+          suggestion: outcome.suggestion,
+          checked_at: outcome.checkedAt,
+        });
+      }
+      shippingVerification = outcome.kind === "record" ? outcome.record : null;
+    }
+
     // #1 create_order: conditional reservation — 0 rows = racing buyer won.
     const reserved = await db.query(
       "UPDATE items SET status = 'reserved', updated_at = now() WHERE id = $1 AND status = 'active'",
@@ -145,12 +180,14 @@ export async function createOrder(input: CreateOrderInput): Promise<{ order: Ord
     try {
       const inserted = await db.query<OrderRow>(
         `INSERT INTO orders (item_id, seller_id, buyer_id, status, payment_mode, price_cents,
-           shipping_price_cents, currency, fulfillment, shipping_address, payment_deadline)
-         VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8, $9::jsonb, $10) RETURNING *`,
+           shipping_price_cents, currency, fulfillment, shipping_address, payment_deadline,
+           shipping_verification)
+         VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8, $9::jsonb, $10, $11::jsonb) RETURNING *`,
         [
           input.itemId, row.seller_id, input.buyerId, mode, row.price_cents,
           fulfillment === "pickup" ? 0 : row.shipping_price_cents, row.currency,
           fulfillment, JSON.stringify(input.shippingAddress ?? {}), deadline,
+          shippingVerification === null ? null : JSON.stringify(shippingVerification),
         ],
       );
       order = inserted.rows[0];
@@ -286,7 +323,7 @@ const ROLE_PREDICATES: Record<OrderRole, string> = {
 export type OrderListEntry = Pick<
   OrderRow,
   | "id" | "item_id" | "status" | "payment_mode" | "price_cents" | "shipping_price_cents" | "currency"
-  | "fulfillment" | "carrier" | "tracking_code" | "label_url" | "payment_deadline" | "dispute_deadline"
+  | "fulfillment" | "carrier" | "tracking_code" | "label_url" | "label_quote" | "payment_deadline" | "dispute_deadline"
   | "status_changed_at" | "created_at" | "updated_at"
 > & { item_title: string };
 
@@ -309,7 +346,7 @@ export async function listOrdersForAccount(params: {
   const limit = Math.min(Math.max(params.limit, 1), MAX_ORDER_LIST_LIMIT);
   const { rows } = await pool.query<OrderListEntry>(
     `SELECT o.id, o.item_id, o.status, o.payment_mode, o.price_cents, o.shipping_price_cents, o.currency,
-            o.fulfillment, o.carrier, o.tracking_code, o.label_url, o.payment_deadline, o.dispute_deadline,
+            o.fulfillment, o.carrier, o.tracking_code, o.label_url, o.label_quote, o.payment_deadline, o.dispute_deadline,
             o.status_changed_at, o.created_at, o.updated_at, i.title AS item_title
      FROM orders o JOIN items i ON i.id = o.item_id
      WHERE ${ROLE_PREDICATES[role]}

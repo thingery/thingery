@@ -207,7 +207,10 @@ describe.skipIf(!available)("get_seller_summary (THI-923 spec v2)", () => {
   async function callTool(args: Record<string, unknown>): Promise<Record<string, unknown>> {
     const captured = registered.get("get_seller_summary");
     if (!captured) throw new Error("get_seller_summary was not registered");
-    const result = (await captured.handler(args)) as {
+    // SDK parity (THI-958): parse through the tool's shape (applying schema
+    // defaults) before the handler runs, like the real server.
+    const parsed = z.object(captured.config.inputSchema ?? {}).parse(args) as Record<string, unknown>;
+    const result = (await captured.handler(parsed)) as {
       isError?: boolean;
       content?: { text?: string }[];
     };
@@ -546,7 +549,9 @@ describe.skipIf(!available)("get_seller_summary (THI-923 spec v2)", () => {
     // Handler level: typed error payload.
     const captured = registered.get("get_seller_summary");
     if (!captured) throw new Error("get_seller_summary was not registered");
-    const result = (await captured.handler({ seller_id: randomUUID() })) as {
+    // SDK parity (THI-958): parse through the tool's shape before invoking.
+    const parsed = z.object(captured.config.inputSchema ?? {}).parse({ seller_id: randomUUID() }) as Record<string, unknown>;
+    const result = (await captured.handler(parsed)) as {
       isError?: boolean;
       content?: { text?: string }[];
     };

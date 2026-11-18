@@ -33,7 +33,11 @@ function captureMyOrders(seller: SellerRow | null) {
 }
 
 async function callMyOrders(seller: SellerRow | null, args: Record<string, unknown> = {}) {
-  const result = await captureMyOrders(seller).handler(args);
+  // SDK parity (THI-958): parse through the tool's shape (applying schema
+  // defaults) before the handler runs, like the real server.
+  const tool = captureMyOrders(seller);
+  const parsed = z.object(tool.config.inputSchema).parse(args) as Record<string, unknown>;
+  const result = await tool.handler(parsed);
   return {
     isError: result.isError === true,
     body: JSON.parse(result.content[0].text) as {
@@ -71,7 +75,12 @@ describe("my_orders tool surface", () => {
     const query = vi.spyOn(pool, "query").mockResolvedValue({ rows: [] } as never);
     const accountId = randomUUID();
     const cursor = randomUUID();
-    await callMyOrders({ id: accountId } as SellerRow, { role: "seller", status: "sold", limit: 100000, cursor });
+    // Defense-in-depth below the zod boundary (THI-958): limit: 100000
+    // violates the my_orders schema (max 100), so no MCP caller can ever
+    // send it — invoke the handler directly to prove the SQL clamp still
+    // holds if a future caller bypasses schema parsing.
+    const tool = captureMyOrders({ id: accountId } as SellerRow);
+    await tool.handler({ role: "seller", status: "sold", limit: 100000, cursor });
     const [sql, values] = query.mock.calls[0] as unknown as [string, unknown[]];
     expect(values).toEqual([accountId, "sold", cursor, 101]);
     expect(sql).not.toContain(accountId);

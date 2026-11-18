@@ -484,6 +484,7 @@ function orderToPublic(order: {
   carrier: string | null; tracking_code: string | null; label_url: string | null;
   payment_deadline: Date | null; dispute_deadline: Date | null;
   status_changed_at: Date; created_at: Date; updated_at: Date; payment_url?: string | null;
+  label_quote?: { amount_cents: number; currency: string; carrier: string; service: string } | null;
 }) {
   return {
     id: order.id,
@@ -504,7 +505,12 @@ function orderToPublic(order: {
     updated_at: order.updated_at,
     item_title: order.item_title,
     payment_url: order.payment_url,
-    total_price_cents: order.price_cents + order.shipping_price_cents,
+    // §9: the label quote's only public projection — mode + amount, never
+    // the snapshot's origin/destination addresses (party PII).
+    shipping: order.label_quote
+      ? { mode: "label_quote" as const, amount_cents: order.label_quote.amount_cents, currency: order.label_quote.currency, carrier: order.label_quote.carrier, service: order.label_quote.service }
+      : { mode: "flat" as const, amount_cents: order.shipping_price_cents, currency: order.currency },
+    total_price_cents: order.price_cents + order.shipping_price_cents + (order.label_quote?.amount_cents ?? 0),
   };
 }
 

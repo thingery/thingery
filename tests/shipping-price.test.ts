@@ -14,7 +14,7 @@ import { normalizeUpdateArgs, signChatConfirmToken, TOOLS, verifyChatConfirmToke
 import { pool, type ItemRow, type SellerRow } from "../src/db.js";
 import { createItem, MAX_SHIPPING_PRICE_CENTS, ShippingPriceError, updateItem } from "../src/items.js";
 import { cancelOrder } from "../src/order-flow.js";
-import { createCheckoutSession, createRefundForOrder, createTransferForOrder, orderAmountCents, setStripeForTests } from "../src/stripe.js";
+import { createCheckoutSession, createRefundForOrder, createTransferForOrder, chargeTotalCents, setStripeForTests } from "../src/stripe.js";
 import { itemToPublic, registerTools } from "../src/tools.js";
 
 delete process.env.EMBED_API_KEY;
@@ -302,7 +302,33 @@ describe("money path includes shipping", () => {
     const amounts = params!.line_items!.map((line) => line.price_data!.unit_amount);
     expect(amounts).toEqual([12000, 700]);
     expect(params!.line_items![1].price_data!.product_data!.name).toBe("Shipping");
-    expect(amounts[0]! + amounts[1]!).toBe(orderAmountCents(order));
+    expect(amounts[0]! + amounts[1]!).toBe(chargeTotalCents(order));
+    expect(params!.metadata).toEqual({ order_id: "o1" }); // no label metadata on flat orders
+  });
+
+  it("quote-mode Checkout: the Shipping line is the label amount, flat stays off, metadata carries the split", async () => {
+    let params: Stripe.Checkout.SessionCreateParams | undefined;
+    const client = {
+      checkout: { sessions: { create: async (p: Stripe.Checkout.SessionCreateParams) => { params = p; return { id: "cs_2" }; } } },
+    } as unknown as Stripe;
+    const quoteOrder = { ...order, shipping_price_cents: 0, label_quote: { amount_cents: 733 } };
+    await createCheckoutSession(
+      {
+        orderId: "o1",
+        item: { title: "Oak desk", currency: "EUR", price_cents: 12000 },
+        shippingPriceCents: 0,
+        labelQuoteAmountCents: 733,
+        expiresAt: new Date(Date.now() + 3_600_000),
+        baseUrl: "https://thingery.test",
+      },
+      client,
+    );
+    const amounts = params!.line_items!.map((line) => line.price_data!.unit_amount);
+    expect(amounts).toEqual([12000, 733]); // item + label — no flat line
+    expect(params!.line_items![1].price_data!.product_data!.name).toBe("Shipping");
+    expect(amounts[0]! + amounts[1]!).toBe(chargeTotalCents(quoteOrder));
+    expect(params!.metadata).toEqual({ order_id: "o1", label_quote_amount_cents: "733" });
+    expect(params!.payment_intent_data!.metadata).toEqual({ order_id: "o1", label_quote_amount_cents: "733" });
   });
 
   it("pays the seller price plus shipping minus the Stripe fee on the whole charge", async () => {
@@ -324,6 +350,28 @@ describe("money path includes shipping", () => {
     } as unknown as Stripe;
     await createRefundForOrder(order, "pi_1", client);
     expect(refunded).toBe(12700);
+  });
+
+  it("quote-mode full refund includes the label line the buyer paid", async () => {
+    let refunded: number | undefined;
+    const client = {
+      refunds: { create: async (p: { amount: number }) => { refunded = p.amount; return { id: "re_2" }; } },
+    } as unknown as Stripe;
+    await createRefundForOrder({ ...order, shipping_price_cents: 0, label_quote: { amount_cents: 733 } }, "pi_1", client);
+    expect(refunded).toBe(12733);
+  });
+
+  it("quote-mode payout before the money-paths PR: balance ≠ payout base fails closed (no wrong transfer)", async () => {
+    // Interim state between this PR and the §4 fee-allocation PR: the
+    // buyer's charge (12000 + 733) does not match the seller's payout base
+    // (12000) — the existing THI-375 R1 invariant refuses to net against a
+    // charge that is not the base, so the order stays payout_pending and the
+    // sweep retries. Locked here so the interim behavior is explicit.
+    const { client, transfers } = stripeWithCharge(12733, 216);
+    await expect(
+      createTransferForOrder({ ...order, shipping_price_cents: 0, label_quote: { amount_cents: 733 } }, "acct_1", client),
+    ).rejects.toThrow(/payout_charge_mismatch/);
+    expect(transfers).toHaveLength(0);
   });
 });
 

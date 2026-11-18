@@ -44,8 +44,24 @@ export function setStripeForTests(fake: Stripe | null): void {
   client = fake;
 }
 
-/** Full order amount the buyer pays and the seller receives (rev 3 §11.4). */
-export function orderAmountCents(order: { price_cents: number; shipping_price_cents: number }): number {
+/** The buyer's charge total (spec buyer-paid-shipping §3) — what Stripe must
+ *  have taken for this order: item + flat shipping (0 in quote mode, where the
+ *  label line replaces it) + the label-quote line when one exists. One helper
+ *  everywhere a charge total is asserted or taken (webhook F5 acceptance,
+ *  refunds) so the three can never drift. Integer cents end-to-end. */
+export function chargeTotalCents(order: {
+  price_cents: number;
+  shipping_price_cents: number;
+  label_quote?: { amount_cents: number } | null;
+}): number {
+  return order.price_cents + order.shipping_price_cents + (order.label_quote?.amount_cents ?? 0);
+}
+
+/** The seller's payout base (§3/§4): item + flat shipping. The label line is
+ *  the buyer's money spent on their label — it is never transferable to the
+ *  seller, so it is excluded here by construction (in quote mode
+ *  shipping_price_cents is stored 0). */
+export function payoutBaseCents(order: { price_cents: number; shipping_price_cents: number }): number {
   return order.price_cents + order.shipping_price_cents;
 }
 
@@ -55,7 +71,8 @@ export function orderAmountCents(order: { price_cents: number; shipping_price_ce
 export interface CheckoutSessionInput {
   orderId: string;
   item: Pick<ItemRow, "title" | "currency" | "price_cents">;
-  shippingPriceCents: number; // orders snapshot; 0 → no shipping line
+  shippingPriceCents: number; // orders snapshot; 0 → no shipping line (flat)
+  labelQuoteAmountCents?: number; // quote-mode label line (§3); 0/undefined → none
   expiresAt: Date; // payment deadline
   baseUrl: string;
 }
@@ -84,6 +101,28 @@ export async function createCheckoutSession(
       },
     });
   }
+  // Quote mode (§3): the buyer pays the quoted label amount as its own
+  // "Shipping" line — the flat amount is never added on top (the caller
+  // stores shipping_price_cents 0 for these orders, so the branch above
+  // stays silent). amount_cents is integer cents straight off the row
+  // snapshot; the EUR-only selection upstream guarantees the currency matches.
+  if (input.labelQuoteAmountCents && input.labelQuoteAmountCents > 0) {
+    lineItems.push({
+      quantity: 1,
+      price_data: {
+        currency: input.item.currency.toLowerCase(),
+        unit_amount: input.labelQuoteAmountCents,
+        product_data: { name: "Shipping" },
+      },
+    });
+  }
+  // Metadata (§3): the split is reconstructible from Stripe's side during
+  // reconciliation — label_quote_amount_cents rides on both the Session and
+  // the PaymentIntent (decimal string, Stripe metadata values are strings).
+  const metadata: Record<string, string> = { order_id: input.orderId };
+  if (input.labelQuoteAmountCents && input.labelQuoteAmountCents > 0) {
+    metadata.label_quote_amount_cents = String(input.labelQuoteAmountCents);
+  }
   return stripe.checkout.sessions.create(
     {
       mode: "payment",
@@ -93,8 +132,8 @@ export async function createCheckoutSession(
       // spells the restriction `allowed_payment_method_types`.
       allowed_payment_method_types: ["card"],
       client_reference_id: input.orderId,
-      metadata: { order_id: input.orderId },
-      payment_intent_data: { metadata: { order_id: input.orderId } },
+      metadata: { ...metadata },
+      payment_intent_data: { metadata: { ...metadata } },
       expires_at: Math.floor(input.expiresAt.getTime() / 1000),
       success_url: `${input.baseUrl}/order/${input.orderId}`,
       cancel_url: `${input.baseUrl}/order/${input.orderId}?canceled=1`,
@@ -166,7 +205,7 @@ export async function sellerNetTransferCents(order: PayoutOrder, stripe: Stripe)
   }
   const bt = typeof charge.balance_transaction === "object" ? charge.balance_transaction : null;
   if (!bt) throw new Error(`payout_netting_unavailable: no balance transaction on charge ${charge.id}`);
-  const gross = orderAmountCents(order);
+  const gross = payoutBaseCents(order);
   // THI-375 R1: the balance transaction must BE this order's charge — the
   // gross match is an invariant, not an assumption. A mismatch (dashboard
   // manipulation, partial capture, cross-currency settlement) fails closed;
@@ -201,12 +240,15 @@ export async function createTransferForOrder(
 }
 
 export async function createRefundForOrder(
-  order: { id: string; price_cents: number; shipping_price_cents: number },
+  order: { id: string; price_cents: number; shipping_price_cents: number; label_quote?: { amount_cents: number } | null },
   paymentIntentId: string,
   stripe: Stripe = getStripe() ?? undefined!,
 ): Promise<Stripe.Refund> {
+  // Full refund = the buyer's whole charge (§3/§6): item + flat shipping + the
+  // label line they paid. chargeTotalCents keeps this identical to the F5
+  // acceptance figure — a refund can never diverge from what was taken.
   return stripe.refunds.create(
-    { payment_intent: paymentIntentId, amount: orderAmountCents(order) },
+    { payment_intent: paymentIntentId, amount: chargeTotalCents(order) },
     { idempotencyKey: `refund:${order.id}` },
   );
 }

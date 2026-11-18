@@ -14,7 +14,7 @@ import { pool } from "../db.js";
 import type { PoolClient } from "pg";
 import { notifyConfig } from "../config.js";
 
-export type OperatorAlertKind = "stuck_money" | "stale_dispute" | "dead_letter" | "label_refund_stack";
+export type OperatorAlertKind = "stuck_money" | "stale_dispute" | "dead_letter" | "label_refund_stack" | "label_line_refund_stuck";
 
 /** Plan one operator alert email. `ref` is the stable subject of the alert
  * (order id / outbox id); the dedupe key absorbs sweep re-runs and webhook

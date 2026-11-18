@@ -26,6 +26,7 @@ import { processStripeEvent } from "./webhooks-stripe.js";
 import { planAccountNotification } from "./notify/items.js";
 import { planOperatorAlert } from "./notify/operator.js";
 import { notifyConfig } from "./config.js";
+import { refundLabelLineForOrder } from "./fulfillment.js";
 
 const SYSTEM = { type: "system" as const };
 
@@ -485,12 +486,51 @@ async function rule9(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   report["9-stale-dispute"] = { acted: rows.length, skipped: 0, errored: 0 };
 }
 
+// --- Rule 10 (buyer-paid shipping §6): own-label quote-mode orders whose
+// label-line refund never completed — retry labelrefund:{order_id} (the
+// idempotency key replays the same refund; reconcile-never-recreate). Only
+// tracked, un-refunded states are candidates: a full refund (refunding /
+// cancelled / payout states) already settled the line under refundCents, and
+// firing here would exceed the charge. Escalates to one operator alert per
+// order when the retry keeps failing.
+async function rule10(report: SweepReport, _cfg: OrderFlowConfig, now: Date) {
+  open(report, "10-label-line-refund");
+  const { rows } = await pool.query<OrderRow>(
+    `SELECT * FROM orders
+      WHERE payment_mode = 'stripe' AND payment_intent_id IS NOT NULL
+        AND label_quote IS NOT NULL AND label_purchase IS NULL
+        AND tracking_code IS NOT NULL
+        AND (label_quote->>'line_refund_id') IS NULL
+        AND status IN ('label_issued','in_transit','delivered','disputed')
+      ORDER BY created_at`,
+  );
+  for (const order of rows) {
+    try {
+      await refundLabelLineForOrder(order);
+      tally(report, "10-label-line-refund", "acted");
+    } catch (err) {
+      console.error(`[sweep:10] label line refund failed for order ${order.id}:`, err);
+      await planOperatorAlert({
+        kind: "label_line_refund_stuck",
+        ref: `labelline:${order.id}`,
+        subject: `Label line refund stuck: order ${order.id} — Thingery`,
+        payload: {
+          title: `Buyer shipping-line refund could not complete (order ${order.id})`,
+          lines: [`Order: ${order.id}`, `Error: ${(err as Error).message.slice(0, 200)}`, "Action: inspect the Stripe payment intent refunds and reconcile manually"],
+        },
+      }).catch(() => undefined);
+      tally(report, "10-label-line-refund", "errored");
+    }
+  }
+  void now;
+}
+
 /** One pass of every rule. A rule failure never blocks the others. */
 export async function runSweeps(cfg: OrderFlowConfig = orderFlowConfig(), now: Date = new Date()): Promise<SweepReport> {
   const report: SweepReport = {};
   const rules: Array<[string, (r: SweepReport, c: OrderFlowConfig, n: Date) => Promise<void>]> = [
     ["1", rule1], ["2", rule2], ["3", rule3], ["4", rule4],
-    ["5", rule5], ["6", rule6], ["7", rule7], ["8", rule8], ["9", rule9],
+    ["5", rule5], ["6", rule6], ["7", rule7], ["8", rule8], ["9", rule9], ["10", rule10],
   ];
   for (const [name, fn] of rules) {
     try {

@@ -104,6 +104,24 @@ async function notifyReview(input: {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Shared field validation (order-reviews spec PR 3: review reports use
+ *  the same canned slugs and the 10–1000 motivation rule as item reports).
+ *  Returns the user-facing message when invalid, else null — each creator
+ *  maps it onto its own error class, keeping messages one source. */
+function reportFieldError(reason: string, motivation: string): string | null {
+  if (!(REPORT_REASONS as readonly string[]).includes(reason)) {
+    return "Pick a reason: explicit images, scam or fraud, or something else.";
+  }
+  const trimmed = motivation.trim();
+  if (trimmed.length < MIN_MOTIVATION_CHARS) {
+    return `Describe the problem in at least ${MIN_MOTIVATION_CHARS} characters.`;
+  }
+  if (trimmed.length > MAX_MOTIVATION_CHARS) {
+    return `The description is limited to ${MAX_MOTIVATION_CHARS} characters.`;
+  }
+  return null;
+}
+
 export async function createItemReport(
   input: { itemId: string; reporterAccountId: string; reason: string; motivation: string },
   limiter: RateLimiter = itemReportLimiter,
@@ -113,16 +131,11 @@ export async function createItemReport(
   if (!UUID_RE.test(input.itemId)) {
     throw new ItemReportError("not_found", "Item not found.");
   }
-  if (!(REPORT_REASONS as readonly string[]).includes(input.reason)) {
-    throw new ItemReportError("validation", "Pick a reason: explicit images, scam or fraud, or something else.");
+  const fieldError = reportFieldError(input.reason, input.motivation);
+  if (fieldError) {
+    throw new ItemReportError("validation", fieldError);
   }
   const motivation = input.motivation.trim();
-  if (motivation.length < MIN_MOTIVATION_CHARS) {
-    throw new ItemReportError("validation", `Describe the problem in at least ${MIN_MOTIVATION_CHARS} characters.`);
-  }
-  if (motivation.length > MAX_MOTIVATION_CHARS) {
-    throw new ItemReportError("validation", `The description is limited to ${MAX_MOTIVATION_CHARS} characters.`);
-  }
 
   // Hourly per-reporter bucket (spec key: reports:acct:<id>).
   if (!limiter.allow(`reports:acct:${input.reporterAccountId}`)) {
@@ -192,4 +205,130 @@ export async function setBoardIssueRef(
   db: PoolClient | typeof pool = pool,
 ): Promise<void> {
   await db.query("UPDATE reports SET board_issue_ref = $2 WHERE id = $1", [reportId, boardIssueRef]);
+}
+
+// --- review reports (order-reviews spec PR 3) ---
+// Same contract as item reports, pointed at a review: any signed-in account
+// except the review's author. Dedupe rides the per-kind partial UNIQUE
+// (reporter, target_review_id) widened into `reports`; the hourly bucket is
+// the same shared one (reports:acct:<id>) so alternating item/review targets
+// cannot multiply an account's report budget.
+
+export type ReviewReportErrorCode =
+  | "not_found" // bad review id — opaque to strangers
+  | "own_review" // reporter wrote the review
+  | "duplicate" // partial UNIQUE (reporter, review) — friendly, not a fault
+  | "rate_limited" // the shared hourly account bucket
+  | "validation"; // reason/motivation shape
+
+export class ReviewReportError extends Error {
+  constructor(readonly code: ReviewReportErrorCode, message: string) {
+    super(message);
+    this.name = "ReviewReportError";
+  }
+}
+
+/** One report row as created by createReviewReport. */
+export interface ReviewReport {
+  id: string;
+  status: "open";
+  created_at: Date;
+}
+
+/** Best-effort triage notification, the notifyReview mirror: after COMMIT,
+ *  never throws, ref lands via setBoardIssueRef. */
+async function notifyReviewReport(input: {
+  report: ReviewReport;
+  reviewId: string;
+  reason: string;
+  motivation: string;
+  reporterAccountId: string;
+}): Promise<void> {
+  const config = reportReviewConfig();
+  if (!config) return;
+  try {
+    const ref = await createReportReviewTask(
+      {
+        report: input.report,
+        reviewId: input.reviewId,
+        reason: input.reason,
+        motivation: input.motivation,
+        reporterAccountId: input.reporterAccountId,
+        createdAt: input.report.created_at,
+      },
+      config,
+    );
+    if (ref) {
+      await setBoardIssueRef(input.report.id, ref);
+    } else {
+      console.warn(`[reports] review endpoint returned no task id for report ${input.report.id}`);
+    }
+  } catch (err) {
+    console.warn(`[reports] review notification failed for report ${input.report.id}: ${(err as Error).message}`);
+  }
+}
+
+export async function createReviewReport(
+  input: { reviewId: string; reporterAccountId: string; reason: string; motivation: string },
+  limiter: RateLimiter = itemReportLimiter,
+): Promise<ReviewReport> {
+  if (!UUID_RE.test(input.reviewId)) {
+    throw new ReviewReportError("not_found", "Review not found.");
+  }
+  const fieldError = reportFieldError(input.reason, input.motivation);
+  if (fieldError) {
+    throw new ReviewReportError("validation", fieldError);
+  }
+  const motivation = input.motivation.trim();
+
+  if (!limiter.allow(`reports:acct:${input.reporterAccountId}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/reviews/:id/report" }, { sellerId: input.reporterAccountId });
+    throw new ReviewReportError("rate_limited", "Too many reports sent in the last hour. Try again later.");
+  }
+
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    try {
+      // FOR SHARE closes the TOCTOU between the author check and the
+      // insert (the createItemReport pattern). Visibility is deliberately
+      // NOT checked: a hidden review reached by link is still reportable —
+      // the reporter saw it.
+      const review = await db.query<{ buyer_id: string }>(
+        "SELECT buyer_id FROM order_reviews WHERE id = $1 FOR SHARE",
+        [input.reviewId],
+      );
+      const row = review.rows[0];
+      if (!row) {
+        throw new ReviewReportError("not_found", "Review not found.");
+      }
+      if (row.buyer_id === input.reporterAccountId) {
+        throw new ReviewReportError("own_review", "You can't report your own review.");
+      }
+
+      const inserted = await db.query<ReviewReport>(
+        `INSERT INTO reports (reporter_account_id, target_review_id, reason, motivation)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, status, created_at`,
+        [input.reporterAccountId, input.reviewId, input.reason, motivation],
+      );
+      await db.query("COMMIT");
+      await notifyReviewReport({
+        report: inserted.rows[0],
+        reviewId: input.reviewId,
+        reason: input.reason,
+        motivation,
+        reporterAccountId: input.reporterAccountId,
+      });
+      return inserted.rows[0];
+    } catch (err) {
+      await db.query("ROLLBACK").catch(() => {});
+      if ((err as { code?: string }).code === "23505") {
+        throw new ReviewReportError("duplicate", "You already reported this review.");
+      }
+      throw err;
+    }
+  } finally {
+    db.release();
+  }
 }

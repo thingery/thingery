@@ -45,6 +45,8 @@ export type SecurityEventRoute =
   | "/api/notifications/:id/read"
   // THI-788 step 2 (spec docs/specs/item-reports.md): report limiter 429s.
   | "/api/items/:id/report"
+  // Order-reviews spec PR 3: review-report limiter 429s (shared bucket).
+  | "/api/reviews/:id/report"
   | "/api/notifications/read-all"
   // THI-780 (THI-760 Phase 2): preferences limiter 429s.
   | "/api/me/preferences"

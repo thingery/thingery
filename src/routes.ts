@@ -88,7 +88,15 @@ import {
   type AccountAddressRow,
 } from "./addresses.js";
 import { CountryCodeError, isIsoCountryCode } from "./countries.js";
-import { createItemReport, ItemReportError, MAX_MOTIVATION_CHARS, MIN_MOTIVATION_CHARS, REPORT_REASONS } from "./reports.js";
+import {
+  createItemReport,
+  createReviewReport,
+  ItemReportError,
+  MAX_MOTIVATION_CHARS,
+  MIN_MOTIVATION_CHARS,
+  REPORT_REASONS,
+  ReviewReportError,
+} from "./reports.js";
 import {
   editReview,
   getOrderReview,
@@ -1501,6 +1509,49 @@ api.get("/sellers/:id/reviews", asyncHandler(async (req: Request, res: Response)
   }
 }));
 
+// Review reports (order-reviews spec PR 3): any signed-in account except the
+// author flags a review — same canned causes and 10–1000 motivation rule as
+// item reports, same shared hourly bucket (5/h per account). Logic lives in
+// src/reports.ts (createReviewReport); this handler only wires auth,
+// validation and status mapping (the item-report layering).
+const reviewReportSchema = z.object({
+  reason: z.enum(REPORT_REASONS),
+  motivation: z.string().min(MIN_MOTIVATION_CHARS).max(MAX_MOTIVATION_CHARS), // required free text; DB CHECK mirrors
+});
+
+api.post("/reviews/:id/report", asyncHandler(async (req: Request, res: Response) => {
+  res.set("Cache-Control", "no-store");
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to report reviews." });
+    return;
+  }
+  const parsed = reviewReportSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: `Pick a reason and describe the problem in ${MIN_MOTIVATION_CHARS}–${MAX_MOTIVATION_CHARS} characters.` });
+    return;
+  }
+  try {
+    const report = await createReviewReport({
+      reviewId: req.params.id,
+      reporterAccountId: seller.id,
+      reason: parsed.data.reason,
+      motivation: parsed.data.motivation,
+    });
+    res.status(201).json({ ok: true, report_id: report.id });
+  } catch (err) {
+    if (err instanceof ReviewReportError) {
+      const status =
+        err.code === "not_found" ? 404 :
+        err.code === "duplicate" ? 409 :
+        err.code === "rate_limited" ? 429 : 400; // validation | own_review
+      res.status(status).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+}));
+
 // --- wanted listings, browser CRUD (spec THI-439 §6.3 — protected path) ------
 // Session-authed browser surface for the funnel form + my-wanted management
 // (public/wanted.js). Every body routes through src/wanted.ts only — caps,
@@ -1817,6 +1868,64 @@ api.post("/admin/items/:id/takedown", asyncHandler(async (req: Request, res: Res
   });
   res.set("Cache-Control", "no-store");
   res.json({ item_id: String(req.params.id), status: "deleted", seller_notified: true });
+}));
+
+// Review moderation (order-reviews spec PR 3): hide one review — the
+// takedown pattern exactly. Bearer ADMIN_API_KEY + boot gate (unset/short
+// key ⇒ 404, route indistinguishable from absent), adminAttemptLimiter on
+// the client IP, one-row UPDATE published → hidden (the explicit state
+// machine; hidden rows vanish from the public list, count and average via
+// the partial index), and the author notified exactly once
+// (dedupeKey review-hidden:<id>). The email is orders-class: prefs and the
+// account gate apply at send time. A second hide hits the status guard and
+// 404s — idempotent to callers as "already gone".
+const hideReviewSchema = z.object({ reason: z.string().min(1).max(500) });
+
+api.post("/admin/reviews/:id/hide", asyncHandler(async (req: Request, res: Response) => {
+  if (!orderFlowConfig().adminRouteEnabled) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const header = req.get("Authorization");
+  const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : undefined;
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
+    res.status(401).json({ error: "Not authorized." });
+    return;
+  }
+  const parsed = hideReviewSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "reason (1-500 chars) required." });
+    return;
+  }
+  const hidden = await pool.query<{ buyer_id: string; seller_id: string; item_title: string }>(
+    `UPDATE order_reviews SET status = 'hidden'
+      WHERE id = $1 AND status = 'published'
+      RETURNING buyer_id, seller_id, item_title`,
+    [String(req.params.id)],
+  );
+  if (!hidden.rows[0]) {
+    res.status(404).json({ error: "Review not found or not hide-eligible." });
+    return;
+  }
+  const review = hidden.rows[0];
+  const author = await pool.query<{ email: string | null }>(
+    "SELECT email FROM sellers WHERE id = $1", [review.buyer_id],
+  );
+  await planAccountNotification({
+    recipientId: review.buyer_id,
+    toEmail: author.rows[0]?.email,
+    eventType: "buyer.review_hidden",
+    role: "buyer",
+    subject: subjectSafe(`Review removed: ${review.item_title} — Thingery`),
+    payload: { item_title: review.item_title, review_id: String(req.params.id), seller_id: review.seller_id, reason: parsed.data.reason },
+    dedupeKey: `review-hidden:${String(req.params.id)}`,
+  });
+  res.set("Cache-Control", "no-store");
+  res.json({ review_id: String(req.params.id), status: "hidden", author_notified: true });
 }));
 
 const ADMIN = { type: "admin" as const };

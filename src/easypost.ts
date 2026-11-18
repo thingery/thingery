@@ -21,6 +21,9 @@ export interface EasyPostOptions {
   apiKey?: string; // default: EASYPOST_API_KEY (empty = unset, F1)
   baseUrl?: string;
   fetchImpl?: typeof fetch; // test seam
+  /** Abort the request after this many ms (address verification enforces the
+   *  spec's ≤3s wrap). Unset → no timeout (existing label/tracker behavior). */
+  timeoutMs?: number;
 }
 
 /**
@@ -149,6 +152,16 @@ async function easypostPostJson(
   const url = `${opts.baseUrl ?? "https://api.easypost.com"}${path}`;
   const apiKey = opts.apiKey ?? envValue("EASYPOST_API_KEY");
   if (apiKey === undefined) throw new Error("easypost not configured"); // callers check first
+  // Optional deadline: an AbortController fired by setTimeout (unref'd so a
+  // hanging provider call never pins the process open). The rejection is an
+  // ordinary fetch failure — callers' existing catch paths apply.
+  let timer: NodeJS.Timeout | undefined;
+  const controller = opts.timeoutMs === undefined ? undefined : new AbortController();
+  if (controller && opts.timeoutMs) {
+    timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+    timer.unref();
+  }
+  try {
   const res = await (opts.fetchImpl ?? fetch)(url, {
     method: "POST",
     headers: {
@@ -156,7 +169,7 @@ async function easypostPostJson(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-    ...(signal ? { signal } : {}),
+    ...(controller ? { signal: controller.signal } : signal ? { signal } : {}),
   });
   if (!res.ok) {
     let code: string | undefined;
@@ -169,6 +182,9 @@ async function easypostPostJson(
     throw new EasyPostError(what, res.status, code);
   }
   return (await res.json()) as Record<string, unknown>;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // EasyPost parcel weights are ounces and dimensions inches — convert from
@@ -395,4 +411,100 @@ export function pickEasyPostRate(
     if (best === null || r.costCents < best.costCents) best = r;
   }
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// Order-time address verification (docs/specs/order-address-verification.md).
+// One POST /v2/addresses with a delivery check — a QUOTE-grade call: no
+// shipment is created, no money moves. Same client conventions as above
+// (basic auth, fetch seam, degraded mode with the key unset). The module in
+// src/address-verification.ts owns the state machine (caps, dedup, storage
+// shapes); this function is the thin provider mapping.
+// ---------------------------------------------------------------------------
+
+/** A correction candidate as EasyPost returned it, mapped back to the domain
+ *  field names. UNVALIDATED provider output: callers MUST pass it through
+ *  address-verification.ts validateSuggestionAddress (F2) before storing or
+ *  surfacing it — provider payloads may carry anything. */
+export interface EasyPostAddressSuggestion {
+  name: string;
+  line1: string;
+  line2?: string;
+  city: string;
+  postal_code: string;
+  country: string;
+}
+
+export type EasyPostVerification =
+  | { status: "verified" } // delivery check passed — EasyPost accepts as typed
+  | { status: "unverified" } // check failed with nothing correctable (or a shape we cannot map)
+  | { status: "suggested"; suggestion: EasyPostAddressSuggestion }; // check failed, corrected fields present
+
+/** Runs the delivery check. Returns null in degraded mode (key unset — the
+ *  caller's not_checked path). Throws on network/HTTP problems (non-2xx,
+ *  timeout); the caller treats ANY throw as not_checked. The ≤3s deadline
+ *  (spec invariant: the whole check is wrapped) is enforced here via the
+ *  shared timeoutMs plumbing. Named verifyEasyPostDelivery because main's
+ *  saved-addresses feature already owns a verifyEasyPostAddress with a
+ *  simpler success/corrected mapping (src/addresses.ts); same POST, richer
+ *  result. */
+export async function verifyEasyPostDelivery(
+  input: EasyPostAddressInput,
+  opts: EasyPostOptions = {},
+): Promise<EasyPostVerification | null> {
+  const apiKey = opts.apiKey ?? envValue("EASYPOST_API_KEY");
+  if (apiKey === undefined) return null;
+
+  const body = await easypostPostJson(
+    "/v2/addresses",
+    { address: toWireAddress(input), verify: ["delivery"] },
+    { ...opts, timeoutMs: opts.timeoutMs ?? 3000 },
+    "address verification",
+  );
+
+  // Response shape (EasyPost v2): the address object (with any corrections
+  // already applied to its fields) plus verifications.delivery.success.
+  // Anything unexpected maps to unverified — failure-open, never a throw the
+  // caller would have to distinguish from a network problem.
+  const addr = body as {
+    name?: unknown;
+    street1?: unknown;
+    street2?: unknown;
+    city?: unknown;
+    zip?: unknown;
+    country?: unknown;
+    verifications?: { delivery?: { success?: unknown } };
+  };
+  if (addr.verifications?.delivery?.success === true) return { status: "verified" };
+
+  const picked = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
+  const name = picked(addr.name);
+  const line1 = picked(addr.street1);
+  const city = picked(addr.city);
+  const zip = picked(addr.zip);
+  const country = picked(addr.country);
+  if (!line1 || !city || !zip) return { status: "unverified" };
+
+  const suggestion: EasyPostAddressSuggestion = {
+    name: name ?? input.name,
+    line1,
+    ...(picked(addr.street2) !== null || input.line2 !== undefined
+      ? { line2: picked(addr.street2) ?? input.line2 }
+      : {}),
+    city,
+    postal_code: zip,
+    country: country ?? input.country,
+  };
+
+  // No actual difference → not a suggestion (the check failed on the address
+  // as the provider sees it; there is nothing corrected to offer).
+  const differs =
+    suggestion.name !== input.name ||
+    suggestion.line1 !== input.line1 ||
+    suggestion.line2 !== input.line2 ||
+    suggestion.city !== input.city ||
+    suggestion.postal_code !== input.postalCode ||
+    suggestion.country !== input.country;
+  if (!differs) return { status: "unverified" };
+  return { status: "suggested", suggestion };
 }

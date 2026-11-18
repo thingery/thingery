@@ -17,6 +17,7 @@
 
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
+import type { ShippingVerificationRecord } from "./address-verification.js";
 import { emitReviewPairAnomalyIfCrossing, REVIEW_ELIGIBLE_STATUSES } from "./reviews.js";
 
 export type OrderStatus =
@@ -198,6 +199,13 @@ export interface OrderRow {
   /** EasyPost purchase snapshot (#5b) — NULL on record_tracking-originated rows.
    *  {shipment_id, rate_id, carrier, service, cost_cents, currency, bought_at} */
   label_purchase: Record<string, unknown> | null;
+  /** Order-time address verification (docs/specs/order-address-verification.md):
+   *  the advisory delivery-check outcome, stored once at creation and never
+   *  transition-set. NULL = not_checked (no key, pickup, provider error or
+   *  timeout, over cap) — every pre-rollout row and every degraded run. A
+   *  suggested record carries only the F2-validated suggestion, never the
+   *  provider's raw response. */
+  shipping_verification: ShippingVerificationRecord | null;
   shipping_address_shared_at: Date | null;
   checkout_session_id: string | null;
   payment_intent_id: string | null;

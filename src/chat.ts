@@ -34,6 +34,7 @@ import {
   OrderMessageError,
   sendOrderMessage,
 } from "./order-messages.js";
+import { AddressSuggestedError } from "./address-verification.js";
 import { logSecurityEvent } from "./security-events.js";
 import { logChatTurnUsage, toolNameSlug, type LlmCallUsage } from "./chat-usage.js";
 import { chatLimits, dailyTokenBudget, parseLlmUsage, fallbackUsageEstimate, type LlmUsage as NormalizedUsage } from "./chat-limits.js";
@@ -1857,6 +1858,12 @@ async function executeConfirmedOrderOp(subjectId: string, op: string, seller: Se
             : "";
         return `✅ Order placed for ${what}. This seller takes payment directly, outside Thingery (no card checkout here): to arrange it, ask me to message the seller.${address}`;
       } catch (err) {
+        if (err instanceof AddressSuggestedError) {
+          // Suggested branch: the model needs the suggestion to ask the buyer
+          // which address to use — it rides as JSON after the guidance line,
+          // the same payload the MCP tool returns for this branch.
+          return `⚠️ ${err.message}\n${JSON.stringify({ code: err.code, verification: err.verification })}`;
+        }
         return `⚠️ ${friendly(err)}`;
       }
     }

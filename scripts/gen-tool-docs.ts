@@ -75,6 +75,7 @@ export const TOOL_PAGES: ToolPage[] = [
       "See [Orders](/guides/orders) for the states and deadlines.",
     tools: [
       "create_order",
+      "quote_shipping",
       "get_order",
       "my_orders",
       "cancel_order",

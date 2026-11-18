@@ -113,6 +113,9 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   "confirm_payment",
   "confirm_receipt",
   "open_dispute",
+  // Buyer-paid shipping (spec docs/specs/buyer-paid-shipping.md §9, PR 5):
+  // the pre-checkout estimate joins the funnel events.
+  "quote_shipping",
   "release_funds",
   // THI-567: order messaging tools join the funnel events.
   "send_order_message",

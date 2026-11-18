@@ -129,6 +129,22 @@ describe.skipIf(!available)("db schema", () => {
         "updated_at",
         "last_used_at",
       ],
+      // Order reviews (spec docs/specs/order-reviews.md, PR 1): one review
+      // per order, server-side snapshots, published|hidden status.
+      order_reviews: [
+        "id",
+        "order_id",
+        "seller_id",
+        "buyer_id",
+        "item_id",
+        "rating",
+        "text",
+        "status",
+        "buyer_first_name",
+        "item_title",
+        "created_at",
+        "edited_at",
+      ],
     };
     for (const [table, columns] of Object.entries(expected)) {
       const { rows } = await client.query<{ column_name: string }>(
@@ -186,6 +202,70 @@ describe.skipIf(!available)("db schema", () => {
         [sellerId, address.name, address.line1, address.city, address.postal_code, address.country],
       ),
     ).rejects.toThrow();
+    await client.query(`DELETE FROM sellers WHERE id = $1`, [sellerId]);
+  });
+
+  // Order reviews (spec docs/specs/order-reviews.md, PR 1): the rating /
+  // status / snapshot CHECKs make illegal values unrepresentable and the
+  // UNIQUE (order_id) barrier (one review per order, ever) is enforced at
+  // the schema layer.
+  it("enforces the order_reviews CHECKs and one-review-per-order UNIQUE", async () => {
+    const seller = await client.query<{ id: string }>(
+      `INSERT INTO sellers (display_name, email) VALUES ($1, $2) RETURNING id`,
+      ["schema-reviews", `schema-reviews-${Date.now()}@test.thingery.dev`],
+    );
+    const sellerId = seller.rows[0].id;
+    const item = await client.query<{ id: string }>(
+      `INSERT INTO items (seller_id, title, price_cents) VALUES ($1, 'Schema review fixture', 100) RETURNING id`,
+      [sellerId],
+    );
+    const order = await client.query<{ id: string }>(
+      `INSERT INTO orders (item_id, seller_id, buyer_id, price_cents, shipping_price_cents, currency, fulfillment, payment_mode, status)
+       VALUES ($1, $2, $2, 100, 0, 'EUR', 'pickup', 'off_platform', 'completed') RETURNING id`,
+      [item.rows[0].id, sellerId],
+    );
+    const insert = (cols: string, values: string, params: unknown[]) =>
+      client.query(
+        `INSERT INTO order_reviews (order_id, seller_id, buyer_id, item_id, buyer_first_name, item_title, ${cols})
+         VALUES ($1, $2, $3, $4, 'Luca', 'Schema review fixture', ${values})`,
+        [order.rows[0].id, sellerId, sellerId, item.rows[0].id, ...params],
+      );
+    // A legal row lands published.
+    await insert("rating", "5", []);
+    // rating outside 1–5, an illegal status, and illegal snapshot lengths
+    // are all CHECKed out (parameterized — values are literals below only
+    // where not bindable).
+    await expect(insert("rating", "$5", [0])).rejects.toThrow();
+    await expect(insert("rating", "$5", [6])).rejects.toThrow();
+    await expect(
+      client.query(
+        `INSERT INTO order_reviews (order_id, seller_id, buyer_id, item_id, rating, status, buyer_first_name, item_title)
+         VALUES ($1, $2, $3, $4, 5, 'draft', 'Luca', 'Schema review fixture')`,
+        [order.rows[0].id, sellerId, sellerId, item.rows[0].id],
+      ),
+    ).rejects.toThrow();
+    await expect(
+      client.query(
+        `INSERT INTO order_reviews (order_id, seller_id, buyer_id, item_id, rating, buyer_first_name, item_title)
+         VALUES ($1, $2, $3, $4, 5, '', 'Schema review fixture')`,
+        [order.rows[0].id, sellerId, sellerId, item.rows[0].id],
+      ),
+    ).rejects.toThrow();
+    await expect(
+      client.query(
+        `INSERT INTO order_reviews (order_id, seller_id, buyer_id, item_id, rating, buyer_first_name, item_title)
+         VALUES ($1, $2, $3, $4, 5, 'Luca', 'x')`,
+        [order.rows[0].id, sellerId, sellerId, item.rows[0].id],
+      ),
+    ).rejects.toThrow();
+    // text longer than 500 chars violates its CHECK.
+    await expect(insert("rating, text", "$5, $6", [4, "x".repeat(501)])).rejects.toThrow();
+    // One review per order, ever: a second row for the same order 23505s.
+    await expect(insert("rating", "4", [])).rejects.toThrow();
+    // Cleanup: orders.seller_id/items.seller_id FKs don't cascade to sellers,
+    // so remove the order (cascades the review) and the item first.
+    await client.query(`DELETE FROM orders WHERE id = $1`, [order.rows[0].id]);
+    await client.query(`DELETE FROM items WHERE id = $1`, [item.rows[0].id]);
     await client.query(`DELETE FROM sellers WHERE id = $1`, [sellerId]);
   });
 

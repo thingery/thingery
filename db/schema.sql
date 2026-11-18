@@ -856,3 +856,41 @@ CREATE INDEX IF NOT EXISTS account_addresses_account_idx
 -- partial unique index can never reject a legal write with a 500.
 CREATE UNIQUE INDEX IF NOT EXISTS account_addresses_one_default
   ON account_addresses (account_id) WHERE is_default;
+
+-- Order reviews (spec docs/specs/order-reviews.md). One review per order,
+-- ever (UNIQUE order_id): only the buyer of an order whose terminal state
+-- left the seller paid and the buyer keeping the item — completed
+-- (off_platform) / paid_out (stripe) — may post; eligibility is enforced in
+-- src/reviews.ts against those exact terminal states (they have no outgoing
+-- transitions, so an order can never leave eligibility after a review).
+-- seller_id/buyer_id/item_id are server-side snapshots of the order row
+-- (INSERT…SELECT FROM orders JOIN items — never client-supplied), written
+-- once at post time: the profile aggregate reads one partial index scan and
+-- the display survives item soft-deletion and later edits.
+-- buyer_first_name/item_title are display snapshots for the public meta
+-- line ("Luca · Nov 2026 · Film camera"): first token of the buyer's
+-- display_name (literal 'Buyer' fallback when empty after trim), the item
+-- title; both CHECKed to the lengths the public payload renders. status:
+-- published | hidden (moderation; hidden rows are invisible to the public
+-- list, count and average — the partial index below serves all three).
+-- ON DELETE CASCADE everywhere: reviews are attached data, not archives.
+CREATE TABLE IF NOT EXISTS order_reviews (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id         UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  seller_id        UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,  -- snapshot of orders.seller_id
+  buyer_id         UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,  -- author; snapshot of orders.buyer_id
+  item_id          UUID NOT NULL REFERENCES items(id) ON DELETE CASCADE,    -- for the meta line
+  rating           SMALLINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  text             TEXT CHECK (text IS NULL OR char_length(text) <= 500),
+  status           TEXT NOT NULL DEFAULT 'published'
+                   CHECK (status IN ('published','hidden')),
+  buyer_first_name TEXT NOT NULL CHECK (char_length(buyer_first_name) BETWEEN 1 AND 40),
+  item_title       TEXT NOT NULL CHECK (char_length(item_title) BETWEEN 3 AND 200),
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),  -- 30-day edit-window anchor; never moved
+  edited_at        TIMESTAMPTZ,
+  UNIQUE (order_id)                                     -- one review per order, ever
+);
+-- Public seller profile list + the count/average aggregate: published rows
+-- newest-first per seller. Hidden rows are excluded from the index itself.
+CREATE INDEX IF NOT EXISTS order_reviews_seller_idx
+  ON order_reviews (seller_id, created_at DESC) WHERE status = 'published';

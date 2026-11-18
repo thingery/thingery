@@ -52,6 +52,9 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       // limiter slugs — reads and writes, one slug per route shape.
       | "/api/me/addresses"
       | "/api/me/addresses/:id"
+      // Order reviews (spec docs/specs/order-reviews.md, PR 1): review-write
+      // limiter slug (POST/PATCH pair, one bucket).
+      | "/api/orders/:id/review"
     >();
     const routes: SecurityEventRoute[] = [
       "/api/signup",
@@ -71,6 +74,7 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       "/api/me/resend-email-verification",
       "/api/me/addresses",
       "/api/me/addresses/:id",
+      "/api/orders/:id/review",
     ];
     expectTypeOf(routes).toEqualTypeOf<SecurityEventRoute[]>();
   });

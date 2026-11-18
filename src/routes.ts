@@ -89,6 +89,13 @@ import {
 } from "./addresses.js";
 import { CountryCodeError, isIsoCountryCode } from "./countries.js";
 import { createItemReport, ItemReportError, MAX_MOTIVATION_CHARS, MIN_MOTIVATION_CHARS, REPORT_REASONS } from "./reports.js";
+import {
+  editReview,
+  getOrderReview,
+  MAX_REVIEW_TEXT_CHARS,
+  postReview,
+  ReviewError,
+} from "./reviews.js";
 import crypto from "node:crypto";
 import { pool } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
@@ -1304,6 +1311,148 @@ api.post("/items/:id/report", asyncHandler(async (req: Request, res: Response) =
         err.code === "duplicate" ? 409 :
         err.code === "rate_limited" ? 429 : 400; // validation | own_item
       res.status(status).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+}));
+
+// --- order reviews, write side (spec docs/specs/order-reviews.md, PR 1) ---
+// Session-authed browser surface for the order page: post / edit / read
+// your own review. Logic (eligibility, dedupe, snapshots, screening, the
+// hourly write bucket) lives in src/reviews.ts — these handlers only wire
+// auth, validation and status mapping (same layering as reports/wanted).
+// All three are no-store (personal page data).
+
+const reviewWriteSchema = z.object({
+  rating: z.number().int().min(1).max(5),
+  text: z.string().max(MAX_REVIEW_TEXT_CHARS).optional(),
+});
+
+/** Zod failure → field-specific message (spec: field-specific, generic for
+ *  contact info — that one comes from the module and never names a rule). */
+function reviewParseError(issues: z.ZodIssue[]): string {
+  if (issues[0]?.path[0] === "text") {
+    return `Review text is limited to ${MAX_REVIEW_TEXT_CHARS} characters.`;
+  }
+  return "Pick a star rating from 1 to 5.";
+}
+
+/** Review-module error → response (spec error tables). */
+function reviewErrorResponse(err: ReviewError, res: Response): void {
+  switch (err.code) {
+    case "not_found":
+    case "none_yet":
+      res.status(404).json({ error: err.message });
+      return;
+    case "duplicate":
+      res.status(409).json({ error: err.message });
+      return;
+    case "rate_limited":
+      res.status(429).json({ error: err.message });
+      return;
+    case "edit_window_closed":
+    case "hidden":
+      res.status(403).json({ error: err.message });
+      return;
+    default: // validation | contact_info | not_eligible
+      res.status(400).json({ error: err.message });
+      return;
+  }
+}
+
+/** The 201/200 review body: rating, text, created_at, editable_until. */
+function reviewWriteBody(view: { rating: number; text: string | null; created_at: Date; editable_until: Date }) {
+  return {
+    rating: view.rating,
+    text: view.text,
+    created_at: view.created_at.toISOString(),
+    editable_until: view.editable_until.toISOString(),
+  };
+}
+
+api.post("/orders/:id/review", asyncHandler(async (req: Request, res: Response) => {
+  res.set("Cache-Control", "no-store");
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to review your orders." });
+    return;
+  }
+  const parsed = reviewWriteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: reviewParseError(parsed.error.issues) });
+    return;
+  }
+  try {
+    const { view } = await postReview({
+      orderId: req.params.id,
+      buyerId: seller.id,
+      rating: parsed.data.rating,
+      text: parsed.data.text,
+    });
+    res.status(201).json({ ok: true, review: reviewWriteBody(view) });
+  } catch (err) {
+    if (err instanceof ReviewError) {
+      reviewErrorResponse(err, res);
+      return;
+    }
+    throw err;
+  }
+}));
+
+api.patch("/orders/:id/review", asyncHandler(async (req: Request, res: Response) => {
+  res.set("Cache-Control", "no-store");
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to review your orders." });
+    return;
+  }
+  const parsed = reviewWriteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: reviewParseError(parsed.error.issues) });
+    return;
+  }
+  try {
+    // Form semantics (spec): replaces both fields; text omitted ⇒ NULL.
+    const { view } = await editReview({
+      orderId: req.params.id,
+      buyerId: seller.id,
+      rating: parsed.data.rating,
+      text: parsed.data.text,
+    });
+    res.json({ ok: true, review: reviewWriteBody(view) });
+  } catch (err) {
+    if (err instanceof ReviewError) {
+      reviewErrorResponse(err, res);
+      return;
+    }
+    throw err;
+  }
+}));
+
+api.get("/orders/:id/review", asyncHandler(async (req: Request, res: Response) => {
+  res.set("Cache-Control", "no-store");
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to review your orders." });
+    return;
+  }
+  try {
+    const review = await getOrderReview({ orderId: req.params.id, callerId: seller.id });
+    res.json({
+      review: review && {
+        rating: review.rating,
+        text: review.text,
+        status: review.status,
+        created_at: review.created_at.toISOString(),
+        edited_at: review.edited_at ? review.edited_at.toISOString() : null,
+        editable_until: review.editable_until.toISOString(),
+        editable: review.editable,
+      },
+    });
+  } catch (err) {
+    if (err instanceof ReviewError) {
+      reviewErrorResponse(err, res);
       return;
     }
     throw err;

@@ -58,6 +58,7 @@ export const TOOL_PAGES: ToolPage[] = [
       "search_items",
       "get_item",
       "get_seller_summary",
+      "get_seller_reviews",
       "describe_category",
       "create_listing",
       "add_item_image",

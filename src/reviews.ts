@@ -381,3 +381,127 @@ export async function emitReviewPairAnomalyIfCrossing(buyerId: string, sellerId:
     logSecurityEvent({ type: "review_pair_anomaly", buyer_id: buyerId, seller_id: sellerId, terminal_orders: n });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Public read side (spec PR 2): the seller's published review list and the
+// per-pair-capped summary, shared byte-for-byte by the public HTTP route and
+// the get_seller_reviews MCP tool (the tool adds exactly one field,
+// content_provenance). Serialization happens here, once, so both surfaces
+// cannot drift.
+
+/** The public shape of one published review (privacy: buyer's first-name
+ *  snapshot + item-title snapshot — never buyer ids, emails or order ids;
+ *  the review's own unguessable `id` is exposed because that is the value
+ *  the report route accepts, closing the moderation loop). */
+export interface PublicSellerReviews {
+  seller_id: string;
+  summary: { average: number | null; count: number };
+  reviews: Array<{
+    id: string;
+    rating: number;
+    text: string | null;
+    first_name: string;
+    item_title: string;
+    created_at: string;
+  }>;
+  next_before: string | null;
+}
+
+/** Encodes the `(created_at, id)` pagination cursor. */
+function reviewCursor(row: { created_at: Date; id: string }): string {
+  return `${row.created_at.toISOString()}|${row.id}`;
+}
+
+/** Decodes a cursor handed back by a previous response; null when malformed.
+ *  Format: "<created_at ISO 8601>|<review id>" — exactly two parts, a
+ *  parseable timestamp and a UUID. Malformed ⇒ the caller sees a 400, never
+ *  a silently-widened first page. */
+export function parseReviewCursor(raw: string): { createdAt: Date; id: string } | null {
+  const parts = raw.split("|");
+  if (parts.length !== 2) return null;
+  const createdAt = new Date(parts[0]!);
+  if (Number.isNaN(createdAt.getTime()) || !UUID_RE.test(parts[1]!)) return null;
+  return { createdAt, id: parts[1]! };
+}
+
+export interface ListSellerReviewsInput {
+  sellerId: string;
+  /** 0–50; 0 = summary only (the item-page seller card). */
+  limit: number;
+  /** Opaque cursor from a previous response's next_before. */
+  before?: string;
+}
+
+/** The shared public read: published reviews of one seller, newest first
+ *  `(created_at DESC, id DESC)`, plus the per-pair-capped summary
+ *  (K = REVIEW_AGGREGATE_PAIR_CAP newest per distinct buyer — farming
+ *  defense a). The list itself is uncapped. Throws ReviewError:
+ *  not_found (unknown seller) | validation (malformed cursor). */
+export async function listSellerReviews(input: ListSellerReviewsInput): Promise<PublicSellerReviews> {
+  if (!UUID_RE.test(input.sellerId)) {
+    throw new ReviewError("not_found", "Seller not found.");
+  }
+  let before: { createdAt: Date; id: string } | undefined;
+  if (input.before !== undefined) {
+    const parsed = parseReviewCursor(input.before);
+    if (!parsed) {
+      throw new ReviewError("validation", "Invalid pagination cursor.");
+    }
+    before = parsed;
+  }
+
+  const seller = await pool.query("SELECT 1 FROM sellers WHERE id = $1", [input.sellerId]);
+  if (seller.rowCount === 0) {
+    throw new ReviewError("not_found", "Seller not found.");
+  }
+
+  // Summary over the per-pair capped set (spec §farming defense a): at
+  // most the K newest published reviews per distinct buyer count toward
+  // average and count. Hidden rows are invisible (partial index served).
+  const summary = await pool.query<{ n: number; avg: string | null }>(
+    `WITH capped AS (
+       SELECT rating FROM (
+         SELECT rating, ROW_NUMBER() OVER (
+                  PARTITION BY buyer_id ORDER BY created_at DESC, id DESC) AS rn
+           FROM order_reviews
+          WHERE seller_id = $1 AND status = 'published'
+       ) t WHERE rn <= $2
+     )
+     SELECT COUNT(*)::int AS n, AVG(rating) AS avg FROM capped`,
+    [input.sellerId, REVIEW_AGGREGATE_PAIR_CAP],
+  );
+  const count = summary.rows[0]?.n ?? 0;
+  const average = count > 0 && summary.rows[0]?.avg != null ? Math.round(Number(summary.rows[0].avg) * 10) / 10 : null;
+
+  // The list: uncapped, newest first, tie-break by id so same-second rows
+  // are never skipped or repeated across pages. LIMIT n+1 detects has-more
+  // without a second COUNT. The cursor predicate is one static SQL string:
+  // NULL params (first page) short-circuit the row comparison.
+  if (input.limit === 0) {
+    return { seller_id: input.sellerId, summary: { average, count }, reviews: [], next_before: null };
+  }
+  const rows = await pool.query<{ id: string; rating: number; text: string | null; buyer_first_name: string; item_title: string; created_at: Date }>(
+    `SELECT id, rating, text, buyer_first_name, item_title, created_at
+       FROM order_reviews
+      WHERE seller_id = $1 AND status = 'published'
+        AND ($2::timestamptz IS NULL OR (created_at, id) < ($2::timestamptz, $3::uuid))
+      ORDER BY created_at DESC, id DESC
+      LIMIT $4`,
+    [input.sellerId, before?.createdAt ?? null, before?.id ?? null, input.limit + 1],
+  );
+  const page = rows.rows.slice(0, input.limit);
+  const hasMore = rows.rows.length > input.limit;
+  return {
+    seller_id: input.sellerId,
+    summary: { average, count },
+    reviews: page.map((r) => ({
+      id: r.id,
+      rating: r.rating,
+      text: r.text,
+      first_name: r.buyer_first_name,
+      item_title: r.item_title,
+      created_at: r.created_at.toISOString(),
+    })),
+    next_before: hasMore && page.length > 0 ? reviewCursor(page[page.length - 1]!) : null,
+  };
+}

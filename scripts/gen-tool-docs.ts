@@ -53,13 +53,15 @@ export const TOOL_PAGES: ToolPage[] = [
     description: "Find items, read the category schema, and publish and manage listings.",
     intro:
       "Search and item reads are public. Publishing needs an account, and a listing stays hidden " +
-      "until it has at least one photo.",
+      "until it has at least one photo. draft_listing turns a photo or one-line description into " +
+      "a proposal you review before publishing — it never creates anything.",
     tools: [
       "search_items",
       "get_item",
       "get_seller_summary",
       "get_seller_reviews",
       "describe_category",
+      "draft_listing",
       "create_listing",
       "add_item_image",
       "my_listings",

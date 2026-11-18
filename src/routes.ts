@@ -29,6 +29,12 @@ import { subjectSafe } from "./notify/templates.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
 import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import {
+  draftListing,
+  draftListingRequestSchema,
+  ExtractionError,
+  extractionSellerLimiter,
+} from "./extraction.js";
+import {
   CHATGPT_PLAN_USAGE_SCOPE,
   chatgptOauthEnabled,
   deleteChatgptConnection,
@@ -88,7 +94,15 @@ import {
   type AccountAddressRow,
 } from "./addresses.js";
 import { CountryCodeError, isIsoCountryCode } from "./countries.js";
-import { createItemReport, ItemReportError, MAX_MOTIVATION_CHARS, MIN_MOTIVATION_CHARS, REPORT_REASONS } from "./reports.js";
+import {
+  createItemReport,
+  createReviewReport,
+  ItemReportError,
+  MAX_MOTIVATION_CHARS,
+  MIN_MOTIVATION_CHARS,
+  REPORT_REASONS,
+  ReviewReportError,
+} from "./reports.js";
 import {
   editReview,
   getOrderReview,
@@ -100,10 +114,10 @@ import {
 import crypto from "node:crypto";
 import { pool } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
-import { applyTransition, IllegalTransitionError, type OrderRow } from "./orders.js";
+import { applyTransition, IllegalTransitionError, settleNothingDueRefund, type OrderRow } from "./orders.js";
 import { logSecurityEvent } from "./security-events.js";
 import { page, escapeHtml } from "./web-pages.js";
-import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer, getPayoutSetup } from "./stripe.js";
+import { getStripe, createRefundForOrder, createTransferForOrder, isNothingDueRefund, retrieveTransfer, getPayoutSetup } from "./stripe.js";
 
 const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/logins per IP per hour
 const apiKeyRotateLimiter = new RateLimiter(10, 60 * 60_000); // 10 key rotations per seller per hour (THI-114)
@@ -1501,6 +1515,49 @@ api.get("/sellers/:id/reviews", asyncHandler(async (req: Request, res: Response)
   }
 }));
 
+// Review reports (order-reviews spec PR 3): any signed-in account except the
+// author flags a review — same canned causes and 10–1000 motivation rule as
+// item reports, same shared hourly bucket (5/h per account). Logic lives in
+// src/reports.ts (createReviewReport); this handler only wires auth,
+// validation and status mapping (the item-report layering).
+const reviewReportSchema = z.object({
+  reason: z.enum(REPORT_REASONS),
+  motivation: z.string().min(MIN_MOTIVATION_CHARS).max(MAX_MOTIVATION_CHARS), // required free text; DB CHECK mirrors
+});
+
+api.post("/reviews/:id/report", asyncHandler(async (req: Request, res: Response) => {
+  res.set("Cache-Control", "no-store");
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to report reviews." });
+    return;
+  }
+  const parsed = reviewReportSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: `Pick a reason and describe the problem in ${MIN_MOTIVATION_CHARS}–${MAX_MOTIVATION_CHARS} characters.` });
+    return;
+  }
+  try {
+    const report = await createReviewReport({
+      reviewId: req.params.id,
+      reporterAccountId: seller.id,
+      reason: parsed.data.reason,
+      motivation: parsed.data.motivation,
+    });
+    res.status(201).json({ ok: true, report_id: report.id });
+  } catch (err) {
+    if (err instanceof ReviewReportError) {
+      const status =
+        err.code === "not_found" ? 404 :
+        err.code === "duplicate" ? 409 :
+        err.code === "rate_limited" ? 429 : 400; // validation | own_review
+      res.status(status).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+}));
+
 // --- wanted listings, browser CRUD (spec THI-439 §6.3 — protected path) ------
 // Session-authed browser surface for the funnel form + my-wanted management
 // (public/wanted.js). Every body routes through src/wanted.ts only — caps,
@@ -1682,6 +1739,45 @@ async function resolveByoCredential(sellerId: string): Promise<ResolvedLlmCreden
   }
 }
 
+// THI-814 (P1-2, ADR 0009): session-authenticated draft endpoint for the web
+// UI (P1-5, platform repo). Same core function, same per-seller limiter and
+// deployment-wide budget as the draft_listing MCP tool (spec §3.3). No
+// persistence — the response is the product; publishing stays an explicit
+// create_listing call by the seller.
+api.post("/draft-listing", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req);
+  if (!seller) {
+    res.status(401).json({ error: "Sign in to draft a listing." });
+    return;
+  }
+  if (!extractionSellerLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/draft-listing" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Draft limit reached (10 per hour) — try again later.", code: "rate_limited" });
+    return;
+  }
+  const parsed = draftListingRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Provide text (≤500 chars) and/or one photo (jpeg, png, webp or gif, base64)." });
+    return;
+  }
+  try {
+    res.json(await draftListing({ ...parsed.data, sellerId: seller.id }));
+  } catch (e) {
+    if (e instanceof ExtractionError) {
+      // Same posture as the chat route: not-configured is a deployment state
+      // (503), invalid input is client error (400), budget/rate exhaustion is
+      // 429 with a try-again-tomorrow message; provider failure is 503.
+      const status =
+        e.code === "invalid_image" ? 400
+        : e.code === "extraction_budget_exhausted" ? 429
+        : 503; // extraction_not_configured | extraction_provider_unavailable
+      res.status(status).json({ error: e.message, code: e.code });
+      return;
+    }
+    throw e;
+  }
+}));
+
 api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
   const seller = await sellerFromSession(req).catch(() => null);
   const limiter = seller ? chatAuthedLimiter : chatAnonLimiter;
@@ -1819,12 +1915,70 @@ api.post("/admin/items/:id/takedown", asyncHandler(async (req: Request, res: Res
   res.json({ item_id: String(req.params.id), status: "deleted", seller_notified: true });
 }));
 
+// Review moderation (order-reviews spec PR 3): hide one review — the
+// takedown pattern exactly. Bearer ADMIN_API_KEY + boot gate (unset/short
+// key ⇒ 404, route indistinguishable from absent), adminAttemptLimiter on
+// the client IP, one-row UPDATE published → hidden (the explicit state
+// machine; hidden rows vanish from the public list, count and average via
+// the partial index), and the author notified exactly once
+// (dedupeKey review-hidden:<id>). The email is orders-class: prefs and the
+// account gate apply at send time. A second hide hits the status guard and
+// 404s — idempotent to callers as "already gone".
+const hideReviewSchema = z.object({ reason: z.string().min(1).max(500) });
+
+api.post("/admin/reviews/:id/hide", asyncHandler(async (req: Request, res: Response) => {
+  if (!orderFlowConfig().adminRouteEnabled) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const header = req.get("Authorization");
+  const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : undefined;
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
+    res.status(401).json({ error: "Not authorized." });
+    return;
+  }
+  const parsed = hideReviewSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "reason (1-500 chars) required." });
+    return;
+  }
+  const hidden = await pool.query<{ buyer_id: string; seller_id: string; item_title: string }>(
+    `UPDATE order_reviews SET status = 'hidden'
+      WHERE id = $1 AND status = 'published'
+      RETURNING buyer_id, seller_id, item_title`,
+    [String(req.params.id)],
+  );
+  if (!hidden.rows[0]) {
+    res.status(404).json({ error: "Review not found or not hide-eligible." });
+    return;
+  }
+  const review = hidden.rows[0];
+  const author = await pool.query<{ email: string | null }>(
+    "SELECT email FROM sellers WHERE id = $1", [review.buyer_id],
+  );
+  await planAccountNotification({
+    recipientId: review.buyer_id,
+    toEmail: author.rows[0]?.email,
+    eventType: "buyer.review_hidden",
+    role: "buyer",
+    subject: subjectSafe(`Review removed: ${review.item_title} — Thingery`),
+    payload: { item_title: review.item_title, review_id: String(req.params.id), seller_id: review.seller_id, reason: parsed.data.reason },
+    dedupeKey: `review-hidden:${String(req.params.id)}`,
+  });
+  res.set("Cache-Control", "no-store");
+  res.json({ review_id: String(req.params.id), status: "hidden", author_notified: true });
+}));
+
 const ADMIN = { type: "admin" as const };
 
 /** §6.6 refund-after-transfer: reverse the transfer (full, idempotent per
  * order), then refund the charge from the platform balance; alert the
  * operator to any shortfall — never silently drop funds. */
-async function refundAfterTransfer(order: OrderRow): Promise<{ refundId: string | null }> {
+async function refundAfterTransfer(order: OrderRow): Promise<{ refundId: string | null; nothingDue: boolean }> {
   const stripe = getStripe();
   if (!stripe) throw new Error("payments_not_configured");
   if (order.transfer_id && !order.refund_id) {
@@ -1836,7 +1990,7 @@ async function refundAfterTransfer(order: OrderRow): Promise<{ refundId: string 
         `platform-balance shortfall possible (transfer ${order.transfer_id} reversed; reserve policy §6.4)`,
     );
   }
-  if (order.refund_id) return { refundId: null }; // refund already in flight — reconcile, never duplicate (F3)
+  if (order.refund_id) return { refundId: null, nothingDue: false }; // refund already in flight — reconcile, never duplicate (F3)
   // §6 admin policy default: with a platform label bought, the line is
   // retained against the EasyPost spend (exclude_label); the transfer
   // reversal above moves the payout base only, so refund + reversal stay
@@ -1846,9 +2000,13 @@ async function refundAfterTransfer(order: OrderRow): Promise<{ refundId: string 
   // loses a cross-outcome race (admin_release won the status CAS meanwhile),
   // the refund stays visible on the row instead of orphaning at Stripe —
   // sweep rules 7/9 key on non-terminal statuses, so the row is the only
-  // record a terminal paid_out would carry.
-  await pool.query("UPDATE orders SET refund_id = $2 WHERE id = $1 AND refund_id IS NULL", [order.id, refund.id]);
-  return { refundId: refund.id };
+  // record a terminal paid_out would carry. B1 (THI-1013): a nothing-due
+  // outcome carries no id — the caller settles the unwind inline instead.
+  const nothingDue = isNothingDueRefund(refund);
+  if (!nothingDue) {
+    await pool.query("UPDATE orders SET refund_id = $2 WHERE id = $1 AND refund_id IS NULL", [order.id, refund.id]);
+  }
+  return { refundId: refund.id, nothingDue };
 }
 
 /** #19 release: reconcile-don't-recreate (F3) — an existing transfer is
@@ -1916,11 +2074,18 @@ async function resolveDisputeCore(
   }
   try {
     if (outcome === "refund") {
-      const refundId =
-        order.payment_mode === "stripe" && order.payment_intent_id
-          ? (await refundAfterTransfer(order)).refundId
-          : null; // null → refund already in flight (reconcile) or off_platform
-      await applyTransition({ orderId: order.id, trigger: "admin_refund", actor: ADMIN, reason: note, ...(refundId ? { sets: { refund_id: refundId } } : {}) });
+      // B1 (THI-1013): admin_refund (#18) lands in `refunding` and waits for
+      // the charge.refunded webhook — a nothing-due refund creates no Stripe
+      // refund, so settle the unwind inline or the order wedges here too.
+      let refundId: string | null = null;
+      let nothingDue = false;
+      if (order.payment_mode === "stripe" && order.payment_intent_id) {
+        const r = await refundAfterTransfer(order);
+        refundId = r.refundId;
+        nothingDue = r.nothingDue;
+      } // refundId null → refund already in flight (reconcile) or off_platform
+      const next = await applyTransition({ orderId: order.id, trigger: "admin_refund", actor: ADMIN, reason: note, ...(refundId ? { sets: { refund_id: refundId } } : {}) });
+      await settleNothingDueRefund(next, { nothingDue });
     } else {
       await applyTransition({ orderId: order.id, trigger: "admin_release", actor: ADMIN, reason: note });
       await releaseWithReconcile(order);

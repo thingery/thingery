@@ -241,11 +241,31 @@ export async function sellerNetTransferCents(order: PayoutOrder, stripe: Stripe)
   return net;
 }
 
+/** B1-sibling (Security review THI-1013): a legal zero payout base — a
+ * free item with no flat shipping. Nothing is due to the seller, so no
+ * transfer exists or will ever exist (Stripe rejects amount-0 transfers);
+ * `id` is null because there is nothing to reconcile at Stripe. Callers
+ * settle the order via the `transfer_paid` transition (the sweep's rule-4
+ * convergence point) instead of waiting for a webhook that cannot come. */
+export interface ZeroBasePayout {
+  zeroBase: true;
+  id: null;
+}
+
+export type OrderTransfer = Stripe.Transfer | ZeroBasePayout;
+
 export async function createTransferForOrder(
   order: PayoutOrder,
   destination: string,
   stripe: Stripe = getStripe() ?? undefined!,
-): Promise<Stripe.Transfer> {
+): Promise<OrderTransfer> {
+  // B1-sibling (THI-1013): base 0 (free listing) is schema-legal and
+  // quote-mode-eligible. The old fail-closed throw (net < 1) wedged such
+  // orders in payout_pending forever — no transfer could ever satisfy it.
+  // Nothing to net or transfer: settle as an explicit zero-base outcome.
+  // The balance-transaction read is skipped: with no funds moving, a
+  // charge mismatch has nothing to corrupt (R1 guards transfers only).
+  if (payoutBaseCents(order) <= 0) return { zeroBase: true, id: null };
   // application_fee_amount is omitted → 0: the platform takes no cut (§6.1).
   // The seller bears the Stripe processing fee by netting (THI-374) — a
   // pass-through of Stripe's own processing cost, not platform revenue.
@@ -329,20 +349,55 @@ async function alertLabelRefundStackIfPresent(order: RefundOrder): Promise<void>
   }).catch(() => undefined); // the console.error floor already fired
 }
 
+/** B1 (Security review THI-1013): the legal zero-remainder refund outcome.
+ * Stripe rejects `amount: 0` with invalid_request_error, so no refund object
+ * can exist for a nothing-due remainder; the transition still fires. `id`
+ * carries the own-label line refund when that already returned the buyer's
+ * label money (keeping refund_id-based reconcile guards sound), else null —
+ * replaying the site recomputes the same outcome with no Stripe call, so a
+ * null id stays idempotent. */
+export interface NothingDueRefund {
+  nothingDue: true;
+  id: string | null;
+}
+
+export type OrderRefund = Stripe.Refund | NothingDueRefund;
+
+/** B1 (THI-1013): narrow the refund union — Stripe.Refund carries no
+ * `nothingDue` marker, so this is the one safe discriminator. */
+export function isNothingDueRefund(refund: OrderRefund): refund is NothingDueRefund {
+  return (refund as NothingDueRefund).nothingDue === true;
+}
+
 export async function createRefundForOrder(
   order: RefundOrder,
   paymentIntentId: string,
   stripe: Stripe = getStripe() ?? undefined!,
   labelLinePolicy: LabelLinePolicy = "exclude_label",
-): Promise<Stripe.Refund> {
+): Promise<OrderRefund> {
   await alertLabelRefundStackIfPresent(order);
   // Settle-aware amount (§6): identical to chargeTotalCents in every state
   // where no label was bought (flat mode, quote mode before purchase, and
   // the pre-payment sites); the label line leaves the refund only when a
-  // platform label was actually bought under an excluding policy, or when
+  // platform label was bought under an excluding policy, or when
   // the own-label partial refund already returned it.
+  const amount = refundCents(order, labelLinePolicy);
+  // B1 (THI-1013): a zero remainder is legal — a free item whose charge is
+  // the label line only (bought, excluding policy), the C1 clamp bottoming
+  // out, or a fully line-refunded zero-price charge. Stripe would reject
+  // amount 0 (invalid_request_error), which wedged the transition at every
+  // refund site. Nothing is due: settle without a Stripe call, surfacing
+  // the line refund id when the own-label refund already paid the buyer.
+  if (amount <= 0) {
+    const lineRefundId = order.label_quote?.line_refund_id ?? null;
+    console.error(
+      `[refund] order ${order.id}: refund remainder ${amount}c — nothing due` +
+        (lineRefundId ? `; settled by own-label line refund ${lineRefundId}` : "; no Stripe refund created"),
+    );
+    return { nothingDue: true, id: lineRefundId };
+  }
   return stripe.refunds.create(
-    { payment_intent: paymentIntentId, amount: refundCents(order, labelLinePolicy) },
+    { payment_intent: paymentIntentId, amount },
     { idempotencyKey: `refund:${order.id}` },
   );
 }

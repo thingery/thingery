@@ -132,6 +132,9 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   // Public reads of the wanted board.
   "search_wanted",
   "get_wanted",
+  // THI-814 (P1-2 draft_listing extraction): joins the funnel set — the
+  // extraction spend is measurable per call like every other tool.
+  "draft_listing",
   // THI-923: public seller summary (item-page seller card).
   "get_seller_summary",
   // THI-941 (order reviews PR 2): public seller reviews read.

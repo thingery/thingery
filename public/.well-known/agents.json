@@ -38,7 +38,8 @@
           "create_listing",
           "add_item_image",
           "my_listings",
-          "update_listing"
+          "update_listing",
+          "draft_listing"
         ],
         "notes": "OAuth one-click sign-in recommended for MCP hosts; thg_ API key is the manual/legacy path. Connected applications can be reviewed and revoked at https://thingery.dev/apps. Anonymous public reads always work; invalid credentials get HTTP 401."
       },
@@ -53,13 +54,15 @@
         "create_listing",
         "add_item_image",
         "my_listings",
-        "update_listing"
+        "update_listing",
+        "draft_listing"
       ],
       "required_for": [
         "create_listing",
         "add_item_image",
         "my_listings",
         "update_listing",
+        "draft_listing",
         "get_payout_setup",
         "create_order",
         "get_order",

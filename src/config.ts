@@ -87,6 +87,15 @@ export interface OrderFlowConfig {
   // Both read env + defaults only — no client input can widen them.
   labelMaxCostCents: number;             // 3000 ≈ €30 per label (A1)
   labelDailyBudgetCents: number;         // 20000 ≈ €200/day platform-wide; 0 = kill switch (A2)
+  // Buyer-paid shipping (spec docs/specs/buyer-paid-shipping.md §2, data
+  // model). SHIPPING_QUOTE_TIMEOUT_MS bounds the order-time EasyPost quote
+  // call with an AbortSignal — a hanging provider must never hold the
+  // item-reservation row lock / a pool client (the address-verification
+  // timeout is the precedent). SHIPPING_QUOTE_ESTIMATE_TTL_MINUTES is the
+  // display-only freshness note for quote_shipping estimates (§9) — advisory,
+  // never a binding expiry.
+  shippingQuoteTimeoutMs: number;        // 5000 — quote-call AbortSignal bound
+  shippingQuoteEstimateTtlMinutes: number; // 15 — estimate display freshness
 }
 
 function stripeModeFor(key: string | undefined): StripeMode | null {
@@ -146,6 +155,8 @@ export function orderFlowConfig(): OrderFlowConfig {
     reorderCooldownMinutes: envInt("REORDER_COOLDOWN_MINUTES", 60),
     labelMaxCostCents: envInt("LABEL_MAX_COST_CENTS", 3000),
     labelDailyBudgetCents: envNonNegativeInt("LABEL_DAILY_BUDGET_CENTS", 20000),
+    shippingQuoteTimeoutMs: envInt("SHIPPING_QUOTE_TIMEOUT_MS", 5000),
+    shippingQuoteEstimateTtlMinutes: envInt("SHIPPING_QUOTE_ESTIMATE_TTL_MINUTES", 15),
   };
 }
 

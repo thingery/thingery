@@ -61,6 +61,10 @@ describe("consent page", () => {
     expect(html).toContain('<button type="submit" name="action" value="allow" class="primary">Allow</button>');
   });
 
+  it("points to Settings for disconnecting the app", () => {
+    expect(consent()).toContain('<p class="muted small center">You can disconnect it any time in Settings.</p>');
+  });
+
   it("posts the same authorize fields, CSRF and nonce back to /oauth/authorize", () => {
     const html = consent();
     expect(html.match(/<form /g)).toHaveLength(1);

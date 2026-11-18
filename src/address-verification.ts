@@ -20,7 +20,7 @@
 
 import { createHash } from "node:crypto";
 import { envNonNegativeInt, envValue } from "./config.js";
-import { verifyEasyPostAddress } from "./easypost.js";
+import { verifyEasyPostDelivery } from "./easypost.js";
 import { RateLimiter } from "./rate-limit.js";
 import { isIsoCountryCode, normalizeCountryCode } from "./countries.js";
 import type { ShippingAddress } from "./order-flow.js";
@@ -258,7 +258,7 @@ export async function verifyOrderAddress(input: {
     // Domain → provider mapping happens here (postal_code → postalCode) so
     // easypost.ts stays domain-agnostic and nothing downstream sees wire
     // field names.
-    const result = await verifyEasyPostAddress(
+    const result = await verifyEasyPostDelivery(
       {
         name: input.address.name,
         line1: input.address.line1,

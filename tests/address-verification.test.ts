@@ -11,7 +11,7 @@ import {
   validateSuggestionAddress,
   verifyOrderAddress,
 } from "../src/address-verification.js";
-import { EasyPostError, verifyEasyPostAddress } from "../src/easypost.js";
+import { EasyPostError, verifyEasyPostDelivery } from "../src/easypost.js";
 import type { EasyPostAddressInput } from "../src/easypost.js";
 import type { ShippingAddress } from "../src/order-flow.js";
 
@@ -86,14 +86,14 @@ afterEach(() => {
   delete process.env.EASYPOST_API_KEY;
 });
 
-describe("verifyEasyPostAddress (provider mapping)", () => {
+describe("verifyEasyPostDelivery (provider mapping)", () => {
   it("delivery success → verified", async () => {
-    const out = await verifyEasyPostAddress(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: async () => resVerified() });
+    const out = await verifyEasyPostDelivery(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: async () => resVerified() });
     expect(out).toEqual({ status: "verified" });
   });
 
   it("failed check with corrected fields → suggested, mapped to domain field names", async () => {
-    const out = await verifyEasyPostAddress(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: async () => resSuggested() });
+    const out = await verifyEasyPostDelivery(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: async () => resSuggested() });
     expect(out).toEqual({
       status: "suggested",
       suggestion: { name: "Mario Rossi", line1: "Via Roma 1/A", city: "Milano", postal_code: "20121", country: "IT" },
@@ -101,18 +101,18 @@ describe("verifyEasyPostAddress (provider mapping)", () => {
   });
 
   it("failed check with no actual correction → unverified (echo is not a suggestion)", async () => {
-    const out = await verifyEasyPostAddress(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: async () => resEcho() });
+    const out = await verifyEasyPostDelivery(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: async () => resEcho() });
     expect(out).toEqual({ status: "unverified" });
   });
 
   it("missing verifications block → unverified (failure-open)", async () => {
-    const out = await verifyEasyPostAddress(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: async () => jsonRes({ id: "adr_4" }) });
+    const out = await verifyEasyPostDelivery(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: async () => jsonRes({ id: "adr_4" }) });
     expect(out).toEqual({ status: "unverified" });
   });
 
   it("non-2xx → throws (the caller's catch maps any throw to not_checked)", async () => {
     await expect(
-      verifyEasyPostAddress(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: async () => jsonRes({ error: {} }, 402) }),
+      verifyEasyPostDelivery(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: async () => jsonRes({ error: {} }, 402) }),
     ).rejects.toBeInstanceOf(EasyPostError);
   });
 
@@ -122,12 +122,12 @@ describe("verifyEasyPostAddress (provider mapping)", () => {
         init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
       });
     await expect(
-      verifyEasyPostAddress(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: hanging, timeoutMs: 20 }),
+      verifyEasyPostDelivery(wire(), { apiKey: "k", baseUrl: "http://x", fetchImpl: hanging, timeoutMs: 20 }),
     ).rejects.toThrow();
   });
 
   it("key unset → null (degraded mode; caller maps to not_checked)", async () => {
-    const out = await verifyEasyPostAddress(wire(), { baseUrl: "http://x", fetchImpl: async () => resVerified() });
+    const out = await verifyEasyPostDelivery(wire(), { baseUrl: "http://x", fetchImpl: async () => resVerified() });
     expect(out).toBeNull();
   });
 });

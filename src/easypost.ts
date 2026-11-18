@@ -147,6 +147,7 @@ async function easypostPostJson(
   body: unknown,
   opts: EasyPostOptions,
   what: string,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const url = `${opts.baseUrl ?? "https://api.easypost.com"}${path}`;
   const apiKey = opts.apiKey ?? envValue("EASYPOST_API_KEY");
@@ -168,7 +169,7 @@ async function easypostPostJson(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-    ...(controller ? { signal: controller.signal } : {}),
+    ...(controller ? { signal: controller.signal } : signal ? { signal } : {}),
   });
   if (!res.ok) {
     let code: string | undefined;
@@ -229,11 +230,16 @@ function parseRate(raw: unknown): EasyPostRate | null {
 
 /**
  * Creates a shipment and returns its quoted rates (no purchase happens
- * here). Returns null in degraded mode (key unset).
+ * here). Returns null in degraded mode (key unset). `signal` bounds the
+ * HTTP call — order-time quoting passes AbortSignal.timeout(
+ * SHIPPING_QUOTE_TIMEOUT_MS) (spec docs/specs/buyer-paid-shipping.md §2,
+ * carry-forward C3) so a hanging provider can never hold the caller's
+ * transaction; a timeout rejects (callers treat it as flat-mode fallback).
  */
 export async function createEasyPostShipment(
   input: CreateEasyPostShipmentInput,
   opts: EasyPostOptions = {},
+  signal?: AbortSignal,
 ): Promise<EasyPostShipment | null> {
   const apiKey = opts.apiKey ?? envValue("EASYPOST_API_KEY");
   if (apiKey === undefined) return null;
@@ -262,6 +268,7 @@ export async function createEasyPostShipment(
     },
     opts,
     "shipment creation",
+    signal,
   );
   const id = typeof body.id === "string" ? body.id : undefined;
   if (!id) throw new Error("easypost shipment creation failed: no shipment id");
@@ -322,6 +329,70 @@ export async function buyEasyPostLabel(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Address verification (spec docs/specs/saved-addresses.md, "Verification
+// (advisory)"; rollout step 4). One POST /v2/addresses with
+// verify:["delivery"]: EasyPost checks deliverability and, when it can, returns
+// the corrected address in the top-level fields. This function only reports
+// the carrier's answer — policy (advisory statuses, limits, storage) lives in
+// src/addresses.ts. Review condition C3: the fetch carries an explicit
+// AbortSignal.timeout so a hanging provider can never hang a save; the caller
+// maps every throw (timeout included) to not_checked.
+// ---------------------------------------------------------------------------
+
+/** Verification fetch timeout (review condition C3). */
+export const EASYPOST_VERIFY_TIMEOUT_MS = 5_000;
+
+/** The carrier's delivery check on one address.
+ *  `corrected` is the (possibly fixed) address EasyPost confirmed — present
+ *  only when success is true and the payload carried usable fields. */
+export interface EasyPostAddressVerification {
+  success: boolean; // verifications.delivery.success
+  corrected: EasyPostAddressInput | null;
+}
+
+function parseVerifiedAddress(body: Record<string, unknown>): EasyPostAddressInput | null {
+  const name = typeof body.name === "string" ? body.name : undefined;
+  const line1 = typeof body.street1 === "string" ? body.street1 : undefined;
+  const city = typeof body.city === "string" ? body.city : undefined;
+  const postalCode = typeof body.zip === "string" ? body.zip : undefined;
+  const country = typeof body.country === "string" ? body.country : undefined;
+  if (!name || !line1 || !city || !postalCode || !country) return null;
+  return {
+    name,
+    line1,
+    ...(typeof body.street2 === "string" && body.street2 ? { line2: body.street2 } : {}),
+    city,
+    postalCode,
+    country,
+  };
+}
+
+/**
+ * Runs EasyPost's delivery verification on one address. Returns null in
+ * degraded mode (key unset); throws EasyPostError on provider errors and on
+ * a timeout (AbortSignal) — callers treat both as advisory not_checked.
+ */
+export async function verifyEasyPostAddress(
+  input: EasyPostAddressInput,
+  opts: EasyPostOptions = {},
+): Promise<EasyPostAddressVerification | null> {
+  const apiKey = opts.apiKey ?? envValue("EASYPOST_API_KEY");
+  if (apiKey === undefined) return null;
+
+  const body = await easypostPostJson(
+    "/v2/addresses",
+    { address: toWireAddress(input), verify: ["delivery"] },
+    opts,
+    "address verification",
+    AbortSignal.timeout(EASYPOST_VERIFY_TIMEOUT_MS),
+  );
+  const verifications = body.verifications as Record<string, unknown> | undefined;
+  const delivery = verifications?.delivery as Record<string, unknown> | undefined;
+  const success = delivery?.success === true;
+  return { success, corrected: success ? parseVerifiedAddress(body) : null };
+}
+
 /**
  * Picks which quoted rate to buy: the cheapest overall, or the cheapest
  * whose carrier matches `carrierPreference` (case-insensitive substring,
@@ -373,8 +444,11 @@ export type EasyPostVerification =
  *  caller's not_checked path). Throws on network/HTTP problems (non-2xx,
  *  timeout); the caller treats ANY throw as not_checked. The ≤3s deadline
  *  (spec invariant: the whole check is wrapped) is enforced here via the
- *  shared timeoutMs plumbing. */
-export async function verifyEasyPostAddress(
+ *  shared timeoutMs plumbing. Named verifyEasyPostDelivery because main's
+ *  saved-addresses feature already owns a verifyEasyPostAddress with a
+ *  simpler success/corrected mapping (src/addresses.ts); same POST, richer
+ *  result. */
+export async function verifyEasyPostDelivery(
   input: EasyPostAddressInput,
   opts: EasyPostOptions = {},
 ): Promise<EasyPostVerification | null> {

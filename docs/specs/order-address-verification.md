@@ -144,7 +144,7 @@ verification_choice PR.
 - What is stored: one JSONB column on the order row (platform-authored shapes only). Same
   retention as the address it describes; no side table.
 - Who sees it: the order's parties under §5a; nothing here widens who can read an address.
-- Plain-language statement: `docs/security.md` §4b; residual risks: §9 entries R2–R4.
+- Plain-language statement: `docs/security.md` §4c; residual risks: §9 entries R2–R4.
 - ISO country enforcement (`src/iso3166.ts`): trim + uppercase normalization, membership
   against the 249 assigned codes, field-only rejection message (the rejected value is never
   echoed) — enforced identically on the MCP zod schema and the chat gate.

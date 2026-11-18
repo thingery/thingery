@@ -160,7 +160,7 @@ describe.skipIf(!available)("address tools over the store (DB)", () => {
     const r = await buyerTools().call("save_address", { ...ADDRESS_INPUT });
     expect(r.isError).toBe(false);
     const summary = r.payload.address as Record<string, unknown>;
-    expect(summary.verification).toBe("not_checked"); // no EasyPost wiring yet (step 4)
+    expect(summary.verification).toBe("not_checked"); // no EasyPost key in tests — verification only runs when one is configured
     // The C2 boundary at the tool surface: banned values absent from the
     // entire serialized response, not just the summary object.
     const all = JSON.stringify(r.payload);

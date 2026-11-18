@@ -16,21 +16,25 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { afterEach, describe, expect, it, beforeAll, afterAll, vi } from "vitest";
+import { afterEach, describe, expect, it, beforeAll, beforeEach, afterAll, vi } from "vitest";
 import { pool } from "../src/db.js";
 import { CountryCodeError } from "../src/countries.js";
 import {
   MAX_ADDRESSES_PER_ACCOUNT,
+  MAX_VERIFICATION_SUGGESTED_LENGTH,
   AddressLimitError,
   AddressValidationError,
   AddressNotFoundError,
   addressToSummary,
+  addressVerificationLimiter,
   deleteAddress,
   getOwnedAddress,
   listAddresses,
   markAddressUsed,
+  parseAddressVerification,
   saveAddress,
   updateAddress,
+  verifyAddressAdvisory,
   type AccountAddressRow,
   type AddressInput,
 } from "../src/addresses.js";
@@ -260,6 +264,125 @@ describe("addressToSummary (C2 allowlist)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Advisory verification (spec "Verification (advisory)", rollout step 4).
+// Shared stub: an EasyPost-shaped address-verification response where
+// `address` overrides the corrected fields the carrier returns.
+
+function easypostVerifyFetch(
+  result: { success: boolean; address?: Partial<AddressInput> },
+  calls: number[] = [],
+): typeof fetch {
+  return (async () => {
+    calls.push(1);
+    const a = result.address ?? {};
+    return new Response(
+      JSON.stringify({
+        id: "adr_1",
+        name: a.name ?? "Ada Lovelace",
+        street1: a.line1 ?? "Via Roma 1",
+        street2: a.line2 ?? null,
+        city: a.city ?? "Milano",
+        zip: a.postal_code ?? "20121",
+        country: a.country ?? "IT",
+        verifications: { delivery: { success: result.success, errors: [] } },
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+}
+
+describe("advisory verification — verifyAddressAdvisory (spec step 4)", () => {
+  beforeEach(() => {
+    addressVerificationLimiter.reset();
+    delete process.env.EASYPOST_API_KEY; // tests must never read the host env
+  });
+  afterEach(() => {
+    addressVerificationLimiter.reset();
+    delete process.env.EASYPOST_API_KEY;
+  });
+
+  it("no key → not_checked, no network call, no bucket draw", async () => {
+    const calls: number[] = [];
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: undefined, fetchImpl: easypostVerifyFetch({ success: true }, calls) });
+    expect(v).toEqual({ status: "not_checked" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("over the 20/day ceiling → not_checked, no fetch (never an error)", async () => {
+    const key = `seller:${ACCOUNT_ID}`;
+    for (let i = 0; i < 20; i++) expect(addressVerificationLimiter.allow(key)).toBe(true);
+    const calls: number[] = [];
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "EZAK_test", fetchImpl: easypostVerifyFetch({ success: true }, calls) });
+    expect(v).toEqual({ status: "not_checked" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("provider error or the C3 timeout → not_checked (saving never fails)", async () => {
+    const failing = (() => Promise.reject(new Error("network down"))) as unknown as typeof fetch;
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "EZAK_test", fetchImpl: failing });
+    expect(v).toEqual({ status: "not_checked" });
+  });
+
+  it("deliverable as written → verified with an ISO checked_at", async () => {
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "EZAK_test", fetchImpl: easypostVerifyFetch({ success: true }) });
+    expect(v.status).toBe("verified");
+    expect(typeof v.checked_at).toBe("string");
+    expect(new Date(v.checked_at!).toString()).not.toBe("Invalid Date");
+    expect("suggested" in v).toBe(false);
+  });
+
+  it("case- and whitespace-only differences are still verified, not suggested", async () => {
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), {
+      apiKey: "EZAK_test",
+      fetchImpl: easypostVerifyFetch({ success: true, address: { city: "  MILANO ", line1: "via   roma 1" } }),
+    });
+    expect(v.status).toBe("verified");
+  });
+
+  it("corrected postal code → suggested with a one-line correction", async () => {
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), {
+      apiKey: "EZAK_test",
+      fetchImpl: easypostVerifyFetch({ success: true, address: { postal_code: "20122", line2: "Scala B" } }),
+    });
+    expect(v).toMatchObject({ status: "suggested" });
+    expect(v.suggested).toBe("Via Roma 1, Scala B, Milano 20122, IT");
+  });
+
+  it("caps provider text at the C4 limit even for pathological fields", async () => {
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), {
+      apiKey: "EZAK_test",
+      fetchImpl: easypostVerifyFetch({ success: true, address: { line1: "V".repeat(600) } }),
+    });
+    expect(v.status).toBe("suggested");
+    expect(v.suggested!.length).toBeLessThanOrEqual(MAX_VERIFICATION_SUGGESTED_LENGTH);
+    expect(v.suggested!.endsWith("…")).toBe(true);
+  });
+
+  it("carrier could not confirm → unverified (still advisory: the save stands)", async () => {
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "EZAK_test", fetchImpl: easypostVerifyFetch({ success: false }) });
+    expect(v.status).toBe("unverified");
+    expect("suggested" in v).toBe(false);
+  });
+});
+
+describe("parseAddressVerification (C4 read-boundary cap)", () => {
+  it("passes a valid object through", () => {
+    const v = { status: "suggested" as const, checked_at: "2026-01-01T00:00:00Z", suggested: "Via Roma 10" };
+    expect(parseAddressVerification(v)).toEqual(v);
+  });
+
+  it("degrades an over-cap suggested to not_checked", () => {
+    expect(parseAddressVerification({ status: "suggested", suggested: "x".repeat(MAX_VERIFICATION_SUGGESTED_LENGTH + 1) })).toEqual({ status: "not_checked" });
+  });
+
+  it("degrades an unknown status or non-object to not_checked", () => {
+    expect(parseAddressVerification({ status: "definitely-fine" })).toEqual({ status: "not_checked" });
+    expect(parseAddressVerification("nope")).toEqual({ status: "not_checked" });
+    expect(parseAddressVerification(null)).toEqual({ status: "not_checked" });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Part 2 — DB-backed (skips without a reachable Postgres)
 
 async function dbAvailable(): Promise<boolean> {
@@ -386,5 +509,37 @@ describe.skipIf(!available)("addresses (db)", () => {
     expect(again.rows[0].last_used_at).not.toBeNull();
     await client.query(`DELETE FROM sellers WHERE id = $1`, [accountId]);
     await client.query(`DELETE FROM sellers WHERE id = $1`, [foreign]);
+  });
+
+  it("persists the advisory verification on save and edit (spec step 4)", async () => {
+    const accountId = await seedAccount();
+    const saved = await saveAddress(accountId, input(), {
+      verification: { apiKey: "EZAK_test", fetchImpl: easypostVerifyFetch({ success: true }) },
+    });
+    expect(saved.verification).toMatchObject({ status: "verified" });
+    // Persisted, not just returned: reload through the read path.
+    const reloaded = await listAddresses(accountId);
+    expect(reloaded[0].verification).toMatchObject({ status: "verified" });
+
+    const updated = await updateAddress(
+      accountId,
+      saved.id,
+      { address: input({ postal_code: "20199" }), is_default: false },
+      { verification: { apiKey: "EZAK_test", fetchImpl: easypostVerifyFetch({ success: true, address: { postal_code: "20198" } }) } },
+    );
+    expect(updated.verification).toMatchObject({ status: "suggested", suggested: expect.stringContaining("20198") });
+    const after = await getOwnedAddress(accountId, saved.id);
+    expect(after.verification).toMatchObject({ status: "suggested" });
+    await client.query(`DELETE FROM sellers WHERE id = $1`, [accountId]);
+  });
+
+  it("a failing provider leaves the row saved at not_checked — never fails the save", async () => {
+    const accountId = await seedAccount();
+    const failing = (() => Promise.reject(new Error("timeout"))) as unknown as typeof fetch;
+    const saved = await saveAddress(accountId, input(), { verification: { apiKey: "EZAK_test", fetchImpl: failing } });
+    expect(saved.verification).toEqual({ status: "not_checked" });
+    const reloaded = await listAddresses(accountId);
+    expect(reloaded[0].verification).toEqual({ status: "not_checked" });
+    await client.query(`DELETE FROM sellers WHERE id = $1`, [accountId]);
   });
 });

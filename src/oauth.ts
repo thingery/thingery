@@ -816,7 +816,7 @@ ${hidden("csrf", opts.csrf)}${hidden("nonce", opts.nonce)}
 <button type="submit" name="action" value="allow" class="primary">Allow</button>
 </div>
 </form>
-<p class="muted small center">You can disconnect it any time from Connected apps in your account.</p>`,
+<p class="muted small center">You can disconnect it any time in Settings.</p>`,
   );
 }
 

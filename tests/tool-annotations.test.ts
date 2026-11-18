@@ -65,6 +65,14 @@ const EXPECTED: Record<
   // Public wanted-board reads: same posture as search_items / get_item.
   search_wanted: { title: "Search wanted posts", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   get_wanted: { title: "Get wanted post", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // THI-923 (seller summary): pure public read of the seller profile + a
+  // page of their feed-visible listings — same posture as get_item.
+  get_seller_summary: { title: "Get seller summary", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // THI-941 (order reviews, PR 2): pure public read of a seller's published
+  // reviews — same posture as get_seller_summary.
+  get_seller_reviews: { title: "Get seller reviews", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // THI-923 (seller summary): pure public read of the seller profile + a
+  // page of their feed-visible listings — same posture as get_item.
   // Buyer-side wanted tools: my_wanted is a pure read; expire_wanted ends a
   // live public post, so it carries destructiveHint like cancel_order.
   create_wanted: { title: "Create wanted post", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },

@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 import type { ItemRow, SellerRow } from "../src/db.js";
 import {
   categoryClosureForItem,
@@ -119,13 +120,18 @@ describe.skipIf(!available)("category taxonomy PR 1 (THI-734)", () => {
       {
         registerTool(
           name: string,
-          _config: unknown,
+          config: { inputSchema: z.ZodRawShape },
           handler: (args: Record<string, unknown>) => Promise<unknown>,
         ) {
-          if (name === "search_items") searchHandler = handler;
-          if (name === "describe_category") describeHandler = handler;
-          if (name === "create_listing") createHandler = handler;
-          if (name === "save_intent") intentHandler = handler;
+          // SDK parity (THI-958): parse args through the tool's zod shape
+          // (applying schema defaults) before the handler runs, like the
+          // real server — handlers now trust their parsed args type.
+          const parse = (args: Record<string, unknown>) =>
+            z.object(config.inputSchema).parse(args) as Record<string, unknown>;
+          if (name === "search_items") searchHandler = async (args) => handler(parse(args));
+          if (name === "describe_category") describeHandler = async (args) => handler(parse(args));
+          if (name === "create_listing") createHandler = async (args) => handler(parse(args));
+          if (name === "save_intent") intentHandler = async (args) => handler(parse(args));
         },
       },
       { seller },

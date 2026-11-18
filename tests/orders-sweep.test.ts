@@ -37,6 +37,7 @@ function fakeStripe(opts: {
   retrieveEvent?: Stripe.Event;
 } = {}) {
   const calls: string[] = [];
+  const refundAmounts: (number | undefined)[] = [];
   const n = Math.random().toString(36).slice(2, 8);
   const client = {
     paymentIntents: {
@@ -64,8 +65,9 @@ function fakeStripe(opts: {
       },
     },
     refunds: {
-      create: async (_a: unknown, o: unknown) => {
+      create: async (a: unknown, o: unknown) => {
         calls.push(`refunds.create:${(o as { idempotencyKey: string }).idempotencyKey}`);
+        refundAmounts.push((a as { amount?: number }).amount);
         return { id: `re_${n}` };
       },
     },
@@ -84,7 +86,7 @@ function fakeStripe(opts: {
       },
     },
   } as unknown as Stripe;
-  return { client, calls };
+  return { client, calls, refundAmounts };
 }
 
 describe.skipIf(!available)("deadline sweeps (DB)", () => {
@@ -175,6 +177,28 @@ describe.skipIf(!available)("deadline sweeps (DB)", () => {
     await applyTransition({ orderId, trigger: "stripe_payment", actor: { type: "stripe", id: "evt_t" }, sets: { payment_intent_id: `pi_${n}` } });
     await payoutReady(email);
   };
+
+  it("rule 2 + buyer-paid shipping §6: stale quote-mode order with no label bought refunds the buyer's full charge (label included)", async () => {
+    // Stale sale ⇒ record_tracking never ran ⇒ no platform label ⇒ the
+    // deployment never spent: the buyer's whole charge, label line included,
+    // goes back. exclude_label policy + lineRetained=false ⇒ no deduction.
+    const { client, refundAmounts } = fakeStripe();
+    setStripeForTests(client);
+    const a = await seed("stripe");
+    await toSold(a.orderId, a.sellerEmail);
+    await db.query(
+      "UPDATE orders SET label_quote = $2::jsonb, shipping_price_cents = 0 WHERE id = $1",
+      [a.orderId, JSON.stringify({ amount_cents: 733, currency: "EUR" })],
+    );
+    await db.query(
+      "UPDATE orders SET status_changed_at = now() - ($1 || ' days')::interval WHERE id = $2",
+      [String(cfg.staleSoldDays + 1), a.orderId],
+    );
+    const report = await runSweeps(cfg);
+    expect((await order(a.orderId)).status).toBe("refunding");
+    expect(report["2-stale-sale"].acted).toBe(1);
+    expect(refundAmounts).toEqual([10733]);
+  });
 
   it("rule 2: stale sold (no tracking) stripe → refunding + refund-first; off_platform → cancelled", async () => {
     const { client, calls } = fakeStripe();

@@ -484,7 +484,10 @@ export async function cancelOrder(orderId: string, actorId: string, reason?: str
     }
     const stripe = getStripe();
     if (!stripe) throw new OrderFlowError("payments_not_configured", "Stripe payments are not configured on this deployment.");
-    const refund = await createRefundForOrder(order, order.payment_intent_id, stripe);
+    // §6 cancel policy: a platform label bought for this order is the
+    // buyer's (procured with their money) — the line stays out of the
+    // refund; with no label bought the full charge goes back.
+    const refund = await createRefundForOrder(order, order.payment_intent_id, stripe, "exclude_label");
     return applyTransition({
       orderId, trigger: "cancel_order", actor: { type: actorType, id: actorId }, reason,
       sets: { refund_id: refund.id },

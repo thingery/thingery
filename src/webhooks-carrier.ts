@@ -359,6 +359,10 @@ export async function processCarrierEvent(
       // deleted (goods presumed gone); RTS → item back active (spec table).
       // Stripe mode: refund FIRST under refund:{order_id} idempotency (F3) —
       // reconcile, never recreate, if a refund already exists.
+      // §6 carrier-failure split: with a platform label the buyer's line is
+      // refunded (the deployment's procurement failed — carrier claim is the
+      // remedy); after own-label record_tracking the line was already
+      // refunded via labelrefund, and the settle-aware helper deducts it.
       const sets: { refund_id?: string } = {};
       if (order.payment_mode === "stripe" && !order.refund_id) {
         if (!order.payment_intent_id) {
@@ -366,7 +370,7 @@ export async function processCarrierEvent(
         }
         const stripe = getStripe();
         if (!stripe) throw new Error("stripe unavailable for carrier-failure refund");
-        const refund = await createRefundForOrder(order, order.payment_intent_id, stripe);
+        const refund = await createRefundForOrder(order, order.payment_intent_id, stripe, "include_label");
         sets.refund_id = refund.id;
       }
       const override: { itemStatusOverride?: ItemStatus } =

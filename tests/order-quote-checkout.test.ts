@@ -12,7 +12,8 @@ import pg from "pg";
 import type Stripe from "stripe";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { pool } from "../src/db.js";
-import { createOrder } from "../src/order-flow.js";
+import { applyTransition } from "../src/orders.js";
+import { cancelOrder, createOrder } from "../src/order-flow.js";
 import { setStripeForTests } from "../src/stripe.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -52,6 +53,8 @@ describe.skipIf(!available)("createOrder buyer-paid shipping quote (DB)", () => 
   let buyerId = "";
   /** Captured Checkout sessions.create params across the fake Stripe client. */
   let sessionParams: Stripe.Checkout.SessionCreateParams | undefined;
+  /** Captured refunds.create amounts (cancel-path §6 tests). */
+  let lastRefundAmount: number | undefined;
 
   const fakeFetch = (impl: () => Promise<{ ok: boolean; json: () => Promise<unknown> }>) =>
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => impl() as never);
@@ -59,7 +62,7 @@ describe.skipIf(!available)("createOrder buyer-paid shipping quote (DB)", () => 
   const easypostOk = () => fakeFetch(async () => ({ ok: true, json: async () => EASYPOST_OK }));
   const easypostDown = () => fakeFetch(async () => ({ ok: false, status: 503, json: async () => ({ error: { message: "down" } }) }));
 
-  /** Stripe fake: only checkout.sessions.create is on the money path here. */
+  /** Stripe fake: checkout on the create path, refunds on the cancel path. */
   const fakeStripe = () =>
     ({
       checkout: {
@@ -68,6 +71,12 @@ describe.skipIf(!available)("createOrder buyer-paid shipping quote (DB)", () => 
             sessionParams = p;
             return { id: `cs_q${n}`, url: `https://pay.test/q${n}` };
           },
+        },
+      },
+      refunds: {
+        create: async (p: { amount?: number }) => {
+          lastRefundAmount = p.amount;
+          return { id: `re_q${n}` };
         },
       },
     }) as unknown as Stripe;
@@ -113,6 +122,7 @@ describe.skipIf(!available)("createOrder buyer-paid shipping quote (DB)", () => 
   beforeEach(async () => {
     await db.query("TRUNCATE order_events, webhook_events, orders, items, sellers, account_addresses RESTART IDENTITY CASCADE");
     sessionParams = undefined;
+    lastRefundAmount = undefined;
     process.env.EASYPOST_API_KEY = "EZAK_test_quote";
     process.env.STRIPE_SECRET_KEY = "sk_test_k1";
     delete process.env.LABEL_MAX_COST_CENTS;
@@ -238,5 +248,37 @@ describe.skipIf(!available)("createOrder buyer-paid shipping quote (DB)", () => 
     const ev = await db.query("SELECT count(*)::int AS c FROM order_events WHERE event_type LIKE 'label_quote%' AND order_id = $1", [order.id]);
     expect(ev.rows[0].c).toBe(0);
     expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+  });
+
+  it("§6 cancel from sold, quote mode, no label bought: refund returns the full charge including the label line", async () => {
+    easypostOk();
+    const itemId = await seed({ defaultAddress: true });
+    const { order } = await createOrder({
+      buyerId, itemId, shippingAddress: BUYER_ADDRESS, paymentMode: "stripe",
+    });
+    await applyTransition({ orderId: order.id, trigger: "stripe_payment", actor: { type: "stripe" }, sets: { payment_intent_id: "pi_c1" } });
+    const cancelled = await cancelOrder(order.id, buyerId, "changed mind");
+    expect(cancelled.status).toBe("refunding"); // #7: stripe refund confirmed via webhook
+    expect(lastRefundAmount).toBe(10733); // 10000 + 733 — the deployment never spent
+  });
+
+  it("§6 cancel from label_issued with a platform label: the buyer's label line stays out of the refund", async () => {
+    easypostOk();
+    const itemId = await seed({ defaultAddress: true });
+    const { order } = await createOrder({
+      buyerId, itemId, shippingAddress: BUYER_ADDRESS, paymentMode: "stripe",
+    });
+    await applyTransition({ orderId: order.id, trigger: "stripe_payment", actor: { type: "stripe" }, sets: { payment_intent_id: "pi_c2" } });
+    await db.query(
+      "UPDATE orders SET label_purchase = $2::jsonb WHERE id = $1",
+      [order.id, JSON.stringify({ shipment_id: "shp_c2", funded_by: "buyer_quote" })],
+    );
+    await applyTransition({
+      orderId: order.id, trigger: "label_purchased", actor: { type: "seller", id: sellerId },
+      sets: { carrier: "DPD", tracking_code: "DPD123", tracker_id: "trk_c2" },
+    });
+    const cancelled = await cancelOrder(order.id, buyerId, "changed mind");
+    expect(cancelled.status).toBe("refunding"); // #7 from label_issued
+    expect(lastRefundAmount).toBe(10000); // 10733 − 733 — the label was procured with the buyer's money
   });
 });

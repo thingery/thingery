@@ -1837,7 +1837,11 @@ async function refundAfterTransfer(order: OrderRow): Promise<{ refundId: string 
     );
   }
   if (order.refund_id) return { refundId: null }; // refund already in flight — reconcile, never duplicate (F3)
-  const refund = await createRefundForOrder(order, order.payment_intent_id!, stripe);
+  // §6 admin policy default: with a platform label bought, the line is
+  // retained against the EasyPost spend (exclude_label); the transfer
+  // reversal above moves the payout base only, so refund + reversal stay
+  // consistent.
+  const refund = await createRefundForOrder(order, order.payment_intent_id!, stripe, "exclude_label");
   // THI-70 A1(a): persist refund_id BEFORE the transition. If admin_refund
   // loses a cross-outcome race (admin_release won the status CAS meanwhile),
   // the refund stays visible on the row instead of orphaning at Stripe —

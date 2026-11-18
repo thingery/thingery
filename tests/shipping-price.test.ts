@@ -14,7 +14,7 @@ import { normalizeUpdateArgs, signChatConfirmToken, TOOLS, verifyChatConfirmToke
 import { pool, type ItemRow, type SellerRow } from "../src/db.js";
 import { createItem, MAX_SHIPPING_PRICE_CENTS, ShippingPriceError, updateItem } from "../src/items.js";
 import { cancelOrder } from "../src/order-flow.js";
-import { createCheckoutSession, createRefundForOrder, createTransferForOrder, chargeTotalCents, setStripeForTests } from "../src/stripe.js";
+import { createCheckoutSession, createRefundForOrder, createTransferForOrder, chargeTotalCents, refundCents, setStripeForTests } from "../src/stripe.js";
 import { itemToPublic, registerTools } from "../src/tools.js";
 
 delete process.env.EMBED_API_KEY;
@@ -361,13 +361,45 @@ describe("money path includes shipping", () => {
     expect(refunded).toBe(12733);
   });
 
-  it("quote-mode payout before the money-paths PR: balance ≠ payout base fails closed (no wrong transfer)", async () => {
-    // Interim state between this PR and the §4 fee-allocation PR: the
-    // buyer's charge (12000 + 733) does not match the seller's payout base
-    // (12000) — the existing THI-375 R1 invariant refuses to net against a
-    // charge that is not the base, so the order stays payout_pending and the
-    // sweep retries. Locked here so the interim behavior is explicit.
+  it("§6 settle-aware refunds: label retained / already refunded / policy matrix", async () => {
+    // Matrix over refundCents — every combination the five sites can see.
+    const base = { id: "o1", price_cents: 12000, shipping_price_cents: 0 };
+    const quote = (extra: Record<string, unknown> = {}) => ({ amount_cents: 733, ...extra });
+    // Flat mode: full amount, policies are irrelevant (no line to deduct).
+    expect(refundCents({ ...base, shipping_price_cents: 700, label_quote: null, label_purchase: null }, "exclude_label")).toBe(12700);
+    // Quote mode, no label bought (cancel before purchase, stale sale, never
+    // shipped): full charge — the deployment never spent.
+    expect(refundCents({ ...base, label_quote: quote(), label_purchase: null }, "exclude_label")).toBe(12733);
+    expect(refundCents({ ...base, label_quote: quote(), label_purchase: null }, "include_label")).toBe(12733);
+    // Platform label bought, excluding policy (cancel, stale, never-shipped,
+    // admin): the line is the buyer's — refunded amount omits it.
+    expect(refundCents({ ...base, label_quote: quote(), label_purchase: { shipment_id: "shp_1" } }, "exclude_label")).toBe(12000);
+    // Platform label bought, including policy (carrier failure with a
+    // platform label): the deployment's procurement failed — full refund.
+    expect(refundCents({ ...base, label_quote: quote(), label_purchase: { shipment_id: "shp_1" } }, "include_label")).toBe(12733);
+    // Own-label line refund already fired (labelrefund): remainder only,
+    // regardless of policy — the two refunds pair to exactly the charge.
+    expect(refundCents({ ...base, label_quote: quote({ line_refund_id: "re_line" }), label_purchase: null }, "exclude_label")).toBe(12000);
+    expect(refundCents({ ...base, label_quote: quote({ line_refund_id: "re_line" }), label_purchase: null }, "include_label")).toBe(12000);
+    // The impossible stack (C1): over-deduct, clamped to ≥ 0 and never above
+    // the charge — refunds too little, alertable, never too much.
+    expect(refundCents({ ...base, label_quote: quote({ line_refund_id: "re_line" }), label_purchase: { shipment_id: "shp_1" } }, "exclude_label")).toBe(11267);
+  });
+
+
+  it("§4 quote-mode payout: balance must equal the full charge; fee share is proportional, rounded up", async () => {
+    // Charge 12733 (12000 item + 733 label), payout base 12000, fee 216 on
+    // the whole charge: seller share = ceil(216 × 12000 / 12733) = 204 — the
+    // label line's fee slice stays with the operator, and the seller is
+    // never charged a fee on the buyer's label money.
     const { client, transfers } = stripeWithCharge(12733, 216);
+    await createTransferForOrder({ ...order, shipping_price_cents: 0, label_quote: { amount_cents: 733 } }, "acct_1", client);
+    expect(transfers).toHaveLength(1);
+    expect(transfers[0].amount).toBe(11796); // 12000 − 204
+  });
+
+  it("§4 rule 1: a balance transaction that omits the label line fails closed (no wrong transfer)", async () => {
+    const { client, transfers } = stripeWithCharge(12000, 216); // base only, not the charge
     await expect(
       createTransferForOrder({ ...order, shipping_price_cents: 0, label_quote: { amount_cents: 733 } }, "acct_1", client),
     ).rejects.toThrow(/payout_charge_mismatch/);
@@ -420,7 +452,7 @@ describe.skipIf(!available)("shipping price through the order flow (DB)", () => 
   });
   beforeEach(async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    await db.query("TRUNCATE order_events, webhook_events, orders, items, sellers RESTART IDENTITY CASCADE");
+    await db.query("TRUNCATE order_events, webhook_events, orders, items, sellers, email_outbox RESTART IDENTITY CASCADE");
     const { rows } = await db.query<{ id: string; display_name: string }>(
       `INSERT INTO sellers (api_key_hash, display_name, email)
        VALUES ('ship-fixture-s', 'ship-seller', 'ship-s@t.dev'), ('ship-fixture-b', 'ship-buyer', 'ship-b@t.dev')
@@ -513,4 +545,33 @@ describe.skipIf(!available)("shipping price through the order flow (DB)", () => 
     await cancelOrder(orderId, buyerId, "changed mind");
     expect(refunded).toBe(12700);
   });
+
+    it("§6 + C1: a stacked row (label_purchase ∧ line_refund_id) still refunds, clamped, and files one operator alert", async () => {
+    let refunded: number | undefined;
+    const client = {
+      refunds: { create: async (p: { amount: number }) => { refunded = p.amount; return { id: "re_3" }; } },
+    } as unknown as Stripe;
+    const baseOrder = { id: "o1", payment_intent_id: "pi_1", price_cents: 12000, shipping_price_cents: 700, currency: "EUR" };
+    const stacked = { ...baseOrder, shipping_price_cents: 0, label_quote: { amount_cents: 733, line_refund_id: "re_line" }, label_purchase: { shipment_id: "shp_1" } };
+    process.env.OPERATOR_ALERT_EMAIL = "ops@test.dev";
+    try {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      await createRefundForOrder(stacked, "pi_1", client, "exclude_label");
+      expect(refunded).toBe(11267); // 12000 + 733 − 733 (retained) − 733 (already refunded)
+      expect(spy).toHaveBeenCalledWith(expect.stringContaining("C1 stacked state"));
+      const row = await pool.query("SELECT to_email, subject, template FROM email_outbox WHERE dedupe_key = $1", [`opalert:label_stack:${baseOrder.id}`]);
+      expect(row.rows).toHaveLength(1);
+      expect(row.rows[0].to_email).toBe("ops@test.dev");
+      expect(row.rows[0].subject).toContain(baseOrder.id);
+      // Deduped: a second refund attempt on the same row alerts once.
+      await createRefundForOrder(stacked, "pi_1", client, "exclude_label");
+      const again = await pool.query("SELECT count(*)::int AS c FROM email_outbox WHERE dedupe_key = $1", [`opalert:label_stack:${baseOrder.id}`]);
+      expect(again.rows[0].c).toBe(1);
+      spy.mockRestore();
+    } finally {
+      delete process.env.OPERATOR_ALERT_EMAIL;
+    }
+  });
+
+
 });

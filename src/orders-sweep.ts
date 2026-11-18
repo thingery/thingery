@@ -47,12 +47,15 @@ const hours = (n: number) => n * 3_600_000;
 const days = (n: number) => hours(n * 24);
 
 /** Refund-first (F3): full refund under refund:{order_id} idempotency before
- * the transition that records it; a replay retrieves the same refund. */
+ * the transition that records it; a replay retrieves the same refund.
+ * §6 policy (stale-sale / never-shipped): a platform label bought for the
+ * order is the buyer's — exclude_label; with no label bought the buyer's
+ * full charge (label line included) goes back. */
 async function refundFirst(order: OrderRow): Promise<string> {
   const stripe = getStripe();
   if (!stripe) throw new Error("payments_not_configured");
   if (!order.payment_intent_id) throw new Error("inconsistent_state: paid order missing payment intent");
-  const refund = await createRefundForOrder(order, order.payment_intent_id, stripe);
+  const refund = await createRefundForOrder(order, order.payment_intent_id, stripe, "exclude_label");
   return refund.id;
 }
 

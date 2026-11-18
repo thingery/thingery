@@ -249,9 +249,12 @@ async function handlePaymentSuccess(db: PoolClient, event: Stripe.Event, cfg: Or
 
   if (order.status === "cancelled" && !order.refund_id) {
     // F2: late payment on a cancelled order — refund, never strand money.
+    // §6 policy include_label: this order was cancelled from `pending` —
+    // no label can have been bought, so the full charge (label line
+    // included) goes back to the buyer.
     const stripe = getStripe();
     if (!stripe) throw new Error("stripe unavailable for unexpected-payment refund");
-    const refund = await createRefundForOrder(order, String(paymentIntentId), stripe);
+    const refund = await createRefundForOrder(order, String(paymentIntentId), stripe, "include_label");
     await db.query(
       `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload)
        VALUES ($1, 'unexpected_payment', 'stripe', $2, 'auto-refund on cancelled order', $3::jsonb)`,

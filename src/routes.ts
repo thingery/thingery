@@ -114,10 +114,10 @@ import {
 import crypto from "node:crypto";
 import { pool } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
-import { applyTransition, IllegalTransitionError, type OrderRow } from "./orders.js";
+import { applyTransition, IllegalTransitionError, settleNothingDueRefund, type OrderRow } from "./orders.js";
 import { logSecurityEvent } from "./security-events.js";
 import { page, escapeHtml } from "./web-pages.js";
-import { getStripe, createRefundForOrder, createTransferForOrder, retrieveTransfer, getPayoutSetup } from "./stripe.js";
+import { getStripe, createRefundForOrder, createTransferForOrder, isNothingDueRefund, retrieveTransfer, getPayoutSetup } from "./stripe.js";
 
 const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/logins per IP per hour
 const apiKeyRotateLimiter = new RateLimiter(10, 60 * 60_000); // 10 key rotations per seller per hour (THI-114)
@@ -1978,7 +1978,7 @@ const ADMIN = { type: "admin" as const };
 /** §6.6 refund-after-transfer: reverse the transfer (full, idempotent per
  * order), then refund the charge from the platform balance; alert the
  * operator to any shortfall — never silently drop funds. */
-async function refundAfterTransfer(order: OrderRow): Promise<{ refundId: string | null }> {
+async function refundAfterTransfer(order: OrderRow): Promise<{ refundId: string | null; nothingDue: boolean }> {
   const stripe = getStripe();
   if (!stripe) throw new Error("payments_not_configured");
   if (order.transfer_id && !order.refund_id) {
@@ -1990,15 +1990,23 @@ async function refundAfterTransfer(order: OrderRow): Promise<{ refundId: string 
         `platform-balance shortfall possible (transfer ${order.transfer_id} reversed; reserve policy §6.4)`,
     );
   }
-  if (order.refund_id) return { refundId: null }; // refund already in flight — reconcile, never duplicate (F3)
-  const refund = await createRefundForOrder(order, order.payment_intent_id!, stripe);
+  if (order.refund_id) return { refundId: null, nothingDue: false }; // refund already in flight — reconcile, never duplicate (F3)
+  // §6 admin policy default: with a platform label bought, the line is
+  // retained against the EasyPost spend (exclude_label); the transfer
+  // reversal above moves the payout base only, so refund + reversal stay
+  // consistent.
+  const refund = await createRefundForOrder(order, order.payment_intent_id!, stripe, "exclude_label");
   // THI-70 A1(a): persist refund_id BEFORE the transition. If admin_refund
   // loses a cross-outcome race (admin_release won the status CAS meanwhile),
   // the refund stays visible on the row instead of orphaning at Stripe —
   // sweep rules 7/9 key on non-terminal statuses, so the row is the only
-  // record a terminal paid_out would carry.
-  await pool.query("UPDATE orders SET refund_id = $2 WHERE id = $1 AND refund_id IS NULL", [order.id, refund.id]);
-  return { refundId: refund.id };
+  // record a terminal paid_out would carry. B1 (THI-1013): a nothing-due
+  // outcome carries no id — the caller settles the unwind inline instead.
+  const nothingDue = isNothingDueRefund(refund);
+  if (!nothingDue) {
+    await pool.query("UPDATE orders SET refund_id = $2 WHERE id = $1 AND refund_id IS NULL", [order.id, refund.id]);
+  }
+  return { refundId: refund.id, nothingDue };
 }
 
 /** #19 release: reconcile-don't-recreate (F3) — an existing transfer is
@@ -2066,11 +2074,18 @@ async function resolveDisputeCore(
   }
   try {
     if (outcome === "refund") {
-      const refundId =
-        order.payment_mode === "stripe" && order.payment_intent_id
-          ? (await refundAfterTransfer(order)).refundId
-          : null; // null → refund already in flight (reconcile) or off_platform
-      await applyTransition({ orderId: order.id, trigger: "admin_refund", actor: ADMIN, reason: note, ...(refundId ? { sets: { refund_id: refundId } } : {}) });
+      // B1 (THI-1013): admin_refund (#18) lands in `refunding` and waits for
+      // the charge.refunded webhook — a nothing-due refund creates no Stripe
+      // refund, so settle the unwind inline or the order wedges here too.
+      let refundId: string | null = null;
+      let nothingDue = false;
+      if (order.payment_mode === "stripe" && order.payment_intent_id) {
+        const r = await refundAfterTransfer(order);
+        refundId = r.refundId;
+        nothingDue = r.nothingDue;
+      } // refundId null → refund already in flight (reconcile) or off_platform
+      const next = await applyTransition({ orderId: order.id, trigger: "admin_refund", actor: ADMIN, reason: note, ...(refundId ? { sets: { refund_id: refundId } } : {}) });
+      await settleNothingDueRefund(next, { nothingDue });
     } else {
       await applyTransition({ orderId: order.id, trigger: "admin_release", actor: ADMIN, reason: note });
       await releaseWithReconcile(order);

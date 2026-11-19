@@ -462,6 +462,20 @@ curl -s https://thingery.dev/healthz   # {"ok":true,...,"version":"…","commit"
 If `commit` reports `"unknown"`, the deploy skipped the build args — rebuild with the
 exports above. The site footer shows the same version + short commit.
 
+**A deploy is done only when the functional smoke passes (THI-909).** The `deploy.yml`
+workflow runs [`scripts/prod-smoke.sh`](../scripts/prod-smoke.sh) automatically after the
+SSH deploy step: it re-checks `/healthz` against the triggering commit, then exercises
+the real MCP contract against the public endpoint — `initialize`, `tools/list` (floor
+count, exact set pinned by the anti-drift tests), and `search_items` query discipline
+(distinctive `q` must filter below the no-`q` browse; a nonsense `q` must return
+exactly 0). All probes are read-only and anonymous; nothing is created, so
+[ops-smoke-policy.md](ops-smoke-policy.md) does not apply. After a **manual** deploy,
+run it yourself and treat a red result as an open incident, not a completed deploy:
+
+```bash
+bash scripts/prod-smoke.sh   # or: EXPECT_COMMIT=$(git -C /opt/thingery rev-parse HEAD) bash scripts/prod-smoke.sh
+```
+
 Post-deploy smoke tests that create seller accounts in production must follow
 [ops-smoke-policy.md](ops-smoke-policy.md): disposable `ops+thiXXX+…@thingery.test`
 accounts, deleted before the run ends.

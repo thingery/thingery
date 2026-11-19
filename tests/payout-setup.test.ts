@@ -8,11 +8,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import type Stripe from "stripe";
-import { afterEach, beforeAll, afterAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, afterAll, describe, expect, it, vi } from "vitest";
 import {
   getOrCreateStripeAccount,
   chargeTotalCents,
   payoutBaseCents,
+  payoutSetupLimiter,
   setStripeForTests,
   createCheckoutSession,
 } from "../src/stripe.js";
@@ -161,6 +162,64 @@ describe.skipIf(!available)("get_payout_setup (DB)", () => {
     await callTool("get_payout_setup");
     expect(fake.calls.filter((c) => c.method === "accounts.create")).toHaveLength(1);
     expect(fake.calls.filter((c) => c.method === "accountLinks.create")).toHaveLength(2);
+  });
+
+  // THI-875 (residual from the THI-871 security review): get_payout_setup
+  // mints a single-use Stripe onboarding link on every call — a provider-side
+  // API call. A scripted session looping the tool must hit a server-side cap,
+  // not just the web client's per-tab guard. Red-check: against unthrottled
+  // code the 11th call succeeds (isError false, a fresh mint) and both
+  // assertions below fail.
+  it("mint throttle: 11th link within the hour → rate_limited, no mint, per-seller bucket", async () => {
+    process.env.STRIPE_SECRET_KEY = "sk_test_k1";
+    const fake = fakeStripe();
+    setStripeForTests(fake.client);
+    payoutSetupLimiter.reset();
+    try {
+      for (let i = 0; i < 10; i++) {
+        const { isError } = await callTool("get_payout_setup");
+        expect(isError).toBe(false);
+      }
+      expect(fake.calls.filter((c) => c.method === "accountLinks.create")).toHaveLength(10);
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const { isError, body } = await callTool("get_payout_setup");
+        expect(isError).toBe(true);
+        expect(body.code).toBe("rate_limited");
+        expect(body.error).toMatch(/10 per hour/);
+        // The rejected call mints nothing — the provider-side call is the
+        // abuse surface being capped.
+        expect(fake.calls.filter((c) => c.method === "accountLinks.create")).toHaveLength(10);
+        // THI-112 H4.2: the 429 is a security event on the MCP surface.
+        const events = logSpy.mock.calls
+          .map((args) => String(args[0]))
+          .filter((s) => s.startsWith('{"ts":'))
+          .map((s) => JSON.parse(s))
+          .filter((o: { type?: string }) => o.type === "rate_limit");
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({ route: "/mcp", sellerId });
+        // Per-seller key (not global): a second seller still mints while p1
+        // is throttled.
+        await client.query(
+          "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ('thg_p2', 'p2', 'p2@t.dev')",
+        );
+        const p2Id = (await client.query<{ id: string }>("SELECT id FROM sellers WHERE email = 'p2@t.dev'")).rows[0].id;
+        const second = new Map<string, { handler: (a: Record<string, unknown>) => Promise<{ isError?: boolean; content?: { text?: string }[] }> }>();
+        registerTools(
+          { registerTool: (name: string, _c: unknown, handler: never) => second.set(name, { handler }) } as never,
+          { seller: { id: p2Id, display_name: "p2" } },
+        );
+        const r = await second.get("get_payout_setup")!.handler({});
+        expect(r.isError).not.toBe(true);
+        expect(JSON.parse(r.content![0].text!).onboarding_url).toMatch(/^https:\/\/onboard\.test\//);
+        // p2 minted its own account + link; p1's mint count is unchanged.
+        expect(fake.calls.filter((c) => c.method === "accountLinks.create")).toHaveLength(11);
+      } finally {
+        logSpy.mockRestore();
+      }
+    } finally {
+      payoutSetupLimiter.reset(); // leave the shared bucket clean
+    }
   });
 
   it("getOrCreateStripeAccount arbitration: a stored id wins over a new account", async () => {

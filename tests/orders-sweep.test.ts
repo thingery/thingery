@@ -37,6 +37,7 @@ function fakeStripe(opts: {
   retrieveEvent?: Stripe.Event;
 } = {}) {
   const calls: string[] = [];
+  const refundAmounts: (number | undefined)[] = [];
   const n = Math.random().toString(36).slice(2, 8);
   const client = {
     paymentIntents: {
@@ -64,8 +65,9 @@ function fakeStripe(opts: {
       },
     },
     refunds: {
-      create: async (_a: unknown, o: unknown) => {
+      create: async (a: unknown, o: unknown) => {
         calls.push(`refunds.create:${(o as { idempotencyKey: string }).idempotencyKey}`);
+        refundAmounts.push((a as { amount?: number }).amount);
         return { id: `re_${n}` };
       },
     },
@@ -84,7 +86,7 @@ function fakeStripe(opts: {
       },
     },
   } as unknown as Stripe;
-  return { client, calls };
+  return { client, calls, refundAmounts };
 }
 
 describe.skipIf(!available)("deadline sweeps (DB)", () => {
@@ -176,6 +178,28 @@ describe.skipIf(!available)("deadline sweeps (DB)", () => {
     await payoutReady(email);
   };
 
+  it("rule 2 + buyer-paid shipping §6: stale quote-mode order with no label bought refunds the buyer's full charge (label included)", async () => {
+    // Stale sale ⇒ record_tracking never ran ⇒ no platform label ⇒ the
+    // deployment never spent: the buyer's whole charge, label line included,
+    // goes back. exclude_label policy + lineRetained=false ⇒ no deduction.
+    const { client, refundAmounts } = fakeStripe();
+    setStripeForTests(client);
+    const a = await seed("stripe");
+    await toSold(a.orderId, a.sellerEmail);
+    await db.query(
+      "UPDATE orders SET label_quote = $2::jsonb, shipping_price_cents = 0 WHERE id = $1",
+      [a.orderId, JSON.stringify({ amount_cents: 733, currency: "EUR" })],
+    );
+    await db.query(
+      "UPDATE orders SET status_changed_at = now() - ($1 || ' days')::interval WHERE id = $2",
+      [String(cfg.staleSoldDays + 1), a.orderId],
+    );
+    const report = await runSweeps(cfg);
+    expect((await order(a.orderId)).status).toBe("refunding");
+    expect(report["2-stale-sale"].acted).toBe(1);
+    expect(refundAmounts).toEqual([10733]);
+  });
+
   it("rule 2: stale sold (no tracking) stripe → refunding + refund-first; off_platform → cancelled", async () => {
     const { client, calls } = fakeStripe();
     setStripeForTests(client);
@@ -265,6 +289,34 @@ describe.skipIf(!available)("deadline sweeps (DB)", () => {
     expect(o.transfer_id).toBeTruthy();
     ev = await db.query("SELECT 1 FROM order_events WHERE order_id = $1 AND event_type = 'payout_attempt_failed'", [seed1.orderId]);
     expect(ev.rowCount).toBe(1); // deduped — one failure record, not one per pass
+  });
+
+  it("rule 4 B1-sibling (THI-1013): zero payout base (free listing) settles paid_out with an operator note, no transfer", async () => {
+    // Free listing in quote mode: the charge is the label line only, which
+    // never enters the payout base. Pre-fix, netting threw
+    // payout_netting_unavailable forever (nothing could ever satisfy it) and
+    // the order wedged in payout_pending with rule-7 noise. Now the sweep
+    // settles it paid_out with a payout_zero_base note and no Stripe call.
+    const { client, calls } = fakeStripe();
+    setStripeForTests(client);
+    const seed1 = await seed("stripe");
+    await db.query("UPDATE items SET price_cents = 0 WHERE id = $1", [seed1.itemId]);
+    await db.query(
+      `UPDATE orders SET price_cents = 0, shipping_price_cents = 0, label_quote = '{"amount_cents":733}' WHERE id = $1`,
+      [seed1.orderId],
+    );
+    await toSold(seed1.orderId, seed1.sellerEmail);
+    await applyTransition({ orderId: seed1.orderId, trigger: "record_tracking", actor: { type: "seller", id: "s" }, sets: { carrier: "DHL", tracking_code: "T5", tracker_id: "trk_5" } });
+    await applyTransition({ orderId: seed1.orderId, trigger: "carrier_update", actor: { type: "carrier", id: "trk_5" } });
+    await applyTransition({ orderId: seed1.orderId, trigger: "carrier_update", actor: { type: "carrier", id: "trk_5" } });
+    await db.query("UPDATE orders SET dispute_deadline = now() - interval '1 hour' WHERE id = $1", [seed1.orderId]);
+    await runSweeps(cfg);
+    const o = await order(seed1.orderId);
+    expect(o.status).toBe("paid_out"); // settled — not wedged in payout_pending
+    expect(o.transfer_id).toBeNull(); // nothing exists at Stripe to reconcile
+    expect(calls.some((c) => c.startsWith("transfers.create:"))).toBe(false);
+    const ev = await db.query("SELECT 1 FROM order_events WHERE order_id = $1 AND event_type = 'payout_zero_base'", [seed1.orderId]);
+    expect(ev.rowCount).toBe(1); // operator note recorded once (deduped)
   });
 
   it("rule 5: pickup sold past autoconfirm → delivered with the long (F10) window", async () => {

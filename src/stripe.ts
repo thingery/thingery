@@ -24,6 +24,22 @@ import Stripe from "stripe";
 import { pool } from "./db.js";
 import type { ItemRow } from "./db.js";
 import { orderFlowConfig } from "./config.js";
+import { planOperatorAlert } from "./notify/operator.js";
+import { RateLimiter } from "./rate-limit.js";
+
+/** Per-seller mint throttle for get_payout_setup (THI-875, residual finding
+ *  from the THI-871 security review): every call mints a single-use Stripe
+ *  onboarding link — a provider-side API call with per-call cost. The web
+ *  client bounds presses per tab, but nothing client-side bounds a scripted
+ *  session looping the tool, so the mint itself is capped server-side:
+ *  10 mints/hour per seller (THI-112/THI-144 bucket convention, same shape
+ *  as extractionSellerLimiter in extraction.ts — one shared exported bucket,
+ *  keyed `seller:{id}`). Enforced in the get_payout_setup handler AFTER the
+ *  kill-switch check, so unconfigured deployments keep returning the stable
+ *  `payments_not_configured` error and never consume the bucket; over-limit
+ *  reads fail closed with the `rate_limited` code the web client already
+ *  renders, and log a `rate_limit` security event ("/mcp", THI-112 H4.2). */
+export const payoutSetupLimiter = new RateLimiter(10, 60 * 60_000);
 
 let client: Stripe | null | undefined;
 
@@ -173,6 +189,18 @@ export interface PayoutOrder {
   price_cents: number;
   shipping_price_cents: number;
   currency: string;
+  label_quote?: { amount_cents: number } | null;
+}
+
+/** Refund-settle shape: the label line and its two settlement states are
+ * row-only (spec §6) — label_purchase is an orders JSONB column, and the
+ * own-label refund persists line_refund_id on label_quote. */
+export interface RefundOrder {
+  id: string;
+  price_cents: number;
+  shipping_price_cents: number;
+  label_quote?: { amount_cents: number; line_refund_id?: string } | null;
+  label_purchase?: Record<string, unknown> | null;
 }
 
 /**
@@ -206,25 +234,53 @@ export async function sellerNetTransferCents(order: PayoutOrder, stripe: Stripe)
   const bt = typeof charge.balance_transaction === "object" ? charge.balance_transaction : null;
   if (!bt) throw new Error(`payout_netting_unavailable: no balance transaction on charge ${charge.id}`);
   const gross = payoutBaseCents(order);
-  // THI-375 R1: the balance transaction must BE this order's charge — the
-  // gross match is an invariant, not an assumption. A mismatch (dashboard
-  // manipulation, partial capture, cross-currency settlement) fails closed;
-  // netting against the wrong base could over- or under-pay the seller.
-  if (bt.currency !== order.currency.toLowerCase() || bt.amount !== gross) {
+  const chargeTotal = chargeTotalCents(order);
+  // THI-375 R1 / buyer-paid-shipping §4 rule 1: the balance transaction must
+  // BE this order's charge — the buyer's full charge, which in quote mode
+  // includes the label line. A mismatch (dashboard manipulation, partial
+  // capture, cross-currency settlement) fails closed; netting against the
+  // wrong base could over- or under-pay the seller.
+  if (bt.currency !== order.currency.toLowerCase() || bt.amount !== chargeTotal) {
     throw new Error(
-      `payout_charge_mismatch: balance transaction ${bt.amount} ${bt.currency} ≠ order ${gross} ${order.currency.toLowerCase()}`,
+      `payout_charge_mismatch: balance transaction ${bt.amount} ${bt.currency} ≠ charge ${chargeTotal} ${order.currency.toLowerCase()}`,
     );
   }
-  const net = Math.min(gross - bt.fee, gross); // clamp pathological fees (negative); never overpay
-  if (net < 1) throw new Error(`payout_netting_unavailable: net ${net}c after fee ${bt.fee}c (gross ${gross}c)`);
+  // §4 rule 2 — fee allocation: the seller bears the fee on their own money
+  // only. The Stripe fee covers item + flat + label lines together, so the
+  // seller's share is proportional, rounded UP (the operator never absorbs
+  // rounding). In flat mode base = charge, so the share is the whole fee and
+  // this is byte-identical to the pre-quote netting.
+  const sellerFeeShareCents = Math.ceil((bt.fee * gross) / chargeTotal);
+  const net = Math.min(gross - sellerFeeShareCents, gross); // clamp pathological fees (negative); never overpay
+  if (net < 1) throw new Error(`payout_netting_unavailable: net ${net}c after fee share ${sellerFeeShareCents}c of ${bt.fee}c (payout base ${gross}c)`);
   return net;
 }
+
+/** B1-sibling (Security review THI-1013): a legal zero payout base — a
+ * free item with no flat shipping. Nothing is due to the seller, so no
+ * transfer exists or will ever exist (Stripe rejects amount-0 transfers);
+ * `id` is null because there is nothing to reconcile at Stripe. Callers
+ * settle the order via the `transfer_paid` transition (the sweep's rule-4
+ * convergence point) instead of waiting for a webhook that cannot come. */
+export interface ZeroBasePayout {
+  zeroBase: true;
+  id: null;
+}
+
+export type OrderTransfer = Stripe.Transfer | ZeroBasePayout;
 
 export async function createTransferForOrder(
   order: PayoutOrder,
   destination: string,
   stripe: Stripe = getStripe() ?? undefined!,
-): Promise<Stripe.Transfer> {
+): Promise<OrderTransfer> {
+  // B1-sibling (THI-1013): base 0 (free listing) is schema-legal and
+  // quote-mode-eligible. The old fail-closed throw (net < 1) wedged such
+  // orders in payout_pending forever — no transfer could ever satisfy it.
+  // Nothing to net or transfer: settle as an explicit zero-base outcome.
+  // The balance-transaction read is skipped: with no funds moving, a
+  // charge mismatch has nothing to corrupt (R1 guards transfers only).
+  if (payoutBaseCents(order) <= 0) return { zeroBase: true, id: null };
   // application_fee_amount is omitted → 0: the platform takes no cut (§6.1).
   // The seller bears the Stripe processing fee by netting (THI-374) — a
   // pass-through of Stripe's own processing cost, not platform revenue.
@@ -239,16 +295,124 @@ export async function createTransferForOrder(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Settle-aware refunds (buyer-paid shipping §6) — one helper, every site
+
+/** The buyer's label line, if the order is in quote mode. */
+export function labelLineCents(order: Pick<RefundOrder, "label_quote">): number {
+  return order.label_quote?.amount_cents ?? 0;
+}
+
+/** A platform label was bought for this order (label_purchase present) — the
+ * line was procured with the buyer's money and is retained against it. */
+export function lineRetained(order: Pick<RefundOrder, "label_purchase">): boolean {
+  return order.label_purchase != null;
+}
+
+/** The own-label partial refund (`labelrefund:{order_id}`) already fired —
+ * the line is back with the buyer; a full refund must not repeat it. */
+export function lineRefunded(order: Pick<RefundOrder, "label_quote">): boolean {
+  return order.label_quote?.line_refund_id != null;
+}
+
+/** Per-site refund policy for the label line when a platform label was
+ * bought (retained): `exclude_label` — the buyer bears the bought label
+ * (cancel, stale-sale, never-shipped, admin default); `include_label` — the
+ * deployment bears its own procurement (carrier failure with a platform
+ * label, and sites that can only run before any purchase). */
+export type LabelLinePolicy = "exclude_label" | "include_label";
+
+/**
+ * Settle-aware refund amount (§6):
+ *
+ *   chargeTotalCents
+ *   − (lineRetained AND policy excludes ? labelLineCents : 0)
+ *   − (lineRefunded ? labelLineCents : 0)
+ *
+ * The two deductions are structurally exclusive; should a future feature
+ * ever stack them, this over-deducts (refunds too little — alertable via the
+ * C1 operator alert) and the clamp keeps it within [0, charge].
+ */
+export function refundCents(order: RefundOrder, policy: LabelLinePolicy): number {
+  const total = chargeTotalCents(order);
+  let amount = total;
+  if (lineRetained(order) && policy === "exclude_label") amount -= labelLineCents(order);
+  if (lineRefunded(order)) amount -= labelLineCents(order);
+  return Math.max(0, Math.min(amount, total));
+}
+
+/**
+ * C1 carry-forward (THI-988): the stacked state `label_purchase ∧
+ * label_quote.line_refund_id` is structurally impossible (the own-label
+ * refund fires only while no label was bought), but if it ever appears the
+ * refund helper over-deducts — refunds too little. Make the alert concrete:
+ * console.error floor + a deduped operator alert (opalert:{ref}), never
+ * breaking the refund path over the alert itself.
+ */
+async function alertLabelRefundStackIfPresent(order: RefundOrder): Promise<void> {
+  if (!(lineRetained(order) && lineRefunded(order))) return;
+  const line = labelLineCents(order);
+  console.error(
+    `[refund] C1 stacked state on order ${order.id}: label_purchase ∧ line_refund_id both set (line ${line}c) — ` +
+      `refundCents will over-deduct; operator reconciliation needed`,
+  );
+  await planOperatorAlert({
+    kind: "label_refund_stack",
+    ref: `label_stack:${order.id}`,
+    subject: `Order ${order.id}: label line both retained and refunded`,
+    payload: { order_id: order.id, label_line_cents: line },
+  }).catch(() => undefined); // the console.error floor already fired
+}
+
+/** B1 (Security review THI-1013): the legal zero-remainder refund outcome.
+ * Stripe rejects `amount: 0` with invalid_request_error, so no refund object
+ * can exist for a nothing-due remainder; the transition still fires. `id`
+ * carries the own-label line refund when that already returned the buyer's
+ * label money (keeping refund_id-based reconcile guards sound), else null —
+ * replaying the site recomputes the same outcome with no Stripe call, so a
+ * null id stays idempotent. */
+export interface NothingDueRefund {
+  nothingDue: true;
+  id: string | null;
+}
+
+export type OrderRefund = Stripe.Refund | NothingDueRefund;
+
+/** B1 (THI-1013): narrow the refund union — Stripe.Refund carries no
+ * `nothingDue` marker, so this is the one safe discriminator. */
+export function isNothingDueRefund(refund: OrderRefund): refund is NothingDueRefund {
+  return (refund as NothingDueRefund).nothingDue === true;
+}
+
 export async function createRefundForOrder(
-  order: { id: string; price_cents: number; shipping_price_cents: number; label_quote?: { amount_cents: number } | null },
+  order: RefundOrder,
   paymentIntentId: string,
   stripe: Stripe = getStripe() ?? undefined!,
-): Promise<Stripe.Refund> {
-  // Full refund = the buyer's whole charge (§3/§6): item + flat shipping + the
-  // label line they paid. chargeTotalCents keeps this identical to the F5
-  // acceptance figure — a refund can never diverge from what was taken.
+  labelLinePolicy: LabelLinePolicy = "exclude_label",
+): Promise<OrderRefund> {
+  await alertLabelRefundStackIfPresent(order);
+  // Settle-aware amount (§6): identical to chargeTotalCents in every state
+  // where no label was bought (flat mode, quote mode before purchase, and
+  // the pre-payment sites); the label line leaves the refund only when a
+  // platform label was bought under an excluding policy, or when
+  // the own-label partial refund already returned it.
+  const amount = refundCents(order, labelLinePolicy);
+  // B1 (THI-1013): a zero remainder is legal — a free item whose charge is
+  // the label line only (bought, excluding policy), the C1 clamp bottoming
+  // out, or a fully line-refunded zero-price charge. Stripe would reject
+  // amount 0 (invalid_request_error), which wedged the transition at every
+  // refund site. Nothing is due: settle without a Stripe call, surfacing
+  // the line refund id when the own-label refund already paid the buyer.
+  if (amount <= 0) {
+    const lineRefundId = order.label_quote?.line_refund_id ?? null;
+    console.error(
+      `[refund] order ${order.id}: refund remainder ${amount}c — nothing due` +
+        (lineRefundId ? `; settled by own-label line refund ${lineRefundId}` : "; no Stripe refund created"),
+    );
+    return { nothingDue: true, id: lineRefundId };
+  }
   return stripe.refunds.create(
-    { payment_intent: paymentIntentId, amount: chargeTotalCents(order) },
+    { payment_intent: paymentIntentId, amount },
     { idempotencyKey: `refund:${order.id}` },
   );
 }

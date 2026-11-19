@@ -1053,6 +1053,47 @@ the next day. Read any snapshot with
 existing snapshots stay. The script only reads containers/DB and writes under
 `metrics/`; it never mutates app or Caddy state.
 
+## 6c. Weekly docker builder prune
+
+Every image build (deploys rebuild the app image — §5) leaves daemon-global
+build cache behind, and it grows without bound: on a small VPS it can quietly
+eat gigabytes between `df -h` checks (§8). Bound it with a weekly prune of
+**build cache only**:
+
+```bash
+sudo tee /etc/cron.d/thingery-docker-prune >/dev/null <<'CRON'
+# weekly build-cache prune (Sunday 04:47 UTC). docker builder prune touches
+# ONLY build-cache records — never images, containers, or volumes — and is a
+# no-op (Total: 0B, exit 0) when there is nothing to reclaim.
+47 4 * * 0 deploy docker builder prune -f >> /var/log/thingery-docker-prune.log 2>&1
+CRON
+sudo chmod 644 /etc/cron.d/thingery-docker-prune
+sudo touch /var/log/thingery-docker-prune.log && sudo chown deploy:deploy /var/log/thingery-docker-prune.log
+```
+
+(`deploy` is in the `docker` group — same posture as §6b. The build cache is
+daemon-global, so any docker-group user can prune it; no root needed.)
+
+Why `docker builder prune` and not `docker system prune`: the latter also
+removes stopped containers, unused networks, and dangling images — including
+the previous release image you keep for rollback — and its `--volumes` variant
+goes further still. `builder prune` has exactly one target: build-cache
+records. Named/tagged images, running containers, and volumes are untouched, so
+rollbacks and data survive every run.
+
+**Verify / drill** (any time; a manual run is safe and idempotent):
+
+```bash
+docker builder df          # cache size before
+docker builder prune -f    # run 1: per-record lines + Total reclaimed
+docker builder prune -f    # run 2, immediately: Total: 0B, exit 0 — idempotent
+docker volume ls && docker images   # unchanged by the runs above
+df -h /                    # Avail grew by ~the reclaimed size
+```
+
+**Rollback:** `sudo rm /etc/cron.d/thingery-docker-prune` — the prune stops and
+the next rebuild starts filling the cache again; nothing else depends on it.
+
 ## 7. Logs: Caddy access log + container output
 
 THI-312: every container's stdout/stderr goes to Docker's `json-file` driver with
@@ -1081,4 +1122,5 @@ JSON line.
 - Managed database: change `DATABASE_URL`, done.
 - Watch disk: `df -h` — item images are blobs stored in the app container's
   `/app/uploads` (nightly backup in section 4), so disk grows with uploads;
-  the DB itself stays small.
+  the DB itself stays small. Build cache grows with every rebuild too — bound
+  it with the weekly prune cron (§6c).

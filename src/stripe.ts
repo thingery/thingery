@@ -25,6 +25,21 @@ import { pool } from "./db.js";
 import type { ItemRow } from "./db.js";
 import { orderFlowConfig } from "./config.js";
 import { planOperatorAlert } from "./notify/operator.js";
+import { RateLimiter } from "./rate-limit.js";
+
+/** Per-seller mint throttle for get_payout_setup (THI-875, residual finding
+ *  from the THI-871 security review): every call mints a single-use Stripe
+ *  onboarding link — a provider-side API call with per-call cost. The web
+ *  client bounds presses per tab, but nothing client-side bounds a scripted
+ *  session looping the tool, so the mint itself is capped server-side:
+ *  10 mints/hour per seller (THI-112/THI-144 bucket convention, same shape
+ *  as extractionSellerLimiter in extraction.ts — one shared exported bucket,
+ *  keyed `seller:{id}`). Enforced in the get_payout_setup handler AFTER the
+ *  kill-switch check, so unconfigured deployments keep returning the stable
+ *  `payments_not_configured` error and never consume the bucket; over-limit
+ *  reads fail closed with the `rate_limited` code the web client already
+ *  renders, and log a `rate_limit` security event ("/mcp", THI-112 H4.2). */
+export const payoutSetupLimiter = new RateLimiter(10, 60 * 60_000);
 
 let client: Stripe | null | undefined;
 

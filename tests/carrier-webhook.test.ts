@@ -15,7 +15,7 @@ import StripeCtor from "stripe";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { pool } from "../src/db.js";
 import { setStripeForTests } from "../src/stripe.js";
-import { carrierWebhookRouter } from "../src/webhooks-carrier.js";
+import { carrierWebhookRouter, verifyEasyPostSignature } from "../src/webhooks-carrier.js";
 import { createOrder } from "../src/order-flow.js";
 import { applyTransition, type OrderRow } from "../src/orders.js";
 import type { OrderFlowConfig } from "../src/config.js";
@@ -95,6 +95,32 @@ async function post(
   });
   return { status: res.status, json: (await res.json().catch(() => ({}))) as Record<string, unknown> };
 }
+
+describe("verifyEasyPostSignature", () => {
+  const raw = Buffer.from('{"description":"tracker.updated"}', "utf8");
+  const digest = createHmac("sha256", SECRET).update(raw).digest("hex");
+
+  it("accepts EasyPost's hmac-sha256-hex= prefixed header (case-insensitive) and bare hex", () => {
+    expect(verifyEasyPostSignature(raw, `hmac-sha256-hex=${digest}`, SECRET)).toBe(true);
+    expect(verifyEasyPostSignature(raw, `  HMAC-SHA256-HEX=${digest.toUpperCase()}  `, SECRET)).toBe(true);
+    expect(verifyEasyPostSignature(raw, digest, SECRET)).toBe(true);
+  });
+
+  it("normalizes the webhook secret with Unicode NFKD like EasyPost's SDK", () => {
+    const nfcSecret = "caf\u00e9-secret";
+    const nfdSecret = "cafe\u0301-secret";
+    const sig = `hmac-sha256-hex=${createHmac("sha256", nfdSecret).update(raw).digest("hex")}`;
+    expect(verifyEasyPostSignature(raw, sig, nfcSecret)).toBe(true);
+  });
+
+  it("rejects wrong digests, empty/unknown/doubled prefixes, and tampered bodies", () => {
+    expect(verifyEasyPostSignature(raw, `hmac-sha256-hex=${"0".repeat(64)}`, SECRET)).toBe(false);
+    expect(verifyEasyPostSignature(raw, "hmac-sha256-hex=", SECRET)).toBe(false);
+    expect(verifyEasyPostSignature(raw, `hmac-sha256-hex=hmac-sha256-hex=${digest}`, SECRET)).toBe(false);
+    expect(verifyEasyPostSignature(raw, `sha256=${digest}`, SECRET)).toBe(false);
+    expect(verifyEasyPostSignature(Buffer.from('{"tampered":true}', "utf8"), `hmac-sha256-hex=${digest}`, SECRET)).toBe(false);
+  });
+});
 
 describe.skipIf(!available)("Carrier webhook endpoint (HTTP)", () => {
   let db: pg.Client;
@@ -267,6 +293,12 @@ describe.skipIf(!available)("Carrier webhook endpoint (HTTP)", () => {
     expect(r.status).toBe(400);
     const count = await db.query("SELECT count(*)::int AS c FROM webhook_events");
     expect(count.rows[0].c).toBe(0);
+  });
+
+  it("accepts EasyPost's real hmac-sha256-hex= signature prefix over HTTP", async () => {
+    const body = trackerEvent("pre_transit", "trk_prefixed");
+    const r = await post(app, body, { sig: `hmac-sha256-hex=${sign(body)}` });
+    expect(r.status).toBe(200);
   });
 
   it("accepts the previous secret during rotation (F13)", async () => {

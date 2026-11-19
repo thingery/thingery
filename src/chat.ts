@@ -725,6 +725,12 @@ export function normalizeOrderArgs(
         }
         out.payment_mode = raw.payment_mode;
       }
+      if (raw.verification_choice !== undefined) {
+        if (raw.verification_choice !== "keep_original") {
+          return { ok: false, error: "create_order: verification_choice must be 'keep_original'" };
+        }
+        out.verification_choice = raw.verification_choice;
+      }
       if (raw.shipping_address !== undefined) {
         const a = raw.shipping_address;
         const str = (v: unknown, max: number, what: string, min = 1): string | null =>
@@ -1700,6 +1706,7 @@ async function orderWriteGate(
   if (name === "create_order") {
     if (args.shipping_address !== undefined) payload.shipping_address = args.shipping_address;
     if (args.payment_mode !== undefined) payload.payment_mode = args.payment_mode;
+    if (args.verification_choice !== undefined) payload.verification_choice = args.verification_choice;
   }
   if (name === "confirm_payment" && args.note !== undefined) payload.note = args.note;
   if (name === "record_tracking") {
@@ -1855,6 +1862,7 @@ async function executeConfirmedOrderOp(subjectId: string, op: string, seller: Se
       if (addr) request.shippingAddress = addr;
       const mode = text(payload.payment_mode);
       if (mode === "stripe" || mode === "off_platform") request.paymentMode = mode;
+      if (payload.verification_choice === "keep_original") request.verificationChoice = "keep_original";
       try {
         const { order, paymentUrl } = await createOrder(request);
         const what = order.item_title ? `"${order.item_title}"` : "the item";

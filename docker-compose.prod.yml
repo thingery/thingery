@@ -29,6 +29,13 @@ services:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
     restart: unless-stopped
+    # Overlay-network pin for outbound triage calls (deploy-vps.md §5.4):
+    # containers do not inherit the host /etc/hosts, so an operator whose
+    # REPORT_REVIEW_CREATE_URL host lives on a private overlay (e.g. a
+    # Tailscale tailnet) pins "hostname:ip" in the VPS .env. Unset → a
+    # no-op loopback pin. Value is a hostname+ip, never a secret.
+    extra_hosts:
+      - "${REPORT_REVIEW_HOST_PIN:-localhost:127.0.0.1}"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-thingery}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-thingery}
       PORT: 3000
@@ -94,6 +101,16 @@ services:
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       NOTIFY_FROM_ADDRESS: ${NOTIFY_FROM_ADDRESS:-}
       NOTIFY_PUBLIC_BASE_URL: ${NOTIFY_PUBLIC_BASE_URL:-}
+      # Resend bounce webhook + operator alerts (THI-760 Phase 2,
+      # enablement THI-1048). Passthrough only: values live in the VPS
+      # .env, never in this repo. RESEND_WEBHOOK_SECRET unset →
+      # /api/webhooks/resend stays a fail-closed 503 stub
+      # (src/webhooks-resend.ts); set it to the exact secret configured
+      # on the Resend dashboard webhook endpoint. OPERATOR_ALERT_EMAIL
+      # unset ⇒ dead-letter/sweep anomaly alerts stay log-only
+      # (src/notify/operator.ts plans nothing without an address).
+      RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
+      OPERATOR_ALERT_EMAIL: ${OPERATOR_ALERT_EMAIL:-}
       # Item report review triage (THI-788 step 3, activation THI-802).
       # Passthrough only: values live in the VPS .env. The seam stays
       # disabled unless BOTH REPORT_REVIEW_CREATE_URL and

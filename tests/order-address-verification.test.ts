@@ -294,4 +294,132 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
     ).resolves.toMatchObject({ isError: true });
     expect(await orderCount()).toBe(0);
   });
+
+  // ---- PR3: verification_choice tool input + §5a per-viewer serialization ----
+
+  const toolHandler = (name: string, callerId: string) => {
+    let handler!: (a: Record<string, unknown>) => Promise<{ content: { text: string }[]; isError?: boolean }>;
+    registerTools(
+      {
+        registerTool(n: string, _c: unknown, h: typeof handler) {
+          if (n === name) handler = h;
+        },
+      },
+      { seller: { id: callerId } as never },
+    );
+    return handler;
+  };
+  const view = async (name: string, callerId: string, args: Record<string, unknown>) =>
+    JSON.parse((await toolHandler(name, callerId)(args)).content[0].text);
+  const soldOffPlatformShared = (orderId: string) =>
+    db.query(
+      "UPDATE orders SET status = 'sold', payment_mode = 'off_platform', payment_intent_id = NULL, " +
+        "shipping_address_shared_at = now(), status_changed_at = now() WHERE id = $1",
+      [orderId],
+    );
+
+  it("tool surface: verification_choice keep_original orders the typed address from the cached suggestion", async () => {
+    process.env.EASYPOST_API_KEY = "test-key";
+    const provider = stubProvider(resSuggested);
+    const itemId = await seedItem();
+    const create = toolHandler("create_order", ids.buyerId);
+    const suggested = await create({ item_id: itemId, shipping_address: ADDRESS });
+    expect(suggested.isError).toBe(true);
+    // The choice rides the cache: the second call orders without another provider hit.
+    const kept = JSON.parse(
+      (await create({ item_id: itemId, shipping_address: ADDRESS, verification_choice: "keep_original" })).content[0].text,
+    );
+    expect(kept.order.status).toBe("pending");
+    expect(kept.order.shipping_verification).toEqual({
+      status: "suggested",
+      kept: true,
+      suggestion: SUGGESTED,
+      checked_at: expect.any(String),
+    });
+    expect(provider.count).toBe(1); // dedupe cache, not a second check
+    expect(await orderCount()).toBe(1);
+  });
+
+  it("§5a get_order: the kept suggestion follows the address-release rule exactly; metadata always", async () => {
+    process.env.EASYPOST_API_KEY = "test-key";
+    stubProvider(resSuggested);
+    const itemId = await seedItem();
+    // Invariant 6: without a cached suggestion the choice is a no-op — the
+    // first call runs the check and lands in the suggested branch (no order);
+    // the keep call then orders from the cache.
+    await createOrder({ buyerId: ids.buyerId, itemId, shippingAddress: ADDRESS }).catch(() => undefined);
+    const { order } = await createOrder({
+      buyerId: ids.buyerId, itemId, shippingAddress: ADDRESS, verificationChoice: "keep_original",
+    });
+    // Seller metadata tier carries only the matrix properties (status +
+    // checked_at): the kept/accepted markers disclose the buyer's choice and
+    // stay buyer-side.
+    const META = { status: "suggested", checked_at: expect.any(String) };
+    const FULL = { status: "suggested", kept: true, suggestion: SUGGESTED, checked_at: expect.any(String) };
+
+    // pending: buyer full, seller metadata only
+    expect((await view("get_order", ids.buyerId, { order_id: order.id })).order.shipping_verification).toEqual(FULL);
+    expect((await view("get_order", ids.sellerId, { order_id: order.id })).order.shipping_verification).toEqual(META);
+
+    // sold + stripe: address released → suggestion released
+    await db.query("UPDATE orders SET status = 'sold', payment_mode = 'stripe', payment_intent_id = 'pi_1', status_changed_at = now() WHERE id = $1", [order.id]);
+    expect((await view("get_order", ids.sellerId, { order_id: order.id })).order.shipping_verification).toEqual(FULL);
+
+    // sold + off_platform pre-consent: address withheld → suggestion withheld
+    await db.query("UPDATE orders SET status = 'sold', payment_mode = 'off_platform', payment_intent_id = NULL, shipping_address_shared_at = NULL, status_changed_at = now() WHERE id = $1", [order.id]);
+    expect((await view("get_order", ids.sellerId, { order_id: order.id })).order.shipping_verification).toEqual(META);
+
+    // consent granted → suggestion visible again (same rule, same switch)
+    await soldOffPlatformShared(order.id);
+    expect((await view("get_order", ids.sellerId, { order_id: order.id })).order.shipping_verification).toEqual(FULL);
+
+    // label_issued keeps the rule; in_transit and beyond close the address window
+    await db.query("UPDATE orders SET status = 'label_issued', status_changed_at = now() WHERE id = $1", [order.id]);
+    expect((await view("get_order", ids.sellerId, { order_id: order.id })).order.shipping_verification).toEqual(FULL);
+    await db.query("UPDATE orders SET status = 'in_transit', status_changed_at = now() WHERE id = $1", [order.id]);
+    expect((await view("get_order", ids.sellerId, { order_id: order.id })).order.shipping_verification).toEqual(META);
+    // the buyer's own data is never state-gated
+    expect((await view("get_order", ids.buyerId, { order_id: order.id })).order.shipping_verification).toEqual(FULL);
+  });
+
+  it("§5a my_orders: metadata for both roles; the kept suggestion only on buyer rows — even when the address is shared", async () => {
+    process.env.EASYPOST_API_KEY = "test-key";
+    stubProvider(resSuggested);
+    const itemId = await seedItem();
+    await createOrder({ buyerId: ids.buyerId, itemId, shippingAddress: ADDRESS }).catch(() => undefined);
+    const { order } = await createOrder({
+      buyerId: ids.buyerId, itemId, shippingAddress: ADDRESS, verificationChoice: "keep_original",
+    });
+    await soldOffPlatformShared(order.id); // address itself IS visible to the seller here
+    // Seller metadata tier carries only the matrix properties (status +
+    // checked_at): the kept/accepted markers disclose the buyer's choice and
+    // stay buyer-side.
+    const META = { status: "suggested", checked_at: expect.any(String) };
+    const FULL = { status: "suggested", kept: true, suggestion: SUGGESTED, checked_at: expect.any(String) };
+    // Raw-handler calls bypass the SDK's zod parse, so defaults must be explicit
+    // (main's handler no longer re-defaults limit at runtime).
+    const sellerRows = (await view("my_orders", ids.sellerId, { role: "seller", limit: 20 })).orders;
+    const buyerRows = (await view("my_orders", ids.buyerId, { role: "buyer", limit: 20 })).orders;
+    expect(sellerRows.find((o: { id: string }) => o.id === order.id)?.shipping_verification).toEqual(META);
+    expect(buyerRows.find((o: { id: string }) => o.id === order.id)?.shipping_verification).toEqual(FULL);
+  });
+
+  it("§5a: verified records serialize without a suggestion for either party; not_checked omits the field", async () => {
+    process.env.EASYPOST_API_KEY = "test-key";
+    stubProvider(resVerified);
+    const { order } = await createOrder({ buyerId: ids.buyerId, itemId: await seedItem(), shippingAddress: ADDRESS });
+    const VERIFIED = { status: "verified", checked_at: expect.any(String) };
+    expect((await view("get_order", ids.buyerId, { order_id: order.id })).order.shipping_verification).toEqual(VERIFIED);
+    expect((await view("get_order", ids.sellerId, { order_id: order.id })).order.shipping_verification).toEqual(VERIFIED);
+    // degraded twin: no record → the field is absent everywhere
+    const plain = await createOrder({ buyerId: ids.buyerId, itemId: await seedItem(), shippingAddress: ADDRESS, paymentMode: "off_platform" });
+    delete process.env.EASYPOST_API_KEY;
+    __resetAddressVerificationForTests();
+    const second = await createOrder({ buyerId: ids.buyerId, itemId: await seedItem(), shippingAddress: ADDRESS, paymentMode: "off_platform" });
+    // Service views carry the raw NULL; the tool serialization (§5a) omits the key.
+    expect(second.order.shipping_verification).toBeNull();
+    expect((await view("get_order", ids.buyerId, { order_id: second.order.id })).order).not.toHaveProperty("shipping_verification");
+    expect((await view("my_orders", ids.buyerId, { role: "buyer", limit: 20 })).orders.find((o: { id: string }) => o.id === second.order.id)).not.toHaveProperty("shipping_verification");
+    expect(plain.order.status).toBe("pending");
+  });
 });

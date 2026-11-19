@@ -57,6 +57,16 @@ describe("backoff ladder + caps (THI-763 PR 4 — pure)", () => {
   });
 });
 
+describe("NOTIFY_MAX_AGE_HOURS config (THI-1043 — pure)", () => {
+  it("defaults to 48; positive ints parse; zero/garbage/blank fall back", () => {
+    expect(notifyConfig({}).maxAgeHours).toBe(48);
+    expect(notifyConfig({ NOTIFY_MAX_AGE_HOURS: "24" }).maxAgeHours).toBe(24);
+    expect(notifyConfig({ NOTIFY_MAX_AGE_HOURS: "0" }).maxAgeHours).toBe(48); // no off-value: set a large horizon instead
+    expect(notifyConfig({ NOTIFY_MAX_AGE_HOURS: "abc" }).maxAgeHours).toBe(48);
+    expect(notifyConfig({ NOTIFY_MAX_AGE_HOURS: " " }).maxAgeHours).toBe(48); // F1 empty-is-unset
+  });
+});
+
 describe("buildMailer fail-closed matrix (THI-763 PR 4 — pure)", () => {
   it("disabled flag → DryRunMailer, regardless of key", () => {
     expect(buildMailer({ NOTIFY_EMAIL_ENABLED: "false", RESEND_API_KEY: "re_test" }).kind).toBe("dry_run");
@@ -107,6 +117,8 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
   const runTag = crypto.randomBytes(4).toString("hex");
   const enabledCfg = notifyConfig({ NOTIFY_EMAIL_ENABLED: "1", NOTIFY_PUBLIC_BASE_URL: "https://thingery.test" });
   const disabledCfg = notifyConfig({});
+  // THI-1043: explicit cutoff so the staleness tests pin the knob, not the default.
+  const staleCfg = notifyConfig({ NOTIFY_EMAIL_ENABLED: "1", NOTIFY_MAX_AGE_HOURS: "48", NOTIFY_PUBLIC_BASE_URL: "https://thingery.test" });
 
   interface Seed {
     to?: string; // undefined = the account's address; "" = deliberately no address
@@ -267,6 +279,83 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
     await runNotifyDelivery(enabledCfg, m2);
     expect(m1.sent[0]?.idempotencyKey).toBe(`outbox-${id}`);
     expect(m2.sent[0]?.idempotencyKey).toBe(`outbox-${id}`);
+  });
+
+  // THI-1043: staleness cutoff. `now` is injected so the boundary is
+  // deterministic — created_at is seeded relative to the same instant the
+  // sweep will judge against (strict <: a row exactly at the cutoff is
+  // still fresh).
+  const ageTo = (id: string, created: Date) =>
+    db.query("UPDATE email_outbox SET created_at = $2 WHERE id = $1", [id, created]);
+
+  it("staleness cutoff: stale row skips (skipped:stale), fresh row sends; oldest-first claim unaffected", async () => {
+    const now = new Date();
+    const account = await seedAccount(true);
+    // Oldest row is stale (49h > 48h cutoff): without the cutoff it would be
+    // claimed first (created_at ASC) and steal the single scripted send.
+    const staleId = await seedOutbox({ to: account.email, verified: true, accountId: account.id });
+    await ageTo(staleId, new Date(now.getTime() - 49 * 3_600_000));
+    const freshId = await seedOutbox({ to: account.email, verified: true, accountId: account.id });
+    const mailer = new ScriptedMailer([{ ok: true, providerMessageId: "re-fresh" }]);
+    const r = await runNotifyDelivery(staleCfg, mailer, now);
+    expect(r.staleSkipped).toBe(1);
+    expect(r.sent).toBe(1);
+    const staleRow = await db.query<{ status: string; last_error: string; attempts: number; sent_at: Date }>(
+      "SELECT status, last_error, attempts, sent_at FROM email_outbox WHERE id = $1", [staleId]);
+    expect(staleRow.rows[0].status).toBe("skipped");
+    expect(staleRow.rows[0].last_error).toBe("skipped:stale"); // distinguishable from gate + manual skips
+    expect(staleRow.rows[0].attempts).toBe(1); // same bookkeeping as markSkipped
+    expect(staleRow.rows[0].sent_at).toBeNull();
+    const freshRow = await db.query<{ status: string; provider_message_id: string }>(
+      "SELECT status, provider_message_id FROM email_outbox WHERE id = $1", [freshId]);
+    expect(freshRow.rows[0].status).toBe("sent");
+    expect(freshRow.rows[0].provider_message_id).toBe("re-fresh"); // the stale row did not consume the send
+  });
+
+  it("staleness cutoff boundary: exactly at the cutoff still sends, past it skips", async () => {
+    const now = new Date();
+    const account = await seedAccount(true);
+    const atEdge = await seedOutbox({ to: account.email, verified: true, accountId: account.id });
+    await ageTo(atEdge, new Date(now.getTime() - 48 * 3_600_000)); // == cutoff → fresh (strict <)
+    const pastEdge = await seedOutbox({ to: account.email, verified: true, accountId: account.id });
+    await ageTo(pastEdge, new Date(now.getTime() - 48 * 3_600_000 - 1_000)); // 1s past → stale
+    const mailer = new ScriptedMailer([{ ok: true, providerMessageId: "re-edge" }]);
+    const r = await runNotifyDelivery(staleCfg, mailer, now);
+    expect(r.staleSkipped).toBe(1);
+    expect(r.sent).toBe(1);
+    const edge = await db.query<{ status: string; last_error: string }>(
+      "SELECT status, last_error FROM email_outbox WHERE id = $1", [atEdge]);
+    expect(edge.rows[0].status).toBe("sent");
+    const past = await db.query<{ status: string; last_error: string }>(
+      "SELECT status, last_error FROM email_outbox WHERE id = $1", [pastEdge]);
+    expect(past.rows[0].status).toBe("skipped");
+    expect(past.rows[0].last_error).toBe("skipped:stale");
+  });
+
+  it("staleness applies to not-yet-due rows too (a rate-limited backlog ages out)", async () => {
+    const now = new Date();
+    const account = await seedAccount(true);
+    // next_attempt_at in the future (rate-capped posture): age alone must decide.
+    const id = await seedOutbox({ to: account.email, verified: true, accountId: account.id, nextAttemptPast: false });
+    await ageTo(id, new Date(now.getTime() - 50 * 3_600_000));
+    const mailer = new ScriptedMailer();
+    const r = await runNotifyDelivery(staleCfg, mailer, now);
+    expect(r.staleSkipped).toBe(1);
+    expect(r.claimed).toBe(0);
+    expect(mailer.sent).toHaveLength(0);
+    const row = await db.query<{ status: string; last_error: string }>(
+      "SELECT status, last_error FROM email_outbox WHERE id = $1", [id]);
+    expect(row.rows[0].status).toBe("skipped");
+    expect(row.rows[0].last_error).toBe("skipped:stale");
+  });
+
+  it("disabled sweep leaves even stale rows pending (dark posture unchanged)", async () => {
+    const id = await seedOutbox({ to: "", verified: false });
+    await db.query("UPDATE email_outbox SET created_at = now() - interval '100 hours' WHERE id = $1", [id]);
+    const r = await runNotifyDelivery(disabledCfg, new ScriptedMailer());
+    expect(r).toEqual({ claimed: 0, sent: 0, skipped: 0, retried: 0, dead: 0, rateLimited: 0, staleSkipped: 0 });
+    const row = await db.query<{ status: string }>("SELECT status FROM email_outbox WHERE id = $1", [id]);
+    expect(row.rows[0].status).toBe("pending"); // untouched while dark
   });
 });
 

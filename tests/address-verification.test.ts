@@ -13,7 +13,8 @@ import {
 } from "../src/address-verification.js";
 import { EasyPostError, verifyEasyPostDelivery } from "../src/easypost.js";
 import type { EasyPostAddressInput } from "../src/easypost.js";
-import type { ShippingAddress } from "../src/order-flow.js";
+import { shippingVerificationFor } from "../src/order-flow.js";
+import type { ShippingAddress, ShippingVerificationRecord } from "../src/order-flow.js";
 
 const addr = (over: Partial<ShippingAddress> = {}): ShippingAddress => ({
   name: "Mario Rossi",
@@ -322,6 +323,7 @@ describe("AddressSuggestedError + validateSuggestionAddress", () => {
     });
     expect(err.code).toBe("address_verification_suggested");
     expect(err.message).toMatch(/ask the buyer/i);
+    expect(err.message).toMatch(/verification_choice 'keep_original'/);
     expect(err.message).not.toContain("Via Roma");
     expect(err.message).not.toContain("20121");
     expect(err.message).not.toContain("Rossi");
@@ -404,5 +406,51 @@ describe("AddressSuggestedError + validateSuggestionAddress", () => {
       const viaValidator = validateSuggestionAddress(candidate) !== null;
       expect(viaValidator, JSON.stringify(candidate)).toBe(viaSchema);
     }
+  });
+});
+
+describe("shippingVerificationFor — §5a property-level serialization (pure)", () => {
+  const record = (over: Partial<ShippingVerificationRecord> = {}): ShippingVerificationRecord =>
+    ({ status: "suggested", kept: true, suggestion: addr(), checked_at: "2026-11-18T00:00:00.000Z", ...over });
+  const order = (over: Record<string, unknown>) => ({
+    buyer_id: "b", seller_id: "s", status: "sold", fulfillment: "shipping",
+    payment_mode: "stripe", shipping_address_shared_at: null,
+    shipping_address: addr(), shipping_verification: record(),
+    ...over,
+  });
+  const META = { status: "suggested", checked_at: "2026-11-18T00:00:00.000Z" };
+
+  it("the buyer sees the full record on both surfaces", () => {
+    expect(shippingVerificationFor(order({}), "b", "order")).toEqual(record());
+    expect(shippingVerificationFor(order({}), "b", "list")).toEqual(record());
+  });
+
+  it("list surfaces give the seller metadata only — even when the address itself is shared", () => {
+    const shared = order({ payment_mode: "off_platform", shipping_address_shared_at: new Date() });
+    expect(shippingVerificationFor(shared, "s", "list")).toEqual(META);
+    expect(shippingVerificationFor(shared, "s", "order")).toEqual(record()); // order view rides the address rule
+  });
+
+  it("order views release the kept suggestion under exactly the address rule", () => {
+    // stripe sold/label_issued → full; every other state/meta shape mirrors shippingAddressForSeller
+    expect(shippingVerificationFor(order({}), "s", "order")).toEqual(record());
+    expect(shippingVerificationFor(order({ status: "in_transit" }), "s", "order")).toEqual(META);
+    expect(shippingVerificationFor(order({ fulfillment: "pickup" }), "s", "order")).toEqual(META);
+    const offPlatform = order({ payment_mode: "off_platform" });
+    expect(shippingVerificationFor(offPlatform, "s", "order")).toEqual(META); // pre-consent
+    expect(shippingVerificationFor({ ...offPlatform, shipping_address_shared_at: new Date() }, "s", "order")).toEqual(record());
+  });
+
+  it("outsiders get metadata on both surfaces; a null record omits the field everywhere", () => {
+    expect(shippingVerificationFor(order({}), "x", "order")).toEqual(META);
+    expect(shippingVerificationFor(order({}), "x", "list")).toEqual(META);
+    expect(shippingVerificationFor(order({ shipping_verification: null }), "b", "order")).toBeNull();
+    expect(shippingVerificationFor(order({ shipping_verification: null }), "s", "list")).toBeNull();
+  });
+
+  it("verified/unverified records carry no suggestion key for anyone", () => {
+    const verified = order({ shipping_verification: record({ status: "verified", kept: undefined, suggestion: undefined }) });
+    expect(shippingVerificationFor(verified, "b", "order")).toEqual({ status: "verified", checked_at: META.checked_at });
+    expect(shippingVerificationFor(verified, "s", "order")).toEqual({ status: "verified", checked_at: META.checked_at });
   });
 });

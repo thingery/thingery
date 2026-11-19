@@ -640,13 +640,19 @@ ${body}
 /** Page/redirect hardening headers (F10): no-store, no-referrer, anti-framing.
  * CSP: default-src 'none' still blocks every remote subresource, script, inline
  * style attribute and framing vector. The one exception is PAGE_CSS, allowed by
- * its hash: it is a fixed constant, so a hash does what a per-request nonce would. */
-function pageHeaders(res: Response): void {
+ * its hash: it is a fixed constant, so a hash does what a per-request nonce would.
+ *
+ * `formRedirectUri` is for the consent page only: browsers (Chrome first) apply
+ * form-action to every redirect that follows a form submission, so the POST's
+ * 302 back to the client would be blocked under 'self' alone. Allowing just the
+ * validated redirect_uri's origin keeps the form pinned everywhere else. */
+function pageHeaders(res: Response, formRedirectUri?: string): void {
+  const formAction = formRedirectUri === undefined ? "'self'" : `'self' ${new URL(formRedirectUri).origin}`;
   res.set({
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": `default-src 'none'; style-src 'sha256-${PAGE_CSS_HASH}'; form-action 'self'; frame-ancestors 'none'`,
+    "Content-Security-Policy": `default-src 'none'; style-src 'sha256-${PAGE_CSS_HASH}'; form-action ${formAction}; frame-ancestors 'none'`,
   });
 }
 
@@ -912,7 +918,7 @@ function mountAuthorize(app: Express): void {
       nonce,
     });
     const { rows } = await pool.query<{ email: string | null }>(`SELECT email FROM sellers WHERE id = $1`, [seller.id]);
-    pageHeaders(res);
+    pageHeaders(res, validated.redirectUri);
     res.type("html").send(
       consentPageHtml({
         clientName: validated.client.client_name ?? validated.client.client_id,

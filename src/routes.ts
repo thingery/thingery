@@ -27,6 +27,7 @@ import { verifyDigestUnsubscribeToken } from "./notify/digest.js";
 import { planAccountNotification } from "./notify/items.js";
 import { subjectSafe } from "./notify/templates.js";
 import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
+import { appendChatTurn, clearChatHistory, loadChatHistory } from "./chat-history.js";
 import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import {
   draftListing,
@@ -123,6 +124,7 @@ const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/login
 const apiKeyRotateLimiter = new RateLimiter(10, 60 * 60_000); // 10 key rotations per seller per hour (THI-114)
 export const chatAnonLimiter = new RateLimiter(chatLimits.turnsHourlyAnon, 60 * 60_000); // anonymous chats per IP per hour (THI-180: env-configurable)
 export const chatAuthedLimiter = new RateLimiter(chatLimits.turnsHourlyAuthed, 60 * 60_000); // logged-in chats per hour (THI-180: env-configurable)
+export const chatHistoryLimiter = new RateLimiter(240, 60 * 60_000); // chat history reads/clears per account per hour
 export const adminAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 admin calls per IP per hour (F7)
 // THI-760 Phase 1 / THI-763: notification reads/marks are cheap, but every
 // route on the session API gets a cap — 240/h per account is far above any
@@ -1841,7 +1843,48 @@ api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
       seller ? { sellerId: seller.id } : { ip: clientIp(req) },
     );
   }
+  if (seller) {
+    await appendChatTurn(seller.id, {
+      userContent: parsed.data.message,
+      assistantContent: reply.text,
+      tools: reply.tools,
+    }).catch((err: unknown) => {
+      console.error("[chat-history] failed to persist turn:", err);
+    });
+  }
   res.json({ reply }); // byte-identical to the pre-THI-180 shape — no usage key leaks
+}));
+
+api.get("/chat/history", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to load chat history." });
+    return;
+  }
+  if (!chatHistoryLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/chat/history" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const messages = await loadChatHistory(seller.id);
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ messages });
+}));
+
+api.delete("/chat/history", asyncHandler(async (req: Request, res: Response) => {
+  const seller = await sellerFromSession(req).catch(() => null);
+  if (!seller) {
+    res.status(401).json({ error: "Log in to clear chat history." });
+    return;
+  }
+  if (!chatHistoryLimiter.allow(`seller:${seller.id}`)) {
+    logSecurityEvent({ type: "rate_limit", route: "/api/chat/history" }, { sellerId: seller.id });
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  await clearChatHistory(seller.id);
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true });
 }));
 
 // --- admin: dispute resolution (spec THI-3 §4.3, PR-9) ----------------------

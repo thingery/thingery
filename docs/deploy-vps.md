@@ -827,8 +827,10 @@ HTTPS. If the endpoint is on a private overlay network (e.g. a WireGuard/
 Tailscale tailnet), join the overlay from the VPS, and prefer deterministic
 name resolution over changing host DNS: run the join with `--accept-dns=false`
 and pin the endpoint host in `/etc/hosts` to its overlay IP (idempotent one
-line). Verify from inside the app container — node resolves `/etc/hosts` via
-getaddrinfo:
+line). Containers do **not** inherit the host `/etc/hosts`, so also pin it for
+the app container via `REPORT_REVIEW_HOST_PIN=<endpoint-host>:<overlay-ip>` in
+the `.env` (compose `extra_hosts`; unset = no-op loopback pin). Verify from
+inside the app container — node resolves `/etc/hosts` via getaddrinfo:
 
 ```bash
 node -e "require('dns').lookup('<endpoint-host>',(e,a)=>console.log(e||a))"
@@ -860,6 +862,57 @@ or `REPORT_REVIEW_API_TOKEN` in `.env`, then recreate the container — the seam
 returns to no-op; reports keep flowing and existing refs stay stored. Blast
 radius of the whole feature: the app container only (one outbound HTTPS call
 per new report; no schema, no ports, no Caddy/db changes).
+
+### 5.5 Notifications Phase 2: bounce webhook + operator alert mailbox (THI-1048)
+
+Two dark-by-default knobs complete the notification stack. Both are passthrough
+env in `docker-compose.prod.yml`; **values live only in the VPS `.env`**.
+
+**1. `RESEND_WEBHOOK_SECRET` — bounce tracking.** While unset,
+`https://thingery.dev/api/webhooks/resend` answers fail-closed 503 and hard
+bounces are untracked (a dead address keeps being retried per notification,
+then dead-letters). When set, the endpoint verifies Resend's HMAC signature
+(`t=…,v1=…` over raw bytes, 5-min replay window) and on `email.bounced`
+suppresses the address (`sellers.email_bounced_at`) and skips its pending
+outbox rows — idempotent on redelivery (`src/webhooks-resend.ts`).
+
+**Wiring:** generate the secret server-side, put the SAME value in the app
+`.env` and in the Resend dashboard's webhook endpoint
+(`https://thingery.dev/api/webhooks/resend`, event `email.bounced`):
+
+```bash
+cd /opt/thingery
+grep -q '^RESEND_WEBHOOK_SECRET=' .env || \
+  printf 'RESEND_WEBHOOK_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
+# then register the webhook in the Resend dashboard with the same value
+# (view it on the VPS: grep '^RESEND_WEBHOOK_SECRET=' .env), and:
+docker compose -f docker-compose.prod.yml up -d app   # env changes recreate
+```
+
+**Verification:** `curl -i -X POST https://thingery.dev/api/webhooks/resend \
+-H 'content-type: application/json' -d '{}'` → **400** `signature verification
+failed` (a 503 means the secret is still unset). Real bounces log
+`[webhooks:resend] bounce suppressed: …` in the app container.
+
+**2. `OPERATOR_ALERT_EMAIL` — operator alert mailbox.** While unset,
+dead-letter and sweep anomaly alerts (stuck money, stale disputes, dead
+letters) only hit container logs. When set, `src/notify/operator.ts` plans
+deduped `operator.*` outbox rows to that mailbox — delivered by the ordinary
+delivery sweep (so they only send while email sending is enabled; at-most-once
+per subject). The address is not validated by the app: point it at a mailbox
+that exists, or its first bounce will suppress it like any other address.
+
+**Wiring:** append `OPERATOR_ALERT_EMAIL=<mailbox>` to the VPS `.env`, recreate
+the app container (same command as above).
+
+**Verification:** presence-only — `docker compose -f docker-compose.prod.yml
+exec app printenv OPERATOR_ALERT_EMAIL >/dev/null && echo set`. First alert
+lands as an `operator.*` row in `email_outbox` and sends with the sweep.
+
+**Rollback:** unset either variable in `.env` + recreate — webhook returns to
+the 503 stub (Resend retries, then disables the endpoint), alerts return to
+log-only. Blast radius: the app container only (inbound webhook route already
+proxied by Caddy; no schema, no ports, no db changes).
 
 ## 6. LLM guard: provider balance/failure detection
 

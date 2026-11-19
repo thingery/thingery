@@ -70,10 +70,14 @@ NOT lose the report: `board_issue_ref` stays NULL, the failure is logged
 (`console.warn`, bounded) and a later backfill can retry NULLs (open
 question). At-most-once per report: the UNIQUE dedupe means only a committed
 INSERT triggers a create; a failed create is retried only by the explicit
-backfill. Config: `REPORT_REVIEW_CREATE_URL`, `REPORT_REVIEW_API_TOKEN`,
+backfill. Delivery runs off the report request path (THI-1066): the notify
+is scheduled after COMMIT and the request returns immediately, so a slow
+triage endpoint cannot stall report filing; the per-attempt budget is
+env-tunable via `REPORT_REVIEW_TIMEOUT_MS` (default 5000 ms). Config:
+`REPORT_REVIEW_CREATE_URL`, `REPORT_REVIEW_API_TOKEN`,
 `REPORT_REVIEW_ASSIGNEE_ID`, `REPORT_REVIEW_ITEM_URL_TEMPLATE` (public item
 URL prefix) — absent URL or token ⇒ notification disabled (rows still land,
-ref NULL), never a crash. Timeout 5s; one attempt, no in-process retry.
+ref NULL), never a crash. One attempt, no in-process retry.
 
 **State machine (explicit):** `status: open → resolved | dismissed`.
 v1 ships only the `open` state (INSERT); `resolved`/`dismissed` are terminal
@@ -159,8 +163,9 @@ step is required to roll back behavior.
 ## Open questions
 
 1. Notify backfill for NULL `board_issue_ref` (step-3 failures): v1
-   keeps a manual psql check; a small sweep is YAGNI until volume says
-   otherwise.
+   keeps a manual psql check; an automatic sweep needs attempt/backoff
+   state (the email-outbox pattern) to avoid unbounded retries — tracked
+   as the follow-up to THI-1066.
 2. Triage UI (resolve/dismiss) — deliberately out of scope v1; the state
    machine reserves the states.
 3. Report-user-from-profile: only if trivially cheap later.

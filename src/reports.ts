@@ -21,10 +21,15 @@
 // values unrepresentable and no v1 path mutates status, so illegal
 // transitions are impossible by construction.
 //
-// board_issue_ref stays NULL in this module: the board notification seam
-// (THI-788 step 3) fills it after the INSERT commits — never inside the
+// board_issue_ref stays NULL in this module's request path: the board
+// notification seam (THI-788 step 3) fills it off-path — never inside the
 // insert transaction (an external API call must not hold a DB lock nor
-// fail a committed report).
+// fail a committed report), and since THI-1066 not even on the request
+// path: the creators schedule the notify after COMMIT and return
+// immediately, so a slow triage endpoint cannot stall the user-facing
+// report (measured 2026-11-19: control-plane spikes pushed the triage
+// POST to ~30s; the old awaited 5s budget aborted and taxed every report
+// request with the wait).
 
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
@@ -69,8 +74,9 @@ export interface ItemReport {
 }
 
 /** Best-effort triage notification (spec §board notification): one attempt
- *  after the INSERT committed, outside the transaction. Never throws to the
- *  caller — a notification failure must not fail a saved report. */
+ *  scheduled after the INSERT committed, outside the transaction and (since
+ *  THI-1066) outside the request path. Never throws to the caller — a
+ *  notification failure must not fail a saved report. */
 async function notifyReview(input: {
   report: ItemReport;
   itemId: string;
@@ -103,6 +109,32 @@ async function notifyReview(input: {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// --- off-path delivery (THI-1066) -----------------------------------------
+// The triage notify is fired-and-tracked, never awaited by the creators:
+// user-facing report latency is the DB round-trip alone, whatever the
+// control plane is doing. Delivery stays best-effort — the promise bodies
+// (notifyReview/notifyReviewReport) catch their own errors, so nothing here
+// can reject; the tracker exists only so tests and a future graceful
+// shutdown can observe completion (in-flight notifies are lost on process
+// exit — same NULL-ref miss as an aborted attempt, by design).
+
+const pendingReviewDeliveries = new Set<Promise<void>>();
+
+/** Schedules one best-effort delivery off the request path. */
+function scheduleReviewDelivery(deliver: () => Promise<void>): void {
+  const p = deliver().finally(() => pendingReviewDeliveries.delete(p));
+  pendingReviewDeliveries.add(p);
+}
+
+/** Resolves when every in-flight off-path delivery has settled. Exported
+ *  for tests (deterministic assertions) — a future graceful-shutdown drain
+ *  can reuse it unchanged. */
+export async function flushReportReviewDeliveries(): Promise<void> {
+  while (pendingReviewDeliveries.size > 0) {
+    await Promise.allSettled([...pendingReviewDeliveries]);
+  }
+}
 
 /** Shared field validation (order-reviews spec PR 3: review reports use
  *  the same canned slugs and the 10–1000 motivation rule as item reports).
@@ -171,16 +203,19 @@ export async function createItemReport(
         [input.reporterAccountId, input.itemId, input.reason, motivation],
       );
       await db.query("COMMIT");
-      // Triage task creation happens after COMMIT (spec): an external call
-      // must not hold the insert lock, and a committed report is never lost
-      // to a notification failure.
-      await notifyReview({
-        report: inserted.rows[0],
-        itemId: input.itemId,
-        reason: input.reason,
-        motivation,
-        reporterAccountId: input.reporterAccountId,
-      });
+      // Triage task creation is scheduled after COMMIT (spec) and off the
+      // request path (THI-1066): no external call holds the insert lock, a
+      // committed report is never lost to a notification failure, and a
+      // slow triage endpoint cannot stall the user's report.
+      scheduleReviewDelivery(() =>
+        notifyReview({
+          report: inserted.rows[0],
+          itemId: input.itemId,
+          reason: input.reason,
+          motivation,
+          reporterAccountId: input.reporterAccountId,
+        }),
+      );
       return inserted.rows[0];
     } catch (err) {
       await db.query("ROLLBACK").catch(() => {});
@@ -235,8 +270,9 @@ export interface ReviewReport {
   created_at: Date;
 }
 
-/** Best-effort triage notification, the notifyReview mirror: after COMMIT,
- *  never throws, ref lands via setBoardIssueRef. */
+/** Best-effort triage notification, the notifyReview mirror: scheduled
+ *  after COMMIT, off the request path (THI-1066), never throws, ref lands
+ *  via setBoardIssueRef. */
 async function notifyReviewReport(input: {
   report: ReviewReport;
   reviewId: string;
@@ -313,13 +349,16 @@ export async function createReviewReport(
         [input.reporterAccountId, input.reviewId, input.reason, motivation],
       );
       await db.query("COMMIT");
-      await notifyReviewReport({
-        report: inserted.rows[0],
-        reviewId: input.reviewId,
-        reason: input.reason,
-        motivation,
-        reporterAccountId: input.reporterAccountId,
-      });
+      // Off the request path like the item-report twin (THI-1066).
+      scheduleReviewDelivery(() =>
+        notifyReviewReport({
+          report: inserted.rows[0],
+          reviewId: input.reviewId,
+          reason: input.reason,
+          motivation,
+          reporterAccountId: input.reporterAccountId,
+        }),
+      );
       return inserted.rows[0];
     } catch (err) {
       await db.query("ROLLBACK").catch(() => {});

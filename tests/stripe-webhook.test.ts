@@ -264,6 +264,42 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     expect(we.rows[0].process_error).toContain("rejected");
   });
 
+  it("quote-mode F5 (buyer-paid shipping §3): amount_total = price + label is accepted; price-only is a mismatch", async () => {
+    const order = await seedOrder();
+    // Turn the seeded order into a quote-mode row exactly as createOrder
+    // would have: label_quote set, flat amount stored 0.
+    await db.query(
+      "UPDATE orders SET label_quote = $2::jsonb, shipping_price_cents = 0 WHERE id = $1",
+      [order.id, JSON.stringify({ shipment_id: "shp_1", rate_id: "rate_1", carrier: "DPD", service: "Classic", amount_cents: 733, currency: "EUR", weight_grams: 2000, dimensions_mm: null, origin: { name: "S", line1: "1", city: "C", postal_code: "00", country: "IT" }, destination: { name: "B", line1: "1", city: "C", postal_code: "00", country: "IT" }, quoted_at: "2026-11-18T00:00:00Z" })],
+    );
+    const good = event("checkout.session.completed", {
+      id: order.checkout_session_id, object: "checkout_session",
+      payment_status: "paid", payment_intent: "pi_q", amount_total: 10733, currency: "eur",
+    });
+    const r1 = await post(app, JSON.stringify(good));
+    expect(r1.status).toBe(200);
+    const row = await db.query<OrderRow>("SELECT * FROM orders WHERE id = $1", [order.id]);
+    expect(row.rows[0].status).toBe("sold");
+    expect(row.rows[0].payment_intent_id).toBe("pi_q");
+  });
+
+  it("quote-mode F5: a session that omits the label line (price-only amount) is rejected", async () => {
+    const order = await seedOrder();
+    await db.query(
+      "UPDATE orders SET label_quote = $2::jsonb, shipping_price_cents = 0 WHERE id = $1",
+      [order.id, JSON.stringify({ shipment_id: "shp_1", rate_id: "rate_1", carrier: "DPD", service: "Classic", amount_cents: 733, currency: "EUR", weight_grams: 2000, dimensions_mm: null, origin: { name: "S", line1: "1", city: "C", postal_code: "00", country: "IT" }, destination: { name: "B", line1: "1", city: "C", postal_code: "00", country: "IT" }, quoted_at: "2026-11-18T00:00:00Z" })],
+    );
+    const bad = event("checkout.session.completed", {
+      id: order.checkout_session_id, object: "checkout_session",
+      payment_status: "paid", payment_intent: "pi_q2", amount_total: 10000, currency: "eur",
+    });
+    const r1 = await post(app, JSON.stringify(bad));
+    expect(r1.status).toBe(200);
+    expect(r1.json).toMatchObject({ rejected: expect.stringContaining("mismatch") });
+    const row = await db.query("SELECT status FROM orders WHERE id = $1", [order.id]);
+    expect(row.rows[0].status).toBe("pending");
+  });
+
   it("duplicate event id is a 200 no-op (replay-safe, §5.4)", async () => {
     const order = await seedOrder();
     const ev = event("checkout.session.completed", {

@@ -53,6 +53,13 @@ const orderRow = {
   status_changed_at: new Date("2026-01-01T12:00:00.000Z"),
   created_at: new Date("2026-01-01T00:00:00.000Z"),
   updated_at: new Date("2026-01-01T12:00:00.000Z"),
+  label_quote: {
+    shipment_id: "shp_internal", rate_id: "rate_internal", carrier: "DPD", service: "Classic",
+    amount_cents: 733, currency: "EUR", weight_grams: 2000, dimensions_mm: null,
+    origin: { name: "Seller", line1: "Via Orig 1", city: "Turin", postal_code: "10121", country: "IT" },
+    destination: { name: "Buyer", line1: "Via Test 1", city: "Milan", postal_code: "20121", country: "IT" },
+    quoted_at: "2026-01-01T00:00:00.000Z",
+  },
   future_internal_column: "must-not-appear",
 };
 
@@ -62,11 +69,14 @@ const PRIVATE_FIELDS = [
   "shipping_address", "seller_id", "buyer_id",
   "tracker_id", "checkout_session_id", "payment_intent_id", "transfer_id", "refund_id",
   "future_internal_column",
+  // The §2 quote snapshot is PII-bearing (origin/destination) — its only
+  // public projection is the `shipping` block (§9).
+  "label_quote", "origin", "destination", "shipment_id", "rate_id", "quoted_at",
 ];
 
 const ROW_FIELDS = [
   "id", "item_id", "status", "payment_mode", "price_cents", "shipping_price_cents",
-  "total_price_cents", "currency", "fulfillment", "carrier", "tracking_code", "label_url",
+  "total_price_cents", "shipping", "currency", "fulfillment", "carrier", "tracking_code", "label_url",
   "payment_deadline", "dispute_deadline", "status_changed_at", "created_at", "updated_at",
 ];
 const VIEW_FIELDS = [...ROW_FIELDS, "item_title", "payment_url"];
@@ -135,7 +145,7 @@ describe("order tools expose an explicit allowlist of fields", () => {
       payment_mode: "stripe",
       price_cents: 12500,
       shipping_price_cents: 500,
-      total_price_cents: 13000,
+      total_price_cents: 13733, // price + flat + label (fixture carries both to prove the math)
       currency: "EUR",
       fulfillment: "shipping",
       carrier: "DHL",
@@ -147,6 +157,13 @@ describe("order tools expose an explicit allowlist of fields", () => {
       status_changed_at: "2026-01-01T12:00:00.000Z",
       created_at: "2026-01-01T00:00:00.000Z",
       updated_at: "2026-01-01T12:00:00.000Z",
+      shipping: {
+        mode: "label_quote",
+        amount_cents: 733,
+        currency: "EUR",
+        carrier: "DPD",
+        service: "Classic",
+      },
     });
   });
 

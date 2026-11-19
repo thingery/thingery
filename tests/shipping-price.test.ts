@@ -14,7 +14,7 @@ import { normalizeUpdateArgs, signChatConfirmToken, TOOLS, verifyChatConfirmToke
 import { pool, type ItemRow, type SellerRow } from "../src/db.js";
 import { createItem, MAX_SHIPPING_PRICE_CENTS, ShippingPriceError, updateItem } from "../src/items.js";
 import { cancelOrder } from "../src/order-flow.js";
-import { createCheckoutSession, createRefundForOrder, createTransferForOrder, orderAmountCents, setStripeForTests } from "../src/stripe.js";
+import { createCheckoutSession, createRefundForOrder, createTransferForOrder, chargeTotalCents, refundCents, setStripeForTests } from "../src/stripe.js";
 import { itemToPublic, registerTools } from "../src/tools.js";
 
 delete process.env.EMBED_API_KEY;
@@ -302,7 +302,33 @@ describe("money path includes shipping", () => {
     const amounts = params!.line_items!.map((line) => line.price_data!.unit_amount);
     expect(amounts).toEqual([12000, 700]);
     expect(params!.line_items![1].price_data!.product_data!.name).toBe("Shipping");
-    expect(amounts[0]! + amounts[1]!).toBe(orderAmountCents(order));
+    expect(amounts[0]! + amounts[1]!).toBe(chargeTotalCents(order));
+    expect(params!.metadata).toEqual({ order_id: "o1" }); // no label metadata on flat orders
+  });
+
+  it("quote-mode Checkout: the Shipping line is the label amount, flat stays off, metadata carries the split", async () => {
+    let params: Stripe.Checkout.SessionCreateParams | undefined;
+    const client = {
+      checkout: { sessions: { create: async (p: Stripe.Checkout.SessionCreateParams) => { params = p; return { id: "cs_2" }; } } },
+    } as unknown as Stripe;
+    const quoteOrder = { ...order, shipping_price_cents: 0, label_quote: { amount_cents: 733 } };
+    await createCheckoutSession(
+      {
+        orderId: "o1",
+        item: { title: "Oak desk", currency: "EUR", price_cents: 12000 },
+        shippingPriceCents: 0,
+        labelQuoteAmountCents: 733,
+        expiresAt: new Date(Date.now() + 3_600_000),
+        baseUrl: "https://thingery.test",
+      },
+      client,
+    );
+    const amounts = params!.line_items!.map((line) => line.price_data!.unit_amount);
+    expect(amounts).toEqual([12000, 733]); // item + label — no flat line
+    expect(params!.line_items![1].price_data!.product_data!.name).toBe("Shipping");
+    expect(amounts[0]! + amounts[1]!).toBe(chargeTotalCents(quoteOrder));
+    expect(params!.metadata).toEqual({ order_id: "o1", label_quote_amount_cents: "733" });
+    expect(params!.payment_intent_data!.metadata).toEqual({ order_id: "o1", label_quote_amount_cents: "733" });
   });
 
   it("pays the seller price plus shipping minus the Stripe fee on the whole charge", async () => {
@@ -324,6 +350,93 @@ describe("money path includes shipping", () => {
     } as unknown as Stripe;
     await createRefundForOrder(order, "pi_1", client);
     expect(refunded).toBe(12700);
+  });
+
+  it("quote-mode full refund includes the label line the buyer paid", async () => {
+    let refunded: number | undefined;
+    const client = {
+      refunds: { create: async (p: { amount: number }) => { refunded = p.amount; return { id: "re_2" }; } },
+    } as unknown as Stripe;
+    await createRefundForOrder({ ...order, shipping_price_cents: 0, label_quote: { amount_cents: 733 } }, "pi_1", client);
+    expect(refunded).toBe(12733);
+  });
+
+  it("§6 settle-aware refunds: label retained / already refunded / policy matrix", async () => {
+    // Matrix over refundCents — every combination the five sites can see.
+    const base = { id: "o1", price_cents: 12000, shipping_price_cents: 0 };
+    const quote = (extra: Record<string, unknown> = {}) => ({ amount_cents: 733, ...extra });
+    // Flat mode: full amount, policies are irrelevant (no line to deduct).
+    expect(refundCents({ ...base, shipping_price_cents: 700, label_quote: null, label_purchase: null }, "exclude_label")).toBe(12700);
+    // Quote mode, no label bought (cancel before purchase, stale sale, never
+    // shipped): full charge — the deployment never spent.
+    expect(refundCents({ ...base, label_quote: quote(), label_purchase: null }, "exclude_label")).toBe(12733);
+    expect(refundCents({ ...base, label_quote: quote(), label_purchase: null }, "include_label")).toBe(12733);
+    // Platform label bought, excluding policy (cancel, stale, never-shipped,
+    // admin): the line is the buyer's — refunded amount omits it.
+    expect(refundCents({ ...base, label_quote: quote(), label_purchase: { shipment_id: "shp_1" } }, "exclude_label")).toBe(12000);
+    // Platform label bought, including policy (carrier failure with a
+    // platform label): the deployment's procurement failed — full refund.
+    expect(refundCents({ ...base, label_quote: quote(), label_purchase: { shipment_id: "shp_1" } }, "include_label")).toBe(12733);
+    // Own-label line refund already fired (labelrefund): remainder only,
+    // regardless of policy — the two refunds pair to exactly the charge.
+    expect(refundCents({ ...base, label_quote: quote({ line_refund_id: "re_line" }), label_purchase: null }, "exclude_label")).toBe(12000);
+    expect(refundCents({ ...base, label_quote: quote({ line_refund_id: "re_line" }), label_purchase: null }, "include_label")).toBe(12000);
+    // The impossible stack (C1): over-deduct, clamped to ≥ 0 and never above
+    // the charge — refunds too little, alertable, never too much.
+    expect(refundCents({ ...base, label_quote: quote({ line_refund_id: "re_line" }), label_purchase: { shipment_id: "shp_1" } }, "exclude_label")).toBe(11267);
+  });
+
+
+  it("§4 quote-mode payout: balance must equal the full charge; fee share is proportional, rounded up", async () => {
+    // Charge 12733 (12000 item + 733 label), payout base 12000, fee 216 on
+    // the whole charge: seller share = ceil(216 × 12000 / 12733) = 204 — the
+    // label line's fee slice stays with the operator, and the seller is
+    // never charged a fee on the buyer's label money.
+    const { client, transfers } = stripeWithCharge(12733, 216);
+    await createTransferForOrder({ ...order, shipping_price_cents: 0, label_quote: { amount_cents: 733 } }, "acct_1", client);
+    expect(transfers).toHaveLength(1);
+    expect(transfers[0].amount).toBe(11796); // 12000 − 204
+  });
+
+  it("§4 rule 1: a balance transaction that omits the label line fails closed (no wrong transfer)", async () => {
+    const { client, transfers } = stripeWithCharge(12000, 216); // base only, not the charge
+    await expect(
+      createTransferForOrder({ ...order, shipping_price_cents: 0, label_quote: { amount_cents: 733 } }, "acct_1", client),
+    ).rejects.toThrow(/payout_charge_mismatch/);
+    expect(transfers).toHaveLength(0);
+  });
+
+  it("B1 (THI-1013): a zero remainder refunds nothing due — no Stripe call, no throw", async () => {
+    // Free item + bought label, excluding policy: the charge IS the label
+    // line, so the remainder is 0 — Stripe would reject amount 0 with
+    // invalid_request_error and the old code threw, wedging every refund
+    // site. Regression: the helper settles without calling Stripe.
+    const created: number[] = [];
+    const client = {
+      refunds: { create: async (p: { amount: number }) => { created.push(p.amount); return { id: "re_never" }; } },
+    } as unknown as Stripe;
+    const free = { id: "o1", payment_intent_id: "pi_1", price_cents: 0, shipping_price_cents: 0, currency: "EUR", label_quote: { amount_cents: 733 }, label_purchase: { shipment_id: "shp_1" } };
+    const r = await createRefundForOrder(free, "pi_1", client, "exclude_label");
+    expect(created).toEqual([]); // no zero-amount refund attempt ever reaches Stripe
+    expect(r).toEqual({ nothingDue: true, id: null });
+    // Same zero remainder with the own-label line already refunded: the line
+    // refund id surfaces so refund_id reconcile guards stay sound.
+    const lineRefunded = { ...free, label_purchase: null, label_quote: { amount_cents: 733, line_refund_id: "re_line" } };
+    const r2 = await createRefundForOrder(lineRefunded, "pi_1", client, "exclude_label");
+    expect(created).toEqual([]);
+    expect(r2).toEqual({ nothingDue: true, id: "re_line" });
+  });
+
+  it("B1-sibling (THI-1013): a zero payout base settles without a transfer", async () => {
+    // Free listing in quote mode: the buyer's charge is the label line only,
+    // which never enters the payout base. The old netting throw wedged the
+    // order in payout_pending forever; now it is an explicit zero-base
+    // outcome with no Stripe call (Stripe rejects amount-0 transfers too).
+    const { client, transfers } = stripeWithCharge(733, 88);
+    const free = { ...order, price_cents: 0, shipping_price_cents: 0, label_quote: { amount_cents: 733 } };
+    const t = await createTransferForOrder(free, "acct_1", client);
+    expect(transfers).toHaveLength(0);
+    expect(t).toEqual({ zeroBase: true, id: null });
   });
 });
 
@@ -372,7 +485,7 @@ describe.skipIf(!available)("shipping price through the order flow (DB)", () => 
   });
   beforeEach(async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    await db.query("TRUNCATE order_events, webhook_events, orders, items, sellers RESTART IDENTITY CASCADE");
+    await db.query("TRUNCATE order_events, webhook_events, orders, items, sellers, email_outbox RESTART IDENTITY CASCADE");
     const { rows } = await db.query<{ id: string; display_name: string }>(
       `INSERT INTO sellers (api_key_hash, display_name, email)
        VALUES ('ship-fixture-s', 'ship-seller', 'ship-s@t.dev'), ('ship-fixture-b', 'ship-buyer', 'ship-b@t.dev')
@@ -465,4 +578,77 @@ describe.skipIf(!available)("shipping price through the order flow (DB)", () => 
     await cancelOrder(orderId, buyerId, "changed mind");
     expect(refunded).toBe(12700);
   });
+
+  it("B1 regression (THI-1013): free item + bought label — cancel settles the zero remainder without a Stripe refund", async () => {
+    // Fails against pre-fix code: the charge is the label line only, so the
+    // cancel-site remainder is 0 and Stripe (here: the fake, mirroring the
+    // real invalid_request_error on amount 0) rejects it — cancelOrder threw
+    // and the order stayed wedged in `sold`. With the fix the transition
+    // fires and no zero-amount refund is ever attempted.
+    process.env.STRIPE_SECRET_KEY = "sk_test_b1";
+    await db.query("UPDATE sellers SET stripe_account_id = 'acct_x', stripe_onboarded_at = now() WHERE id = $1", [sellerId]);
+    const created: number[] = [];
+    const client = {
+      checkout: { sessions: { create: async () => ({ id: "cs_b1", url: "https://pay.test/b1" }) } },
+      refunds: {
+        create: async (p: { amount: number }) => {
+          created.push(p.amount);
+          if (p.amount <= 0) throw new Error("invalid_request_error: amount must be greater than 0");
+          return { id: "re_b1" };
+        },
+      },
+    } as unknown as Stripe;
+    setStripeForTests(client);
+
+    // Free listing in the quote-mode shape: price 0, flat shipping stored 0 —
+    // the buyer's charge is the label line only (snapshot the label purchase
+    // onto the row below, as the §5 flow leaves it after buying the label).
+    const item = await list({ price_cents: 0, shipping_price_cents: 0 });
+    const ordered = await callTool(buyerTools, "create_order", { item_id: item.id, shipping_address: address });
+    expect(ordered.body.order).toMatchObject({ payment_mode: "stripe" });
+    const orderId = ordered.body.order.id as string;
+    await db.query(
+      `UPDATE orders SET status = 'sold', payment_intent_id = 'pi_b1', status_changed_at = now(),
+         label_quote = '{"amount_cents":733}', label_purchase = '{"shipment_id":"shp_1"}' WHERE id = $1`,
+      [orderId],
+    );
+    await db.query("UPDATE items SET status = 'sold' WHERE id = $1", [item.id]);
+
+    await cancelOrder(orderId, buyerId, "changed mind"); // must not throw
+    const row = (await db.query("SELECT status, refund_id FROM orders WHERE id = $1", [orderId])).rows[0];
+    // #8 cancel → refunding, then the inline settle fires #21 refund_confirmed —
+    // the same terminal the charge.refunded webhook produces for a real refund.
+    expect(row.status).toBe("refunded"); // the unwind completed — the path never breaks
+    expect(row.refund_id).toBeNull(); // nothing due, nothing recorded
+    expect(created).toEqual([]); // no refunds.create with amount <= 0 ever reached Stripe
+  });
+
+    it("§6 + C1: a stacked row (label_purchase ∧ line_refund_id) still refunds, clamped, and files one operator alert", async () => {
+    let refunded: number | undefined;
+    const client = {
+      refunds: { create: async (p: { amount: number }) => { refunded = p.amount; return { id: "re_3" }; } },
+    } as unknown as Stripe;
+    const baseOrder = { id: "o1", payment_intent_id: "pi_1", price_cents: 12000, shipping_price_cents: 700, currency: "EUR" };
+    const stacked = { ...baseOrder, shipping_price_cents: 0, label_quote: { amount_cents: 733, line_refund_id: "re_line" }, label_purchase: { shipment_id: "shp_1" } };
+    process.env.OPERATOR_ALERT_EMAIL = "ops@test.dev";
+    try {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      await createRefundForOrder(stacked, "pi_1", client, "exclude_label");
+      expect(refunded).toBe(11267); // 12000 + 733 − 733 (retained) − 733 (already refunded)
+      expect(spy).toHaveBeenCalledWith(expect.stringContaining("C1 stacked state"));
+      const row = await pool.query("SELECT to_email, subject, template FROM email_outbox WHERE dedupe_key = $1", [`opalert:label_stack:${baseOrder.id}`]);
+      expect(row.rows).toHaveLength(1);
+      expect(row.rows[0].to_email).toBe("ops@test.dev");
+      expect(row.rows[0].subject).toContain(baseOrder.id);
+      // Deduped: a second refund attempt on the same row alerts once.
+      await createRefundForOrder(stacked, "pi_1", client, "exclude_label");
+      const again = await pool.query("SELECT count(*)::int AS c FROM email_outbox WHERE dedupe_key = $1", [`opalert:label_stack:${baseOrder.id}`]);
+      expect(again.rows[0].c).toBe(1);
+      spy.mockRestore();
+    } finally {
+      delete process.env.OPERATOR_ALERT_EMAIL;
+    }
+  });
+
+
 });

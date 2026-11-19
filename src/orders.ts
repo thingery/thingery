@@ -17,7 +17,9 @@
 
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
+import type { ShippingVerificationRecord } from "./address-verification.js";
 import { emitReviewPairAnomalyIfCrossing, REVIEW_ELIGIBLE_STATUSES } from "./reviews.js";
+import type { LabelQuoteSnapshot } from "./shipping-quotes.js";
 
 export type OrderStatus =
   | "pending"
@@ -198,6 +200,18 @@ export interface OrderRow {
   /** EasyPost purchase snapshot (#5b) — NULL on record_tracking-originated rows.
    *  {shipment_id, rate_id, carrier, service, cost_cents, currency, bought_at} */
   label_purchase: Record<string, unknown> | null;
+  /** Buyer-paid shipping quote snapshot (spec buyer-paid-shipping §2) — NULL on
+   *  flat-mode and pre-feature orders. PII-bearing (origin/destination): never
+   *  exposed through any public surface; the §9 `shipping` block is its only
+   *  public projection. */
+  label_quote: LabelQuoteSnapshot | null;
+  /** Order-time address verification (docs/specs/order-address-verification.md):
+   *  the advisory delivery-check outcome, stored once at creation and never
+   *  transition-set. NULL = not_checked (no key, pickup, provider error or
+   *  timeout, over cap) — every pre-rollout row and every degraded run. A
+   *  suggested record carries only the F2-validated suggestion, never the
+   *  provider's raw response. */
+  shipping_verification: ShippingVerificationRecord | null;
   shipping_address_shared_at: Date | null;
   checkout_session_id: string | null;
   payment_intent_id: string | null;
@@ -403,4 +417,30 @@ export async function applyTransition(input: ApplyTransitionInput): Promise<Orde
     }
   }
   return next;
+}
+
+/** B1 (Security review THI-1013): complete a nothing-due refund unwind. A
+ * zero-remainder refund creates no Stripe refund, so no charge.refunded
+ * webhook will ever arrive to confirm it — fire refund_confirmed inline so
+ * the order reaches `refunded` instead of wedging in `refunding` until the
+ * rule-7 stuck-money alert. Returns the confirmed row, or null when not
+ * applicable (something was due, or the primary transition did not land in
+ * refunding). A concurrent webhook confirm losing the race is not an error:
+ * the terminal state (refunded) is identical either way. */
+export async function settleNothingDueRefund(
+  next: OrderRow,
+  refund: { nothingDue?: boolean; id?: string | null } | null | undefined,
+): Promise<OrderRow | null> {
+  if (!refund?.nothingDue || next.status !== "refunding") return null;
+  try {
+    return await applyTransition({
+      orderId: next.id,
+      trigger: "refund_confirmed",
+      actor: { type: "stripe", id: "zero_remainder" },
+      reason: "zero-remainder refund — nothing due, settled without a Stripe refund",
+    });
+  } catch (err) {
+    if (err instanceof IllegalTransitionError) return null;
+    throw err;
+  }
 }

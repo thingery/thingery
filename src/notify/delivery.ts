@@ -6,6 +6,7 @@
 //   pending --permanent skip (no address / unverified)--> skipped
 //   pending --send fail, attempts < MAX--> pending (next_attempt_at = now + backoff)
 //   pending --send fail, attempts >= MAX--> dead
+//   pending --older than NOTIFY_MAX_AGE_HOURS--> skipped:stale (THI-1043)
 //
 // Every transition is one guarded UPDATE; rows are claimed with
 // FOR UPDATE SKIP LOCKED so a second app instance can never double-send, and
@@ -50,6 +51,10 @@ export interface DeliveryReport {
   retried: number;
   dead: number;
   rateLimited: number;
+  /** Rows bulk-skipped by the staleness cutoff this pass (THI-1043) —
+   *  terminal `skipped` with last_error 'skipped:stale'; counted separately
+   *  from the gate skips so a post-downtime sweep is legible in the log. */
+  staleSkipped: number;
 }
 
 type SkipReason = "no_address" | "not_verified" | "bounced" | "opted_out";
@@ -148,12 +153,32 @@ export async function runNotifyDelivery(
   mailer: Mailer,
   now: Date = new Date(),
 ): Promise<DeliveryReport> {
-  const report: DeliveryReport = { claimed: 0, sent: 0, skipped: 0, retried: 0, dead: 0, rateLimited: 0 };
+  const report: DeliveryReport = { claimed: 0, sent: 0, skipped: 0, retried: 0, dead: 0, rateLimited: 0, staleSkipped: 0 };
   if (!cfg.emailEnabled) return report; // dark deploy: claim nothing
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    // Staleness cutoff (THI-1043), before the claim: pending rows older than
+    // NOTIFY_MAX_AGE_HOURS (default 48h) are bulk-skipped so that enabling
+    // email after a dark period never sends old notices — and so an old
+    // backlog cannot crowd fresh rows out of the claim batch. Age is judged
+    // against the injectable `now`; due-ness is irrelevant (a rate-limited
+    // row left pending for days is just as stale). Same SKIP LOCKED
+    // concurrency contract as the claim below (multi-instance safe);
+    // 'skipped:stale' keeps the reason distinguishable from gate skips
+    // (no_address/not_verified/bounced/opted_out) and from manual ops skips.
+    const cutoff = new Date(now.getTime() - cfg.maxAgeHours * 3_600_000);
+    const stale = await client.query(
+      `UPDATE email_outbox o
+          SET status = 'skipped', attempts = o.attempts + 1, last_error = 'skipped:stale'
+         FROM (SELECT id FROM email_outbox
+                WHERE status = 'pending' AND created_at < $1
+                FOR UPDATE SKIP LOCKED) s
+        WHERE o.id = s.id`,
+      [cutoff],
+    );
+    report.staleSkipped = stale.rowCount ?? 0;
     // Claim due rows (SKIP LOCKED: multi-instance safe), oldest first.
     const claimed = await client.query<OutboxRow>(
       `SELECT id, notification_id, to_email, subject, template, payload, attempts
@@ -257,7 +282,7 @@ export function startNotifyDeliveryTimer(cfg: NotifyConfig = notifyConfig(), mai
     running = true;
     try {
       const r = await runNotifyDelivery(cfg, mailer);
-      if (r.claimed > 0) console.log(`[notify-delivery] ${JSON.stringify(r)}`);
+      if (r.claimed > 0 || r.staleSkipped > 0) console.log(`[notify-delivery] ${JSON.stringify(r)}`);
     } catch (err) {
       console.error("[notify-delivery] sweep failed:", err);
     } finally {

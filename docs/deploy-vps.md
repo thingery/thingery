@@ -804,9 +804,18 @@ via buyer `confirm_receipt` (state machine T6/T13) and payouts release via buyer
 The report button (THI-788 step 2) writes item reports to the `reports` table.
 After each report INSERT commits, `src/report-review-notify.ts` POSTs one review
 task to the operator-configured triage endpoint and stores the returned task id
-in `reports.board_issue_ref`. Best-effort by design: one attempt, 5s timeout,
-never retried in-process — a failure leaves the ref NULL and never fails the
-user's report. The seam is **disabled unless BOTH** `REPORT_REVIEW_CREATE_URL`
+in `reports.board_issue_ref`. Best-effort by design: one attempt, no in-process
+retry — a failure leaves the ref NULL and never fails the user's report.
+Delivery runs **off the report request path** (THI-1066): the notify is
+scheduled after COMMIT and the user's request returns immediately, so a slow
+triage endpoint cannot stall report filing — control-plane load spikes
+(measured ~30s under load) only risk the notify itself, not the report. The
+per-attempt budget is `REPORT_REVIEW_TIMEOUT_MS` (default 5000 ms, clamped to
+[100, 600000]; empty/invalid falls back to the default). Because the budget no
+longer taxes report latency, raise it to absorb spikes — e.g.
+`REPORT_REVIEW_TIMEOUT_MS=60000` rides out the observed 30s class. A timed-out
+or failed attempt leaves the ref NULL (recovery is the manual backfill below).
+The seam is **disabled unless BOTH** `REPORT_REVIEW_CREATE_URL`
 **and** `REPORT_REVIEW_API_TOKEN` are set; a deployment without them still
 records reports, just without triage tasks.
 
@@ -843,7 +852,8 @@ cd /opt/thingery
 printf '%s\n' 'REPORT_REVIEW_CREATE_URL=<endpoint URL>' \
   'REPORT_REVIEW_API_TOKEN=<token>' \
   'REPORT_REVIEW_ASSIGNEE_ID=<assignee id>' \
-  'REPORT_REVIEW_ITEM_URL_TEMPLATE=https://thingery.dev/item/{id}' >> .env
+  'REPORT_REVIEW_ITEM_URL_TEMPLATE=https://thingery.dev/item/{id}' \
+  'REPORT_REVIEW_TIMEOUT_MS=60000' >> .env
 # env changes need a container recreate, not a rebuild:
 docker compose -f docker-compose.prod.yml up -d
 ```

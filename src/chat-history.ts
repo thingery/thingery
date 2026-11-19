@@ -47,7 +47,8 @@ export async function loadChatHistory(
     `SELECT id::text AS id, role, content, tools, suggestions, created_at
        FROM chat_messages
       WHERE seller_id = $1
-      ORDER BY id DESC
+      -- Qualified: a bare "id" here binds to the text alias above and sorts "9" after "88".
+      ORDER BY chat_messages.id DESC
       LIMIT $2`,
     [sellerId, bounded],
   );

@@ -17,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mountApiRoutes } from "../src/routes.js";
 import { registerTools } from "../src/tools.js";
+import { MASKED_BUYER_FIRST_NAME } from "../src/reviews.js";
 import type { SellerRow } from "../src/db.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -57,7 +58,8 @@ describe.skipIf(!available)("order reviews — public read (spec docs/specs/orde
 
   /** Seeds one published (or hidden) review on a fresh completed order for
    *  `buyer`, sold by `seller` (defaults to the file seller), with an
-   *  explicit created_at. */
+   *  explicit created_at and first-name snapshot (default "Luca", the
+   *  pre-THI-979 fixture name). */
   async function seedReview(opts: {
     buyer: string;
     rating: number;
@@ -66,6 +68,7 @@ describe.skipIf(!available)("order reviews — public read (spec docs/specs/orde
     status?: "published" | "hidden";
     title?: string;
     seller?: string;
+    firstName?: string;
   }): Promise<string> {
     const seller = opts.seller ?? sellerId;
     const item = await db.query<{ id: string }>(
@@ -80,7 +83,7 @@ describe.skipIf(!available)("order reviews — public read (spec docs/specs/orde
     createdOrderIds.push(order.rows[0].id);
     const r = await db.query<{ id: string }>(
       `INSERT INTO order_reviews (order_id, seller_id, buyer_id, item_id, rating, text, status, buyer_first_name, item_title, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'Luca', $8, $9) RETURNING id`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
       [
         order.rows[0].id,
         seller,
@@ -89,6 +92,7 @@ describe.skipIf(!available)("order reviews — public read (spec docs/specs/orde
         opts.rating,
         opts.text ?? null,
         opts.status ?? "published",
+        opts.firstName ?? "Luca",
         opts.title ?? "Film camera",
         opts.createdAt,
       ],
@@ -267,6 +271,66 @@ describe.skipIf(!available)("order reviews — public read (spec docs/specs/orde
     }
     const six = await get("?limit=0", capSeller);
     expect(six.json.summary.count).toBe(6);
+  });
+
+  // THI-979 (SR-5 on PR #319): rows stored before the insert-path F1 fix can
+  // carry an email-derived handle in buyer_first_name. The public read
+  // re-masks with the shared exact-match rule so legacy rows never publish
+  // the handle either; chosen names pass through untouched (exact match
+  // only, same semantics as the seller-surface guard). Fails against the
+  // unmasked read, which published the stored snapshot verbatim.
+  it("masks email-derived first names on already-stored rows at read time (THI-979 F1)", async () => {
+    const t0 = new Date("2026-04-01T08:00:00Z");
+    const legacySeller = await mkSeller("Legacy Seller");
+    // Signup-default buyer: display_name = email local-part (src/routes.ts).
+    const localPart = `legacy${crypto.randomUUID().slice(0, 8)}`;
+    const handleBuyer = (
+      await db.query<{ id: string }>(
+        `INSERT INTO sellers (email, password_hash, display_name) VALUES ($1, 'x', $2) RETURNING id`,
+        [`${localPart}@example.test`, localPart],
+      )
+    ).rows[0]!.id;
+    createdSellerIds.push(handleBuyer);
+    // A >40-char local-part: the old unmasked path stored its 40-char prefix
+    // (buyerFirstName cap = the column CHECK), so the read mask must catch
+    // the prefix too.
+    const longHandle = `long-${crypto.randomUUID().slice(0, 8)}-with-a-local-part-well-past-forty`;
+    expect(longHandle.length).toBeGreaterThan(40);
+    const longBuyer = (
+      await db.query<{ id: string }>(
+        `INSERT INTO sellers (email, password_hash, display_name) VALUES ($1, 'x', $2) RETURNING id`,
+        [`${longHandle}@example.test`, longHandle],
+      )
+    ).rows[0]!.id;
+    createdSellerIds.push(longBuyer);
+    // Chosen name that differs from a handle only by case: NOT masked
+    // (exact match, same as the seller-surface guard).
+    const aliceBuyer = await mkSeller("Alice");
+
+    const legacy = await seedReview({ buyer: handleBuyer, rating: 5, createdAt: t0, seller: legacySeller, firstName: localPart });
+    const prefix = await seedReview({ buyer: longBuyer, rating: 4, createdAt: t0, seller: legacySeller, firstName: longHandle.slice(0, 40) });
+    const chosen = await seedReview({ buyer: aliceBuyer, rating: 5, createdAt: t0, seller: legacySeller, firstName: "Alice" });
+
+    const r = await get("?limit=50", legacySeller);
+    expect(r.status).toBe(200);
+    const byId = new Map<string, string>(
+      r.json.reviews.map((x: { id: string; first_name: string }) => [x.id, x.first_name]),
+    );
+    expect(byId.get(legacy)).toBe(MASKED_BUYER_FIRST_NAME);
+    expect(byId.get(prefix)).toBe(MASKED_BUYER_FIRST_NAME);
+    expect(byId.get(chosen)).toBe("Alice");
+    expect(r.text).not.toContain(localPart);
+    expect(r.text).not.toContain(longHandle.slice(0, 40));
+
+    // The MCP tool shares the read, so it masks identically.
+    const mcp = mcpTools();
+    const tool = await mcp.call("get_seller_reviews", { seller_id: legacySeller, limit: 50 });
+    expect(tool.isError).toBe(false);
+    const toolById = new Map<string, string>(
+      (tool.payload.reviews as Array<{ id: string; first_name: string }>).map((x) => [x.id, x.first_name]),
+    );
+    expect(toolById.get(legacy)).toBe(MASKED_BUYER_FIRST_NAME);
+    expect(toolById.get(prefix)).toBe(MASKED_BUYER_FIRST_NAME);
   });
 
   // Test 11 — the MCP tool: identical shape and rules (capped summary,

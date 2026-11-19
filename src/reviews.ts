@@ -14,6 +14,16 @@
 // item_title) are read from the order/items/sellers rows server-side in
 // the same INSERT path. src/routes.ts only wires auth + validation.
 //
+// F1 on the review surface (finding SR-5 on PR #319, THI-979): signup
+// defaults display_name to the email local-part, so the first-name
+// snapshot can be an email-derived handle. The snapshot is masked at
+// insert with the shared F1 exact-match mask (src/display-names.ts,
+// maskEmailDerivedHandle — the same rule sellerToPublic applies, with the
+// buyer-shaped constant), and listSellerReviews re-masks at read time so
+// rows already stored unmasked before this fix never publish a handle
+// either. The buyer's email is fetched in both paths as mask input only
+// and is never serialized.
+//
 // Abuse posture (spec §abuse rules):
 // - one RateLimiter bucket for review WRITES (POST + PATCH alike),
 //   reviews:acct:<account id>, 20/hour; 429s log a security_events line.
@@ -39,6 +49,13 @@ import { pool } from "./db.js";
 import { RateLimiter } from "./rate-limit.js";
 import { logSecurityEvent } from "./security-events.js";
 import { screenReviewText } from "./contact-scrub.js";
+import { emailLocalPart, maskEmailDerivedHandle, MASKED_BUYER_FIRST_NAME } from "./display-names.js";
+
+// The review-surface F1 constant lives with the shared mask rule in
+// src/display-names.ts (one rule, one home — sellerToPublic masks through
+// the same helper). Re-exported so review-surface import sites keep their
+// module-local path.
+export { MASKED_BUYER_FIRST_NAME } from "./display-names.js";
 
 /** Terminal statuses a review may attach to — exactly the states where the
  *  deal ended with the seller paid and the buyer keeping the item (spec
@@ -50,6 +67,10 @@ export const REVIEW_EDIT_WINDOW_DAYS = 30;
 
 /** Text hard cap (spec rule); mirrored by the DB CHECK. */
 export const MAX_REVIEW_TEXT_CHARS = 500;
+
+/** First-name snapshot cap, the DB CHECK's upper bound: trim → first token
+ *  → cap 40. Also the projection width for the read-time legacy mask. */
+export const MAX_BUYER_FIRST_NAME_CHARS = 40;
 
 /** Per-pair aggregate cap K (spec §farming defenses, a): the public summary
  *  — average + count, profile and item card — counts at most the K newest
@@ -129,7 +150,19 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export function buyerFirstName(displayName: string): string {
   const trimmed = displayName.trim();
   if (!trimmed) return "Buyer";
-  return trimmed.split(/\s+/)[0]!.slice(0, 40);
+  return trimmed.split(/\s+/)[0]!.slice(0, MAX_BUYER_FIRST_NAME_CHARS);
+}
+
+/** The first-name snapshot actually stored (THI-979): the plain projection
+ *  above, but with the F1 exact-match mask decided on the UNCAPPED first
+ *  word — a local-part longer than the 40-char column cap must still mask,
+ *  not publish a 40-char prefix of the handle. Unmasked inputs keep the
+ *  existing projection (first token, cap, "Buyer" fallback). */
+export function buyerFirstNameSnapshot(displayName: string, email: string | null): string {
+  const trimmed = displayName.trim();
+  const firstWord = trimmed ? trimmed.split(/\s+/)[0]! : "";
+  const masked = maskEmailDerivedHandle(firstWord, emailLocalPart(email), MASKED_BUYER_FIRST_NAME);
+  return masked === firstWord ? buyerFirstName(displayName) : masked;
 }
 
 /** Editable-until anchor: created_at + window. The only clock in the
@@ -158,6 +191,8 @@ interface OrderForReview {
   item_id: string;
   item_title: string;
   buyer_display_name: string;
+  /** Mask input for the first-name snapshot only — never serialized. */
+  buyer_email: string | null;
 }
 
 /** The order join the write/read paths share: order row FOR SHARE (TOCTOU
@@ -169,7 +204,8 @@ async function orderForReview(
 ): Promise<OrderForReview | null> {
   const { rows } = await db.query<OrderForReview>(
     `SELECT o.seller_id, o.buyer_id, o.status, o.item_id,
-            i.title AS item_title, s.display_name AS buyer_display_name
+            i.title AS item_title, s.display_name AS buyer_display_name,
+            s.email AS buyer_email
        FROM orders o
        JOIN items i ON i.id = o.item_id
        JOIN sellers s ON s.id = o.buyer_id
@@ -251,7 +287,7 @@ export async function postReview(
         [
           input.orderId, order.seller_id, order.buyer_id, order.item_id,
           rating, text,
-          buyerFirstName(order.buyer_display_name), order.item_title,
+          buyerFirstNameSnapshot(order.buyer_display_name, order.buyer_email), order.item_title,
         ],
       );
       await db.query("COMMIT");
@@ -476,16 +512,20 @@ export async function listSellerReviews(input: ListSellerReviewsInput): Promise<
   // The list: uncapped, newest first, tie-break by id so same-second rows
   // are never skipped or repeated across pages. LIMIT n+1 detects has-more
   // without a second COUNT. The cursor predicate is one static SQL string:
-  // NULL params (first page) short-circuit the row comparison.
+  // NULL params (first page) short-circuit the row comparison. The buyers'
+  // emails join in as F1 mask input only (read-time mask below) — never
+  // serialized.
   if (input.limit === 0) {
     return { seller_id: input.sellerId, summary: { average, count }, reviews: [], next_before: null };
   }
-  const rows = await pool.query<{ id: string; rating: number; text: string | null; buyer_first_name: string; item_title: string; created_at: Date }>(
-    `SELECT id, rating, text, buyer_first_name, item_title, created_at
-       FROM order_reviews
-      WHERE seller_id = $1 AND status = 'published'
-        AND ($2::timestamptz IS NULL OR (created_at, id) < ($2::timestamptz, $3::uuid))
-      ORDER BY created_at DESC, id DESC
+  const rows = await pool.query<{ id: string; rating: number; text: string | null; buyer_first_name: string; item_title: string; created_at: Date; buyer_email: string | null }>(
+    `SELECT r.id, r.rating, r.text, r.buyer_first_name, r.item_title, r.created_at,
+            s.email AS buyer_email
+       FROM order_reviews r
+       JOIN sellers s ON s.id = r.buyer_id
+      WHERE r.seller_id = $1 AND r.status = 'published'
+        AND ($2::timestamptz IS NULL OR (r.created_at, r.id) < ($2::timestamptz, $3::uuid))
+      ORDER BY r.created_at DESC, r.id DESC
       LIMIT $4`,
     [input.sellerId, before?.createdAt ?? null, before?.id ?? null, input.limit + 1],
   );
@@ -498,7 +538,20 @@ export async function listSellerReviews(input: ListSellerReviewsInput): Promise<
       id: r.id,
       rating: r.rating,
       text: r.text,
-      first_name: r.buyer_first_name,
+      // Read-time F1 mask (THI-979): rows stored before the insert-path fix
+      // can carry an email-derived handle, so the public surface never
+      // trusts the stored snapshot alone. The stored snapshot is a first
+      // word capped at MAX_BUYER_FIRST_NAME_CHARS, hence a snapshot taken
+      // from a longer local-part is its prefix — compare in that projection
+      // space (a no-op slice, i.e. the plain exact match, for normal
+      // handles). Runs on every published row, so the invariant
+      // "public payloads never carry an email-derived first name" holds for
+      // both legacy and new rows.
+      first_name: maskEmailDerivedHandle(
+        r.buyer_first_name,
+        emailLocalPart(r.buyer_email)?.slice(0, MAX_BUYER_FIRST_NAME_CHARS),
+        MASKED_BUYER_FIRST_NAME,
+      ),
       item_title: r.item_title,
       created_at: r.created_at.toISOString(),
     })),

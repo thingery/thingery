@@ -128,6 +128,12 @@ services:
       # (measured ~30s under load). Empty/invalid falls back to the code
       # default (5000); clamped to [100, 600000].
       REPORT_REVIEW_TIMEOUT_MS: ${REPORT_REVIEW_TIMEOUT_MS:-}
+      # Backfill staleness window in hours (THI-1068, spec §backfill):
+      # open reports with NULL board_issue_ref older than this are skipped
+      # terminally instead of retried. Empty/invalid falls back to the code
+      # default (48); clamped to [1, 168] — above 168 h the tracker's
+      # idempotency-key retention (7 days) can no longer absorb a replay.
+      REPORT_REVIEW_MAX_AGE_HOURS: ${REPORT_REVIEW_MAX_AGE_HOURS:-}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}

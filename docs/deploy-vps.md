@@ -804,9 +804,18 @@ via buyer `confirm_receipt` (state machine T6/T13) and payouts release via buyer
 The report button (THI-788 step 2) writes item reports to the `reports` table.
 After each report INSERT commits, `src/report-review-notify.ts` POSTs one review
 task to the operator-configured triage endpoint and stores the returned task id
-in `reports.board_issue_ref`. Best-effort by design: one attempt, 5s timeout,
-never retried in-process — a failure leaves the ref NULL and never fails the
-user's report. The seam is **disabled unless BOTH** `REPORT_REVIEW_CREATE_URL`
+in `reports.board_issue_ref`. Best-effort by design: one attempt, no in-process
+retry — a failure leaves the ref NULL and never fails the user's report.
+Delivery runs **off the report request path** (THI-1066): the notify is
+scheduled after COMMIT and the user's request returns immediately, so a slow
+triage endpoint cannot stall report filing — control-plane load spikes
+(measured ~30s under load) only risk the notify itself, not the report. The
+per-attempt budget is `REPORT_REVIEW_TIMEOUT_MS` (default 5000 ms, clamped to
+[100, 600000]; empty/invalid falls back to the default). Because the budget no
+longer taxes report latency, raise it to absorb spikes — e.g.
+`REPORT_REVIEW_TIMEOUT_MS=60000` rides out the observed 30s class. A timed-out
+or failed attempt leaves the ref NULL (recovery is the manual backfill below).
+The seam is **disabled unless BOTH** `REPORT_REVIEW_CREATE_URL`
 **and** `REPORT_REVIEW_API_TOKEN` are set; a deployment without them still
 records reports, just without triage tasks.
 
@@ -843,7 +852,8 @@ cd /opt/thingery
 printf '%s\n' 'REPORT_REVIEW_CREATE_URL=<endpoint URL>' \
   'REPORT_REVIEW_API_TOKEN=<token>' \
   'REPORT_REVIEW_ASSIGNEE_ID=<assignee id>' \
-  'REPORT_REVIEW_ITEM_URL_TEMPLATE=https://thingery.dev/item/{id}' >> .env
+  'REPORT_REVIEW_ITEM_URL_TEMPLATE=https://thingery.dev/item/{id}' \
+  'REPORT_REVIEW_TIMEOUT_MS=60000' >> .env
 # env changes need a container recreate, not a rebuild:
 docker compose -f docker-compose.prod.yml up -d
 ```
@@ -862,6 +872,39 @@ or `REPORT_REVIEW_API_TOKEN` in `.env`, then recreate the container — the seam
 returns to no-op; reports keep flowing and existing refs stay stored. Blast
 radius of the whole feature: the app container only (one outbound HTTPS call
 per new report; no schema, no ports, no Caddy/db changes).
+
+**Backfill sweep for missed notifies (THI-1068, spec §backfill of
+docs/specs/item-reports.md):** a 5-minute sweep retries open reports whose
+notify missed (`board_issue_ref` NULL — timeout abort, endpoint 5xx, process
+exit). Bounded: up to 8 attempts with exponential backoff (1 min doubling,
+cap 6 h); exhausted rows land in a visible dead-letter state instead of
+retrying forever. Reports older than `REPORT_REVIEW_MAX_AGE_HOURS` (default
+48, clamped to [1, 168] — the tracker retains idempotency keys 7 days, so the
+window stays inside it) are skipped terminally (`skipped:stale`) rather than
+triaged days late. Every retry POST rides the unchanged idempotency key
+`report-review:<report id>`, so the tracker's dedupe absorbs replays and a
+replay returns the existing task id. A 409 answer is terminal-success
+(`conflict:409`): the task exists but the answer carries no recoverable id.
+
+Dead-letter / skip inspection (the operational visibility surface):
+
+```bash
+docker exec $(docker ps -qf name=thingery-db) psql -U thingery -d thingery -c \
+  "SELECT review_notify_status, count(*), max(review_notify_last_error) AS last_error
+     FROM reports WHERE board_issue_ref IS NULL GROUP BY 1;"
+```
+
+Manual recovery of a dead-lettered row (after fixing the endpoint — the
+idempotency key makes the replay safe):
+
+```bash
+docker exec $(docker ps -qf name=thingery-db) psql -U thingery -d thingery -c \
+  "UPDATE reports SET review_notify_status='pending', review_notify_attempts=0,
+     review_notify_next_attempt_at=now() WHERE id='<report uuid>';"
+```
+
+The sweep claims nothing while the triage seam is disabled (URL/token unset),
+so the kill switch above also silences the backfill.
 
 ### 5.5 Notifications Phase 2: bounce webhook + operator alert mailbox (THI-1048)
 

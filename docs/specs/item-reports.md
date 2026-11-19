@@ -67,13 +67,19 @@ implementation sends), body: item URL, reason, motivation (truncated),
 reporter account id, timestamp. The created task id is stored in
 `reports.board_issue_ref`. Failure does NOT fail the user's request and does
 NOT lose the report: `board_issue_ref` stays NULL, the failure is logged
-(`console.warn`, bounded) and a later backfill can retry NULLs (open
-question). At-most-once per report: the UNIQUE dedupe means only a committed
-INSERT triggers a create; a failed create is retried only by the explicit
-backfill. Config: `REPORT_REVIEW_CREATE_URL`, `REPORT_REVIEW_API_TOKEN`,
+(`console.warn`, bounded) and the backfill sweep below retries NULLs with
+bounded attempts. At-most-once per report: the UNIQUE dedupe means only a
+committed INSERT triggers a create; every create (initial or backfill) rides
+the `report-review:<report id>` idempotency key, so a retry can never mint a
+duplicate task. Delivery runs off the report request path: the notify
+is scheduled after COMMIT and the request returns immediately, so a slow
+triage endpoint cannot stall report filing; the per-attempt budget is
+env-tunable via `REPORT_REVIEW_TIMEOUT_MS` (default 5000 ms). Config:
+`REPORT_REVIEW_CREATE_URL`, `REPORT_REVIEW_API_TOKEN`,
 `REPORT_REVIEW_ASSIGNEE_ID`, `REPORT_REVIEW_ITEM_URL_TEMPLATE` (public item
 URL prefix) — absent URL or token ⇒ notification disabled (rows still land,
-ref NULL), never a crash. Timeout 5s; one attempt, no in-process retry.
+ref NULL), never a crash. One initial attempt, no in-process retry; recovery
+for a missed initial attempt is the backfill sweep (next section).
 
 **State machine (explicit):** `status: open → resolved | dismissed`.
 v1 ships only the `open` state (INSERT); `resolved`/`dismissed` are terminal
@@ -156,14 +162,109 @@ signed-in 201, duplicate 409). Rollback: revert the PR; the additive
 table can stay (harmless, no reader) or be dropped later — no destructive
 step is required to roll back behavior.
 
+## Backfill for missed triage notifications (delivery retry)
+
+The initial notify is exactly one attempt: a timeout abort, an endpoint 5xx,
+or a process exit mid-flight leaves `board_issue_ref` NULL. A backfill sweep
+retries those misses with bounded attempts, mirroring the email-outbox
+delivery sweep (`src/notify/delivery.ts`): attempts counter, exponential
+backoff ladder, dead-letter state, small claim batches, and a staleness
+cutoff. Without attempt state a sweep would re-POST every NULL ref on every
+tick — unbounded resource consumption aimed at the operator's own control
+plane — so the attempt-bounded state is the design, not an optimization.
+
+**Retry state (on `reports`, additive columns):**
+
+- `review_notify_attempts INT NOT NULL DEFAULT 0` — sweep attempts (the
+  initial off-path attempt is not counted; success ends the lifecycle).
+- `review_notify_next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now() +
+  interval '10 minutes'` — due-ness. The 10-minute default grace keeps the
+  sweep from racing the in-flight initial notify right after COMMIT; it also
+  backfills pre-existing NULL rows to "due 10 min after deploy".
+- `review_notify_status TEXT NOT NULL DEFAULT 'pending'` with
+  `CHECK (review_notify_status IN ('pending','dead','skipped'))` —
+  `'dead'` = attempts exhausted (terminal, visible); `'skipped'` = terminal
+  without exhausting attempts (stale, or a conflict answer — reason recorded
+  in `review_notify_last_error`).
+- `review_notify_last_error TEXT` — last failure reason; the dead-letter
+  read path (`skipped:` / `conflict:` prefixes keeps reasons
+  distinguishable).
+- Partial index on `(review_notify_next_attempt_at)` limited to
+  `board_issue_ref IS NULL AND status = 'open' AND review_notify_status =
+  'pending'` — the claim path only.
+
+**Success representation:** `board_issue_ref NOT NULL` is the success
+marker; there is no "sent" status. The claim query filters `ref IS NULL`, so
+the initial notify and the sweep share one success representation and a
+recovered row can never be re-claimed.
+
+**State machine (explicit):**
+
+```
+pending --2xx with usable id-->            delivered   (ref := id; attempts+1; last_error NULL)
+pending --409-->                           skipped      (terminal; last_error 'conflict:409')
+pending --created_at < staleness cutoff--> skipped      (terminal; last_error 'skipped:stale')
+pending --other failure, attempts < 8-->   pending      (attempts+1; next_attempt_at = now + backoff)
+pending --other failure, attempts >= 8--> dead         (terminal; last_error kept)
+```
+
+Illegal transitions are unrepresentable: nothing ever writes a terminal
+status back to `'pending'`; delivered rows (ref set) are outside the claim
+filter. Manual recovery of a dead row is an operator UPDATE of
+`board_issue_ref` (documented in the deploy guide) — the claim filter then
+excludes it permanently.
+
+**Conflict (409) semantics.** The endpoint contract answers an idempotency
+replay with the ORIGINAL task (2xx carrying the existing id) — replays
+recover the ref — while key retention on the tracker side bounds replay
+correctness to 7 days. Any 409 answer (an older or stricter tracker
+deployment) means "a task already exists" but yields no recoverable id: it
+is terminal-success for delivery purposes — stop retrying, ref stays NULL,
+`last_error='conflict:409'`, one warn line. Retrying a 409 forever is
+exactly the unbounded loop the attempt state exists to prevent.
+
+**Staleness cutoff.** `REPORT_REVIEW_MAX_AGE_HOURS` (default 48, the email
+delivery sweep's `NOTIFY_MAX_AGE_HOURS` precedent): reports older than the
+window are `skipped:stale` without a POST — a moderation task filed days
+late has little value, and the window must never exceed the tracker's
+7-day idempotency-key retention or a replay could mint a duplicate task;
+the parser clamps to [1, 168] hours.
+
+**Sweep mechanics.** Every 5 minutes (boot + interval, unref'd): inside one
+transaction, first the bulk staleness skip, then claim up to 25 due rows
+oldest-first with `FOR UPDATE SKIP LOCKED` (multi-instance safe), POST each
+with the unchanged idempotency key `report-review:<report id>` under the
+same per-attempt timeout budget as the initial notify, apply the guarded
+transition (`UPDATE … WHERE id = $1 AND board_issue_ref IS NULL` — a ref
+landed concurrently is never overwritten), commit. Backoff ladder:
+1 m doubling, capped at 6 h; dead after 8 attempts (≈ 4.3 h of failures).
+No-op while the triage seam is disabled (URL/token unset) — the dark-deploy
+posture of the email sweep.
+
+**Migration:** additive columns + partial index via `IF NOT EXISTS` /
+idempotent DO-block, re-applied by `scripts/migrate.ts`; existing NULL-ref
+rows become due 10 minutes after the migration runs. No contract step.
+
+**Test plan (`tests/report-review-backfill.test.ts`, DB-backed + mock
+endpoint):** due NULL-ref row recovered (idempotency key asserted); 409 →
+terminal skip, no second POST on the next sweep; 5xx → attempts+1 and
+next-run claims nothing while backoff is pending (fails against a naive
+always-retry sweep); attempts exhaustion → dead, visible, never re-claimed;
+stale row skipped without a POST; rows with ref set / status resolved /
+next-attempt future are not claimed; batch cap respected; two concurrent
+sweeps never double-POST a row (SKIP LOCKED); disabled seam is a no-op;
+`REPORT_REVIEW_MAX_AGE_HOURS` parser unit tests (default, clamp, garbage).
+
+**Rollout + rollback:** merge → schema applies on deploy → sweep starts
+recovering the backlog inside the grace window. Rollback: revert the PR;
+the columns are inert without the sweep (expand-contract — no destructive
+step needed).
+
 ## Open questions
 
-1. Notify backfill for NULL `board_issue_ref` (step-3 failures): v1
-   keeps a manual psql check; a small sweep is YAGNI until volume says
-   otherwise.
-2. Triage UI (resolve/dismiss) — deliberately out of scope v1; the state
+1. Triage UI (resolve/dismiss) — deliberately out of scope v1; the state
    machine reserves the states.
-3. Report-user-from-profile: only if trivially cheap later.
+2. Report-user-from-profile: only if trivially cheap later.
 
 ## PR breakdown (PR-sized steps)
 

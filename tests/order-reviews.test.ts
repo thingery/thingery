@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { mountApiRoutes } from "../src/routes.js";
 import { SESSION_COOKIE, signSession } from "../src/auth.js";
 import { applyTransition, type OrderStatus } from "../src/orders.js";
+import { MASKED_BUYER_FIRST_NAME } from "../src/reviews.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const connectionString =
@@ -164,6 +165,40 @@ describe.skipIf(!available)("order reviews — writes (spec docs/specs/order-rev
     const second = await call("POST", paidOutOrderId, { rating: 5 }, buyerCookie);
     expect(second.status).toBe(201);
     expect(second.json.review).toMatchObject({ rating: 5, text: null });
+  });
+
+  // THI-979 (SR-5 on PR #319): signup defaults display_name to the email
+  // local-part, so a reviewer's first-name snapshot can be an email-derived
+  // handle. The F1 exact-match mask (shared rule, src/sellers.ts) substitutes
+  // the buyer-shaped constant at insert — this test fails against the
+  // unmasked path, which stored and published the local-part itself.
+  it("masks a signup-default (email local-part) first-name snapshot at insert (THI-979 F1)", async () => {
+    // A buyer who skipped the name field: display_name = email local-part,
+    // byte-for-byte the /signup derivation (src/routes.ts).
+    const localPart = `handle${runTag}${crypto.randomUUID().slice(0, 8)}`;
+    const handleBuyer = (
+      await db.query<{ id: string }>(
+        `INSERT INTO sellers (email, password_hash, display_name) VALUES ($1, 'x', $2) RETURNING id`,
+        [`${localPart}@example.test`, localPart],
+      )
+    ).rows[0]!.id;
+    const order = await mkOrderFor(handleBuyer, "completed");
+    const posted = await call("POST", order, { rating: 5 }, `${SESSION_COOKIE}=${signSession(handleBuyer)}`);
+    expect(posted.status).toBe(201);
+
+    // Stored snapshot is the constant, not the handle.
+    const row = await db.query<{ buyer_first_name: string }>(
+      "SELECT buyer_first_name FROM order_reviews WHERE order_id = $1",
+      [order],
+    );
+    expect(row.rows[0]!.buyer_first_name).toBe(MASKED_BUYER_FIRST_NAME);
+
+    // And the seller's public list carries no trace of the handle.
+    const list = await fetch(`${base}/api/sellers/${sellerId}/reviews?limit=50`);
+    expect(list.status).toBe(200);
+    const json = (await list.json()) as { reviews: Array<{ id: string; first_name: string }> };
+    expect(json.reviews.some((x) => x.first_name === MASKED_BUYER_FIRST_NAME)).toBe(true);
+    expect(JSON.stringify(json)).not.toContain(localPart);
   });
 
   // Test 3 — ineligible statuses, unknown order, non-buyer: friendly 400 /

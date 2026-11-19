@@ -14,6 +14,12 @@ import { pool, type ItemRow } from "./db.js";
 import { sellerPayoutReady } from "./order-flow.js";
 import { orderFlowConfig } from "./config.js";
 import { SOLD_COUNT_STATUSES } from "./orders.js";
+import { emailLocalPart, maskEmailDerivedHandle, MASKED_DISPLAY_NAME } from "./display-names.js";
+
+// The F1 mask rule and its seller-surface constant live in src/display-names.ts
+// (one rule, one home — reviews mask through the same helper). Re-exported so
+// existing import sites keep their surface-local path.
+export { MASKED_DISPLAY_NAME } from "./display-names.js";
 
 /** Input page size cap, the search_items convention (limit 1–50). */
 export const SELLER_LISTINGS_MAX_LIMIT = 50;
@@ -23,11 +29,12 @@ export const SELLER_LISTINGS_MAX_OFFSET = 450;
 /** F1 display-name guard (spec v2): signup names a new account after the
  *  email local-part (src/routes.ts /signup → email.split("@")[0]), so
  *  publishing display_name raw would publish an email-derived handle for
- *  sellers who never chose a name. sellerToPublic substitutes this neutral
- *  handle on an exact local-part match. Deliberately-chosen names that
- *  happen to equal the local-part are masked too — accepted over-blocking
- *  for a public surface (CEO decision, THI-923). */
-export const MASKED_DISPLAY_NAME = "Thingery seller";
+ *  sellers who never chose a name. sellerToPublic substitutes the neutral
+ *  handle on an exact local-part match, via the shared rule in
+ *  src/display-names.ts (maskEmailDerivedHandle + MASKED_DISPLAY_NAME,
+ *  re-exported above). Deliberately-chosen names that happen to equal the
+ *  local-part are masked too — accepted over-blocking for a public surface
+ *  (CEO decision, THI-923). */
 
 /** Thrown when sellerId matches no seller row; the tool layer maps it to the
  *  typed `not_found` error (same treatment as getItem's callers). */
@@ -81,14 +88,12 @@ export function sellerToPublic(
     payment_available: boolean;
   },
 ): SellerSummarySeller {
-  // F1 guard: an email-derived handle is never published silently. The email
-  // exists only in this local scope — the object literal below cannot
-  // include it (allowlist construction, not spread).
-  const emailLocalPart = row.email?.split("@")[0];
-  const masked = emailLocalPart !== undefined && row.display_name === emailLocalPart;
+  // F1 guard via the shared helper: an email-derived handle is never
+  // published silently. The email exists only as mask input — the object
+  // literal below cannot include it (allowlist construction, not spread).
   return {
     id: row.id,
-    display_name: masked ? MASKED_DISPLAY_NAME : row.display_name,
+    display_name: maskEmailDerivedHandle(row.display_name, emailLocalPart(row.email), MASKED_DISPLAY_NAME),
     joined_month: row.joined_month,
     ships_from: aggregates.ships_from,
     sold_count: aggregates.sold_count,

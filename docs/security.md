@@ -421,7 +421,10 @@ refunds, disputes, chargebacks) will not be disableable; ordinary transactional 
 one-click unsubscribe (List-Unsubscribe header). None of this gating is live yet:
 there is currently no per-category opt-out and no unsubscribe link. Today's bounds are
 the rate caps (default ≤ 6 emails/account/hour plus a per-sweep cap, `src/config.ts`),
-the fixed event taxonomy, and the operator-side channel flag
+the staleness cutoff (`NOTIFY_MAX_AGE_HOURS`, default 48 h: pending notices older
+than the cutoff are skipped with `last_error = 'skipped:stale'`, never sent — enabling
+email after a dark period cannot flush an old backlog at users), the fixed event
+taxonomy, and the operator-side channel flag
 (`NOTIFY_EMAIL_ENABLED=false` stops all mail).
 
 **PII minimization — live.** Emails and notification payloads carry item title,

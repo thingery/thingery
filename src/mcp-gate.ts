@@ -113,6 +113,9 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   "confirm_payment",
   "confirm_receipt",
   "open_dispute",
+  // Buyer-paid shipping (spec docs/specs/buyer-paid-shipping.md §9, PR 5):
+  // the pre-checkout estimate joins the funnel events.
+  "quote_shipping",
   "release_funds",
   // THI-567: order messaging tools join the funnel events.
   "send_order_message",
@@ -132,12 +135,24 @@ export const TOOL_NAMES: ReadonlySet<string> = new Set([
   // Public reads of the wanted board.
   "search_wanted",
   "get_wanted",
+  // THI-814 (P1-2 draft_listing extraction): joins the funnel set — the
+  // extraction spend is measurable per call like every other tool.
+  "draft_listing",
+  // THI-923: public seller summary (item-page seller card).
+  "get_seller_summary",
+  // THI-941 (order reviews PR 2): public seller reviews read.
+  "get_seller_reviews",
   // The buyer side of the wanted board.
   "create_wanted",
   "my_wanted",
   "update_wanted",
   "expire_wanted",
   "renew_wanted",
+  // Saved addresses (spec docs/specs/saved-addresses.md, step 2): the
+  // account address book joins the funnel events.
+  "list_addresses",
+  "save_address",
+  "delete_address",
   // First-party session-only account settings (SESSION_ONLY_TOOLS).
   "list_connected_apps",
   "revoke_connected_app",

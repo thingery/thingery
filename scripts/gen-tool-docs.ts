@@ -53,11 +53,15 @@ export const TOOL_PAGES: ToolPage[] = [
     description: "Find items, read the category schema, and publish and manage listings.",
     intro:
       "Search and item reads are public. Publishing needs an account, and a listing stays hidden " +
-      "until it has at least one photo.",
+      "until it has at least one photo. draft_listing turns a photo or one-line description into " +
+      "a proposal you review before publishing — it never creates anything.",
     tools: [
       "search_items",
       "get_item",
+      "get_seller_summary",
+      "get_seller_reviews",
       "describe_category",
+      "draft_listing",
       "create_listing",
       "add_item_image",
       "my_listings",
@@ -73,6 +77,7 @@ export const TOOL_PAGES: ToolPage[] = [
       "See [Orders](/guides/orders) for the states and deadlines.",
     tools: [
       "create_order",
+      "quote_shipping",
       "get_order",
       "my_orders",
       "cancel_order",
@@ -99,6 +104,16 @@ export const TOOL_PAGES: ToolPage[] = [
     tools: [
       "list_notifications",
     ],
+  },
+  {
+    slug: "addresses",
+    title: "Saved addresses",
+    description: "Save shipping addresses once and reuse them on every order.",
+    intro:
+      "An account keeps up to 10 saved shipping addresses. The tool surface only ever returns a " +
+      "summary — label, city, country and verification status; the recipient name, street and " +
+      "postal code stay on the server and are copied into the order when the address is used.",
+    tools: ["list_addresses", "save_address", "delete_address"],
   },
   {
     slug: "alerts",

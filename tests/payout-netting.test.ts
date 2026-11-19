@@ -78,7 +78,7 @@ describe("sellerNetTransferCents (THI-374)", () => {
 
   it("throws payout_charge_mismatch when bt.amount ≠ order gross (THI-375 R1: wrong base, never net)", async () => {
     await expect(sellerNetTransferCents(order, stripeReturning(piWith(182, { amount: 10000 })))).rejects.toThrow(
-      /payout_charge_mismatch: balance transaction 10000 eur ≠ order 10500 eur/,
+      /payout_charge_mismatch: balance transaction 10000 eur ≠ charge 10500 eur/,
     );
   });
 

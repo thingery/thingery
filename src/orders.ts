@@ -17,6 +17,9 @@
 
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
+import type { ShippingVerificationRecord } from "./address-verification.js";
+import { emitReviewPairAnomalyIfCrossing, REVIEW_ELIGIBLE_STATUSES } from "./reviews.js";
+import type { LabelQuoteSnapshot } from "./shipping-quotes.js";
 
 export type OrderStatus =
   | "pending"
@@ -80,6 +83,22 @@ export const TERMINAL_STATUSES: readonly OrderStatus[] = [
 export const LIVE_ORDER_ITEM_STATUSES: readonly OrderStatus[] = [
   "pending", "sold", "label_issued", "in_transit", "delivered", "disputed",
   "refunding", "payout_pending",
+];
+
+/** Order statuses that count as "reached payment" for the public seller
+ *  summary's sold_count (THI-923 spec v2, F3 single source of truth). The
+ *  exact 8-status set, defined once here and consumed by the SQL builder
+ *  (src/sellers.ts), the test matrix (tests/seller-summary.test.ts) and the
+ *  tool docs — the literal list is never restated (drift = buyers misled
+ *  about who actually sells). Named exclusions, so every one of the 12
+ *  order statuses is accounted for: pending (no payment yet), cancelled
+ *  (never was), refunding + refunded (sale unwinding / unwound). Disputed
+ *  is included: "reached payment" is approximated for it (a chargeback can
+ *  reach disputed from pending, never paid) — accepted for a public stat.
+ *  Sealed matrix per spec v2; future statuses must be classified explicitly. */
+export const SOLD_COUNT_STATUSES: readonly OrderStatus[] = [
+  "sold", "label_issued", "in_transit", "delivered", "disputed",
+  "payout_pending", "paid_out", "completed",
 ];
 
 const NON_TERMINAL_EXCEPT_REFUNDING: readonly OrderStatus[] = [
@@ -181,6 +200,18 @@ export interface OrderRow {
   /** EasyPost purchase snapshot (#5b) — NULL on record_tracking-originated rows.
    *  {shipment_id, rate_id, carrier, service, cost_cents, currency, bought_at} */
   label_purchase: Record<string, unknown> | null;
+  /** Buyer-paid shipping quote snapshot (spec buyer-paid-shipping §2) — NULL on
+   *  flat-mode and pre-feature orders. PII-bearing (origin/destination): never
+   *  exposed through any public surface; the §9 `shipping` block is its only
+   *  public projection. */
+  label_quote: LabelQuoteSnapshot | null;
+  /** Order-time address verification (docs/specs/order-address-verification.md):
+   *  the advisory delivery-check outcome, stored once at creation and never
+   *  transition-set. NULL = not_checked (no key, pickup, provider error or
+   *  timeout, over cap) — every pre-rollout row and every degraded run. A
+   *  suggested record carries only the F2-validated suggestion, never the
+   *  provider's raw response. */
+  shipping_verification: ShippingVerificationRecord | null;
   shipping_address_shared_at: Date | null;
   checkout_session_id: string | null;
   payment_intent_id: string | null;
@@ -356,11 +387,60 @@ export async function applyTransition(input: ApplyTransitionInput): Promise<Orde
     }
   };
 
-  if (input.client) return run(input.client, false);
-  const db = await pool.connect();
+  let next: OrderRow;
+  if (input.client) {
+    next = await run(input.client, false);
+  } else {
+    const db = await pool.connect();
+    try {
+      next = await run(db, true);
+    } finally {
+      db.release();
+    }
+  }
+
+  // Order-reviews spec (docs/specs/order-reviews.md, farming defense b):
+  // after a successful transition INTO a review-eligible terminal state,
+  // count the buyer→seller pair's terminal orders and emit the one-shot
+  // `review_pair_anomaly` signal when the count crosses N. Best-effort by
+  // contract — a signal must never fail or block an order transition — and
+  // it reads committed data, so for caller-owned transactions (none target
+  // these states today) the count can lag one order; monotonicity still
+  // makes the crossing fire exactly once.
+  if (REVIEW_ELIGIBLE_STATUSES.includes(next.status)) {
+    try {
+      await emitReviewPairAnomalyIfCrossing(next.buyer_id, next.seller_id);
+    } catch (err) {
+      console.warn(
+        `[orders] review pair anomaly check failed for order ${next.id}: ${(err as Error).message}`,
+      );
+    }
+  }
+  return next;
+}
+
+/** B1 (Security review THI-1013): complete a nothing-due refund unwind. A
+ * zero-remainder refund creates no Stripe refund, so no charge.refunded
+ * webhook will ever arrive to confirm it — fire refund_confirmed inline so
+ * the order reaches `refunded` instead of wedging in `refunding` until the
+ * rule-7 stuck-money alert. Returns the confirmed row, or null when not
+ * applicable (something was due, or the primary transition did not land in
+ * refunding). A concurrent webhook confirm losing the race is not an error:
+ * the terminal state (refunded) is identical either way. */
+export async function settleNothingDueRefund(
+  next: OrderRow,
+  refund: { nothingDue?: boolean; id?: string | null } | null | undefined,
+): Promise<OrderRow | null> {
+  if (!refund?.nothingDue || next.status !== "refunding") return null;
   try {
-    return await run(db, true);
-  } finally {
-    db.release();
+    return await applyTransition({
+      orderId: next.id,
+      trigger: "refund_confirmed",
+      actor: { type: "stripe", id: "zero_remainder" },
+      reason: "zero-remainder refund — nothing due, settled without a Stripe refund",
+    });
+  } catch (err) {
+    if (err instanceof IllegalTransitionError) return null;
+    throw err;
   }
 }

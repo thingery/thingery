@@ -111,6 +111,53 @@ describe.skipIf(!available)("db schema", () => {
         "created_at",
         "updated_at",
       ],
+      // Saved shipping addresses (spec docs/specs/saved-addresses.md,
+      // rollout step 1): the account-owned address store.
+      account_addresses: [
+        "id",
+        "account_id",
+        "label",
+        "name",
+        "line1",
+        "line2",
+        "city",
+        "postal_code",
+        "country",
+        "is_default",
+        "verification",
+        "created_at",
+        "updated_at",
+        "last_used_at",
+      ],
+      // Order reviews (spec docs/specs/order-reviews.md, PR 1): one review
+      // per order, server-side snapshots, published|hidden status.
+      order_reviews: [
+        "id",
+        "order_id",
+        "seller_id",
+        "buyer_id",
+        "item_id",
+        "rating",
+        "text",
+        "status",
+        "buyer_first_name",
+        "item_title",
+        "created_at",
+        "edited_at",
+      ],
+      // Reports, widened (order-reviews spec PR 3): exactly one target per
+      // row — item or review — enforced by reports_one_target_check.
+      reports: [
+        "id",
+        "reporter_account_id",
+        "target_item_id",
+        "target_review_id",
+        "reason",
+        "motivation",
+        "status",
+        "board_issue_ref",
+        "created_at",
+      ],
     };
     for (const [table, columns] of Object.entries(expected)) {
       const { rows } = await client.query<{ column_name: string }>(
@@ -128,6 +175,111 @@ describe.skipIf(!available)("db schema", () => {
       client.query(`INSERT INTO oauth_tokens (grant_id, kind, token_hash, expires_at)
                     VALUES (gen_random_uuid(), 'macaroon', 'x', now())`),
     ).rejects.toThrow();
+  });
+
+  // Saved addresses (spec docs/specs/saved-addresses.md, rollout step 1):
+  // the verification-status CHECK makes illegal states unrepresentable and
+  // the partial unique index pins one default per account.
+  it("enforces the account_addresses verification CHECK and one-default index", async () => {
+    const seller = await client.query<{ id: string }>(
+      `INSERT INTO sellers (display_name, email) VALUES ($1, $2) RETURNING id`,
+      ["schema-addresses", `schema-addr-${Date.now()}@test.thingery.dev`],
+    );
+    const sellerId = seller.rows[0].id;
+    const address = {
+      label: "Home",
+      name: "Ada Lovelace",
+      line1: "Via Roma 1",
+      city: "Milano",
+      postal_code: "20121",
+      country: "IT",
+    };
+    // An illegal verification status is rejected by the CHECK.
+    await expect(
+      client.query(
+        `INSERT INTO account_addresses (account_id, label, name, line1, city, postal_code, country, verification)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, '{"status":"definitely"}'::jsonb)`,
+        [sellerId, address.label, address.name, address.line1, address.city, address.postal_code, address.country],
+      ),
+    ).rejects.toThrow();
+    // Two defaults for one account violate the partial unique index.
+    await client.query(
+      `INSERT INTO account_addresses (account_id, label, name, line1, city, postal_code, country, is_default)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, true)`,
+      [sellerId, address.label, address.name, address.line1, address.city, address.postal_code, address.country],
+    );
+    await expect(
+      client.query(
+        `INSERT INTO account_addresses (account_id, label, name, line1, city, postal_code, country, is_default)
+         VALUES ($1, 'Work', $3, $4, $5, $6, $7, true)`,
+        [sellerId, address.name, address.line1, address.city, address.postal_code, address.country],
+      ),
+    ).rejects.toThrow();
+    await client.query(`DELETE FROM sellers WHERE id = $1`, [sellerId]);
+  });
+
+  // Order reviews (spec docs/specs/order-reviews.md, PR 1): the rating /
+  // status / snapshot CHECKs make illegal values unrepresentable and the
+  // UNIQUE (order_id) barrier (one review per order, ever) is enforced at
+  // the schema layer.
+  it("enforces the order_reviews CHECKs and one-review-per-order UNIQUE", async () => {
+    const seller = await client.query<{ id: string }>(
+      `INSERT INTO sellers (display_name, email) VALUES ($1, $2) RETURNING id`,
+      ["schema-reviews", `schema-reviews-${Date.now()}@test.thingery.dev`],
+    );
+    const sellerId = seller.rows[0].id;
+    const item = await client.query<{ id: string }>(
+      `INSERT INTO items (seller_id, title, price_cents) VALUES ($1, 'Schema review fixture', 100) RETURNING id`,
+      [sellerId],
+    );
+    const order = await client.query<{ id: string }>(
+      `INSERT INTO orders (item_id, seller_id, buyer_id, price_cents, shipping_price_cents, currency, fulfillment, payment_mode, status)
+       VALUES ($1, $2, $2, 100, 0, 'EUR', 'pickup', 'off_platform', 'completed') RETURNING id`,
+      [item.rows[0].id, sellerId],
+    );
+    const insert = (cols: string, values: string, params: unknown[]) =>
+      client.query(
+        `INSERT INTO order_reviews (order_id, seller_id, buyer_id, item_id, buyer_first_name, item_title, ${cols})
+         VALUES ($1, $2, $3, $4, 'Luca', 'Schema review fixture', ${values})`,
+        [order.rows[0].id, sellerId, sellerId, item.rows[0].id, ...params],
+      );
+    // A legal row lands published.
+    await insert("rating", "5", []);
+    // rating outside 1–5, an illegal status, and illegal snapshot lengths
+    // are all CHECKed out (parameterized — values are literals below only
+    // where not bindable).
+    await expect(insert("rating", "$5", [0])).rejects.toThrow();
+    await expect(insert("rating", "$5", [6])).rejects.toThrow();
+    await expect(
+      client.query(
+        `INSERT INTO order_reviews (order_id, seller_id, buyer_id, item_id, rating, status, buyer_first_name, item_title)
+         VALUES ($1, $2, $3, $4, 5, 'draft', 'Luca', 'Schema review fixture')`,
+        [order.rows[0].id, sellerId, sellerId, item.rows[0].id],
+      ),
+    ).rejects.toThrow();
+    await expect(
+      client.query(
+        `INSERT INTO order_reviews (order_id, seller_id, buyer_id, item_id, rating, buyer_first_name, item_title)
+         VALUES ($1, $2, $3, $4, 5, '', 'Schema review fixture')`,
+        [order.rows[0].id, sellerId, sellerId, item.rows[0].id],
+      ),
+    ).rejects.toThrow();
+    await expect(
+      client.query(
+        `INSERT INTO order_reviews (order_id, seller_id, buyer_id, item_id, rating, buyer_first_name, item_title)
+         VALUES ($1, $2, $3, $4, 5, 'Luca', 'x')`,
+        [order.rows[0].id, sellerId, sellerId, item.rows[0].id],
+      ),
+    ).rejects.toThrow();
+    // text longer than 500 chars violates its CHECK.
+    await expect(insert("rating, text", "$5, $6", [4, "x".repeat(501)])).rejects.toThrow();
+    // One review per order, ever: a second row for the same order 23505s.
+    await expect(insert("rating", "4", [])).rejects.toThrow();
+    // Cleanup: orders.seller_id/items.seller_id FKs don't cascade to sellers,
+    // so remove the order (cascades the review) and the item first.
+    await client.query(`DELETE FROM orders WHERE id = $1`, [order.rows[0].id]);
+    await client.query(`DELETE FROM items WHERE id = $1`, [item.rows[0].id]);
+    await client.query(`DELETE FROM sellers WHERE id = $1`, [sellerId]);
   });
 
   // THI-193 §4 expand step (rev fa3288ff): the kind CHECK is widened to
@@ -191,5 +343,121 @@ describe.skipIf(!available)("db schema", () => {
     await client.query(`DELETE FROM sellers WHERE id = $1`, [sellerId]);
     const tokens = await client.query(`SELECT 1 FROM oauth_tokens WHERE grant_id = $1`, [grant.rows[0].id]);
     expect(tokens.rowCount).toBe(0);
+  });
+
+  // Order-reviews spec PR 3, test item 14: the reports widening replay
+  // converges a legacy (pre-widening) database — the exact shape production
+  // carries — without touching existing rows, then enforces the XOR target
+  // CHECK and the per-kind partial uniques. Wrapped in a transaction so the
+  // drop/recreate is invisible to parallel DB users (THI-31) and rolled
+  // back to the canonical table for any later assertions.
+  it("converges a legacy reports table and enforces the widened shape", async () => {
+    await client.query("BEGIN");
+    try {
+      await client.query("DROP TABLE reports CASCADE");
+      // The pre-widening shape (item-reports spec, THI-788 step 2).
+      await client.query(`
+        CREATE TABLE reports (
+          id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          reporter_account_id UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+          target_item_id      UUID NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+          reason              TEXT NOT NULL CHECK (reason IN ('explicit_images','scam_fraud','other')),
+          motivation          TEXT NOT NULL CHECK (char_length(motivation) BETWEEN 10 AND 1000),
+          status              TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved','dismissed')),
+          board_issue_ref     TEXT,
+          created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+          UNIQUE (reporter_account_id, target_item_id)
+        )`);
+      await client.query("CREATE INDEX reports_target_created_idx ON reports (target_item_id, created_at)");
+
+      const reporter = await client.query<{ id: string }>(
+        `INSERT INTO sellers (display_name) VALUES ('legacy-reporter') RETURNING id`,
+      );
+      const itemOwner = await client.query<{ id: string }>(
+        `INSERT INTO sellers (display_name) VALUES ('legacy-owner') RETURNING id`,
+      );
+      const legacyItem = await client.query<{ id: string }>(
+        `INSERT INTO items (seller_id, title, price_cents, category) VALUES ($1, 'Legacy lens', 100, 'other') RETURNING id`,
+        [itemOwner.rows[0].id],
+      );
+      await client.query(
+        `INSERT INTO reports (reporter_account_id, target_item_id, reason, motivation)
+         VALUES ($1, $2, 'other', 'legacy row that must survive')`,
+        [reporter.rows[0].id, legacyItem.rows[0].id],
+      );
+
+      // The widening replay: schema.sql applied to the legacy shape.
+      await client.query(readFileSync(schemaPath, "utf8"));
+
+      // The legacy row is intact.
+      const legacy = await client.query<{ target_item_id: string | null; motivation: string }>(
+        "SELECT target_item_id, motivation FROM reports WHERE reporter_account_id = $1",
+        [reporter.rows[0].id],
+      );
+      expect(legacy.rows).toHaveLength(1);
+      expect(legacy.rows[0]).toEqual({ target_item_id: legacyItem.rows[0].id, motivation: "legacy row that must survive" });
+
+      // Converged shape: nullable item target + the review column.
+      const nullable = await client.query<{ is_nullable: string }>(
+        `SELECT is_nullable FROM information_schema.columns
+          WHERE table_name = 'reports' AND column_name = 'target_item_id'`,
+      );
+      expect(nullable.rows[0].is_nullable).toBe("YES");
+
+      // The XOR CHECK: no target and both targets are unrepresentable.
+      // Each expected failure rides its own savepoint — a failed statement
+      // aborts the surrounding transaction otherwise.
+      await client.query("SAVEPOINT xor_no_target");
+      await expect(client.query(
+        `INSERT INTO reports (reporter_account_id, reason, motivation) VALUES ($1, 'other', 'no target at all here')`,
+        [reporter.rows[0].id],
+      )).rejects.toThrow();
+      await client.query("ROLLBACK TO SAVEPOINT xor_no_target");
+
+      // A review report now lands (and dedupes) per kind.
+      const buyer = await client.query<{ id: string }>(
+        `INSERT INTO sellers (display_name) VALUES ('legacy-buyer') RETURNING id`,
+      );
+      const reviewItem = await client.query<{ id: string }>(
+        `INSERT INTO items (seller_id, title, price_cents, category) VALUES ($1, 'Legacy camera', 100, 'other') RETURNING id`,
+        [itemOwner.rows[0].id],
+      );
+      const order = await client.query<{ id: string }>(
+        `INSERT INTO orders (item_id, seller_id, buyer_id, price_cents, shipping_price_cents, currency, fulfillment, payment_mode, status)
+         VALUES ($1, $2, $3, 100, 0, 'EUR', 'pickup', 'off_platform', 'completed') RETURNING id`,
+        [reviewItem.rows[0].id, itemOwner.rows[0].id, buyer.rows[0].id],
+      );
+      const review = await client.query<{ id: string }>(
+        `INSERT INTO order_reviews (order_id, seller_id, buyer_id, item_id, rating, buyer_first_name, item_title)
+         VALUES ($1, $2, $3, $4, 5, 'Luca', 'Legacy camera') RETURNING id`,
+        [order.rows[0].id, itemOwner.rows[0].id, buyer.rows[0].id, reviewItem.rows[0].id],
+      );
+      await client.query(
+        `INSERT INTO reports (reporter_account_id, target_review_id, reason, motivation)
+         VALUES ($1, $2, 'other', 'first review report lands')`,
+        [reporter.rows[0].id, review.rows[0].id],
+      );
+      await client.query("SAVEPOINT xor_dup");
+      await expect(client.query(
+        `INSERT INTO reports (reporter_account_id, target_review_id, reason, motivation)
+         VALUES ($1, $2, 'other', 'duplicate review report rejected')`,
+        [reporter.rows[0].id, review.rows[0].id],
+      )).rejects.toThrow(/duplicate/i);
+      await client.query("ROLLBACK TO SAVEPOINT xor_dup");
+
+      // Two targets on one row are equally unrepresentable.
+      await client.query("SAVEPOINT xor_two_targets");
+      await expect(client.query(
+        `INSERT INTO reports (reporter_account_id, target_item_id, target_review_id, reason, motivation)
+         VALUES ($1, $2, $3, 'other', 'two targets at once rejected')`,
+        [reporter.rows[0].id, legacyItem.rows[0].id, review.rows[0].id],
+      )).rejects.toThrow();
+      await client.query("ROLLBACK TO SAVEPOINT xor_two_targets");
+
+      await client.query("ROLLBACK");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    }
   });
 });

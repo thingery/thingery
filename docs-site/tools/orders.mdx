@@ -11,15 +11,18 @@ Every order tool needs an account, and only the two parties of an order can see 
 
 **Create order** · Needs an account · Writes
 
-Buy an item: place an order on a second-hand listing. Default payment_mode is 'stripe' (Checkout URL returned) when the deployment has payments AND the seller finished payout onboarding; otherwise 'off_platform' — you and the seller settle payment yourselves (check get_item's payment_available first). Shippable items need a shipping_address; local-pickup items ignore it. The result's total_price_cents is what the buyer pays (price plus any shipping_price_cents); Stripe Checkout shows shipping as its own line. On off_platform orders the seller cannot see the address until you agree with share_shipping_address after they confirm payment. Requires authentication (buyer account).
+Buy an item: place an order on a second-hand listing. Default payment_mode is 'stripe' (Checkout URL returned) when the deployment has payments AND the seller finished payout onboarding; otherwise 'off_platform' — you and the seller settle payment yourselves (check get_item's payment_available first). Shippable items need a shipping_address, or address_id to reuse a saved address (see list_addresses — summaries only; the full address is copied into the order server-side, never shown in chat). country must be a real ISO 3166-1 alpha-2 code ('IT', not 'XX'; case/whitespace-insensitive: ' it ' ships as 'IT'). Local-pickup items ignore both. Before creating a shippable order the platform runs an advisory carrier address check: if it suggests a correction, NO order is created and the result carries code 'address_verification_suggested' with verification.suggestion — ask the buyer which address to use, then re-call create_order with that address. The result's total_price_cents is what the buyer pays — flat shipping is the listing's shipping_price_cents; on shipping-quote mode (see the result's `shipping` block, mode 'label_quote') it is the carrier label amount quoted for this order, shown as its own Shipping line in Stripe Checkout. On off_platform orders the seller cannot see the address until you agree with share_shipping_address after they confirm payment. Requires authentication (buyer account).
 
 **Parameters**
 
 <ParamField body="item_id" type="string" required>
   Item to order.
 </ParamField>
+<ParamField body="address_id" type="string">
+  Ship to a saved address (from list_addresses) instead of typing shipping_address; mutually exclusive with it.
+</ParamField>
 <ParamField body="shipping_address" type="object">
-  Required for shippable items.
+  Required for shippable items unless address_id is given.
   <Expandable title="fields">
     <ParamField body="name" type="string" required>
       Up to 120 characters.
@@ -37,12 +40,50 @@ Buy an item: place an order on a second-hand listing. Default payment_mode is 's
       Up to 20 characters.
     </ParamField>
     <ParamField body="country" type="string" required>
-      ISO 3166-1 alpha-2, e.g. 'IT'. Exactly 2 characters.
+      ISO 3166-1 alpha-2, e.g. 'IT' (case/whitespace-insensitive; stored normalized). Exactly 2 characters.
     </ParamField>
   </Expandable>
 </ParamField>
 <ParamField body="payment_mode" type="string">
   Leave unset for the best available path. One of `stripe`, `off_platform`.
+</ParamField>
+
+## `quote_shipping`
+
+**Quote shipping** · Needs an account · Read-only
+
+Pre-checkout shipping estimate for a shippable item to one address — exactly what create_order would quote at checkout (same carrier selection: cheapest EUR rate under the per-label cap). Returns &#123; quotable: true, estimate: &#123; amount_cents, currency, carrier, service &#125;, valid_for_minutes, binding: false &#125; or &#123; quotable: false, reason &#125; (no_weight, no_seller_default_address, easypost_not_configured, no_eur_rate, rate_above_cap, not_shippable, …). Estimates are display-only: the amount charged at checkout is re-quoted server-side and may differ. Rate-limited per account (20/hour). Requires authentication.
+
+**Parameters**
+
+<ParamField body="item_id" type="string" required>
+  Item to estimate shipping for.
+</ParamField>
+<ParamField body="address_id" type="string">
+  Estimate to a saved address (from list_addresses); mutually exclusive with shipping_address.
+</ParamField>
+<ParamField body="shipping_address" type="object">
+  Ship-to address; mutually exclusive with address_id.
+  <Expandable title="fields">
+    <ParamField body="name" type="string" required>
+      Up to 120 characters.
+    </ParamField>
+    <ParamField body="line1" type="string" required>
+      Up to 200 characters.
+    </ParamField>
+    <ParamField body="line2" type="string">
+      Up to 200 characters.
+    </ParamField>
+    <ParamField body="city" type="string" required>
+      Up to 80 characters.
+    </ParamField>
+    <ParamField body="postal_code" type="string" required>
+      Up to 20 characters.
+    </ParamField>
+    <ParamField body="country" type="string" required>
+      ISO 3166-1 alpha-2, e.g. 'IT' (case/whitespace-insensitive; stored normalized). Exactly 2 characters.
+    </ParamField>
+  </Expandable>
 </ParamField>
 
 ## `get_order`
@@ -95,7 +136,7 @@ Cancel one of your orders (buyer or seller) while it is still cancellable (pendi
 
 **Get payout setup** · Needs an account · Writes
 
-Get set up to receive payouts when your items sell: returns a Stripe Express onboarding URL when payments are enabled for this Thingery deployment, plus current onboarding status. Onboarding is optional — items stay buyable as off-platform orders without it — but platform payment (Stripe Checkout with buyer protection) requires it. Requires seller auth.
+Get set up to receive payouts when your items sell: returns a Stripe Express onboarding URL when payments are enabled for this Thingery deployment, plus current onboarding status. Onboarding is optional — items stay buyable as off-platform orders without it — but platform payment (Stripe Checkout with buyer protection) requires it. Onboarding links are single-use and rate-limited (10 per hour per seller). Requires seller auth.
 
 No parameters.
 
@@ -148,7 +189,7 @@ Seller records shipment details after shipping a sold item — carrier and track
 
 **Buy shipping label** · Needs an account · Writes
 
-Seller buys a shipping label through the platform on a sold, shippable order (sold → label_issued): the platform quotes EasyPost rates, buys the cheapest EUR one (or the cheapest matching carrier_preference), and stores carrier + tracking + label URL and a purchase snapshot. Weight and parcel dimensions default to the listing's estimates when present. Spend is guarded server-side: a per-label cap, a platform daily budget, and 10 purchases per seller per day — over-limit calls fail with a clear error before anything is bought. Off_platform orders need the buyer's address consent first (share_shipping_address); Stripe orders are ready as soon as they are sold. Replaying the call on the same label-issued order returns the stored label without a second purchase. Without EASYPOST_API_KEY the deployment is in degraded mode: the call fails with easypost_not_configured and the seller ships manually via record_tracking instead.
+Seller buys a shipping label through the platform on a sold, shippable order (sold → label_issued): the platform quotes EasyPost rates, buys the cheapest EUR one (or the cheapest matching carrier_preference), and stores carrier + tracking + label URL and a purchase snapshot. On an order whose shipping the buyer paid at checkout (label-quote mode), the label is bought against the paid quote — from_address/weight/dimensions are locked to the quoted snapshot, carrier_preference applies only if the paid rate is no longer purchasable, and a live rate above the paid amount fails with label_rate_exceeded before anything is bought. Weight and parcel dimensions default to the listing's estimates when present. Spend is guarded server-side: a per-label cap, a platform daily budget, and 10 purchases per seller per day — over-limit calls fail with a clear error before anything is bought. Off_platform orders need the buyer's address consent first (share_shipping_address); Stripe orders are ready as soon as they are sold. Replaying the call on the same label-issued order returns the stored label without a second purchase. Without EASYPOST_API_KEY the deployment is in degraded mode: the call fails with easypost_not_configured and the seller ships manually via record_tracking instead.
 
 **Parameters**
 

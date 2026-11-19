@@ -28,7 +28,7 @@ import type Stripe from "stripe";
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { orderFlowConfig, type OrderFlowConfig } from "./config.js";
-import { getStripe, createRefundForOrder, orderAmountCents } from "./stripe.js";
+import { getStripe, createRefundForOrder, isNothingDueRefund, chargeTotalCents } from "./stripe.js";
 import { planAccountNotification } from "./notify/items.js";
 import { applyTransition, IllegalTransitionError, type OrderRow, type OrderStatus } from "./orders.js";
 
@@ -224,11 +224,13 @@ async function handlePaymentSuccess(db: PoolClient, event: Stripe.Event, cfg: Or
   if (session) {
     // F5 defense in depth: the session must match the order's stored
     // checkout_session_id (checked by resolution) AND the amount+currency.
+    // chargeTotalCents (§3): flat orders price+shipping, quote-mode orders
+    // price+label — the exact figure the Checkout lines were built from.
     const sessionAmount = (session as unknown as { amount_total?: number }).amount_total;
     const sessionCurrency = (session as unknown as { currency?: string }).currency;
-    if (sessionAmount !== orderAmountCents(order) || sessionCurrency !== order.currency.toLowerCase()) {
+    if (sessionAmount !== chargeTotalCents(order) || sessionCurrency !== order.currency.toLowerCase()) {
       throw new WebhookRejectError(
-        `session amount/currency mismatch: expected ${orderAmountCents(order)} ${order.currency}, got ${sessionAmount} ${sessionCurrency}`,
+        `session amount/currency mismatch: expected ${chargeTotalCents(order)} ${order.currency}, got ${sessionAmount} ${sessionCurrency}`,
       );
     }
   }
@@ -247,16 +249,29 @@ async function handlePaymentSuccess(db: PoolClient, event: Stripe.Event, cfg: Or
 
   if (order.status === "cancelled" && !order.refund_id) {
     // F2: late payment on a cancelled order — refund, never strand money.
+    // §6 policy include_label: this order was cancelled from `pending` —
+    // no label can have been bought, so the full charge (label line
+    // included) goes back to the buyer.
     const stripe = getStripe();
     if (!stripe) throw new Error("stripe unavailable for unexpected-payment refund");
-    const refund = await createRefundForOrder(order, String(paymentIntentId), stripe);
+    const refund = await createRefundForOrder(order, String(paymentIntentId), stripe, "include_label");
+    // B1 (THI-1013): a nothing-due remainder (another site already returned
+    // the full charge) settles with no new refund — the event records the
+    // outcome; writing a null refund_id onto the row would be a no-op anyway.
+    const nothingDue = isNothingDueRefund(refund);
+    if (refund.id) {
+      await db.query("UPDATE orders SET refund_id = $2 WHERE id = $1", [order.id, refund.id]);
+    }
     await db.query(
       `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload)
        VALUES ($1, 'unexpected_payment', 'stripe', $2, 'auto-refund on cancelled order', $3::jsonb)`,
-      [order.id, event.id, JSON.stringify({ refund_id: refund.id })],
+      [order.id, event.id, JSON.stringify({ refund_id: refund.id, nothing_due: nothingDue })],
     );
-    await db.query("UPDATE orders SET refund_id = $2 WHERE id = $1", [order.id, refund.id]);
-    console.error(`[webhooks:stripe] operator alert: unexpected payment on cancelled order ${order.id} — auto-refunded ${refund.id}`);
+    console.error(
+      nothingDue
+        ? `[webhooks:stripe] operator alert: unexpected payment on cancelled order ${order.id} — nothing due (charge already returned), no new refund`
+        : `[webhooks:stripe] operator alert: unexpected payment on cancelled order ${order.id} — auto-refunded ${refund.id}`,
+    );
     return;
   }
 

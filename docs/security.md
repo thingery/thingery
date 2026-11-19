@@ -31,6 +31,7 @@ It is maintained by the Security role; changes go through PR like everything els
 | Uploaded images (`/app/uploads`) | Listing content | Disk exhaustion, illegal content hosting |
 | Infrastructure secrets (`SESSION_SECRET`, `POSTGRES_PASSWORD`, `EMBED_API_KEY`, `LLM_API_KEY`) | Trust anchors + cost-bearing credentials | Session forgery, DB access, provider bill |
 | Platform trust (spam-free, non-malicious listings) | Why agents and humans use Thingery at all | Slow death by spam; agent users poisoned |
+| Saved shipping addresses (`account_addresses`) | PII: recipient name, street, city, postal code — owner-scoped | Address disclosure beyond the owner (leak = PII breach) |
 
 **Actors:** anonymous buyers (browser + agents), authenticated sellers (MCP clients with
 API keys, browsers with sessions), the chat assistant (server-side LLM agent acting for a
@@ -338,8 +339,18 @@ phishing concerns — threat-model them before building, not after.
   the Security agent; author agents push as `isaac1972` and cannot reach the
   credential, so reviewer ≠ author holds by credential reach, not convention. Merge
   flow: author agent opens PR → CI green → independent reviewer approves → author
-  merges. The "never push to main" convention is enforced by GitHub, not just
-  discipline. R1 in §9 is struck (gate live).
+  merges. **Approve-last discipline** (2026-11-17, PR #316, THI-957): push branch
+  updates *before* requesting approval, never push between approval and merge, and
+  the reviewer pins the exact head SHA in the review body — a mismatch between that
+  verified SHA and the review's `commit_id` invalidates the approval (re-request
+  review). This closes a race neither branch-protection setting catches: a push
+  landing seconds *before* the approval is submitted attaches the approval to the
+  new head with **no dismissal event** (`dismiss_stale_reviews` only reacts to pushes
+  after approval) while the approval's verification record still names the older,
+  actually-verified SHA, and `require_last_push_approval` checks submission time, not
+  verification time — observed live on PR #316, where an approval verifying 0941cc2
+  silently covered c6c5b47. The "never push to main" convention is enforced by
+  GitHub, not just discipline. R1 in §9 is struck (gate live).
   `deploy` is intentionally not a required check (it runs push-to-main only and never on
   PRs).
 - `npm audit --omit=dev` on the current lockfile: **0 production vulnerabilities**.
@@ -356,6 +367,11 @@ phishing concerns — threat-model them before building, not after.
   replay-safe); email outbox with verified-address gate, rate caps, backoff +
   dead-letter; provider adapter = Resend, channel off unless `NOTIFY_EMAIL_ENABLED=true`
   (default **false** — in-app only until enabled). Privacy and retention statement: §4a.
+- Saved shipping addresses with advisory EasyPost delivery verification (spec
+  docs/specs/saved-addresses.md): owner-scoped `account_addresses` store; MCP tools
+  return summaries only (name, street and postal code never reach a model provider);
+  30 writes/hour and ~20 verification checks/day per account; verification is
+  advisory and never blocks a save. Privacy & processor statement: §4b.
 
 **Missing (each maps to a backlog item below):**
 
@@ -424,6 +440,78 @@ delivered message follows the provider's own retention, not ours.
 off by default: no provider key configured → no mail leaves the host, and no processor
 relationship is created. Operators who enable it choose the provider and from-address
 and carry the corresponding obligations.
+
+## 4b. Saved shipping addresses — privacy & processor statement
+
+Saved addresses (spec `docs/specs/saved-addresses.md`; table `account_addresses`) are
+personal data: recipient name, street, city, postal code, country, and a user-chosen
+label. Saving is always an explicit act (a confirmed chat write or a web form), never a
+side effect of ordering; the address is processed to perform the sale it is used for
+(GDPR art. 6(1)(b)).
+
+**What is stored and who can read it — live.** One row per saved address, owned by the
+account and deleted with it (`ON DELETE CASCADE`). Full rows are readable by the owner
+only: the web settings routes (`/api/me/addresses` — session-authenticated, owner-scoped,
+`no-store`). Every other surface sees less: the MCP address tools return summaries only
+(label, city, country, default flag, verification status) — name, street and postal code
+never reach a model provider or the chat history. Using a saved address copies it into
+the order's own snapshot, which keeps the order's existing access rules (the order's
+parties only; on off-platform orders the seller sees it only after the buyer agrees).
+Addresses never appear in logs, `security_events` (address write events carry ids and
+statuses only), emails, or notifications.
+
+**EasyPost as a processor — live, only when the operator configures `EASYPOST_API_KEY`.**
+Saving or editing an address asks EasyPost to run its delivery check once
+(`verifyEasyPostAddress`, `src/easypost.ts`): the full typed address is sent to EasyPost
+**before any label exists**, and possibly for an address never shipped to. Label purchase
+already sent order addresses to EasyPost — verification widens that to save time. The
+check is advisory (it never blocks or rejects a save) and runs at most about 20 times per
+account per day (token-bucket average rate; over the ceiling the status is simply
+`not_checked`). Only the status, the time of the check and a length-capped suggested
+correction are stored — never the provider's raw response — and the correction text is
+never returned through MCP tools. Self-hosters without the key never send anything and
+see `not_checked` only; no processor relationship is created.
+
+**Deletion — live, with the backup caveat.** Deleting an address is a hard delete;
+deleting the account removes all of its addresses. The encrypted nightly database
+backups are point-in-time copies: a deleted address persists in existing backups until
+they age out of the retention rotation. Erasure requests must account for that window.
+
+## 4c. Order-time address verification — privacy & retention statement
+
+Order-time address verification (docs/specs/order-address-verification.md) sends the
+buyer's shipping address to EasyPost once, at order creation, for an advisory delivery
+check. Same "live/planned" discipline as §4a so the statement cannot overstate.
+
+**What is sent — live.** Exactly the typed shipping address fields (name, street lines,
+city, postal code, ISO country) as one `POST /v2/addresses` with a delivery check. No
+shipment is created; no money moves; the request IS the check. Phone is never sent (the
+field is not part of `create_order`).
+
+**When — live.** Only for shippable orders (never local pickup), only when
+`EASYPOST_API_KEY` is configured (unset key → the feature is entirely absent: no call, no
+storage, no suggestion flow — pre-rollout behavior byte for byte), and bounded: at most one
+provider call per create attempt (10-minute dedup cache), 20 checks/account/day shared with
+the saved-addresses path, and a platform-wide daily ceiling defaulting to 1,000/day
+(`ADDRESS_VERIFICATION_DAILY_CAP`; `0` disables the feature entirely).
+
+**What is stored — live.** One JSONB column on the order row (`orders.shipping_verification`):
+outcome status, an ISO timestamp, and — only when the buyer kept a suggested correction —
+the corrected address, re-validated to the exact `create_order` schema before storage
+(provider payloads never travel raw: a malformed suggestion downgrades to `unverified`).
+Provider responses and error bodies are never stored, logged, or returned.
+
+**Who sees it — planned (verification_choice PR).** The record rides the order parties'
+existing read rules plus a property-level visibility matrix (§5a of the spec): status and
+timestamp to both parties; the suggestion to the buyer always (their own data) and to the
+seller exactly under the existing address-release rule. Until that PR, the record is stored
+but not surfaced in tool output — nothing here widens who can read an address.
+
+**Retention — live.** The record lives and dies with the order row — same retention as the
+shipping address it describes; no side table, no separate policy.
+
+**Self-hosting — live.** Like tracking and labels, verification is off unless the operator
+configures an EasyPost key. No key → today's behavior.
 
 ## 5. Secrets hygiene policy
 
@@ -840,6 +928,48 @@ are met and names where the remediation is tracked.
   Historical context: accepted as interim 2026-10-31 (board confirmation of THI-225,
   CEO ruling = phased Option 1; compensating controls: strict checks, `enforce_admins`,
   mandatory Security pre-merge review for sensitive changes, THI-224 F1–F5).
+
+### R2 — Order-time address verification is a bounded address-validation oracle — ACCEPTED 2026-11-18
+
+- **What:** with `EASYPOST_API_KEY` set, an authenticated account can use `create_order` as
+  a yes/no oracle about whether EasyPost considers an address deliverable (and get the
+  provider's normalization when it does not). Since signup is open, the real bound is the
+  global daily ceiling, not the per-account budget (docs/specs/
+  order-address-verification.md, residual risks).
+- **Bounds:** at most one provider call per create attempt (10-minute dedup cache keyed by
+  account + normalized address), 20 checks/account/day (`addrverify:{accountId}` bucket,
+  shared with the saved-addresses path), platform-wide default ceiling 1,000/day
+  (`ADDRESS_VERIFICATION_DAILY_CAP`, `0` = off). The oracle's answers are yes/no plus the
+  normalization of an address the submitter already had — no third-party data is exposed.
+  Over-cap days degrade to `not_checked` (order proceeds unverified), never fail orders.
+- **Removal criteria:** on any abuse signal, lower the ceiling default and/or the
+  per-account budget first (config-only); removing the check is not planned (typo/fraud
+  value exceeds the bounded probing risk). Tracked: this register; revisit on abuse signals.
+
+### R3 — Verification dedup cache and budgets are single-instance (in-memory) — ACCEPTED 2026-11-18
+
+- **What:** the 10-minute dedup cache, the per-account `RateLimiter` bucket, and the daily
+  ceiling counter in `src/address-verification.ts` live in one process's memory. A
+  multi-instance deployment would multiply effective budgets by the instance count.
+- **Compensating controls:** single-instance is the documented deployment shape; the
+  ceiling still bounds per-instance provider spend; every cap path degrades to
+  `not_checked` rather than failing orders.
+- **Removal criteria:** move cache + budget + ceiling counter to shared storage (Redis/
+  Postgres) as a hard precondition of the first multi-instance deployment. Tracked here.
+
+### R4 — The buyer's choice between typed and suggested address is agent-relayed — ACCEPTED 2026-11-18
+
+- **What:** nothing in the protocol can cryptographically prove the BUYER chose the
+  correction; the agent relays the choice. A careless agent could re-submit the suggested
+  address without asking, or keep the typed one against the buyer's wish.
+- **Bounds:** both candidates derive from the buyer's own typed submission (the suggestion
+  is the provider's normalization of it); the suggested-branch result instructs the agent
+  to ask the buyer and carries the suggestion as data for the conversation (the buyer sees
+  it in the transcript before paying); the stored record says which happened (`accepted` vs
+  `kept`) for support review; `verification_choice:"keep_original"` gives the buyer an
+  explicit, logged keep path once surfaced.
+- **Removal criteria:** none planned — inherent to agent-mediated commerce; revisit on a
+  buyer-complaint pattern. Tracked here.
 
 ## 10. Keeping this document honest
 

@@ -12,6 +12,7 @@ import { setStripeForTests } from "../src/stripe.js";
 import { applyTransition } from "../src/orders.js";
 import { createOrder, shareShippingAddress } from "../src/order-flow.js";
 import { OrderFlowError, confirmPayment, confirmReceipt, openDispute, recordTracking, releaseFunds, buyShippingLabel, MAX_LABELS_PER_SELLER_PER_DAY } from "../src/fulfillment.js";
+import { runSweeps } from "../src/orders-sweep.js";
 import { registerTools } from "../src/tools.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -34,10 +35,11 @@ async function dbAvailable(): Promise<boolean> {
 const available = await dbAvailable();
 
 const n0 = Math.random().toString(36).slice(2, 8);
+let csSeq = 0; // module-level: every fakeStripe() instance must mint unique session ids
 function fakeStripe(transferImpl?: () => Promise<unknown>): { client: Stripe; calls: string[] } {
   const calls: string[] = [];
   const client = {
-    checkout: { sessions: { create: async () => ({ id: `cs_${n0}`, url: `https://pay.test/${n0}` }) } },
+    checkout: { sessions: { create: async () => ({ id: `cs_${n0}_${++csSeq}`, url: `https://pay.test/${n0}/${csSeq}` }) } },
     paymentIntents: {
       retrieve: async () => ({
         // THI-374 netting read: expanded PI → succeeded charge → balance
@@ -318,17 +320,27 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
   const RATE_USPS_EUR = { id: "rate_usps_eur", carrier: "USPS", service: "Priority", rate: "12.30", currency: "EUR" };
 
   /** EasyPost fetch stub: quotes `rates` on /v2/shipments, buys on /buy.
-   *  `onBuy` runs inside the /buy handler — the hook for the cancel race. */
-  function easypostFetch(rates: Array<Record<string, unknown>>, opts: { onBuy?: () => Promise<void>; shipId?: string } = {}) {
+   *  `onBuy` runs inside the /buy handler — the hook for the cancel race.
+   *  `bodies` captures each /v2/shipments POST body so tests can assert the
+   *  exact wire address fields (THI-953 regression hook).
+   *  `failBuyFor` makes the /buy of a given shipment id fail with a 422 —
+   *  the quote-mode "paid rate no longer purchasable" path (§5.3). */
+  function easypostFetch(rates: Array<Record<string, unknown>>, opts: { onBuy?: () => Promise<void>; shipId?: string; failBuyFor?: string } = {}) {
     const shipId = opts.shipId ?? `shp_${Math.random().toString(36).slice(2, 8)}`;
     const calls: string[] = [];
+    const bodies: Record<string, unknown>[] = [];
     const fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       const u = String(url);
       calls.push(`${init?.method ?? "GET"} ${u}`);
       if (u.endsWith("/v2/shipments") && init?.method === "POST") {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
         return new Response(JSON.stringify({ id: shipId, rates }), { status: 200 });
       }
-      if (/\/v2\/shipments\/[^/]+\/buy$/.test(u)) {
+      if (/\/v2\/shipments\/([^/]+)\/buy$/.test(u)) {
+        const buying = u.split("/").slice(-2, -1)[0];
+        if (opts.failBuyFor === buying) {
+          return new Response(JSON.stringify({ error: { message: "rate is no longer purchasable", code: "RATE_UNAVAILABLE" } }), { status: 422 });
+        }
         if (opts.onBuy) await opts.onBuy();
         return new Response(
           JSON.stringify({
@@ -343,7 +355,7 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
       }
       return new Response(JSON.stringify({ error: { message: "unexpected call", code: "UNEXPECTED" } }), { status: 404 });
     }) as typeof fetch;
-    return { fetch, calls, shipId, buyCalls: () => calls.filter((c) => c.endsWith("/buy")).length };
+    return { fetch, calls, bodies, shipId, buyCalls: () => calls.filter((c) => c.endsWith("/buy")).length };
   }
 
   function spyLog() {
@@ -718,5 +730,226 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
     expect(degraded.isError).toBe(true);
     expect(degraded.body.code).toBe("easypost_not_configured");
     expect(String(degraded.body.error)).toContain("record_tracking");
+  });
+
+  // THI-953 regression: the MCP handler used to pass the snake_case
+  // from_address straight through as EasyPostAddressInput, so toWireAddress
+  // read a.postalCode (camelCase) and the live quote went out with
+  // zip: undefined — every real label purchase failed with easypost_error.
+  // Assert the exact wire body built from the handler's snake_case args.
+  it("buy_shipping_label tool maps snake_case from_address onto the wire body: from_address.zip equals the caller's postal_code (THI-953)", async () => {
+    const { order, ep, restore } = await seedSoldOrderWithLabels(undefined, { mode: "stripe" });
+    try {
+      const tools = captureTools({ id: sellerId } as never);
+      const res = await call(tools, "buy_shipping_label", {
+        order_id: order.id,
+        from_address: { name: "Seller", line1: "Corso Buenos Aires 2", line2: "Int 4", city: "Milan", postal_code: "20122", country: "IT", phone: "+39 333 1112223" },
+        weight_grams: 800,
+      });
+      expect(res.isError).toBe(false);
+      const quote = ep.bodies[0] as { shipment: { from_address: Record<string, unknown> } };
+      expect(quote.shipment.from_address.zip).toBe("20122");
+      expect(quote.shipment.from_address.name).toBe("Seller");
+      expect(quote.shipment.from_address.street1).toBe("Corso Buenos Aires 2");
+      expect(quote.shipment.from_address.street2).toBe("Int 4");
+      expect(quote.shipment.from_address.city).toBe("Milan");
+      expect(quote.shipment.from_address.country).toBe("IT");
+      expect(quote.shipment.from_address.phone).toBe("+39 333 1112223");
+    } finally {
+      restore();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Buyer-paid shipping quote mode (spec docs/specs/buyer-paid-shipping.md
+  // §5/§6, PR 4). The seed walks a stripe order to sold, then arms a paid
+  // label_quote snapshot (destination == shipping_address, 733c line).
+  // -------------------------------------------------------------------------
+
+  const BUYER_ADDR_SNAPSHOT = { name: "B", line1: "1 St", city: "C", postal_code: "20100", country: "IT" };
+
+  async function seedQuoteModeSoldOrder(opts: { quoteAmountCents?: number } = {}) {
+    const order = await seedOrder({ mode: "stripe", onboarded: true });
+    await db.query("UPDATE items SET weight_grams = 800, dimensions_mm = '300x200x150' WHERE id = $1", [order.item_id]);
+    await applyTransition({ orderId: order.id, trigger: "stripe_payment", actor: { type: "stripe" }, sets: { payment_intent_id: `pi_q${n}` } });
+    await db.query("UPDATE orders SET shipping_address = $2::jsonb, shipping_price_cents = 0, label_quote = $3::jsonb WHERE id = $1", [
+      order.id,
+      JSON.stringify({ ...BUYER_ADDR_SNAPSHOT, phone: "+39 333 000111" }),
+      JSON.stringify({
+        shipment_id: "shp_paid", rate_id: "rate_paid", carrier: "DHLExpress", service: "ExpressWorldwide",
+        amount_cents: opts.quoteAmountCents ?? 733, currency: "EUR", weight_grams: 800, dimensions_mm: "300x200x150",
+        origin: { name: "Seller", line1: "Corso Buenos Aires 2", city: "Milan", postal_code: "20122", country: "IT" },
+        destination: BUYER_ADDR_SNAPSHOT, quoted_at: "2026-11-18T00:00:00Z",
+      }),
+    ]);
+    return order;
+  }
+
+  /** The paid rate's /buy payload — what path A should return. */
+  const PAID_RATE = { id: "rate_paid", carrier: "DHLExpress", service: "ExpressWorldwide", rate: "7.33", currency: "EUR" };
+
+  /** Stripe fake with refund capture (§6 labelrefund tests). */
+  function stripeWithRefunds(refundImpl?: () => Promise<unknown>) {
+    const refunds: Array<{ amount?: number; idempotencyKey?: string }> = [];
+    const client = {
+      checkout: { sessions: { create: async () => ({ id: `cs_q${Math.random().toString(36).slice(2, 8)}`, url: "https://pay.test/q" }) } },
+      refunds: {
+        create: async (a: { amount?: number }, o: { idempotencyKey?: string }) => {
+          refunds.push({ amount: a.amount, idempotencyKey: o.idempotencyKey });
+          if (refundImpl) return refundImpl();
+          return { id: `re_line_${refunds.length}` };
+        },
+      },
+    } as unknown as Stripe;
+    return { client, refunds };
+  }
+
+  it("§5 quote mode: buys the exact paid rate — no re-quote, snapshot funded_by buyer_quote", async () => {
+    const order = await seedQuoteModeSoldOrder();
+    process.env.EASYPOST_API_KEY = "EZTK_TEST_KEY";
+    const ep = easypostFetch([PAID_RATE], { shipId: "shp_paid" });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ep.fetch;
+    try {
+      const result = await buyShippingLabel(order.id, sellerId, { fromAddress: FROM_ADDR });
+      expect(result.order.status).toBe("label_issued");
+      expect(result.label.cost).toBe("EUR 7.33");
+      const snap = result.order.label_purchase as Record<string, unknown>;
+      expect(snap.funded_by).toBe("buyer_quote");
+      expect(snap.shipment_id).toBe("shp_paid");
+      expect(snap.rate_id).toBe("rate_paid");
+      expect(snap.cost_cents).toBe(733);
+      expect(ep.calls.filter((c) => c.endsWith("/v2/shipments"))).toHaveLength(0); // no re-quote POST (the /buy URL also contains /v2/shipments)
+      expect(ep.calls.filter((c) => c.endsWith("/buy"))).toHaveLength(1); // the single /buy
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("§5.3 re-quote: paid rate no longer purchasable → snapshot-only re-quote, cheaper rate bought, label_requoted event", async () => {
+    const order = await seedQuoteModeSoldOrder();
+    process.env.EASYPOST_API_KEY = "EZTK_TEST_KEY";
+    const requotedRates = [{ id: "rate_new", carrier: "USPS", service: "Priority", rate: "7.00", currency: "EUR" }];
+    const ep = easypostFetch(requotedRates, { failBuyFor: "shp_paid" });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ep.fetch;
+    try {
+      const result = await buyShippingLabel(order.id, sellerId, { fromAddress: FROM_ADDR });
+      expect(result.order.status).toBe("label_issued");
+      expect(result.label.cost).toBe("EUR 7.00");
+      const snap = result.order.label_purchase as Record<string, unknown>;
+      expect(snap.funded_by).toBe("buyer_quote");
+      // The re-quote was built solely from the snapshot: origin/destination
+      // reversed roles of the quote, never re-resolved account data.
+      const body = ep.bodies[0] as { shipment: { to_address: Record<string, unknown>; from_address: Record<string, unknown> } };
+      expect(body.shipment.to_address.street1).toBe("1 St");
+      expect(body.shipment.from_address.street1).toBe("Corso Buenos Aires 2");
+      const evt = await db.query("SELECT payload FROM order_events WHERE order_id = $1 AND event_type = 'label_requoted'", [order.id]);
+      expect(evt.rows).toHaveLength(1);
+      const payload = evt.rows[0].payload as Record<string, unknown>;
+      expect(payload.amount_cents).toBe(700);
+      expect(payload.paid_amount_cents).toBe(733);
+      expect(payload).not.toHaveProperty("destination"); // ids + amounts only, no PII
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("§5.4 rate-up rule: live cheapest rate above the paid amount → label_rate_exceeded, no /buy, no quota", async () => {
+    const order = await seedQuoteModeSoldOrder();
+    process.env.EASYPOST_API_KEY = "EZTK_TEST_KEY";
+    const ep = easypostFetch([{ id: "rate_hi", carrier: "DHLExpress", service: "ExpressWorldwide", rate: "9.00", currency: "EUR" }], { failBuyFor: "shp_paid" });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ep.fetch;
+    try {
+      const err = await buyShippingLabel(order.id, sellerId, { fromAddress: FROM_ADDR }).catch((e: unknown) => e as OrderFlowError);
+      expect(err.code).toBe("label_rate_exceeded");
+      expect(err.message).toContain("record_tracking");
+      expect(ep.calls.filter((c) => c.endsWith("/buy") && !c.includes("shp_paid"))).toHaveLength(0); // the re-quote was never bought
+      const still = await db.query<{ status: string; quota: number }>(
+        "SELECT o.status, (SELECT COALESCE(SUM(used), 0) FROM seller_label_quota) AS quota FROM orders o WHERE o.id = $1", [order.id]);
+      expect(still.rows[0].status).toBe("sold");
+      expect(Number(still.rows[0].quota)).toBe(1); // path A burned one slot (fail-closed); the re-quote bought nothing
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("§5.3 destination invariant: mutated shipping address → label_destination_mismatch, no EasyPost call at all", async () => {
+    const order = await seedQuoteModeSoldOrder();
+    await db.query(`UPDATE orders SET shipping_address = jsonb_set(shipping_address, '{city}', $j$"Elsewhere"$j$) WHERE id = $1`, [order.id]);
+    process.env.EASYPOST_API_KEY = "EZTK_TEST_KEY";
+    const ep = easypostFetch([PAID_RATE], { shipId: "shp_paid" });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ep.fetch;
+    try {
+      const err = await buyShippingLabel(order.id, sellerId, { fromAddress: FROM_ADDR }).catch((e: unknown) => e as OrderFlowError);
+      expect(err.code).toBe("label_destination_mismatch");
+      expect(ep.calls).toHaveLength(0); // refused before any provider call
+      const still = await db.query<{ status: string }>("SELECT status FROM orders WHERE id = $1", [order.id]);
+      expect(still.rows[0].status).toBe("sold");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("§5.5 quote-mode guard: actual rate above the cap → label_cost_exceeds_cap with the §6 remedy set", async () => {
+    const order = await seedQuoteModeSoldOrder({ quoteAmountCents: 5000 });
+    process.env.EASYPOST_API_KEY = "EZTK_TEST_KEY";
+    process.env.LABEL_MAX_COST_CENTS = "3000";
+    const ep = easypostFetch([{ id: "rate_paid", carrier: "DHLExpress", service: "X", rate: "50.00", currency: "EUR" }], { shipId: "shp_paid" });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ep.fetch;
+    try {
+      const err = await buyShippingLabel(order.id, sellerId, { fromAddress: FROM_ADDR }).catch((e: unknown) => e as OrderFlowError);
+      expect(err.code).toBe("label_cost_exceeds_cap");
+      expect(err.message).toContain("cancel the order for a full refund"); // §5.5 remedies verbatim
+      expect(ep.calls.filter((c) => c.endsWith("/buy"))).toHaveLength(0);
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.LABEL_MAX_COST_CENTS;
+    }
+  });
+
+  it("§6 unused-quote refund: own-label record_tracking refunds the paid line immediately under labelrefund:{order_id}", async () => {
+    const order = await seedQuoteModeSoldOrder();
+    const { client, refunds } = stripeWithRefunds();
+    setStripeForTests(client);
+    const result = await recordTracking(order.id, sellerId, { carrier: "DHL", trackingCode: "OWN1" });
+    expect(result.order.status).toBe("label_issued");
+    expect(result.note).toContain("refunded");
+    expect(refunds).toEqual([{ amount: 733, idempotencyKey: `labelrefund:${order.id}` }]);
+    const row = await db.query<{ line_refund_id: string | null }>("SELECT label_quote->>'line_refund_id' AS line_refund_id FROM orders WHERE id = $1", [order.id]);
+    expect(row.rows[0].line_refund_id).toMatch(/^re_line_/);
+    const evt = await db.query("SELECT 1 FROM order_events WHERE order_id = $1 AND event_type = 'label_line_refunded'", [order.id]);
+    expect(evt.rows).toHaveLength(1);
+    // A #23 correction afterwards never refunds again.
+    await recordTracking(order.id, sellerId, { carrier: "UPS", trackingCode: "OWN2" });
+    expect(refunds).toHaveLength(1);
+  });
+
+  it("§6 sweep rule 10: a stuck label-line refund is retried, and full-refund states are never candidates", async () => {
+    const stuck = await seedQuoteModeSoldOrder();
+    const broken = stripeWithRefunds(async () => { throw new Error("stripe down"); });
+    setStripeForTests(broken.client);
+    const tracked = await recordTracking(stuck.id, sellerId, { carrier: "DHL", trackingCode: "SW1" });
+    expect(tracked.order.status).toBe("label_issued");
+    expect(tracked.note).toContain("retried automatically");
+    // A refunded order (own label, line already settled via a full refund at
+    // cancel) must never be picked up: its refund already included the line.
+    const settled = await seedQuoteModeSoldOrder();
+    await applyTransition({ orderId: settled.id, trigger: "record_tracking", actor: { type: "seller", id: sellerId }, sets: { carrier: "DHL", tracking_code: "SET1" } });
+    await applyTransition({ orderId: settled.id, trigger: "cancel_order", actor: { type: "buyer", id: buyerId } });
+    // Fix Stripe and sweep: only the stuck order is a candidate.
+    const fixed = stripeWithRefunds();
+    setStripeForTests(fixed.client);
+    const report = await runSweeps();
+    expect(report["10-label-line-refund"].acted).toBe(1);
+    expect(fixed.refunds).toEqual([{ amount: 733, idempotencyKey: `labelrefund:${stuck.id}` }]);
+    const row = await db.query<{ line_refund_id: string | null }>("SELECT label_quote->>'line_refund_id' AS line_refund_id FROM orders WHERE id = $1", [stuck.id]);
+    expect(row.rows[0].line_refund_id).toMatch(/^re_line_/);
+    // Second pass: nothing left to do (dedupe by durable state).
+    const again = await runSweeps();
+    expect(again["10-label-line-refund"].acted).toBe(0);
   });
 });

@@ -31,6 +31,7 @@ The chat API (`POST /api/chat`) runs on a model you configure. The server ships 
 | Variable | Purpose |
 |---|---|
 | `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL` | Any OpenAI-compatible chat completions endpoint. Leave the key empty to turn chat off; MCP and signup keep working |
+| `LLM_THINKING` | `disabled` turns off the model's hidden reasoning, for providers that accept `thinking` (GLM on z.ai): replies come faster. Leave it unset for other providers, which may reject the field |
 | `CHAT_TURNS_HOURLY_AUTHED`, `CHAT_TURNS_HOURLY_ANON` | Chat turns per hour, per account and per IP. Defaults `60` and `10` |
 | `CHAT_DAILY_TOKEN_BUDGET` | Daily token budget for the whole server. Default `2000000`; `0` removes it |
 
@@ -46,7 +47,8 @@ The chat API (`POST /api/chat`) runs on a model you configure. The server ships 
 | Variable | Purpose |
 |---|---|
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Stripe Connect payments. With no key, orders run off-platform. With a key but no webhook secret, payments stay pending until the webhook is set up |
-| `EASYPOST_API_KEY`, `EASYPOST_WEBHOOK_SECRET` | Optional automatic carrier tracking. Without it, buyers confirm delivery |
+| `EASYPOST_API_KEY`, `EASYPOST_WEBHOOK_SECRET` | Optional automatic carrier tracking, label purchase, and order-time address verification (an advisory delivery check when a shippable order is created — with no key, buyers confirm delivery and no address check runs). See docs/specs/order-address-verification.md |
+| `ADDRESS_VERIFICATION_DAILY_CAP` | Max order-time address checks per UTC day, platform-wide (default `1000`). `0` disables address verification entirely; orders then always proceed without a check |
 | `ADMIN_API_KEY` | Turns on the admin route for resolving disputes. Must be at least 32 characters |
 
 ## Order windows

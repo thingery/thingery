@@ -12,6 +12,7 @@ import {
   createEasyPostShipment,
   EasyPostError,
   pickEasyPostRate,
+  verifyEasyPostAddress,
   type EasyPostRate,
 } from "../src/easypost.js";
 
@@ -126,6 +127,42 @@ describe("createEasyPostShipment", () => {
     const out = await createEasyPostShipment({ toAddress: TO, fromAddress: FROM, weightGrams: 500 }, { ...OPTS, fetchImpl: fetch });
     expect(out?.rates).toEqual([{ id: "rate_dhl", carrier: "DHLExpress", service: "ExpressWorldwide", costCents: 1045, currency: "USD" }]);
   });
+
+  // Buyer-paid shipping C3 (spec docs/specs/buyer-paid-shipping.md §2): the
+  // order-time quote is bounded by AbortSignal.timeout(SHIPPING_QUOTE_TIMEOUT_MS)
+  // — but only if the signal actually reaches the fetch. Regression: fails
+  // against a createEasyPostShipment that drops the signal (pre-C3 code — the
+  // fetch init would carry no signal at all).
+  it("C3: passes the caller's signal into the actual fetch", async () => {
+    const { calls, fetch } = fetchStub(shipmentResponse);
+    const controller = new AbortController();
+    await createEasyPostShipment(
+      { toAddress: TO, fromAddress: FROM, weightGrams: 500 },
+      { ...OPTS, fetchImpl: fetch },
+      controller.signal,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init.signal).toBe(controller.signal); // plumbed, not dropped
+  });
+
+  it("C3: an aborted signal rejects the quote call (a hanging provider can never hang the caller)", async () => {
+    // Fetch stub that emulates the real fetch abort contract: never resolves
+    // on its own, rejects when the signal fires.
+    const fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    }) as typeof fetch;
+    const controller = new AbortController();
+    const pending = createEasyPostShipment(
+      { toAddress: TO, fromAddress: FROM, weightGrams: 500 },
+      { ...OPTS, fetchImpl: fetch },
+      controller.signal,
+    );
+    controller.abort();
+    await expect(pending).rejects.toThrow("aborted");
+  });
 });
 
 describe("buyEasyPostLabel", () => {
@@ -211,3 +248,75 @@ function boughtResponse(labelUrl = "https://easypost.test/labels/abc.pdf"): Resp
     { status: 200 },
   );
 }
+
+// Address verification (spec docs/specs/saved-addresses.md "Verification
+// (advisory)"; rollout step 4): the provider call only — policy, limits and
+// status mapping are tested in tests/addresses.test.ts. C3's timeout rides
+// on the fetch init as an AbortSignal.
+describe("verifyEasyPostAddress", () => {
+  const ADDR = { name: "Buyer", line1: "Via Roma 1", city: "Milan", postalCode: "20121", country: "IT" };
+
+  function verificationResponse(fields: Record<string, unknown> = {}, success = true): Response {
+    return new Response(
+      JSON.stringify({
+        id: "adr_123",
+        name: "Buyer",
+        street1: "Via Roma 1",
+        street2: null,
+        city: "Milan",
+        zip: "20121",
+        country: "IT",
+        ...fields,
+        verifications: { delivery: { success, errors: success ? [] : [{ code: "E.ADDRESS.NOT_FOUND" }] } },
+      }),
+      { status: 200 },
+    );
+  }
+
+  it("degraded mode: no API key → null, no network call", async () => {
+    const { calls, fetch } = fetchStub(() => verificationResponse());
+    const out = await verifyEasyPostAddress(ADDR, { apiKey: undefined, baseUrl: OPTS.baseUrl, fetchImpl: fetch });
+    expect(out).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("posts the address with verify delivery, basic auth and an abort signal (C3)", async () => {
+    const { calls, fetch } = fetchStub(() => verificationResponse());
+    const out = await verifyEasyPostAddress(ADDR, { ...OPTS, fetchImpl: fetch });
+    expect(out).toEqual({
+      success: true,
+      corrected: { name: "Buyer", line1: "Via Roma 1", city: "Milan", postalCode: "20121", country: "IT" },
+    });
+    const { url, init } = calls[0];
+    expect(url).toBe(`${OPTS.baseUrl}/v2/addresses`);
+    expect(JSON.parse(String(init.body))).toEqual({
+      address: { name: "Buyer", street1: "Via Roma 1", city: "Milan", zip: "20121", country: "IT" },
+      verify: ["delivery"],
+    });
+    expect((init.headers as Record<string, string>).Authorization).toMatch(/^Basic /);
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("maps the corrected fields EasyPost returns", async () => {
+    const { fetch } = fetchStub(() => verificationResponse({ zip: "20122", street2: "Scala B" }));
+    const out = await verifyEasyPostAddress(ADDR, { ...OPTS, fetchImpl: fetch });
+    expect(out.success).toBe(true);
+    expect(out.corrected).toMatchObject({ postalCode: "20122", line2: "Scala B" });
+  });
+
+  it("delivery failure → success false, no corrected address", async () => {
+    const { fetch } = fetchStub(() => verificationResponse({}, false));
+    const out = await verifyEasyPostAddress(ADDR, { ...OPTS, fetchImpl: fetch });
+    expect(out).toEqual({ success: false, corrected: null });
+  });
+
+  it("non-2xx → EasyPostError (the caller maps every throw to not_checked)", async () => {
+    const { fetch } = fetchStub(
+      () => new Response(JSON.stringify({ error: { message: "bad", code: "INVALID" } }), { status: 422 }),
+    );
+    await expect(verifyEasyPostAddress(ADDR, { ...OPTS, fetchImpl: fetch })).rejects.toMatchObject({
+      name: "EasyPostError",
+      status: 422,
+    });
+  });
+});

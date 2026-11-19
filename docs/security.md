@@ -32,6 +32,7 @@ It is maintained by the Security role; changes go through PR like everything els
 | Infrastructure secrets (`SESSION_SECRET`, `POSTGRES_PASSWORD`, `EMBED_API_KEY`, `LLM_API_KEY`) | Trust anchors + cost-bearing credentials | Session forgery, DB access, provider bill |
 | Platform trust (spam-free, non-malicious listings) | Why agents and humans use Thingery at all | Slow death by spam; agent users poisoned |
 | Saved shipping addresses (`account_addresses`) | PII: recipient name, street, city, postal code — owner-scoped | Address disclosure beyond the owner (leak = PII breach) |
+| Chat history (`chat_messages`) | Signed-in users' conversation with the assistant — user-authored text, owner-scoped, ≤ 80 rows per account | Disclosure of the owner's chat content beyond the owner (PII-adjacent; privacy statement §4d) |
 
 **Actors:** anonymous buyers (browser + agents), authenticated sellers (MCP clients with
 API keys, browsers with sessions), the chat assistant (server-side LLM agent acting for a
@@ -515,6 +516,37 @@ shipping address it describes; no side table, no separate policy.
 
 **Self-hosting — live.** Like tracking and labels, verification is off unless the operator
 configures an EasyPost key. No key → today's behavior.
+
+## 4d. Chat history — privacy & retention statement
+
+Signed-in chat turns are persisted in Postgres (`chat_messages`, PR #334). Same
+live-only discipline as §4a–4c so the statement cannot overstate.
+
+**What is stored — live.** One row per message: role (`user`/`assistant`), text
+content (≤ 8,000 characters, enforced by the normalizer and a `CHECK` constraint),
+the assistant reply's tool names and follow-up suggestions, and a timestamp. Rows
+are keyed by the account id taken from the session — no client-supplied IDs — and
+anonymous chat turns are never stored at all. Confirm/decline tokens are stripped
+before persisting: a `chat-confirm <token>` message is stored as "(confirmed the
+pending change)", so the signed token itself never reaches the database
+(`src/chat-history.ts` `normalizeStoredUserMessage`).
+
+**Who can read it — live.** The account owner only, via the session-authenticated
+chat UI (`GET /api/chat/history`; `Cache-Control: no-store`, 240 reads/clears per
+hour per account). No MCP tool exposes chat history — API-key clients manage
+listings and orders, not chat content.
+
+**Retention — live. Capped, user-clearable, no auto-expiry (accepted).** Hard cap
+of 80 rows per account: every append is one transaction that inserts the turn and
+deletes rows outside the newest 80 (`src/chat-history.ts` `appendChatTurn`), and
+reads clamp their `LIMIT` to 1..80. The user can clear their history from the chat
+UI (`DELETE /api/chat/history` — a hard delete), and deleting the account wipes
+the rows (`ON DELETE CASCADE` on `sellers`). There is **no time-based expiry** —
+reviewed and accepted at the post-hoc review of PR #334 (THI-1057 / THI-1075):
+the 80-row cap bounds per-account storage and rows are owner-scoped and
+user-clearable, so an aging history is bounded residue, not unbounded growth.
+As with every delete, rows persist in the encrypted nightly backups until they
+age out of the retention rotation (same caveat as §4b).
 
 ## 5. Secrets hygiene policy
 

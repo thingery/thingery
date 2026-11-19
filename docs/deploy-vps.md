@@ -827,8 +827,10 @@ HTTPS. If the endpoint is on a private overlay network (e.g. a WireGuard/
 Tailscale tailnet), join the overlay from the VPS, and prefer deterministic
 name resolution over changing host DNS: run the join with `--accept-dns=false`
 and pin the endpoint host in `/etc/hosts` to its overlay IP (idempotent one
-line). Verify from inside the app container — node resolves `/etc/hosts` via
-getaddrinfo:
+line). Containers do **not** inherit the host `/etc/hosts`, so also pin it for
+the app container via `REPORT_REVIEW_HOST_PIN=<endpoint-host>:<overlay-ip>` in
+the `.env` (compose `extra_hosts`; unset = no-op loopback pin). Verify from
+inside the app container — node resolves `/etc/hosts` via getaddrinfo:
 
 ```bash
 node -e "require('dns').lookup('<endpoint-host>',(e,a)=>console.log(e||a))"

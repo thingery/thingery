@@ -126,7 +126,7 @@ The public review object is exactly:
   a 500, and with the fallback the NOT NULL + 1–40 length CHECK always
   holds. Display stays stable across later
   name edits and item edits, and survives item soft-deletion.
-- **F1 mask on the first-name snapshot (THI-979, finding SR-5 on PR #319):**
+- **F1 mask on the first-name snapshot (security finding SR-5 on PR #319):**
   signup defaults `display_name` to the email local-part when the name
   field is skipped, so an unmasked snapshot can publish an email-derived
   handle. At insert the snapshot is masked with the shared F1 exact-match

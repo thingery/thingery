@@ -122,6 +122,12 @@ services:
       REPORT_REVIEW_API_TOKEN: ${REPORT_REVIEW_API_TOKEN:-}
       REPORT_REVIEW_ASSIGNEE_ID: ${REPORT_REVIEW_ASSIGNEE_ID:-}
       REPORT_REVIEW_ITEM_URL_TEMPLATE: ${REPORT_REVIEW_ITEM_URL_TEMPLATE:-}
+      # Per-attempt budget (ms) for the triage POST (THI-1066). Delivery
+      # runs off the report request path, so a slow triage endpoint cannot
+      # stall user reports — raise it to ride out control-plane load spikes
+      # (measured ~30s under load). Empty/invalid falls back to the code
+      # default (5000); clamped to [100, 600000].
+      REPORT_REVIEW_TIMEOUT_MS: ${REPORT_REVIEW_TIMEOUT_MS:-}
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}

@@ -957,3 +957,18 @@ CREATE INDEX IF NOT EXISTS account_addresses_account_idx
 CREATE UNIQUE INDEX IF NOT EXISTS account_addresses_one_default
   ON account_addresses (account_id) WHERE is_default;
 
+-- Persistent assistant chat history per signed-in account. One continuous
+-- conversation per account, capped to the latest 80 rows on write and wiped
+-- by DELETE /api/chat/history ("New chat"). Anonymous chats stay client-side
+-- in sessionStorage. Confirmation tokens are never stored here.
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id          BIGSERIAL PRIMARY KEY,
+  seller_id   UUID NOT NULL REFERENCES sellers(id) ON DELETE CASCADE,
+  role        TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  content     TEXT NOT NULL CHECK (char_length(content) BETWEEN 1 AND 8000),
+  tools       TEXT[] NOT NULL DEFAULT '{}',
+  suggestions TEXT[] NOT NULL DEFAULT '{}',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS chat_messages_seller_id_idx
+  ON chat_messages (seller_id, id DESC);

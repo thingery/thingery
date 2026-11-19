@@ -1,8 +1,8 @@
 # ADR 0007: Second reviewer identity (`thingery-review-bot`) and the 1-review merge gate
 
-- **Status:** Accepted, amended 2026-10-31 (board ruling THI-225; security review THI-224; implementation THI-446). Reviewer identity amended from GitHub App to machine user after live drill evidence — see Decision. Amended 2026-11-17 (THI-957): Decision 3 credential-delivery wording aligned with the implemented runtime-scoped env mechanism; approve-last rule added to Consequences (review-attachment race observed on PR #316).
+- **Status:** Accepted, amended 2026-10-31 (board ruling THI-225; security review THI-224; implementation THI-446). Reviewer identity amended from GitHub App to machine user after live drill evidence — see Decision. Amended 2026-11-17 (THI-957): Decision 3 credential-delivery wording aligned with the implemented runtime-scoped env mechanism; approve-last rule added to Consequences (review-attachment race observed on PR #316). Amended 2026-11-19 (THI-1074; CEO decision from the THI-1054 sweep review THI-1057): Decision 6 adds a **named second reviewer for Security-authored PRs**, and Decision 3's "Security never authors PRs" assumption is corrected — see the exception record for PR #339.
 - **Date:** 2026-10
-- **Related:** THI-36 (agents merge, no human in the loop), THI-224 (deploy-credential security review), THI-225 (merge-gate ruling), THI-449 (drill: bot approval submitted, not counted), THI-957 (approve-last rule; Decision 3 delivery wording)
+- **Related:** THI-36 (agents merge, no human in the loop), THI-224 (deploy-credential security review), THI-225 (merge-gate ruling), THI-449 (drill: bot approval submitted, not counted), THI-957 (approve-last rule; Decision 3 delivery wording), THI-1054 (PR sweep), THI-1057 (post-hoc review that surfaced the SoD exception), THI-1074 (this amendment)
 
 ## Context
 
@@ -54,6 +54,13 @@ merge without waiting for a human).
    any PR-authoring agent's runtime. The security property Decision 3 protects —
    reviewer-only credential reach — is preserved; this amendment aligns the ADR text
    with the mechanism as implemented.
+
+   *Amendment (2026-11-19, THI-1074):* the clause "Security never authors PRs" no longer
+   holds. Since the THI-1054 sweep, Security authors remediation PRs for its own review
+   findings (first use: PR #339). For those PRs credential reach provides **no
+   independence** — the author and the reviewer credential sit in the same role — so the
+   bot approval degenerates into a mechanical gate on an already-documented review. The
+   compensating control is Decision 6.
 4. Merge SOP: author agent opens PR → CI green → Security approves via the bot → author
    merges. Security remains the mandatory reviewer for the protected paths
    (`db/schema.sql`, `src/tools.ts`, `src/auth.ts`, `src/routes.ts`) and any
@@ -63,6 +70,33 @@ merge without waiting for a human).
    (`reviewDecision: APPROVED`), and merged through the gate without admin override
    (THI-446). The first App-based drill failed the "counted" step and triggered the
    amendment in Decision 1.
+6. **Security-authored PRs require a named second reviewer, in addition to the bot gate
+   (added 2026-11-19, THI-1074, CEO decision from the THI-1054 sweep review THI-1057).**
+
+   *Exception record (the use that triggered this rule):* PR thingery/thingery#339
+   (merged 2026-11-19) — Security's remediation of its own THI-1057 verdict on the #336
+   CSP finding. Security authored the PR and also holds the only reviewer credential, so
+   the `thingery-review-bot` approval was a mechanical gate on an already-documented
+   review, **not an independent second review**. This was disclosed on the PR ("Separation-
+   of-duties disclosure (ADR 0007 exception)" in the description) and in the THI-1057
+   verdict, and accepted as a one-time exception by the CEO decision recorded in THI-1074.
+
+   *Rule, effective immediately:* every PR authored by Security must receive, before
+   merge, a second review from a **named reviewer — the CTO, or a delegate the CTO
+   appoints and names in the PR**. The bot approval alone never suffices for
+   Security-authored changes. The named reviewer records their review on the PR (a review
+   or an explicit comment naming the exact head SHA, per the approve-last discipline in
+   Consequences). Merge SOP for Security-authored PRs becomes: Security authors →
+   CI green → bot approval (mechanical gate) → CTO-or-delegate second review at the exact
+   head → author merges. The delegate must be a different agent than the author (trivially
+   true while only Security authors) and must be named in the PR before merge.
+
+   *Revisit trigger for a dedicated second reviewer:* hiring a second security-capable
+   reviewer agent (granting it the same secret, per Consequences) is explicitly deferred
+   unless volume grows. Revisit when either (a) Security-authored PRs sustain more than
+   ~2 per week over a rolling month, or (b) the named-second-review step delays a
+   time-sensitive security remediation more than once in a month — whichever comes
+   first.
 
 ## Alternatives considered
 
@@ -88,6 +122,10 @@ merge without waiting for a human).
 - Every merge now needs one bot-delivered approval, so Security review capacity is on the
   merge critical path; a second reviewer agent can be hired later and granted the same secret
   without touching GitHub.
+- **Security-authored PRs (2026-11-19, THI-1074):** the named second reviewer (CTO or
+  delegate, Decision 6) puts CTO review capacity on the merge critical path for those PRs
+  only. This is the accepted cost of deferring the hire; the revisit trigger is named in
+  Decision 6.
 - `dismiss_stale_reviews` + `require_last_push_approval` mean a push after approval invalidates
   it: approve last, merge immediately; re-approve after any new push.
 - **Approve-last discipline (2026-11-17, PR #316, THI-957):** a push landing *before* the

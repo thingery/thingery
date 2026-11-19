@@ -126,10 +126,12 @@ describe.skipIf(!available)("oauth authorize endpoint (HTTP)", () => {
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     const html = await res.text();
     // The only thing the CSP lets through is the page's own stylesheet, by its exact hash.
+    // form-action also names the redirect_uri origin: browsers check the POST's
+    // 302 back to the client against it, and 'self' alone blocks the hand-back.
     const css = /<style>([\s\S]*?)<\/style>/.exec(html)?.[1] ?? "";
     const cssHash = crypto.createHash("sha256").update(css).digest("base64");
     expect(res.headers.get("content-security-policy")).toBe(
-      `default-src 'none'; style-src 'sha256-${cssHash}'; form-action 'self'; frame-ancestors 'none'`,
+      `default-src 'none'; style-src 'sha256-${cssHash}'; form-action 'self' ${new URL(REDIRECT_URI).origin}; frame-ancestors 'none'`,
     );
     expect(html.match(/<style>/g)).toHaveLength(1);
     expect(html).not.toMatch(/\sstyle="/);

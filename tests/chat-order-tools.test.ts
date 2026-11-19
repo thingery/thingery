@@ -229,6 +229,15 @@ describe("manifest parity table (chat vs MCP arg validation)", () => {
     };
     expect(mcp.shape("buy_shipping_label").safeParse(labelArgs).success).toBe(true);
     expect(normalizeOrderArgs("buy_shipping_label", labelArgs).ok).toBe(true);
+    // verification_choice (advisory address verification keep_original) — same enum, same rejection, both surfaces
+    const keep = { item_id: "11111111-1111-4111-8111-111111111111", shipping_address: okAddress, verification_choice: "keep_original" };
+    expect(mcp.shape("create_order").safeParse(keep).success).toBe(true);
+    expect(normalizeOrderArgs("create_order", keep).ok).toBe(true);
+    const badChoice = { item_id: "11111111-1111-4111-8111-111111111111", verification_choice: "accept_suggestion" };
+    expect(mcp.shape("create_order").safeParse(badChoice).success).toBe(false);
+    const chatBad = normalizeOrderArgs("create_order", badChoice);
+    expect(chatBad.ok).toBe(false);
+    if (!chatBad.ok) expect(chatBad.error).toMatch(/verification_choice/);
   });
 });
 
@@ -267,6 +276,22 @@ describe("order confirm-op verbs (pure)", () => {
     expect(orderOpVerb("receipt")).toBe("receipt");
     expect(decodeOrderPayload(`dispute=${encoded}`)).toEqual(payload);
     expect(decodeOrderPayload("receipt")).toEqual({});
+  });
+
+  it("verification_choice rides the confirm payload end to end (chat parity with the tool input)", () => {
+    // normalizeOrderArgs output is what confirmOrderOp encodes; decoding must
+    // hand executeConfirmedOrderOp exactly the choice the buyer typed.
+    const normalized = normalizeOrderArgs("create_order", {
+      item_id: "11111111-1111-4111-8111-111111111111",
+      verification_choice: "keep_original",
+    });
+    expect(normalized.ok).toBe(true);
+    if (normalized.ok) {
+      const round = decodeOrderPayload(
+        "order=" + Buffer.from(JSON.stringify(normalized.args), "utf8").toString("base64url"),
+      );
+      expect(round.verification_choice).toBe("keep_original");
+    }
   });
 });
 

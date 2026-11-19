@@ -322,9 +322,9 @@ const ROLE_PREDICATES: Record<OrderRole, string> = {
 
 export type OrderListEntry = Pick<
   OrderRow,
-  | "id" | "item_id" | "status" | "payment_mode" | "price_cents" | "shipping_price_cents" | "currency"
+  | "id" | "item_id" | "buyer_id" | "status" | "payment_mode" | "price_cents" | "shipping_price_cents" | "currency"
   | "fulfillment" | "carrier" | "tracking_code" | "label_url" | "label_quote" | "payment_deadline" | "dispute_deadline"
-  | "status_changed_at" | "created_at" | "updated_at"
+  | "status_changed_at" | "created_at" | "updated_at" | "shipping_verification"
 > & { item_title: string };
 
 /**
@@ -333,7 +333,9 @@ export type OrderListEntry = Pick<
  * on a bulk read. The cursor is the last order id of the previous page: its
  * (created_at, id) is immutable, so a page boundary survives new orders and
  * status changes, and looking it up party-scoped means another account's order
- * id cannot be used to probe that order's position.
+ * id cannot be used to probe that order's position. buyer_id rides for the
+ * shipping_verification visibility rule (buyer-owned list entries may carry
+ * the kept suggestion; seller-owned ones never do).
  */
 export async function listOrdersForAccount(params: {
   accountId: string;
@@ -345,9 +347,9 @@ export async function listOrdersForAccount(params: {
   const { accountId, role, status = null, cursor = null } = params;
   const limit = Math.min(Math.max(params.limit, 1), MAX_ORDER_LIST_LIMIT);
   const { rows } = await pool.query<OrderListEntry>(
-    `SELECT o.id, o.item_id, o.status, o.payment_mode, o.price_cents, o.shipping_price_cents, o.currency,
+    `SELECT o.id, o.item_id, o.buyer_id, o.status, o.payment_mode, o.price_cents, o.shipping_price_cents, o.currency,
             o.fulfillment, o.carrier, o.tracking_code, o.label_url, o.label_quote, o.payment_deadline, o.dispute_deadline,
-            o.status_changed_at, o.created_at, o.updated_at, i.title AS item_title
+            o.status_changed_at, o.created_at, o.updated_at, o.shipping_verification, i.title AS item_title
      FROM orders o JOIN items i ON i.id = o.item_id
      WHERE ${ROLE_PREDICATES[role]}
        AND ($2::text IS NULL OR o.status = $2)
@@ -404,6 +406,47 @@ export function shippingAddressForSeller(
 // records the seller's own claim (#24), so it cannot be what releases the address.
 function needsBuyerAddressConsent(order: Pick<OrderRow, "payment_mode">): boolean {
   return order.payment_mode !== "stripe";
+}
+
+/** shipping_verification serialized for one viewer (spec §5a property-level
+ *  authorization). status + checked_at are verification metadata — both
+ *  parties, every result. The kept suggestion is the buyer's own data:
+ *  buyer-side always; seller-side only under the exact address-release rule
+ *  (shippingAddressForSeller), and never on list surfaces (my_orders carries
+ *  metadata only — no order state, no consent state, no new disclosure
+ *  channel). null = not_checked, omit the field. */
+type VerificationMeta = { status: ShippingVerificationRecord["status"]; checked_at: string };
+export function shippingVerificationFor(
+  order: Pick<OrderRow, "buyer_id" | "shipping_verification">,
+  viewerId: string,
+  surface: "list",
+): ShippingVerificationRecord | VerificationMeta | null;
+export function shippingVerificationFor(
+  order: Pick<
+    OrderRow,
+    | "buyer_id" | "shipping_verification" | "seller_id" | "status" | "fulfillment"
+    | "shipping_address" | "payment_mode" | "shipping_address_shared_at"
+  >,
+  viewerId: string,
+  surface: "order",
+): ShippingVerificationRecord | VerificationMeta | null;
+export function shippingVerificationFor(
+  order:
+    | Pick<OrderRow, "buyer_id" | "shipping_verification">
+    | Pick<
+        OrderRow,
+        | "buyer_id" | "shipping_verification" | "seller_id" | "status" | "fulfillment"
+        | "shipping_address" | "payment_mode" | "shipping_address_shared_at"
+      >,
+  viewerId: string,
+  surface: "list" | "order",
+): ShippingVerificationRecord | VerificationMeta | null {
+  const record = order.shipping_verification;
+  if (!record) return null;
+  const meta: VerificationMeta = { status: record.status, checked_at: record.checked_at };
+  if (order.buyer_id === viewerId) return record;
+  if (surface === "list") return meta;
+  return shippingAddressForSeller(order as Parameters<typeof shippingAddressForSeller>[0], viewerId) ? record : meta;
 }
 
 export type ShippingAddressConsent =

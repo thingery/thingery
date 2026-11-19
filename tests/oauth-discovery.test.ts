@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Request } from "express";
 import {
+  formActionSource,
   issuerFromRequest,
   newClientId,
   normalizeRedirectUri,
@@ -57,6 +58,32 @@ describe("redirect URI validation at registration (spec §2.4)", () => {
     expect(normalizeRedirectUri("https://user:pass@example.com/cb")).toBeNull();
     expect(normalizeRedirectUri("https://example.com/cb#frag")).toBeNull();
     expect(normalizeRedirectUri(`https://example.com/${"a".repeat(2100)}`)).toBeNull();
+    // THI-1057: WHATWG admits `;`, quotes and backticks in hosts (and
+    // percent-decodes `%3B` into one) — such hosts would later split the
+    // consent page's CSP form-action directive, so they are not registrable.
+    expect(normalizeRedirectUri("https://exa;mple.com/cb")).toBeNull();
+    expect(normalizeRedirectUri("https://exa%3Bmple.com/cb")).toBeNull();
+    expect(normalizeRedirectUri("https://exa'mple.com/cb")).toBeNull();
+    expect(normalizeRedirectUri('https://exa"mple.com/cb')).toBeNull();
+    expect(normalizeRedirectUri("https://exa`mple.com/cb")).toBeNull();
+  });
+});
+
+describe("consent form-action CSP source (THI-1057)", () => {
+  it("allows the validated redirect origin and stays at 'self' without one", () => {
+    expect(formActionSource(undefined)).toBe("'self'");
+    expect(formActionSource("https://claude.ai/callback")).toBe("'self' https://claude.ai");
+    expect(formActionSource("http://localhost:6274/oauth/callback")).toBe("'self' http://localhost:6274");
+    expect(formActionSource("http://[::1]:6274/cb")).toBe("'self' http://[::1]:6274");
+  });
+
+  it("fails closed when the origin is not a plain CSP source token", () => {
+    // Junk host that slipped past registration (legacy DB row): the sink must
+    // not interpolate it into the header even though the URL parses.
+    expect(formActionSource("https://exa;mple.com/cb")).toBe("'self'");
+    expect(formActionSource("https://exa'mple.com/cb")).toBe("'self'");
+    // CSP origin is serialized "null" for non-special schemes — never emitted.
+    expect(formActionSource("myapp://callback")).toBe("'self'");
   });
 });
 

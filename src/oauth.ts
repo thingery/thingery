@@ -27,6 +27,14 @@ const MAX_CLIENT_URI_LEN = 2048;
 /** The three loopback literals whose http redirect URIs are accepted (RFC 8252 §7.3). */
 export const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
+/** THI-1057: the hostname must serialize to a plain DNS-name / IPv4 / IPv6
+ * token. WHATWG parsing still admits hosts carrying `;`, quotes or backticks
+ * (they are sub-delims, and `%3B` percent-decodes into the host), and the
+ * consent page later interpolates the redirect origin into the CSP
+ * `form-action` — a `;` there splits CSP directives. Reject such hosts at
+ * the door; no real client can live on them. */
+const CSP_SAFE_HOST_RE = /^[A-Za-z0-9.\[\]:_-]+$/;
+
 /**
  * Validates and canonicalizes one redirect URI at registration time
  * (spec §2.4): absolute https://, or absolute http:// whose host is a
@@ -43,6 +51,7 @@ export function normalizeRedirectUri(raw: string): string | null {
   const loopbackHttp = u.protocol === "http:" && LOOPBACK_HOSTNAMES.has(u.hostname);
   if (u.protocol !== "https:" && !loopbackHttp) return null;
   if (u.username || u.password || u.hash) return null; // no userinfo/fragments in redirect URIs (RFC 6749 §3.1.2)
+  if (!CSP_SAFE_HOST_RE.test(u.hostname)) return null; // THI-1057: CSP-metacharacter hosts
   return u.href;
 }
 
@@ -646,8 +655,22 @@ ${body}
  * form-action to every redirect that follows a form submission, so the POST's
  * 302 back to the client would be blocked under 'self' alone. Allowing just the
  * validated redirect_uri's origin keeps the form pinned everywhere else. */
+/** A serialized origin may only enter the CSP when it is a plain
+ * scheme://host[:port] token — `;`, quotes, backticks or a `%` would split
+ * or confuse the directive grammar (same charset contract as registration,
+ * applied at the sink so legacy DB rows fail closed too). */
+const CSP_ORIGIN_RE = /^https?:\/\/[A-Za-z0-9.\[\]:_-]+$/;
+
+/** THI-1057: the form-action source list for the consent page. Fail-closed —
+ * anything that does not serialize to a plain origin token keeps 'self'. */
+export function formActionSource(formRedirectUri: string | undefined): string {
+  if (formRedirectUri === undefined) return "'self'";
+  const origin = new URL(formRedirectUri).origin;
+  return CSP_ORIGIN_RE.test(origin) ? `'self' ${origin}` : "'self'";
+}
+
 function pageHeaders(res: Response, formRedirectUri?: string): void {
-  const formAction = formRedirectUri === undefined ? "'self'" : `'self' ${new URL(formRedirectUri).origin}`;
+  const formAction = formActionSource(formRedirectUri);
   res.set({
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",

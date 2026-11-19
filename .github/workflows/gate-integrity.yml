@@ -1,0 +1,58 @@
+name: gate-integrity
+
+# Detection control for ADR 0007 Decision 2 (1-review merge gate on main).
+#
+# Point-in-time reads of branch protection cannot prove the gate was live at
+# every merge: an owner can flip the requirement off, merge, and flip it back.
+# This workflow reconstructs the gate state per merged PR — counting only
+# approvals that were valid at merge time — and files an alert issue when a
+# merge landed with zero valid approvals or when branch protection drifts
+# from the ADR 0007 baseline (count 1, dismiss_stale_reviews,
+# require_last_push_approval, enforce_admins).
+#
+# Runs every 30 minutes, on every push to main, and on demand (with optional
+# explicit window for manual backfills). Uses only the built-in GITHUB_TOKEN;
+# no secrets, no PATs.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report findings in the run log only, do not write the alert issue"
+        type: boolean
+        default: false
+      from:
+        description: "Optional window start (ISO 8601 UTC); overrides the incremental window"
+        required: false
+      to:
+        description: "Optional window end (ISO 8601 UTC)"
+        required: false
+
+permissions:
+  contents: read        # checkout + PR/review reads
+  pull-requests: read   # list merged PRs and their reviews
+  issues: write         # create/append the tracking alert issue
+  actions: read         # read own run history for the incremental window
+  administration: read  # read branch protection on main
+
+concurrency:
+  group: gate-integrity
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Zero-review merge + protection drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check merge-gate integrity
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          GATE_FROM: ${{ inputs.from }}
+          GATE_TO: ${{ inputs.to }}
+        run: node scripts/check-merge-gate.mjs

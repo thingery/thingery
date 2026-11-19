@@ -917,6 +917,44 @@ CREATE INDEX IF NOT EXISTS reports_target_created_idx
 CREATE INDEX IF NOT EXISTS reports_review_created_idx
   ON reports (target_review_id, created_at);
 
+-- Review-notify backfill state (spec docs/specs/item-reports.md §backfill;
+-- the email_outbox delivery-sweep pattern applied to reports): NULL-ref
+-- misses get bounded retry with attempts + exponential backoff; permanent
+-- failures dead-letter visibly. Success is NOT a status here —
+-- board_issue_ref NOT NULL is the success marker, and the claim path
+-- filters ref IS NULL, so the off-path initial notify and the sweep share
+-- one success representation. review_notify_status covers only the retry
+-- lifecycle of not-yet-delivered rows: 'pending' (retryable) | 'dead'
+-- (attempts exhausted — terminal) | 'skipped' (terminal without exhausting
+-- attempts: stale past the max-age window, or a conflict answer; the
+-- reason rides review_notify_last_error with 'skipped:'/'conflict:'
+-- prefixes). Expand-only and idempotent: fresh databases get these from the
+-- ALTERs right after CREATE TABLE; the 10-minute next-attempt default is a
+-- grace window that keeps the sweep from racing the in-flight off-path
+-- initial notify right after COMMIT, and backfills pre-existing NULL rows
+-- to "due 10 minutes after migration" (now() is transaction-stable, so one
+-- ALTER timestamps every existing row identically).
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS review_notify_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS review_notify_next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '10 minutes';
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS review_notify_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS review_notify_last_error TEXT;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'reports_review_notify_status_check'
+      AND conrelid = 'reports'::regclass
+  ) THEN
+    ALTER TABLE reports ADD CONSTRAINT reports_review_notify_status_check
+      CHECK (review_notify_status IN ('pending','dead','skipped'));
+  END IF;
+END $$;
+-- Claim path only: due rows among open, undelivered, still-retryable
+-- reports (spec §backfill sweep mechanics).
+CREATE INDEX IF NOT EXISTS reports_review_backfill_due_idx
+  ON reports (review_notify_next_attempt_at)
+  WHERE board_issue_ref IS NULL AND status = 'open' AND review_notify_status = 'pending';
+
 -- Saved shipping addresses (spec docs/specs/saved-addresses.md, rollout
 -- step 1). One store per account (the sellers table holds buyers and
 -- sellers alike): at most 10 rows per account — enforced in

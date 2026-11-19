@@ -146,7 +146,8 @@ describe.skipIf(!available)("db schema", () => {
         "edited_at",
       ],
       // Reports, widened (order-reviews spec PR 3): exactly one target per
-      // row — item or review — enforced by reports_one_target_check.
+      // row — item or review — enforced by reports_one_target_check. The
+      // review_notify_* columns are the backfill state (spec §backfill).
       reports: [
         "id",
         "reporter_account_id",
@@ -157,6 +158,10 @@ describe.skipIf(!available)("db schema", () => {
         "status",
         "board_issue_ref",
         "created_at",
+        "review_notify_attempts",
+        "review_notify_next_attempt_at",
+        "review_notify_status",
+        "review_notify_last_error",
       ],
     };
     for (const [table, columns] of Object.entries(expected)) {

@@ -268,8 +268,11 @@ describe("addressToSummary (C2 allowlist)", () => {
 // Shared stub: an EasyPost-shaped address-verification response where
 // `address` overrides the corrected fields the carrier returns.
 
-function easypostVerifyFetch(
-  result: { success: boolean; address?: Partial<AddressInput> },
+/** Sendcloud /api/v3/addresses/validate fixture: one recommended:false entry
+ *  plus (when result.recommended) a recommended:true entry whose address is
+ *  the input unless overridden. */
+function sendcloudVerifyFetch(
+  result: { valid: boolean | null; recommended?: boolean; address?: Partial<AddressInput> },
   calls: number[] = [],
 ): typeof fetch {
   return (async () => {
@@ -277,14 +280,22 @@ function easypostVerifyFetch(
     const a = result.address ?? {};
     return new Response(
       JSON.stringify({
-        id: "adr_1",
-        name: a.name ?? "Ada Lovelace",
-        street1: a.line1 ?? "Via Roma 1",
-        street2: a.line2 ?? null,
-        city: a.city ?? "Milano",
-        zip: a.postal_code ?? "20121",
-        country: a.country ?? "IT",
-        verifications: { delivery: { success: result.success, errors: [] } },
+        input_address_is_valid: result.valid,
+        results: [
+          {
+            validation_method: null,
+            recommended: result.recommended ?? false,
+            address: {
+              address_line_1: a.line1 ?? "Via Roma 1",
+              address_line_2: a.line2 ?? null,
+              house_number: null,
+              city: a.city ?? "Milano",
+              postal_code: a.postal_code ?? "20121",
+              country_code: a.country ?? "IT",
+            },
+            analysis: null,
+          },
+        ],
       }),
       { status: 200 },
     );
@@ -294,16 +305,25 @@ function easypostVerifyFetch(
 describe("advisory verification — verifyAddressAdvisory (spec step 4)", () => {
   beforeEach(() => {
     addressVerificationLimiter.reset();
-    delete process.env.EASYPOST_API_KEY; // tests must never read the host env
+    delete process.env.SENDCLOUD_API_KEY; // tests must never read the host env
+    delete process.env.SENDCLOUD_VALIDATE_CARRIER_CODE;
   });
   afterEach(() => {
     addressVerificationLimiter.reset();
-    delete process.env.EASYPOST_API_KEY;
+    delete process.env.SENDCLOUD_API_KEY;
+    delete process.env.SENDCLOUD_VALIDATE_CARRIER_CODE;
   });
 
   it("no key → not_checked, no network call, no bucket draw", async () => {
     const calls: number[] = [];
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: undefined, fetchImpl: easypostVerifyFetch({ success: true }, calls) });
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: undefined, fetchImpl: sendcloudVerifyFetch({ valid: true }, calls) });
+    expect(v).toEqual({ status: "not_checked" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("key without a carrier code → not_checked (the validate API needs both)", async () => {
+    const calls: number[] = [];
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "SC_key", fetchImpl: sendcloudVerifyFetch({ valid: true }, calls) });
     expect(v).toEqual({ status: "not_checked" });
     expect(calls).toHaveLength(0);
   });
@@ -312,54 +332,67 @@ describe("advisory verification — verifyAddressAdvisory (spec step 4)", () => 
     const key = `seller:${ACCOUNT_ID}`;
     for (let i = 0; i < 20; i++) expect(addressVerificationLimiter.allow(key)).toBe(true);
     const calls: number[] = [];
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "EZAK_test", fetchImpl: easypostVerifyFetch({ success: true }, calls) });
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: sendcloudVerifyFetch({ valid: true }, calls) });
     expect(v).toEqual({ status: "not_checked" });
     expect(calls).toHaveLength(0);
   });
 
   it("provider error or the C3 timeout → not_checked (saving never fails)", async () => {
     const failing = (() => Promise.reject(new Error("network down"))) as unknown as typeof fetch;
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "EZAK_test", fetchImpl: failing });
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: failing });
     expect(v).toEqual({ status: "not_checked" });
   });
 
-  it("deliverable as written → verified with an ISO checked_at", async () => {
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "EZAK_test", fetchImpl: easypostVerifyFetch({ success: true }) });
+  it("valid as written → verified with an ISO checked_at", async () => {
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: sendcloudVerifyFetch({ valid: true }) });
     expect(v.status).toBe("verified");
     expect(typeof v.checked_at).toBe("string");
     expect(new Date(v.checked_at!).toString()).not.toBe("Invalid Date");
     expect("suggested" in v).toBe(false);
   });
 
-  it("case- and whitespace-only differences are still verified, not suggested", async () => {
+  it("case- and whitespace-only 'corrections' are not suggestions — unverified", async () => {
     const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), {
-      apiKey: "EZAK_test",
-      fetchImpl: easypostVerifyFetch({ success: true, address: { city: "  MILANO ", line1: "via   roma 1" } }),
+      apiKey: "SC_key",
+      carrierCode: "dhl",
+      fetchImpl: sendcloudVerifyFetch({ valid: false, recommended: true, address: { city: "  MILANO ", line1: "via   roma 1" } }),
     });
-    expect(v.status).toBe("verified");
+    expect(v.status).toBe("unverified");
+    expect("suggested" in v).toBe(false);
   });
 
   it("corrected postal code → suggested with a one-line correction", async () => {
     const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), {
-      apiKey: "EZAK_test",
-      fetchImpl: easypostVerifyFetch({ success: true, address: { postal_code: "20122", line2: "Scala B" } }),
+      apiKey: "SC_key",
+      carrierCode: "dhl",
+      fetchImpl: sendcloudVerifyFetch({ valid: false, recommended: true, address: { postal_code: "20122", line2: "Scala B" } }),
     });
     expect(v).toMatchObject({ status: "suggested" });
     expect(v.suggested).toBe("Via Roma 1, Scala B, Milano 20122, IT");
   });
 
+  it("the validator being unavailable (null) → not_checked", async () => {
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), {
+      apiKey: "SC_key",
+      carrierCode: "dhl",
+      fetchImpl: sendcloudVerifyFetch({ valid: null }),
+    });
+    expect(v).toEqual({ status: "not_checked" });
+  });
+
   it("caps provider text at the C4 limit even for pathological fields", async () => {
     const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), {
-      apiKey: "EZAK_test",
-      fetchImpl: easypostVerifyFetch({ success: true, address: { line1: "V".repeat(600) } }),
+      apiKey: "SC_key",
+      carrierCode: "dhl",
+      fetchImpl: sendcloudVerifyFetch({ valid: false, recommended: true, address: { line1: "V".repeat(600) } }),
     });
     expect(v.status).toBe("suggested");
     expect(v.suggested!.length).toBeLessThanOrEqual(MAX_VERIFICATION_SUGGESTED_LENGTH);
     expect(v.suggested!.endsWith("…")).toBe(true);
   });
 
-  it("carrier could not confirm → unverified (still advisory: the save stands)", async () => {
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "EZAK_test", fetchImpl: easypostVerifyFetch({ success: false }) });
+  it("nothing recommended → unverified (still advisory: the save stands)", async () => {
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: sendcloudVerifyFetch({ valid: false }) });
     expect(v.status).toBe("unverified");
     expect("suggested" in v).toBe(false);
   });
@@ -514,7 +547,7 @@ describe.skipIf(!available)("addresses (db)", () => {
   it("persists the advisory verification on save and edit (spec step 4)", async () => {
     const accountId = await seedAccount();
     const saved = await saveAddress(accountId, input(), {
-      verification: { apiKey: "EZAK_test", fetchImpl: easypostVerifyFetch({ success: true }) },
+      verification: { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: sendcloudVerifyFetch({ valid: true }) },
     });
     expect(saved.verification).toMatchObject({ status: "verified" });
     // Persisted, not just returned: reload through the read path.
@@ -525,7 +558,7 @@ describe.skipIf(!available)("addresses (db)", () => {
       accountId,
       saved.id,
       { address: input({ postal_code: "20199" }), is_default: false },
-      { verification: { apiKey: "EZAK_test", fetchImpl: easypostVerifyFetch({ success: true, address: { postal_code: "20198" } }) } },
+      { verification: { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: sendcloudVerifyFetch({ valid: false, recommended: true, address: { postal_code: "20198" } }) } },
     );
     expect(updated.verification).toMatchObject({ status: "suggested", suggested: expect.stringContaining("20198") });
     const after = await getOwnedAddress(accountId, saved.id);
@@ -536,7 +569,7 @@ describe.skipIf(!available)("addresses (db)", () => {
   it("a failing provider leaves the row saved at not_checked — never fails the save", async () => {
     const accountId = await seedAccount();
     const failing = (() => Promise.reject(new Error("timeout"))) as unknown as typeof fetch;
-    const saved = await saveAddress(accountId, input(), { verification: { apiKey: "EZAK_test", fetchImpl: failing } });
+    const saved = await saveAddress(accountId, input(), { verification: { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: failing } });
     expect(saved.verification).toEqual({ status: "not_checked" });
     const reloaded = await listAddresses(accountId);
     expect(reloaded[0].verification).toEqual({ status: "not_checked" });

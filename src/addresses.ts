@@ -18,7 +18,11 @@ import { normalizeCountryCode, CountryCodeError } from "./countries.js";
 import { RateLimiter } from "./rate-limit.js";
 import { logSecurityEvent } from "./security-events.js";
 import { envValue } from "./config.js";
-import { verifyEasyPostAddress, type EasyPostAddressInput } from "./easypost.js";
+import {
+  verifySendcloudAddress,
+  type SendcloudAddressInput,
+  type SendcloudAddressSuggestion,
+} from "./sendcloud.js";
 
 /** Fan-out controls (spec "Security and privacy"): module constants,
  *  deliberately not env-configurable — same posture as the wanted caps.
@@ -152,6 +156,9 @@ export interface AddressInput {
  *  network and never depend on the host environment. */
 export interface AddressVerificationDeps {
   apiKey?: string;
+  /** Sendcloud's validate API requires a carrier available on the account
+   *  (default env: SENDCLOUD_VALIDATE_CARRIER_CODE); unset → not_checked. */
+  carrierCode?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -371,7 +378,7 @@ export async function markAddressUsed(accountId: string, addressId: string): Pro
 
 const NOT_CHECKED: AddressVerification = { status: "not_checked" };
 
-function toEasyPostInput(input: AddressInput): EasyPostAddressInput {
+function toSendcloudInput(input: AddressInput): SendcloudAddressInput {
   return {
     name: input.name,
     line1: input.line1,
@@ -389,12 +396,12 @@ function norm(s: string): string {
 
 /** True when the carrier-confirmed address differs from what the user typed
  *  (delivery fields only — a name-only difference is not a correction). */
-function addressDiffers(input: AddressInput, corrected: EasyPostAddressInput): boolean {
+function addressDiffers(input: AddressInput, corrected: SendcloudAddressSuggestion): boolean {
   return (
     norm(input.line1) !== norm(corrected.line1) ||
     norm(input.line2 ?? "") !== norm(corrected.line2 ?? "") ||
     norm(input.city) !== norm(corrected.city) ||
-    norm(input.postal_code) !== norm(corrected.postalCode) ||
+    norm(input.postal_code) !== norm(corrected.postal_code) ||
     norm(input.country) !== norm(corrected.country)
   );
 }
@@ -403,11 +410,11 @@ function addressDiffers(input: AddressInput, corrected: EasyPostAddressInput): b
  *  each component whitespace-collapsed and capped to its field bound, the
  *  whole line capped at MAX_VERIFICATION_SUGGESTED_LENGTH. Synthesized here
  *  from the corrected fields — the provider's raw response is never stored. */
-function suggestedLine(corrected: EasyPostAddressInput): string {
+function suggestedLine(corrected: SendcloudAddressSuggestion): string {
   const line1 = corrected.line1.trim().replace(/\s+/g, " ").slice(0, 200);
   const line2 = corrected.line2?.trim().replace(/\s+/g, " ").slice(0, 200);
   const city = corrected.city.trim().replace(/\s+/g, " ").slice(0, 80);
-  const postal = corrected.postalCode.trim().slice(0, 20);
+  const postal = corrected.postal_code.trim().slice(0, 20);
   const country = corrected.country.trim().slice(0, 2);
   const line = [line1, ...(line2 ? [line2] : []), `${city} ${postal}`, country].join(", ");
   return line.length > MAX_VERIFICATION_SUGGESTED_LENGTH
@@ -424,21 +431,23 @@ export async function verifyAddressAdvisory(
   input: AddressInput,
   deps?: AddressVerificationDeps,
 ): Promise<AddressVerification> {
-  const apiKey = deps?.apiKey ?? envValue("EASYPOST_API_KEY");
-  if (apiKey === undefined) return NOT_CHECKED;
+  const apiKey = deps?.apiKey ?? envValue("SENDCLOUD_API_KEY");
+  const carrierCode = deps?.carrierCode ?? envValue("SENDCLOUD_VALIDATE_CARRIER_CODE");
+  if (apiKey === undefined || carrierCode === undefined) return NOT_CHECKED;
   if (!addressVerificationLimiter.allow(`seller:${accountId}`)) return NOT_CHECKED;
   try {
-    const result = await verifyEasyPostAddress(toEasyPostInput(input), {
+    const result = await verifySendcloudAddress(toSendcloudInput(input), {
       apiKey,
+      carrierCode,
       ...(deps?.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
     });
     if (result === null) return NOT_CHECKED;
     const checked_at = new Date().toISOString();
-    if (!result.success) return { status: "unverified", checked_at };
-    if (result.corrected && addressDiffers(input, result.corrected)) {
-      return { status: "suggested", checked_at, suggested: suggestedLine(result.corrected) };
+    if (result.status === "verified") return { status: "verified", checked_at };
+    if (result.status === "suggested" && addressDiffers(input, result.suggestion)) {
+      return { status: "suggested", checked_at, suggested: suggestedLine(result.suggestion) };
     }
-    return { status: "verified", checked_at };
+    return { status: "unverified", checked_at };
   } catch (e) {
     // Spec "Failure" + C3: provider error or timeout → not_checked. The
     // logged message carries no address content (EasyPostError is

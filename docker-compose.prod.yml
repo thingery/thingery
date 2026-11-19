@@ -90,6 +90,14 @@ services:
       EASYPOST_API_KEY: ${EASYPOST_API_KEY:-}
       EASYPOST_WEBHOOK_SECRET: ${EASYPOST_WEBHOOK_SECRET:-}
       EASYPOST_WEBHOOK_SECRET_PREVIOUS: ${EASYPOST_WEBHOOK_SECRET_PREVIOUS:-}
+      # Address verification — Sendcloud v3 (ships dark: empty/unset keeps the
+      # advisory check degraded, i.e. not_checked). SENDCLOUD_API_KEY is the
+      # basic-auth credential ("key:secret" pair, or a single token as the
+      # basic username); SENDCLOUD_VALIDATE_CARRIER_CODE must name a carrier
+      # available on the account — both required to activate. Passthrough
+      # only: values live in the VPS .env.
+      SENDCLOUD_API_KEY: ${SENDCLOUD_API_KEY:-}
+      SENDCLOUD_VALIDATE_CARRIER_CODE: ${SENDCLOUD_VALIDATE_CARRIER_CODE:-}
       LABEL_MAX_COST_CENTS: ${LABEL_MAX_COST_CENTS:-}
       LABEL_DAILY_BUDGET_CENTS: ${LABEL_DAILY_BUDGET_CENTS:-}
       # Notifications — in-app store + Resend transactional email (THI-760

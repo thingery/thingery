@@ -70,7 +70,8 @@ export class AddressSuggestedError extends Error {
   constructor(verification: AddressSuggestedError["verification"]) {
     super(
       "No order was created: the carrier could not confirm this address as typed and suggests a corrected one " +
-        "(see verification.suggestion). Ask the buyer which address to use, then re-call create_order with that address.",
+        "(see verification.suggestion). Ask the buyer which address to use, then re-call create_order with that " +
+        "address — or pass verification_choice 'keep_original' to order with the address as typed.",
     );
     this.name = "AddressSuggestedError";
     this.verification = verification;

@@ -28,6 +28,7 @@ export type SecurityEventRoute =
   | "/api/items/:id/images/:filename" // THI-308 PR 4: image-mutation limiter 429s (F6)
   | "/api/items/:id/images/order" // THI-308 PR 4: image-mutation limiter 429s (F6)
   | "/api/chat"
+  | "/api/chat/history"
   | "/api/me/llm-credential"
   | "/api/me/chatgpt/connect"
   // THI-439 §6.3: wanted-write limiter 429s — one slug per write route.

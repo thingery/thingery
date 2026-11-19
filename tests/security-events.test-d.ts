@@ -28,6 +28,7 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       | "/api/items/:id/images/:filename" // THI-308 PR 4: delete-route limiter
       | "/api/items/:id/images/order" // THI-308 PR 4: reorder-route limiter
       | "/api/chat"
+      | "/api/chat/history"
       | "/api/me/llm-credential"
       | "/api/me/chatgpt/connect" // THI-193 PR-2: connect rate-limit log line
       // THI-439 §6.3: wanted-write limiter slugs (one per write route).
@@ -57,6 +58,7 @@ describe("SecurityEvent route/reason literal unions (THI-133)", () => {
       "/api/items/:id/images/:filename",
       "/api/items/:id/images/order",
       "/api/chat",
+      "/api/chat/history",
       "/api/me/llm-credential",
       "/api/me/chatgpt/connect",
       "/api/wanted",

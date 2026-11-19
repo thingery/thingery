@@ -70,7 +70,7 @@ NOT lose the report: `board_issue_ref` stays NULL, the failure is logged
 (`console.warn`, bounded) and a later backfill can retry NULLs (open
 question). At-most-once per report: the UNIQUE dedupe means only a committed
 INSERT triggers a create; a failed create is retried only by the explicit
-backfill. Delivery runs off the report request path (THI-1066): the notify
+backfill. Delivery runs off the report request path: the notify
 is scheduled after COMMIT and the request returns immediately, so a slow
 triage endpoint cannot stall report filing; the per-attempt budget is
 env-tunable via `REPORT_REVIEW_TIMEOUT_MS` (default 5000 ms). Config:
@@ -164,8 +164,8 @@ step is required to roll back behavior.
 
 1. Notify backfill for NULL `board_issue_ref` (step-3 failures): v1
    keeps a manual psql check; an automatic sweep needs attempt/backoff
-   state (the email-outbox pattern) to avoid unbounded retries — tracked
-   as the follow-up to THI-1066.
+   state (the email-outbox pattern) to avoid unbounded retries —
+   deliberate follow-up, not v1 scope.
 2. Triage UI (resolve/dismiss) — deliberately out of scope v1; the state
    machine reserves the states.
 3. Report-user-from-profile: only if trivially cheap later.

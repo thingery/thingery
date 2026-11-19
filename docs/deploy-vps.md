@@ -873,6 +873,39 @@ returns to no-op; reports keep flowing and existing refs stay stored. Blast
 radius of the whole feature: the app container only (one outbound HTTPS call
 per new report; no schema, no ports, no Caddy/db changes).
 
+**Backfill sweep for missed notifies (THI-1068, spec §backfill of
+docs/specs/item-reports.md):** a 5-minute sweep retries open reports whose
+notify missed (`board_issue_ref` NULL — timeout abort, endpoint 5xx, process
+exit). Bounded: up to 8 attempts with exponential backoff (1 min doubling,
+cap 6 h); exhausted rows land in a visible dead-letter state instead of
+retrying forever. Reports older than `REPORT_REVIEW_MAX_AGE_HOURS` (default
+48, clamped to [1, 168] — the tracker retains idempotency keys 7 days, so the
+window stays inside it) are skipped terminally (`skipped:stale`) rather than
+triaged days late. Every retry POST rides the unchanged idempotency key
+`report-review:<report id>`, so the tracker's dedupe absorbs replays and a
+replay returns the existing task id. A 409 answer is terminal-success
+(`conflict:409`): the task exists but the answer carries no recoverable id.
+
+Dead-letter / skip inspection (the operational visibility surface):
+
+```bash
+docker exec $(docker ps -qf name=thingery-db) psql -U thingery -d thingery -c \
+  "SELECT review_notify_status, count(*), max(review_notify_last_error) AS last_error
+     FROM reports WHERE board_issue_ref IS NULL GROUP BY 1;"
+```
+
+Manual recovery of a dead-lettered row (after fixing the endpoint — the
+idempotency key makes the replay safe):
+
+```bash
+docker exec $(docker ps -qf name=thingery-db) psql -U thingery -d thingery -c \
+  "UPDATE reports SET review_notify_status='pending', review_notify_attempts=0,
+     review_notify_next_attempt_at=now() WHERE id='<report uuid>';"
+```
+
+The sweep claims nothing while the triage seam is disabled (URL/token unset),
+so the kill switch above also silences the backfill.
+
 ### 5.5 Notifications Phase 2: bounce webhook + operator alert mailbox (THI-1048)
 
 Two dark-by-default knobs complete the notification stack. Both are passthrough

@@ -126,6 +126,24 @@ The public review object is exactly:
   a 500, and with the fallback the NOT NULL + 1–40 length CHECK always
   holds. Display stays stable across later
   name edits and item edits, and survives item soft-deletion.
+- **F1 mask on the first-name snapshot (security finding SR-5 on PR #319):**
+  signup defaults `display_name` to the email local-part when the name
+  field is skipped, so an unmasked snapshot can publish an email-derived
+  handle. At insert the snapshot is masked with the shared F1 exact-match
+  rule (`maskEmailDerivedHandle` in `src/display-names.ts` — the same rule
+  as the seller-surface guard, with the buyer-shaped constant
+  `MASKED_BUYER_FIRST_NAME`, "A Thingery buyer"), decided on the first
+  word before the 40-char cap so an over-long local-part masks instead of
+  truncating to a handle prefix. The public read re-masks stored rows with
+  the same rule, so reviews already stored unmasked before the fix never
+  publish a handle either — read-time masking was chosen over a data
+  migration because it needs no schema/data rewrite, covers rows written
+  between deploy steps, and re-checks on every render. Case-sensitive
+  exact match only: chosen names that merely contain or case-differ from
+  the local-part pass through; chosen names exactly equal to it are masked
+  too (accepted over-blocking, same decision as the seller surface).
+  The buyer's email is fetched in both paths as mask input only and is
+  never serialized.
 - The month label ("Nov 2026") is client-side formatting of `created_at`
   (frontend i18n); the API returns the timestamp.
 - **Public responses never carry** the buyer's account id, email, or full

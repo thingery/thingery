@@ -29,7 +29,7 @@ import {
   type AccountAddressRow,
 } from "./addresses.js";
 import { CountryCodeError, isIsoCountryCode, normalizeCountryCode } from "./countries.js";
-import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, stripeConfigured } from "./stripe.js";
+import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, payoutSetupLimiter, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
 import { cancelOrder, createOrder, getOrderView, listOrdersForAccount, MAX_ORDER_LIST_LIMIT, ORDER_ROLES, OrderFlowError, shareShippingAddress, shippingAddressConsent, shippingAddressForSeller, shippingVerificationFor, type OrderRole } from "./order-flow.js";
 import { ORDER_STATUSES, type OrderStatus } from "./orders.js";
@@ -1493,7 +1493,8 @@ export function registerTools(
         "Get set up to receive payouts when your items sell: returns a Stripe Express onboarding URL " +
         "when payments are enabled for this Thingery deployment, plus current onboarding status. " +
         "Onboarding is optional — items stay buyable as off-platform orders without it — but " +
-        "platform payment (Stripe Checkout with buyer protection) requires it. Requires seller auth.",
+        "platform payment (Stripe Checkout with buyer protection) requires it. Onboarding links " +
+        "are single-use and rate-limited (10 per hour per seller). Requires seller auth.",
       inputSchema: {},
     },
     async () => {
@@ -1509,6 +1510,16 @@ export function registerTools(
         }
         const stripe = getStripe();
         if (!stripe) return err("Stripe payments are not configured on this deployment.", "payments_not_configured");
+        // THI-875 (residual from the THI-871 security review): every call past
+        // here mints a single-use Stripe onboarding link — a provider-side API
+        // call. Checked after the kill switch so unconfigured deployments keep
+        // the stable payments_not_configured error and never consume the
+        // bucket; over-limit fails closed with the rate_limited code the web
+        // client already renders, logging a rate_limit event (THI-112 H4.2).
+        if (!payoutSetupLimiter.allow(`seller:${seller.id}`)) {
+          logSecurityEvent({ type: "rate_limit", route: "/mcp" }, { sellerId: seller.id });
+          return err("Payout setup limit reached (10 per hour) — try again later.", "rate_limited");
+        }
         const accountId = await getOrCreateStripeAccount(seller.id, stripe);
         const link = await createOnboardingLink(accountId, publicBaseUrl(), stripe);
         const setup = await getPayoutSetup(seller.id);

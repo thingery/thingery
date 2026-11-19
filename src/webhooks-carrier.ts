@@ -75,12 +75,24 @@ function normalizeStatus(raw: string | undefined): NormalizedStatus {
   return (raw && EASYPOST_STATUS_MAP[raw]) || "unknown";
 }
 
+const EASYPOST_SIG_PREFIX = "hmac-sha256-hex=";
+
 /** §5.3: timing-safe HMAC-SHA256 (hex) compare; catches the length-mismatch
- * throw — both digests and header are attacker-controlled lengths. */
-function verifyEasyPostSignature(raw: Buffer, header: string, secret: string): boolean {
+ * throw — both digests and header are attacker-controlled lengths.
+ * EasyPost sends `X-Hmac-Signature: hmac-sha256-hex=<hex>` and normalizes the
+ * webhook secret with Unicode NFKD before hashing; bare `<hex>` is also
+ * accepted so existing callers keep working. */
+export function verifyEasyPostSignature(raw: Buffer, header: string, secret: string): boolean {
   try {
-    const digest = Buffer.from(crypto.createHmac("sha256", secret).update(raw).digest("hex"), "utf8");
-    const provided = Buffer.from(header.trim().toLowerCase(), "utf8");
+    const digest = Buffer.from(
+      crypto.createHmac("sha256", secret.normalize("NFKD")).update(raw).digest("hex"),
+      "utf8",
+    );
+    const normalized = header.trim().toLowerCase();
+    const hex = normalized.startsWith(EASYPOST_SIG_PREFIX)
+      ? normalized.slice(EASYPOST_SIG_PREFIX.length)
+      : normalized;
+    const provided = Buffer.from(hex, "utf8");
     return digest.length === provided.length && crypto.timingSafeEqual(digest, provided);
   } catch {
     return false;

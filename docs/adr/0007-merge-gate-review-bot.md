@@ -165,3 +165,15 @@ override. Record at merge time:
 
 If this PR is still open, the drill has not completed: the record above is then prospective
 and the blocking step is named in the PR discussion.
+
+## Detection control (appended 2026-11, THI-1065)
+
+The baseline above is enforced by GitHub settings, but owners can flip it off and back on,
+so a scheduled detector also watches it: `.github/workflows/gate-integrity.yml` (every
+30 minutes and on pushes to `main`) runs `scripts/check-merge-gate.mjs`, which flags merges
+to `main` with zero approvals valid at merge time and any drift from the Decision-2 baseline
+onto a dedicated `Merge-gate integrity alerts` issue. The incremental window starts at the
+last successful workflow run (24h fallback): a `--dry-run` over the default window still
+completes successfully, so it advances that watermark without writing findings — anything
+found in it will not be re-reported. Use `--from/--to` for previews and backfills; those
+windows are non-persisting by definition.

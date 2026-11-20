@@ -2733,8 +2733,8 @@ export function registerTools(
         "Save a shipping address to the user's account for reuse in later orders — the user " +
         "confirms the write in chat first. Returns the saved address as a summary (label, " +
         "city, country, verification status); the full address is never echoed back into " +
-        "chat. country must be a real ISO 3166-1 alpha-2 code. When the server has an " +
-        "EasyPost key, the address is checked once on save — advisory only, it never " +
+        "chat. country must be a real ISO 3166-1 alpha-2 code. When the server has a " +
+        "Sendcloud key, the address is checked once on save — advisory only, it never " +
         "blocks: status is verified, suggested (a correction exists), unverified (carrier " +
         "could not confirm) or not_checked. Max 10 saved addresses; " +
         "30 address writes per hour. Requires seller authentication (Bearer API key).",

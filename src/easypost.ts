@@ -21,8 +21,9 @@ export interface EasyPostOptions {
   apiKey?: string; // default: EASYPOST_API_KEY (empty = unset, F1)
   baseUrl?: string;
   fetchImpl?: typeof fetch; // test seam
-  /** Abort the request after this many ms (address verification enforces the
-   *  spec's ≤3s wrap). Unset → no timeout (existing label/tracker behavior). */
+  /** Abort the request after this many ms. Unset → no timeout
+   *  (existing label/tracker behavior; address verification lives in
+   *  src/sendcloud.ts, which carries its own ≤3s deadline). */
   timeoutMs?: number;
 }
 
@@ -329,70 +330,6 @@ export async function buyEasyPostLabel(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Address verification (spec docs/specs/saved-addresses.md, "Verification
-// (advisory)"; rollout step 4). One POST /v2/addresses with
-// verify:["delivery"]: EasyPost checks deliverability and, when it can, returns
-// the corrected address in the top-level fields. This function only reports
-// the carrier's answer — policy (advisory statuses, limits, storage) lives in
-// src/addresses.ts. Review condition C3: the fetch carries an explicit
-// AbortSignal.timeout so a hanging provider can never hang a save; the caller
-// maps every throw (timeout included) to not_checked.
-// ---------------------------------------------------------------------------
-
-/** Verification fetch timeout (review condition C3). */
-export const EASYPOST_VERIFY_TIMEOUT_MS = 5_000;
-
-/** The carrier's delivery check on one address.
- *  `corrected` is the (possibly fixed) address EasyPost confirmed — present
- *  only when success is true and the payload carried usable fields. */
-export interface EasyPostAddressVerification {
-  success: boolean; // verifications.delivery.success
-  corrected: EasyPostAddressInput | null;
-}
-
-function parseVerifiedAddress(body: Record<string, unknown>): EasyPostAddressInput | null {
-  const name = typeof body.name === "string" ? body.name : undefined;
-  const line1 = typeof body.street1 === "string" ? body.street1 : undefined;
-  const city = typeof body.city === "string" ? body.city : undefined;
-  const postalCode = typeof body.zip === "string" ? body.zip : undefined;
-  const country = typeof body.country === "string" ? body.country : undefined;
-  if (!name || !line1 || !city || !postalCode || !country) return null;
-  return {
-    name,
-    line1,
-    ...(typeof body.street2 === "string" && body.street2 ? { line2: body.street2 } : {}),
-    city,
-    postalCode,
-    country,
-  };
-}
-
-/**
- * Runs EasyPost's delivery verification on one address. Returns null in
- * degraded mode (key unset); throws EasyPostError on provider errors and on
- * a timeout (AbortSignal) — callers treat both as advisory not_checked.
- */
-export async function verifyEasyPostAddress(
-  input: EasyPostAddressInput,
-  opts: EasyPostOptions = {},
-): Promise<EasyPostAddressVerification | null> {
-  const apiKey = opts.apiKey ?? envValue("EASYPOST_API_KEY");
-  if (apiKey === undefined) return null;
-
-  const body = await easypostPostJson(
-    "/v2/addresses",
-    { address: toWireAddress(input), verify: ["delivery"] },
-    opts,
-    "address verification",
-    AbortSignal.timeout(EASYPOST_VERIFY_TIMEOUT_MS),
-  );
-  const verifications = body.verifications as Record<string, unknown> | undefined;
-  const delivery = verifications?.delivery as Record<string, unknown> | undefined;
-  const success = delivery?.success === true;
-  return { success, corrected: success ? parseVerifiedAddress(body) : null };
-}
-
 /**
  * Picks which quoted rate to buy: the cheapest overall, or the cheapest
  * whose carrier matches `carrierPreference` (case-insensitive substring,
@@ -413,98 +350,3 @@ export function pickEasyPostRate(
   return best;
 }
 
-// ---------------------------------------------------------------------------
-// Order-time address verification (docs/specs/order-address-verification.md).
-// One POST /v2/addresses with a delivery check — a QUOTE-grade call: no
-// shipment is created, no money moves. Same client conventions as above
-// (basic auth, fetch seam, degraded mode with the key unset). The module in
-// src/address-verification.ts owns the state machine (caps, dedup, storage
-// shapes); this function is the thin provider mapping.
-// ---------------------------------------------------------------------------
-
-/** A correction candidate as EasyPost returned it, mapped back to the domain
- *  field names. UNVALIDATED provider output: callers MUST pass it through
- *  address-verification.ts validateSuggestionAddress (F2) before storing or
- *  surfacing it — provider payloads may carry anything. */
-export interface EasyPostAddressSuggestion {
-  name: string;
-  line1: string;
-  line2?: string;
-  city: string;
-  postal_code: string;
-  country: string;
-}
-
-export type EasyPostVerification =
-  | { status: "verified" } // delivery check passed — EasyPost accepts as typed
-  | { status: "unverified" } // check failed with nothing correctable (or a shape we cannot map)
-  | { status: "suggested"; suggestion: EasyPostAddressSuggestion }; // check failed, corrected fields present
-
-/** Runs the delivery check. Returns null in degraded mode (key unset — the
- *  caller's not_checked path). Throws on network/HTTP problems (non-2xx,
- *  timeout); the caller treats ANY throw as not_checked. The ≤3s deadline
- *  (spec invariant: the whole check is wrapped) is enforced here via the
- *  shared timeoutMs plumbing. Named verifyEasyPostDelivery because main's
- *  saved-addresses feature already owns a verifyEasyPostAddress with a
- *  simpler success/corrected mapping (src/addresses.ts); same POST, richer
- *  result. */
-export async function verifyEasyPostDelivery(
-  input: EasyPostAddressInput,
-  opts: EasyPostOptions = {},
-): Promise<EasyPostVerification | null> {
-  const apiKey = opts.apiKey ?? envValue("EASYPOST_API_KEY");
-  if (apiKey === undefined) return null;
-
-  const body = await easypostPostJson(
-    "/v2/addresses",
-    { address: toWireAddress(input), verify: ["delivery"] },
-    { ...opts, timeoutMs: opts.timeoutMs ?? 3000 },
-    "address verification",
-  );
-
-  // Response shape (EasyPost v2): the address object (with any corrections
-  // already applied to its fields) plus verifications.delivery.success.
-  // Anything unexpected maps to unverified — failure-open, never a throw the
-  // caller would have to distinguish from a network problem.
-  const addr = body as {
-    name?: unknown;
-    street1?: unknown;
-    street2?: unknown;
-    city?: unknown;
-    zip?: unknown;
-    country?: unknown;
-    verifications?: { delivery?: { success?: unknown } };
-  };
-  if (addr.verifications?.delivery?.success === true) return { status: "verified" };
-
-  const picked = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
-  const name = picked(addr.name);
-  const line1 = picked(addr.street1);
-  const city = picked(addr.city);
-  const zip = picked(addr.zip);
-  const country = picked(addr.country);
-  if (!line1 || !city || !zip) return { status: "unverified" };
-
-  const suggestion: EasyPostAddressSuggestion = {
-    name: name ?? input.name,
-    line1,
-    ...(picked(addr.street2) !== null || input.line2 !== undefined
-      ? { line2: picked(addr.street2) ?? input.line2 }
-      : {}),
-    city,
-    postal_code: zip,
-    country: country ?? input.country,
-  };
-
-  // No actual difference → not a suggestion (the check failed on the address
-  // as the provider sees it; there is nothing corrected to offer).
-  const differs =
-    suggestion.name !== input.name ||
-    suggestion.line1 !== input.line1 ||
-    suggestion.line2 !== input.line2 ||
-    suggestion.city !== input.city ||
-    suggestion.postal_code !== input.postalCode ||
-    suggestion.country !== input.country;
-  if (!differs) return { status: "unverified" };
-  return { status: "suggested", suggestion };
-}

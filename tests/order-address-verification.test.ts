@@ -1,10 +1,11 @@
 // Order-time address verification — DB-backed integration (docs/specs/
 // order-address-verification.md): the createOrder gate, the suggested branch
 // (no order, no reservation, no payment clock), the accept/keep/verified
-// storage shapes, degraded mode (key unset → NULL column), and the tool
-// surface's suggested result. Provider responses are scripted by stubbing
-// global fetch (the easypost client resolves `fetch` at call time); Stripe is
-// faked via setStripeForTests exactly like the other order suites.
+// storage shapes, degraded mode (credentials unset → NULL column), and the
+// tool surface's suggested result. Provider responses are scripted by
+// stubbing global fetch (the sendcloud client resolves `fetch` at call
+// time); Stripe is faked via setStripeForTests exactly like the other order
+// suites.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -53,15 +54,29 @@ function fakeStripe(): { client: Stripe } {
 const jsonRes = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status }) as Response;
 
-const resVerified = () =>
-  jsonRes({
-    id: "adr_1", street1: "Via Roma 1", city: "Milano", zip: "20100", country: "IT",
-    verifications: { delivery: { success: true } },
-  });
+const rawAddress = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  address_line_1: "Via Roma 1",
+  address_line_2: null,
+  house_number: null,
+  city: "Milano",
+  postal_code: "20100",
+  country_code: "IT",
+  ...over,
+});
+
+const resVerified = () => jsonRes({ input_address_is_valid: true, results: [] });
 const resSuggested = () =>
   jsonRes({
-    id: "adr_2", street1: "Via Roma 1/A", city: "Milano", zip: "20121", country: "IT",
-    verifications: { delivery: { success: false, errors: [{ message: "Address not found" }] } },
+    input_address_is_valid: false,
+    results: [
+      { validation_method: null, recommended: false, address: rawAddress(), analysis: null },
+      {
+        validation_method: null,
+        recommended: true,
+        address: rawAddress({ address_line_1: "Via Roma 1/A", postal_code: "20121" }),
+        analysis: { changed_attributes: ["postal_code"], invalid_attributes: [] },
+      },
+    ],
   });
 
 /** Provider fixture for the next N fetch calls. Returns the call counter. */
@@ -109,13 +124,15 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
     ids.buyerId = r.rows[0].buyer;
     __resetAddressVerificationForTests();
     delete process.env.ADDRESS_VERIFICATION_DAILY_CAP;
-    delete process.env.EASYPOST_API_KEY;
+    delete process.env.SENDCLOUD_API_KEY;
+    delete process.env.SENDCLOUD_VALIDATE_CARRIER_CODE;
   });
   afterEach(() => {
     setStripeForTests(null);
     vi.unstubAllGlobals();
     delete process.env.ADDRESS_VERIFICATION_DAILY_CAP;
-    delete process.env.EASYPOST_API_KEY;
+    delete process.env.SENDCLOUD_API_KEY;
+    delete process.env.SENDCLOUD_VALIDATE_CARRIER_CODE;
   });
 
   const seedItem = async (tier = "parcel") => {
@@ -143,7 +160,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("kill switch (cap 0): key set but no checks run", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     process.env.ADDRESS_VERIFICATION_DAILY_CAP = "0";
     const calls = stubProvider(resVerified);
     const itemId = await seedItem();
@@ -153,7 +171,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("verified: order created with the record stored; pickup orders never check", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     const calls = stubProvider(resVerified);
     const itemId = await seedItem();
     const { order } = await createOrder({ buyerId: ids.buyerId, itemId, shippingAddress: ADDRESS });
@@ -167,7 +186,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("suggested branch: no order, no reservation, no payment clock — item stays active", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     const calls = stubProvider(resSuggested);
     const itemId = await seedItem();
     const err = await createOrder({ buyerId: ids.buyerId, itemId, shippingAddress: ADDRESS }).catch((e) => e);
@@ -186,7 +206,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("accept path: resubmitting the suggested address orders it, stored suggested/accepted, one provider call total", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     const calls = stubProvider(resSuggested);
     const itemId = await seedItem();
     await createOrder({ buyerId: ids.buyerId, itemId, shippingAddress: ADDRESS }).catch(() => undefined);
@@ -204,7 +225,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("keep path: verification_choice orders the typed address with suggested/kept stored", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     const calls = stubProvider(resSuggested);
     const itemId = await seedItem();
     await createOrder({ buyerId: ids.buyerId, itemId, shippingAddress: ADDRESS }).catch(() => undefined);
@@ -226,7 +248,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("keep_original without a cached suggestion is a no-op: fresh check runs", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     const calls = stubProvider(resVerified);
     const itemId = await seedItem();
     const { order } = await createOrder({
@@ -240,7 +263,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("provider failure → not_checked: order proceeds, column NULL", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     stubProvider(() => jsonRes({ error: {} }, 500));
     const itemId = await seedItem();
     const { order } = await createOrder({ buyerId: ids.buyerId, itemId, shippingAddress: ADDRESS });
@@ -249,7 +273,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("over-cap account → not_checked: order proceeds unverified", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     stubProvider(resVerified);
     // Exhaust this buyer's 20/day bucket directly through the shared module
     // (the bucket createOrder spends from) — going through createOrder itself
@@ -264,7 +289,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("tool surface: suggested branch is an isError result with code + validated suggestion only", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     stubProvider(resSuggested);
     const itemId = await seedItem();
     let createOrderTool!: (a: Record<string, unknown>) => Promise<{ isError?: boolean; content: { text: string }[] }>;
@@ -319,7 +345,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
     );
 
   it("tool surface: verification_choice keep_original orders the typed address from the cached suggestion", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     const provider = stubProvider(resSuggested);
     const itemId = await seedItem();
     const create = toolHandler("create_order", ids.buyerId);
@@ -341,7 +368,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("§5a get_order: the kept suggestion follows the address-release rule exactly; metadata always", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     stubProvider(resSuggested);
     const itemId = await seedItem();
     // Invariant 6: without a cached suggestion the choice is a no-op — the
@@ -383,7 +411,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("§5a my_orders: metadata for both roles; the kept suggestion only on buyer rows — even when the address is shared", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     stubProvider(resSuggested);
     const itemId = await seedItem();
     await createOrder({ buyerId: ids.buyerId, itemId, shippingAddress: ADDRESS }).catch(() => undefined);
@@ -405,7 +434,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
   });
 
   it("§5a: verified records serialize without a suggestion for either party; not_checked omits the field", async () => {
-    process.env.EASYPOST_API_KEY = "test-key";
+    process.env.SENDCLOUD_API_KEY = "test-key";
+    process.env.SENDCLOUD_VALIDATE_CARRIER_CODE = "dhl";
     stubProvider(resVerified);
     const { order } = await createOrder({ buyerId: ids.buyerId, itemId: await seedItem(), shippingAddress: ADDRESS });
     const VERIFIED = { status: "verified", checked_at: expect.any(String) };
@@ -413,7 +443,8 @@ describe.skipIf(!available)("order-time address verification (DB)", () => {
     expect((await view("get_order", ids.sellerId, { order_id: order.id })).order.shipping_verification).toEqual(VERIFIED);
     // degraded twin: no record → the field is absent everywhere
     const plain = await createOrder({ buyerId: ids.buyerId, itemId: await seedItem(), shippingAddress: ADDRESS, paymentMode: "off_platform" });
-    delete process.env.EASYPOST_API_KEY;
+    delete process.env.SENDCLOUD_API_KEY;
+    delete process.env.SENDCLOUD_VALIDATE_CARRIER_CODE;
     __resetAddressVerificationForTests();
     const second = await createOrder({ buyerId: ids.buyerId, itemId: await seedItem(), shippingAddress: ADDRESS, paymentMode: "off_platform" });
     // Service views carry the raw NULL; the tool serialization (§5a) omits the key.

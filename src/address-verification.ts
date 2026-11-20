@@ -1,6 +1,6 @@
 // Order-time address verification (docs/specs/order-address-verification.md).
 //
-// Advisory EasyPost delivery check, run inside createOrder's transaction
+// Advisory Sendcloud address validation, run inside createOrder's transaction
 // before the item reservation. The state machine is failure-open by design:
 // any provider problem (unset key, error, timeout, over cap) resolves to
 // "not_checked" and the order proceeds exactly as it did before this module
@@ -8,7 +8,7 @@
 // before — a correction pauses the order once, with the suggestion in hand.
 //
 // Privacy invariants (spec §Privacy and security):
-// - Raw provider responses never travel past easypost.ts; suggestions are
+// - Raw provider responses never travel past sendcloud.ts; suggestions are
 //   re-validated to the exact ShippingAddress shape (validateSuggestionAddress)
 //   before any cache write, store, or return. A malformed suggestion downgrades
 //   to "unverified" — provider output is never surfaced as-is.
@@ -20,7 +20,7 @@
 
 import { createHash } from "node:crypto";
 import { envNonNegativeInt, envValue } from "./config.js";
-import { verifyEasyPostDelivery } from "./easypost.js";
+import { verifySendcloudAddress } from "./sendcloud.js";
 import { RateLimiter } from "./rate-limit.js";
 import { isIsoCountryCode, normalizeCountryCode } from "./countries.js";
 import type { ShippingAddress } from "./order-flow.js";
@@ -81,6 +81,9 @@ export class AddressSuggestedError extends Error {
 export interface VerifyOrderAddressOptions {
   /** Test seams — production callers pass nothing. */
   apiKey?: string;
+  /** Sendcloud requires a carrier available on the account; unset →
+   *  degraded mode (not_checked), exactly like a missing key. */
+  carrierCode?: string;
   baseUrl?: string;
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -207,10 +210,13 @@ export async function verifyOrderAddress(input: {
   const now = opts.now ?? Date.now;
   const ttl = opts.cacheTtlMs ?? CACHE_TTL_MS;
 
-  // Degraded mode first: no key means today's behavior, byte for byte —
-  // no caps consumed, no cache writes, no suggestion flow.
-  const apiKey = opts.apiKey ?? envValue("EASYPOST_API_KEY");
-  if (!apiKey) return { kind: "not_checked" };
+  // Degraded mode first: no credentials means today's behavior, byte for
+  // byte — no caps consumed, no cache writes, no suggestion flow. The
+  // validate API needs a key AND a carrier available on the account; a
+  // missing either keeps the feature entirely absent.
+  const apiKey = opts.apiKey ?? envValue("SENDCLOUD_API_KEY");
+  const carrierCode = opts.carrierCode ?? envValue("SENDCLOUD_VALIDATE_CARRIER_CODE");
+  if (!apiKey || !carrierCode) return { kind: "not_checked" };
 
   const nowMs = now();
   const keyA = cacheKey(input.accountId, input.address);
@@ -251,15 +257,15 @@ export async function verifyOrderAddress(input: {
   if (!state.limiter.allow(`addrverify:${input.accountId}`)) return { kind: "not_checked" };
   dailyCounter.count += 1; // spend counted even if the provider call fails
 
-  // Provider call, wrapped: easypost.ts maps the response; ANY throw (network,
+  // Provider call, wrapped: sendcloud.ts maps the response; ANY throw (network,
   // timeout, non-2xx, malformed JSON) lands here → not_checked. The raw error
   // is dropped, never logged with context — nothing provider-derived leaks.
   let outcome: CachedOutcome;
   try {
     // Domain → provider mapping happens here (postal_code → postalCode) so
-    // easypost.ts stays domain-agnostic and nothing downstream sees wire
+    // sendcloud.ts stays domain-agnostic and nothing downstream sees wire
     // field names.
-    const result = await verifyEasyPostDelivery(
+    const result = await verifySendcloudAddress(
       {
         name: input.address.name,
         line1: input.address.line1,
@@ -270,6 +276,7 @@ export async function verifyOrderAddress(input: {
       },
       {
         apiKey,
+        carrierCode,
         ...(opts.baseUrl !== undefined ? { baseUrl: opts.baseUrl } : {}),
         ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
       },

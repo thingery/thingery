@@ -1,25 +1,31 @@
 # Spec: Order-time address verification
 
 - **Status:** Accepted design, Security-reviewed (design note v2) — implementation in flight
-- **Date:** 2026-11-18
+- **Date:** 2026-11-18; amended 2026-11-19 (provider moved to Sendcloud v3 — verification
+  only; labels/tracking stay on EasyPost)
 - **Author:** Architect
-- **Decision:** product decision, 2026-11-18 — shippable orders get one advisory EasyPost
-  delivery check at creation; a suggested correction pauses the order once and lets the buyer
+- **Decision:** product decision, 2026-11-18 — shippable orders get one advisory carrier
+  address check at creation; a suggested correction pauses the order once and lets the buyer
   choose. Failure-open: the check can never block an order the platform could ship before.
+- **Provider decision, 2026-11-19:** the advisory check runs on Sendcloud's v3 address
+  validation (EU processor, published DPA). EasyPost remains the labels/tracking processor
+  only — its verify functions are retired from the active verification path.
 
 ## Problem
 
 `create_order` accepts any well-formed shipping address and the first quality gate on an
 address is a human (the seller, at label time) or nothing (carrier rejects at manifest, order
 already paid). Typo'd or undeliverable addresses surface late, cost re-shipments, and give
-scam orders a friction-free path. EasyPost is already integrated (tracking, labels) and its
-address-verification endpoint returns a deliverability verdict plus a corrected address —
-so the platform can check the address in the same transaction that creates the order, before
-any reservation or payment link exists.
+scam orders a friction-free path. A provider address-validation endpoint returns a
+deliverability verdict plus a corrected address — so the platform can check the address in
+the same transaction that creates the order, before any reservation or payment link exists.
+Sendcloud's validate API is quote-grade (no shipment is created, nothing is announced) and
+keeps the address data with an EU processor under a published DPA.
 
 ## Decisions (binding)
 
-1. **Advisory only, failure-open.** Unset `EASYPOST_API_KEY`, provider error, timeout (≤3s),
+1. **Advisory only, failure-open.** Unset `SENDCLOUD_API_KEY` (or
+   `SENDCLOUD_VALIDATE_CARRIER_CODE`), provider error, timeout (≤3s),
    non-2xx, malformed payload, over-cap → outcome `not_checked`, order proceeds **unchanged**.
    The feature can never block an order the platform could ship before it existed.
 2. **Provider output never travels raw.** A suggested correction is re-validated (F2 below)
@@ -48,20 +54,29 @@ Two refinements decided in Security review of v2, without weakening the above:
 
 ## Design
 
-### Provider call (`src/easypost.ts`)
+### Provider call (`src/sendcloud.ts`)
 
-`verifyEasyPostAddress(input, opts)` — one `POST /v2/addresses` with `verify: ["delivery"]`
-(quote-grade: no shipment, no money moves). Same client conventions as tracking/labels:
-basic auth, fetch seam, degraded mode (key unset → `null`). A ≤3s `AbortController` deadline
-wraps the call. Returns `verified` (delivery check passed), `unverified` (failed, nothing
-correctable or unmappable shape), or `suggested` with the correction mapped back to domain
-field names. Throws on network/HTTP problems; the caller treats any throw as `not_checked`.
+`verifySendcloudAddress(input, opts)` — one `POST /api/v3/addresses/validate`
+(quote-grade: no shipment, no money moves). Auth is HTTP basic: `SENDCLOUD_API_KEY` carries
+the `"key:secret"` pair verbatim, or a single token sent as the basic username with an empty
+password. The validate API additionally requires `carrier_code` naming a carrier available
+on the account — env `SENDCLOUD_VALIDATE_CARRIER_CODE`; unset key **or** carrier keeps the
+feature fully degraded. Fetch seam, same client conventions; a ≤3s `AbortController`
+deadline wraps the call. The wire request carries exactly the typed address fields mapped to
+Sendcloud's `address_line_*`/`postal_code`/`country_code` format — the wire shape has no
+name field, so the buyer's name is never sent. Returns `verified`
+(`input_address_is_valid: true`), `unverified` (invalid, nothing usable we can map), or
+`suggested` with the recommended result's address mapped back to domain field names
+(`house_number` folded back into `line1`). The provider's documented `null` (validator
+unavailable) and degraded mode both return `null` — the caller's `not_checked`. Throws on
+network/HTTP problems; the caller treats any throw as `not_checked`.
 
 ### Service (`src/address-verification.ts`)
 
 `verifyOrderAddress({ accountId, address, choice? })` — the state machine:
 
-1. Key unset → `not_checked` (before caps: no budget consumed in degraded mode).
+1. Credentials unset (key or carrier code) → `not_checked` (before caps: no budget
+   consumed in degraded mode).
 2. `keep_original` with a cached suggestion → `suggested/kept` record, no provider call.
    Without one → fall through (decision 6).
 3. Cache hit (within TTL): re-submitting **exactly the suggested address** is the accept
@@ -139,8 +154,9 @@ verification_choice PR.
 
 ## Privacy & security
 
-- What is sent: exactly the typed address fields, once, to EasyPost, only for shippable
-  orders, only with the key configured, bounded by the caps above. Phone is never sent.
+- What is sent: exactly the typed address fields (mapped to Sendcloud's wire format, no
+  name field), once, to Sendcloud, only for shippable orders, only with the credentials
+  configured, bounded by the caps above. Phone is never sent.
 - What is stored: one JSONB column on the order row (platform-authored shapes only). Same
   retention as the address it describes; no side table.
 - Who sees it: the order's parties under §5a; nothing here widens who can read an address.
@@ -153,17 +169,18 @@ verification_choice PR.
 
 - `src/iso3166.ts`: membership sanity, trim + uppercase normalization (" it " → `IT`; `XX`
   rejected), MCP ⇄ chat parity, field-only rejection (assert on strings).
-- Verification module: response → status mapping; non-2xx / timeout / over-cap / unset key →
-  `not_checked` with no provider call where applicable; cap accounting; cache dedupe (accept
-  path; identical resubmission; `keep_original` with and without a cached suggestion).
+- Verification module: response → status mapping; non-2xx / timeout / over-cap / unset key
+  or carrier code → `not_checked` with no provider call where applicable; cap accounting;
+  cache dedupe (accept path; identical resubmission; `keep_original` with and without a
+  cached suggestion).
 - F2: oversized fields, unknown keys, non-string junk, invalid country → `unverified`, nothing
   unvalidated stored or returned; a valid suggestion round-trips as exactly the
   `ShippingAddress` shape; instruction-like text stays data.
 - §5a matrix, cell-by-cell (buyer all results; seller `get_order` states; seller `my_orders`
   never carries `suggestion`).
 - `createOrder`: suggested branch creates no order, no reservation, no payment clock; accept
-  / keep / verified / unverified store the right shapes; key unset → NULL column; no address
-  values in any thrown message.
+  / keep / verified / unverified store the right shapes; credentials unset → NULL column; no
+  address values in any thrown message.
 - Accept-path provenance: within TTL → `suggested/accepted`; past TTL → fresh check.
 - Tools: additive fields; suggested-result code shape (validated fields only);
   `verification_choice:"keep_original"` no-op without a cached suggestion; docs regen.

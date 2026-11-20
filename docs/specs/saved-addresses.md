@@ -125,8 +125,11 @@ wrapped. Unlike the model-facing tool, they return full addresses: the owner's o
 
 ### Verification (advisory)
 
-When `EASYPOST_API_KEY` is set, saving or editing an address calls EasyPost's address verification
-(the delivery check) once. The result is stored in `verification`:
+Amended 2026-11-19: the check runs on Sendcloud's v3 address validation
+(`verifySendcloudAddress`, `src/sendcloud.ts`) — EasyPost remains the labels/tracking
+processor only. It runs when both `SENDCLOUD_API_KEY` and `SENDCLOUD_VALIDATE_CARRIER_CODE`
+are set (the validate API requires a carrier available on the account). Saving or editing an
+address calls the validation once. The result is stored in `verification`:
 
 | `status` | Meaning | UI |
 |---|---|---|
@@ -145,8 +148,9 @@ Rules for the check:
   because of verification.
 - **Storage:** only the status, the time of the check and a suggested correction. Never the
   provider's raw response.
-- **Privacy:** this sends an address to EasyPost before any label exists, and possibly for an address
-  never shipped to. The privacy page must say so. Self-hosters without the key never send anything.
+- **Privacy:** this sends an address to the verification provider (Sendcloud) before any label
+  exists, and possibly for an address never shipped to. The privacy page must say so.
+  Self-hosters without the credentials never send anything.
 
 Typed addresses in `create_order` are not verified in the first version. The typed path stays as fast
 as today; the same check can be added there later as a warning.

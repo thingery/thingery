@@ -368,7 +368,7 @@ phishing concerns — threat-model them before building, not after.
   replay-safe); email outbox with verified-address gate, rate caps, backoff +
   dead-letter; provider adapter = Resend, channel off unless `NOTIFY_EMAIL_ENABLED=true`
   (default **false** — in-app only until enabled). Privacy and retention statement: §4a.
-- Saved shipping addresses with advisory EasyPost delivery verification (spec
+- Saved shipping addresses with advisory Sendcloud address validation (spec
   docs/specs/saved-addresses.md): owner-scoped `account_addresses` store; MCP tools
   return summaries only (name, street and postal code never reach a model provider);
   30 writes/hour and ~20 verification checks/day per account; verification is
@@ -464,17 +464,24 @@ parties only; on off-platform orders the seller sees it only after the buyer agr
 Addresses never appear in logs, `security_events` (address write events carry ids and
 statuses only), emails, or notifications.
 
+**Sendcloud as a processor — live, only when the operator configures `SENDCLOUD_API_KEY`
+and `SENDCLOUD_VALIDATE_CARRIER_CODE`.** Saving or editing an address asks Sendcloud to
+validate it once (`verifySendcloudAddress`, `src/sendcloud.ts`): the typed address is sent
+to Sendcloud **before any label exists**, and possibly for an address never shipped to.
+The validate request carries the address mapped to Sendcloud's wire format — the wire shape
+has no name field, so the recipient's name is never sent. The check is advisory (it never
+blocks or rejects a save) and runs at most about 20 times per account per day (token-bucket
+average rate; over the ceiling the status is simply `not_checked`). Only the status, the
+time of the check and a length-capped suggested correction are stored — never the
+provider's raw response — and the correction text is never returned through MCP tools.
+Sendcloud is an EU processor with a published DPA, which is why verification moved here.
+Self-hosters without the credentials never send anything and see `not_checked` only; no
+processor relationship is created.
+
 **EasyPost as a processor — live, only when the operator configures `EASYPOST_API_KEY`.**
-Saving or editing an address asks EasyPost to run its delivery check once
-(`verifyEasyPostAddress`, `src/easypost.ts`): the full typed address is sent to EasyPost
-**before any label exists**, and possibly for an address never shipped to. Label purchase
-already sent order addresses to EasyPost — verification widens that to save time. The
-check is advisory (it never blocks or rejects a save) and runs at most about 20 times per
-account per day (token-bucket average rate; over the ceiling the status is simply
-`not_checked`). Only the status, the time of the check and a length-capped suggested
-correction are stored — never the provider's raw response — and the correction text is
-never returned through MCP tools. Self-hosters without the key never send anything and
-see `not_checked` only; no processor relationship is created.
+EasyPost no longer receives verification checks; it processes order addresses only when a
+seller buys a label (`buy_shipping_label`) and for carrier tracking. With the key unset,
+those carrier features run in degraded mode.
 
 **Deletion — live, with the backup caveat.** Deleting an address is a hard delete;
 deleting the account removes all of its addresses. The encrypted nightly database
@@ -484,20 +491,23 @@ they age out of the retention rotation. Erasure requests must account for that w
 ## 4c. Order-time address verification — privacy & retention statement
 
 Order-time address verification (docs/specs/order-address-verification.md) sends the
-buyer's shipping address to EasyPost once, at order creation, for an advisory delivery
-check. Same "live/planned" discipline as §4a so the statement cannot overstate.
+buyer's shipping address to Sendcloud once, at order creation, for an advisory address
+validation. Same "live/planned" discipline as §4a so the statement cannot overstate.
+EasyPost is no longer in the verification path — it keeps labels/tracking only.
 
-**What is sent — live.** Exactly the typed shipping address fields (name, street lines,
-city, postal code, ISO country) as one `POST /v2/addresses` with a delivery check. No
-shipment is created; no money moves; the request IS the check. Phone is never sent (the
-field is not part of `create_order`).
+**What is sent — live.** Exactly the typed shipping address fields (street lines, city,
+postal code, ISO country) as one `POST /api/v3/addresses/validate`. No shipment is
+created; no money moves; the request IS the check. The recipient's name is never sent
+(Sendcloud's validate wire shape has no name field). Phone is never sent (the field is
+not part of `create_order`).
 
 **When — live.** Only for shippable orders (never local pickup), only when
-`EASYPOST_API_KEY` is configured (unset key → the feature is entirely absent: no call, no
-storage, no suggestion flow — pre-rollout behavior byte for byte), and bounded: at most one
-provider call per create attempt (10-minute dedup cache), 20 checks/account/day shared with
-the saved-addresses path, and a platform-wide daily ceiling defaulting to 1,000/day
-(`ADDRESS_VERIFICATION_DAILY_CAP`; `0` disables the feature entirely).
+`SENDCLOUD_API_KEY` and `SENDCLOUD_VALIDATE_CARRIER_CODE` are configured (either unset →
+the feature is entirely absent: no call, no storage, no suggestion flow — pre-rollout
+behavior byte for byte), and bounded: at most one provider call per create attempt
+(10-minute dedup cache), 20 checks/account/day shared with the saved-addresses path, and
+a platform-wide daily ceiling defaulting to 1,000/day (`ADDRESS_VERIFICATION_DAILY_CAP`;
+`0` disables the feature entirely).
 
 **What is stored — live.** One JSONB column on the order row (`orders.shipping_verification`):
 outcome status, an ISO timestamp, and — only when the buyer kept a suggested correction —
@@ -515,7 +525,7 @@ but not surfaced in tool output — nothing here widens who can read an address.
 shipping address it describes; no side table, no separate policy.
 
 **Self-hosting — live.** Like tracking and labels, verification is off unless the operator
-configures an EasyPost key. No key → today's behavior.
+configures the Sendcloud credentials. Either variable unset → today's behavior.
 
 ## 4d. Chat history — privacy & retention statement
 
@@ -966,8 +976,8 @@ are met and names where the remediation is tracked.
 
 ### R2 — Order-time address verification is a bounded address-validation oracle — ACCEPTED 2026-11-18
 
-- **What:** with `EASYPOST_API_KEY` set, an authenticated account can use `create_order` as
-  a yes/no oracle about whether EasyPost considers an address deliverable (and get the
+- **What:** with the Sendcloud credentials set, an authenticated account can use `create_order` as
+  a yes/no oracle about whether Sendcloud considers an address valid (and get the
   provider's normalization when it does not). Since signup is open, the real bound is the
   global daily ceiling, not the per-account budget (docs/specs/
   order-address-verification.md, residual risks).

@@ -140,7 +140,7 @@ export async function createOrder(input: CreateOrderInput): Promise<{ order: Ord
     }
 
     // Order-time address verification (docs/specs/order-address-verification.md):
-    // one advisory EasyPost delivery check BEFORE the reservation, inside this
+    // one advisory Sendcloud address validation BEFORE the reservation, inside this
     // transaction. An offered correction throws AddressSuggestedError — the
     // catch below rolls back having touched NOTHING (no reservation, no order
     // row, no payment clock), so the item stays buyable. Any provider problem

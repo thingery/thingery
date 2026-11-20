@@ -99,10 +99,17 @@ async function paged(path, pick) {
     const res = await api(`${path}${sep}per_page=100&page=${page}`);
     if (!res.ok) throw new Error(`GET ${path} -> HTTP ${res.status}`);
     const items = pick(res.json);
-    if (!items?.length) break;
+    // A 200 with a malformed body is an operational error, not an empty
+    // list: treating it as empty would fabricate "no findings" instead of
+    // failing the run.
+    if (!Array.isArray(items)) throw new Error(`GET ${path} -> malformed page body (expected an array)`);
+    if (!items.length) return out;
     out.push(...items);
-    if (items.length < 100) break;
+    if (items.length < 100) return out;
   }
+  console.error(
+    `gate-integrity: warning: GET ${path} truncated at MAX_PAGES=${MAX_PAGES} (${out.length} items) — results may be incomplete`,
+  );
   return out;
 }
 
@@ -127,10 +134,13 @@ async function resolveWindow(explicitFrom, explicitTo) {
 
 async function listMergedPRs(fromMs, toMs) {
   const out = [];
+  let truncated = false;
   for (let page = 1; page <= MAX_PAGES; page++) {
     const res = await api(`/repos/${REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`);
     if (!res.ok) throw new Error(`GET pulls -> HTTP ${res.status}`);
-    const batch = res.json ?? [];
+    // A 200 with a malformed body is an operational error, not an empty list.
+    if (!Array.isArray(res.json)) throw new Error("GET pulls -> malformed page body (expected an array)");
+    const batch = res.json;
     if (!batch.length) break;
     for (const pr of batch) {
       const merged = pr.merged_at ? Date.parse(pr.merged_at) : NaN;
@@ -140,6 +150,12 @@ async function listMergedPRs(fromMs, toMs) {
     // page is older than the window start, everything further is too.
     const allOld = batch.every((pr) => !pr.updated_at || Date.parse(pr.updated_at) < fromMs);
     if (allOld) break;
+    if (page === MAX_PAGES) truncated = true;
+  }
+  if (truncated) {
+    console.error(
+      `gate-integrity: warning: pull list truncated at MAX_PAGES=${MAX_PAGES} (${out.length} PRs in window) — results may be incomplete`,
+    );
   }
   return out;
 }
@@ -319,13 +335,17 @@ async function findTrackingIssue() {
   return candidates.sort((a, b) => b.number - a.number)[0] ?? null;
 }
 
-async function reportedMarkers(issueNumber) {
-  const comments = await paged(`/repos/${REPO}/issues/${issueNumber}/comments`, (j) => j);
+/** Markers already reported on the tracking issue — comments AND the issue
+ * body itself: the create path writes the first findings batch into the
+ * body, so a comment-only scan would re-report it once as a duplicate
+ * comment on the next overlapping run. */
+async function reportedMarkers(issue) {
+  const comments = await paged(`/repos/${REPO}/issues/${issue.number}/comments`, (j) => j);
   const prs = new Set();
   const fingerprints = new Set();
-  for (const c of comments) {
-    for (const m of (c.body ?? "").matchAll(/gate-violation pr=(\d+)/g)) prs.add(Number(m[1]));
-    for (const m of (c.body ?? "").matchAll(/gate-config-drift fingerprint=([0-9a-f]+)/g)) fingerprints.add(m[1]);
+  for (const text of [issue.body ?? "", ...comments.map((c) => c.body ?? "")]) {
+    for (const m of text.matchAll(/gate-violation pr=(\d+)/g)) prs.add(Number(m[1]));
+    for (const m of text.matchAll(/gate-config-drift fingerprint=([0-9a-f]+)/g)) fingerprints.add(m[1]);
   }
   return { prs, fingerprints };
 }
@@ -336,7 +356,7 @@ async function deliver(window_, prs, violations, details, protection, drift, fp,
     return { reported: false };
   }
   const issue = await findTrackingIssue();
-  const markers = issue ? await reportedMarkers(issue.number) : { prs: new Set(), fingerprints: new Set() };
+  const markers = issue ? await reportedMarkers(issue) : { prs: new Set(), fingerprints: new Set() };
   const newViolations = violations.filter((n) => !markers.prs.has(n));
   const newDrift = drift.length && !markers.fingerprints.has(fp) ? drift : [];
   if (!newViolations.length && !newDrift.length) {
@@ -425,7 +445,7 @@ export async function main(argv = process.argv.slice(2)) {
 
 // ---------------------------------------------------------------- exports
 // Named exports keep the helpers unit-testable; nothing here is imported by app code.
-export { parseArgs, resolveWindow, listMergedPRs, countValidApprovals, readProtection, driftEntries, fingerprint, alertBody };
+export { parseArgs, resolveWindow, listMergedPRs, countValidApprovals, readProtection, driftEntries, fingerprint, alertBody, reportedMarkers };
 
 const isDirectRun = process.argv[1]?.endsWith("check-merge-gate.mjs");
 if (isDirectRun) process.exitCode = await main();

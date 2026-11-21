@@ -1,8 +1,8 @@
 # ADR 0007: Second reviewer identity (`thingery-review-bot`) and the 1-review merge gate
 
-- **Status:** Accepted, amended 2026-10-31 (board ruling THI-225; security review THI-224; implementation THI-446). Reviewer identity amended from GitHub App to machine user after live drill evidence — see Decision. Amended 2026-11-17 (THI-957): Decision 3 credential-delivery wording aligned with the implemented runtime-scoped env mechanism; approve-last rule added to Consequences (review-attachment race observed on PR #316). Amended 2026-11-19 (THI-1074; CEO decision from the THI-1054 sweep review THI-1057): Decision 6 adds a **named second reviewer for Security-authored PRs**, and Decision 3's "Security never authors PRs" assumption is corrected — see the exception record for PR #339.
+- **Status:** Accepted, amended 2026-10-31 (board ruling THI-225; security review THI-224; implementation THI-446). Reviewer identity amended from GitHub App to machine user after live drill evidence — see Decision. Amended 2026-11-17 (THI-957): Decision 3 credential-delivery wording aligned with the implemented runtime-scoped env mechanism; approve-last rule added to Consequences (review-attachment race observed on PR #316). Amended 2026-11-19 (THI-1074; CEO decision from the THI-1054 sweep review THI-1057): Decision 6 adds a **named second reviewer for Security-authored PRs**, and Decision 3's "Security never authors PRs" assumption is corrected — see the exception record for PR #339. Amended 2026-11-21 (THI-836): a Security-owned scheduled sweep re-queues mechanical re-approval for approvals dismissed by a push.
 - **Date:** 2026-10
-- **Related:** THI-36 (agents merge, no human in the loop), THI-224 (deploy-credential security review), THI-225 (merge-gate ruling), THI-449 (drill: bot approval submitted, not counted), THI-957 (approve-last rule; Decision 3 delivery wording), THI-1054 (PR sweep), THI-1057 (post-hoc review that surfaced the SoD exception), THI-1074 (this amendment)
+- **Related:** THI-36 (agents merge, no human in the loop), THI-224 (deploy-credential security review), THI-225 (merge-gate ruling), THI-449 (drill: bot approval submitted, not counted), THI-957 (approve-last rule; Decision 3 delivery wording), THI-1054 (PR sweep), THI-1057 (post-hoc review that surfaced the SoD exception), THI-1074 (named second reviewer for Security-authored PRs), THI-836 (merge-gate heal sweep; this amendment)
 
 ## Context
 
@@ -128,6 +128,16 @@ merge without waiting for a human).
   Decision 6.
 - `dismiss_stale_reviews` + `require_last_push_approval` mean a push after approval invalidates
   it: approve last, merge immediately; re-approve after any new push.
+- **Dismissed-approval heal sweep (2026-11-21, THI-836):** the settings above dismiss the bot
+  approval on any push to an approved PR, but nothing re-created the review task, so an approved PR
+  could strand at `REVIEW_REQUIRED` until someone noticed (PR #279 stranded ~3 h on 2026-11-15;
+  THI-834/835). A **Security-owned scheduled sweep (approximately hourly)** now detects open PRs
+  stranded at `REVIEW_REQUIRED` with a dismissed bot review and re-queues the mechanical
+  re-approval **only when the PR patch is byte-identical to the dismissed verdict's head** (the
+  THI-835 equivalence procedure). Any change to the diff requires full re-review — the sweep never
+  mechanically approves a changed diff. The sweep is read-only on GitHub: it never approves and
+  never merges. Approval still happens only through the reviewer-role task flow (Decision 3), and
+  merging stays with the author.
 - **Approve-last discipline (2026-11-17, PR #316, THI-957):** a push landing *before* the
   approval is submitted is caught by neither setting — GitHub attaches the approval to
   the new head with **no dismissal event** (`dismiss_stale_reviews` only reacts to pushes

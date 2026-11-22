@@ -175,3 +175,22 @@ override. Record at merge time:
 
 If this PR is still open, the drill has not completed: the record above is then prospective
 and the blocking step is named in the PR discussion.
+
+## Control health: dead-man's switch (appended 2026-11, THI-1065)
+
+The detector itself can die silently: an invalid workflow file fails as a startup failure
+with zero jobs and GitHub emits no notification for it (this happened once — the detector
+sat dead on `main` for a day after landing). Two guard layers now cover that class:
+
+- **`control-heartbeat.yml`** (separate workflow file on purpose, so a parse defect in
+  `gate-integrity.yml` cannot kill its own watchdog) checks every 15 minutes that
+  gate-integrity has a successful run within the last 90 minutes (three schedule periods)
+  and files a deduplicated alert (≤1 per UTC day per condition) on the
+  `Merge-gate integrity alerts` issue when the pulse is missing.
+- **The actionlint CI job** lints workflow files — changed files on PRs, the full
+  `.github/workflows/` tree on pushes to `main` — so an invalid workflow file is caught
+  at the parse path before merge instead of as a silent startup failure.
+
+The watchdog cannot detect its own death; the remaining layers are actionlint on its own
+file and the periodic repo health sweep. A `failure` run with zero executed jobs is the
+startup-failure signature to look for in run history.

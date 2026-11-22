@@ -1,0 +1,49 @@
+name: control-heartbeat
+
+# Dead-man's switch for the scheduled gate-integrity control (ADR 0007).
+#
+# An invalid workflow file fails as a startup failure with zero jobs and
+# emits no notification — exactly how the detector sat dead on main unnoticed
+# (THI-1065, Nov 2026). This file deliberately lives SEPARATE from
+# gate-integrity.yml so a parse defect in that file kills the detector's
+# triggers but not its own watchdog: every 15 minutes this workflow checks
+# that gate-integrity has a successful run within the last 90 minutes
+# (three 30-minute schedule periods) and files a deduplicated alert on the
+# "Merge-gate integrity alerts" tracking issue when the pulse is missing.
+#
+# Valid permission scopes only (an unknown scope invalidates the whole file —
+# the very defect class this guards against). Uses only the built-in
+# GITHUB_TOKEN; no secrets, no PATs.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report findings in the run log only, do not write the alert issue"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read        # checkout
+  actions: read         # list runs of the control workflow
+  issues: write         # create/append the tracking alert issue
+
+concurrency:
+  group: control-heartbeat
+  cancel-in-progress: false
+
+jobs:
+  pulse:
+    name: Scheduled-control heartbeat check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check control heartbeat
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: node scripts/check-control-heartbeat.mjs

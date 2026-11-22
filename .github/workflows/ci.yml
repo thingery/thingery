@@ -64,3 +64,44 @@ jobs:
           tar -xzf gitleaks.tar.gz gitleaks
       - name: Scan git history for secrets
         run: ./gitleaks git . --config .gitleaks.toml --redact --verbose --no-banner
+
+  # Workflow-file linting: actionlint (official release binary, pinned by
+  # SHA-256). On PRs this lints the workflow files the PR changed; on pushes
+  # to main it lints the whole .github/workflows/ tree. An invalid workflow
+  # file fails as a silent startup failure with zero executed jobs and no
+  # notification — this job is the parse-path check that catches that class
+  # before merge (THI-1065: the gate-integrity detector sat dead on main for
+  # a day for exactly this reason). Trivially green on PRs that touch no
+  # workflow files, so it can carry a required status check.
+  actionlint:
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: the merge-base diff needs the base branch
+      - name: Download and verify actionlint v1.7.7
+        run: |
+          set -euo pipefail
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  actionlint.tar.gz" | sha256sum --check
+          tar -xzf actionlint.tar.gz actionlint
+      - name: Lint workflow files (changed on PR, full tree on main)
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # NUL-safe list of added/copied/modified workflow files; xargs
+            # (not shell word-splitting) feeds them to actionlint so
+            # filenames can never break the command.
+            if ! git diff --name-only --diff-filter=ACMR -z "origin/${{ github.base_ref }}...HEAD" -- .github/workflows/ | grep -z -q .; then
+              echo "No workflow files changed in this PR — actionlint not needed."
+              exit 0
+            fi
+            echo "Linting changed workflow files:"
+            git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" -- .github/workflows/
+            git diff --name-only --diff-filter=ACMR -z "origin/${{ github.base_ref }}...HEAD" -- .github/workflows/ | xargs -0 ./actionlint
+          else
+            echo "Linting all workflow files:"
+            ./actionlint .github/workflows/*.yml
+          fi

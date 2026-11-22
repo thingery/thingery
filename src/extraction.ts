@@ -85,7 +85,19 @@ export interface ExtractionProviderConfig {
 }
 
 const DEFAULT_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
-const EXTRACTION_MAX_TOKENS = 800;
+// THI-1183: 1200 (was 800). The enum-listed registry prompt produces fuller
+// replies, and at 800 the model's JSON was sometimes cut mid-object on
+// description-heavy fixtures — an unparseable reply loses the WHOLE draft
+// (honest degradation, but a pure waste of the call). 1200 leaves headroom
+// for 3 open_questions + a 1000-char description; worst-case output cost is
+// still well inside the D7 daily token budget.
+const EXTRACTION_MAX_TOKENS = 1200;
+// THI-1183: extraction is a structured task — pin a low temperature instead
+// of riding the provider default. The THI-1181 vs THI-1183 live runs showed
+// real cross-run variance (same fixture, same model: `phones`↔unresolvable
+// slug) at default sampling; 0.2 keeps drafts stable enough for the
+// acceptance eval to measure the pipeline rather than the dice.
+const EXTRACTION_TEMPERATURE = 0.2;
 const EXTRACTION_TIMEOUT_MS = 60_000;
 
 export function extractionProviderConfig(): ExtractionProviderConfig {
@@ -510,6 +522,7 @@ async function callExtractionLlm(
       { role: "user", content: userContent },
     ],
     response_format: { type: "json_object" },
+    temperature: EXTRACTION_TEMPERATURE,
     max_tokens: EXTRACTION_MAX_TOKENS,
   };
   const res = await fetch(cfg.apiURL, {

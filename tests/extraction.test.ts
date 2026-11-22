@@ -20,6 +20,7 @@ import {
   normalizeCompletionsUrl,
   normalizePhoto,
   validateModelDraft,
+  canonicalizeEnumValue,
   draftListing,
   draftListingRequestSchema,
   ExtractionBudget,
@@ -34,6 +35,43 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.resolve(__dirname, "..", "db", "schema.sql");
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://thingery:thingery@localhost:5432/thingery";
+
+// ---------------------------------------------------------------------------
+// Pure: enum canonicalization (THI-1183)
+// ---------------------------------------------------------------------------
+
+const GAME_PLATFORMS = ["nintendo_switch", "ps4", "ps5", "xbox_one", "xbox_series", "pc", "other"];
+const BIKE_TYPES = ["road", "mtb", "city", "bmx", "ebike", "kids", "other"];
+const PET_TYPES = ["dog", "cat", "bird", "small_animal", "aquarium", "other"];
+
+describe("canonicalizeEnumValue (THI-1183 — free text → registry-canonical enum token)", () => {
+  it("exact and case-insensitive matches return the declared casing", () => {
+    expect(canonicalizeEnumValue("vinyl", ["vinyl", "cd", "cassette"])).toBe("vinyl");
+    expect(canonicalizeEnumValue("MEN", ["women", "men", "unisex", "kids"])).toBe("men");
+  });
+
+  it("alphanumeric folding maps spacing/punctuation variants (THI-1181 live misses)", () => {
+    expect(canonicalizeEnumValue("Nintendo Switch", GAME_PLATFORMS)).toBe("nintendo_switch");
+    expect(canonicalizeEnumValue("e-bike", BIKE_TYPES)).toBe("ebike");
+    expect(canonicalizeEnumValue("XBox ONE", GAME_PLATFORMS)).toBe("xbox_one");
+  });
+
+  it("unique substring containment maps decorated free text", () => {
+    expect(canonicalizeEnumValue("vinyl LP (180g)", ["vinyl", "cd", "cassette", "instrument", "other"])).toBe("vinyl");
+    expect(canonicalizeEnumValue("foldable dog crate", PET_TYPES)).toBe("dog");
+  });
+
+  it("the longest contained token wins (city e-bike → ebike, not city)", () => {
+    expect(canonicalizeEnumValue("city e-bike", BIKE_TYPES)).toBe("ebike");
+  });
+
+  it("zero hits, ties between distinct tokens, and empty input stay undefined — never guessed", () => {
+    expect(canonicalizeEnumValue("PlayStation 5", GAME_PLATFORMS)).toBeUndefined(); // no ps5 token contained
+    expect(canonicalizeEnumValue("dog or cat bed", PET_TYPES)).toBeUndefined(); // dog/cat tie
+    expect(canonicalizeEnumValue("   ", PET_TYPES)).toBeUndefined();
+    expect(canonicalizeEnumValue("cordless drill", ["power", "hand", "garden", "other"])).toBeUndefined();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Pure: FMV math
@@ -459,6 +497,40 @@ describe("validateModelDraft + draftListing (DB + scripted provider)", () => {
     const notes = core.notes.join(" ");
     expect(notes).toContain("brand_model");
     expect(notes).toContain("not declared");
+  });
+
+  it("validateModelDraft: enum free text is canonicalized or dropped — never passed through (THI-1183)", async () => {
+    // create_listing rejects enum violations (validateAttributes), so a draft
+    // carrying the model's free text ("Nintendo Switch", "Sega Genesis")
+    // would be an unpublishable create_listing input.
+    const GAMES: RegistryEntry = {
+      name: "games",
+      parent: "electronics",
+      description: "Video games and consoles",
+      defs: [{ key: "platform", type: "string", enum: GAME_PLATFORMS, required: true }],
+    };
+    const core = await validateModelDraft(
+      {
+        title: "Zelda TOTK", category: "games", condition: "good",
+        attributes: { platform: "Nintendo Switch" },
+      },
+      undefined,
+      [GAMES],
+    );
+    expect(core.draft.attributes.platform).toBe("nintendo_switch");
+    expect(core.notes.join(" ")).toContain("canonicalized");
+
+    const dropped = await validateModelDraft(
+      {
+        title: "Mystery console", category: "games", condition: "good",
+        attributes: { platform: "Sega Genesis" },
+      },
+      undefined,
+      [GAMES],
+    );
+    expect(dropped.draft.attributes.platform).toBeUndefined();
+    expect(dropped.notes.join(" ")).toContain("not one of");
+    expect(dropped.notes.join(" ")).toContain("dropped");
   });
 
   it("validateModelDraft: ill-typed attribute value dropped with a note", async () => {

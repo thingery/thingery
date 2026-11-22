@@ -40,6 +40,7 @@
           "my_listings",
           "update_listing",
           "draft_listing",
+          "format_listing",
           "get_payout_setup",
           "create_order",
           "quote_shipping",
@@ -87,7 +88,8 @@
         "add_item_image",
         "my_listings",
         "update_listing",
-        "draft_listing"
+        "draft_listing",
+        "format_listing"
       ],
       "required_for": [
         "create_listing",
@@ -95,6 +97,7 @@
         "my_listings",
         "update_listing",
         "draft_listing",
+        "format_listing",
         "get_payout_setup",
         "create_order",
         "quote_shipping",

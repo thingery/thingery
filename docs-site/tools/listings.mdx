@@ -237,3 +237,21 @@ Update one of your own listings: flip between stored (private inventory) and act
 <ParamField body="attributes" type="object">
   Replaces the whole attributes object (read-modify-write).
 </ParamField>
+
+## `format_listing`
+
+**Format listing for another platform** · Needs an account · Read-only
+
+Turn one of your own listings into ready-to-paste copy for Subito, Vinted, Wallapop or eBay: a marketplace-style title (clamped to the platform limit — eBay 80, Subito/Vinted 60, Wallapop 50 characters), a structured description (identity, condition, known flaws from your description, attribute lines, shipping terms, price, and a market-range line computed from comparable active listings), platform-labeled fields (e.g. Vinted size/brand/status, eBay Item-Specifics style), and a versioned JSON envelope per platform for API use. Language: 'it' (default) or 'en'. Deterministic: same input, same output. Export only — nothing is posted anywhere; you paste the copy yourself. Warnings flag title truncation, missing comparables, and contact info detected in the source fields (your content passes through unchanged). Read-only: nothing is stored or published. Owner-only. Requires API key.
+
+**Parameters**
+
+<ParamField body="item_id" type="string" required>
+  ID of one of your own listings (see my_listings).
+</ParamField>
+<ParamField body="platform" type="string" required>
+  Target marketplace template. One of `subito`, `vinted`, `wallapop`, `ebay`.
+</ParamField>
+<ParamField body="language" type="string">
+  Copy language; defaults to 'it' (deployment's primary market). One of `it`, `en`.
+</ParamField>

@@ -12,6 +12,7 @@ import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, I
 import { listNotificationsForAccount } from "./notify/queries.js";
 import { addItemImageBase64 } from "./images.js";
 import { draftListing, draftListingRequestSchema, ExtractionError, extractionSellerLimiter } from "./extraction.js";
+import { FormatListingError, formatListingForItem, formatListingRequestSchema, PLATFORM_TITLE_LIMITS } from "./format-listing.js";
 import { respondToWanted, WantedResponseError } from "./wanted-responses.js";
 import { ContactInfoError, getWantedById, listMyWanted, searchWanted, updateWanted, wantedToPublic, WantedLimitError, WantedNotFoundError, WantedValidationError, type WantedRow } from "./wanted.js";
 import { createWantedWithAlert, wantedCreateShape, wantedEditShape, wantedWriteLimiter } from "./wanted-writes.js";
@@ -115,6 +116,9 @@ export const PROTECTED_TOOLS: ReadonlySet<string> = new Set([
   // seller-authenticated — spends operator LLM money per call, so anonymous
   // callers get the method-aware 401 challenge like every authoring tool.
   "draft_listing",
+  // THI-816 (P1-4 format_listing, spec THI-813 §5): per-account item data
+  // (owner-scoped) — same 401-challenge treatment as the authoring tools.
+  "format_listing",
   // Order-flow tools (spec THI-10) must be added here when they land.
   "get_payout_setup",
   "create_order",
@@ -197,6 +201,10 @@ export const DIRECTORY_PROFILE_TOOLS: ReadonlySet<string> = new Set([
   "my_listings",
   "add_item_image",
   "draft_listing",
+  // THI-816 (P1-4): export copy generation — a read-only computation over the
+  // seller's own stored item (no money movement, nothing written), same
+  // authoring-lane posture as draft_listing (spec THI-813 §11 Q3 ruling).
+  "format_listing",
   // The wanted board: public reads + per-account writes.
   "search_wanted",
   "get_wanted",
@@ -1358,6 +1366,69 @@ export function registerTools(
         // ShippingPriceError above.
         if (e instanceof ItemTransitionError) return err(describeError(e), e.code);
         return err(`update_listing failed: ${describeError(e)}`);
+      }
+    },
+  );
+
+  // THI-816 (P1-4, spec THI-813 §5): format_listing — cross-platform listing
+  // copy for the legacy marketplaces (Subito/Vinted/Wallapop/eBay). DETERMINISTIC
+  // string assembly (no LLM, ADR 0009 posture): same item + platform + language
+  // → byte-identical copy, pinned by tests/format-listing.test.ts. Export-only
+  // (plan D3): the seller pastes the copy herself — this tool never talks to
+  // those platforms. Read-only over the seller's OWN stored item; runs in the
+  // authoring lane next to my_listings/update_listing (directory profile included).
+  server.registerTool(
+    "format_listing",
+    {
+      title: "Format listing for another platform",
+      annotations: {
+        title: "Format listing for another platform",
+        // Nothing is persisted and nothing leaves the deployment: a pure
+        // computation over the item row + the category registry + our own
+        // comparables search (openWorldHint false, unlike draft_listing —
+        // no LLM, no external call).
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      description:
+        "Turn one of your own listings into ready-to-paste copy for Subito, Vinted, Wallapop or eBay: " +
+        `a marketplace-style title (clamped to the platform limit — eBay ${PLATFORM_TITLE_LIMITS.ebay}, ` +
+        `Subito/Vinted ${PLATFORM_TITLE_LIMITS.subito}, Wallapop ${PLATFORM_TITLE_LIMITS.wallapop} characters), ` +
+        "a structured description (identity, condition, known flaws from your description, attribute lines, " +
+        "shipping terms, price, and a market-range line computed from comparable active listings), " +
+        "platform-labeled fields (e.g. Vinted size/brand/status, eBay Item-Specifics style), and a " +
+        "versioned JSON envelope per platform for API use. Language: 'it' (default) or 'en'. " +
+        "Deterministic: same input, same output. Export only — nothing is posted anywhere; you paste " +
+        "the copy yourself. Warnings flag title truncation, missing comparables, and contact info " +
+        "detected in the source fields (your content passes through unchanged). Read-only: nothing " +
+        "is stored or published. Owner-only. Requires API key.",
+      inputSchema: {
+        item_id: z.string().uuid().describe("ID of one of your own listings (see my_listings)"),
+        platform: z.enum(["subito", "vinted", "wallapop", "ebay"]).describe("Target marketplace template"),
+        language: z.enum(["it", "en"]).optional().describe("Copy language; defaults to 'it' (deployment's primary market)"),
+      },
+    },
+    async (args) => {
+      const seller = requireSeller();
+      if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
+      const parsed = formatListingRequestSchema.safeParse({ item_id: args.item_id, platform: args.platform, language: args.language });
+      if (!parsed.success) {
+        return err("Provide item_id (uuid), platform (subito|vinted|wallapop|ebay), and optionally language (it|en).", "invalid_params");
+      }
+      // Owner scope before the wrapper touches the category registry or
+      // comparables — a foreign or deleted item is indistinguishable from a
+      // missing one (same posture as update_listing).
+      const owned = await getItem(parsed.data.item_id);
+      if (!owned || owned.seller_id !== seller.id || owned.status === "deleted") {
+        return err("Item not found or not owned by this seller", "not_found");
+      }
+      try {
+        return ok(await formatListingForItem(parsed.data));
+      } catch (e) {
+        if (e instanceof FormatListingError) return err(e.message, e.code);
+        return err(`format_listing failed: ${describeError(e)}`);
       }
     },
   );

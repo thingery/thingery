@@ -162,14 +162,16 @@ describe.skipIf(!available)("extraction golden set — recorded-stub CI harness 
     expect(mismatches, mismatches.join("\n")).toEqual([]);
   });
 
-  it("replay: alias-coded recorded replies resolve through the registry", async () => {
-    // sn-2's reply says 'trainers' (→ sneakers), mu-1 'vinyl' (→ music),
-    // ba-1 'stroller' (→ baby) — asserted implicitly by the main replay, but
-    // pinned here with the alias note so the mechanism is visible.
+  it("replay: alias-coded category replies resolve through the registry", async () => {
+    // The passing live run (THI-1182 stub refresh) emits canonical slugs for
+    // every fixture, so no recorded entry is alias-coded any more. Pin the
+    // category-alias mechanism with an inline alias-coded reply ('trainers' →
+    // sneakers) so resolution stays covered offline.
+    const aliasCoded = { ...recorded["sn-2"], category: "trainers" };
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(recorded["sn-2"]) } }] }), {
+        new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(aliasCoded) } }] }), {
           status: 200,
           headers: { "content-type": "application/json" },
         }),

@@ -432,6 +432,51 @@ describe("validateModelDraft + draftListing (DB + scripted provider)", () => {
     expect(core.draft.attributes.size_eu).toBe(42); // numeric string coerced to number
   });
 
+  it("validateModelDraft: enum free text folds to the declared slug (THI-1182), non-matching text is dropped", async () => {
+    const core = await validateModelDraft(
+      {
+        title: "Bosch cordless drill",
+        category: "tools",
+        condition: "good",
+        attributes: { type: "cordless drill" }, // marketplace vocabulary → declared enum
+      },
+      undefined,
+      await loadRegistry(),
+    );
+    expect(core.draft.attributes.type).toBe("power"); // canonicalized, not raw free text
+    expect(core.notes.join(" ")).toContain("attribute 'type' canonicalized from 'cordless drill' to 'power'");
+
+    const dropped = await validateModelDraft(
+      {
+        title: "Jar of screws",
+        category: "tools",
+        condition: "good",
+        attributes: { type: "screws and bolts assorted" }, // matches no declared value
+      },
+      undefined,
+      await loadRegistry(),
+    );
+    expect(dropped.draft.attributes.type).toBeUndefined(); // the old fallthrough leaked raw text here
+    expect(dropped.notes.join(" ")).toContain("dropped");
+  });
+
+  it("validateModelDraft: 'other' + car-seat text → refined to baby by registry keyword scan (THI-1182 backstop)", async () => {
+    const core = await validateModelDraft(
+      {
+        title: "Maxi-Cosi infant car seat",
+        category: "car-seat", // resolves to nothing → 'other' path
+        condition: "good",
+        confidence: { category: 0.2 },
+      },
+      "Maxi-Cosi infant car seat, never in an accident, light use",
+      await loadRegistry(),
+    );
+    expect(core.draft.category).toBe("baby");
+    expect(core.notes.join(" ")).toContain("refined to 'baby'");
+    expect(core.confidence.category).toBeGreaterThanOrEqual(0.6);
+    expect(core.openQuestions.join(" ")).not.toContain("Which category"); // no longer an open question
+  });
+
   it("validateModelDraft: attribute shape rules — undeclared dropped, ill-typed dropped, enum canonicalized, boolean string coerced", async () => {
     const core = await validateModelDraft(
       {

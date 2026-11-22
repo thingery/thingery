@@ -3,59 +3,1004 @@
     "Recorded model replies for the THI-814 golden set, keyed by fixture id.",
     "What the CI harness replays offline (tests/extraction-golden.test.ts): the",
     "pipeline is tested against these, not against the network. Hand-authored",
-    "to match each fixture's expected output — refresh from a real provider run",
+    "to match each fixture's expected output \u2014 refresh from a real provider run",
     "with `npx tsx scripts/extraction-eval.ts --live --record`. Replies",
-    "sn-2/mu-1/ba-1 deliberately use registry aliases (trainers→sneakers,",
-    "vinyl→music, stroller→baby) to exercise alias resolution in the harness."
+    "sn-2/mu-1/ba-1 deliberately use registry aliases (trainers\u2192sneakers,",
+    "vinyl\u2192music, stroller\u2192baby) to exercise alias resolution in the harness;",
+    "ga-1 deliberately uses the model raw free-text enum form (\"Nintendo Switch\")",
+    "to exercise enum canonicalization (THI-1183: the pipeline must emit the",
+    "registry-canonical token nintendo_switch)."
   ],
-  "sn-1": { "title": "Nike Air Max 90 white, EU 43", "category": "sneakers", "condition": "like_new", "brand": "Nike", "attributes": { "size_eu": 43, "colorway": "white", "has_original_box": true }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "size_eu": 0.95, "colorway": 0.85, "has_original_box": 0.9 } }, "open_questions": [] },
-  "sn-2": { "title": "Trail running trainers, EU 42", "category": "trainers", "condition": "good", "brand": null, "attributes": { "size_eu": 42, "has_original_box": false }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.9, "condition": 0.7, "title": 0.8, "attributes": { "size_eu": 0.9, "has_original_box": 0.85 } }, "open_questions": [] },
-  "sh-1": { "title": "Leather Chelsea boots, EU 41", "category": "shoes", "condition": "like_new", "brand": null, "attributes": { "size_eu": 41, "material": "leather" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.85, "title": 0.85, "attributes": { "size_eu": 0.9, "material": 0.9 } }, "open_questions": [] },
-  "sh-2": { "title": "Kids' sandals, EU 28", "category": "shoes", "condition": "good", "brand": null, "attributes": { "size_eu": 28, "department": "kids" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.9, "condition": 0.7, "title": 0.8, "attributes": { "size_eu": 0.9, "department": 0.9 } }, "open_questions": [] },
-  "cl-1": { "title": "Levi's 501 jeans W32 L32, blue", "category": "clothing", "condition": "good", "brand": "Levi's", "attributes": { "size": "W32 L32", "color": "blue", "department": "men" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "size": 0.95, "color": 0.9, "department": 0.9 } }, "open_questions": [] },
-  "cl-2": { "title": "Wool blazer, size M, navy", "category": "clothing", "condition": "like_new", "brand": null, "attributes": { "size": "M", "size_letter": "M", "material": "wool", "color": "navy", "department": "women" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.8, "attributes": { "size": 0.95, "size_letter": 0.95, "material": 0.9, "color": 0.9, "department": 0.95 } }, "open_questions": [] },
-  "bg-1": { "title": "Canvas backpack, olive green", "category": "bags", "condition": "like_new", "brand": null, "attributes": { "material": "canvas", "color": "olive green" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.85, "attributes": { "material": 0.9, "color": 0.9 } }, "open_questions": [] },
-  "bg-2": { "title": "Leather handbag, brown", "category": "bags", "condition": "fair", "brand": null, "attributes": { "material": "leather", "color": "brown" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.85, "attributes": { "material": 0.9, "color": 0.9 } }, "open_questions": [] },
-  "ac-1": { "title": "Seiko automatic watch, steel bracelet", "category": "accessories", "condition": "good", "brand": "Seiko", "attributes": { "type": "watch", "department": "men" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "type": 0.95, "department": 0.9 } }, "open_questions": [] },
-  "ac-2": { "title": "Black silk scarf, unworn with tags", "category": "accessories", "condition": "new", "brand": null, "attributes": { "type": "scarf" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.9, "title": 0.85, "attributes": { "type": 0.95 } }, "open_questions": [] },
-  "be-1": { "title": "Nivea body lotion 400ml, unopened", "category": "beauty", "condition": "new", "brand": "Nivea", "attributes": { "type": "skincare" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.95, "title": 0.9, "attributes": { "type": 0.9 } }, "open_questions": [] },
-  "be-2": { "title": "Red lipstick, barely used", "category": "beauty", "condition": "like_new", "brand": null, "attributes": { "type": "makeup" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.8, "attributes": { "type": 0.9 } }, "open_questions": [] },
-  "ba-1": { "title": "Bugaboo pushchair, well used, working", "category": "stroller", "condition": "good", "brand": "Bugaboo", "attributes": { "type": "pushchair" }, "shipping_tier_hint": "bulky", "confidence": { "category": 0.9, "condition": 0.7, "title": 0.85, "attributes": { "type": 0.9 } }, "open_questions": [] },
-  "ba-2": { "title": "Maxi-Cosi infant car seat", "category": "baby", "condition": "good", "brand": "Maxi-Cosi", "attributes": { "type": "car_seat" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "type": 0.95 } }, "open_questions": [] },
-  "kc-1": { "title": "Toddler winter jacket size 104, blue", "category": "kids-clothing", "condition": "good", "brand": null, "attributes": { "size": "104", "color": "blue" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.85, "attributes": { "size": 0.9, "color": 0.9 } }, "open_questions": [] },
-  "kc-2": { "title": "Girl's dress size 6Y, purple", "category": "kids-clothing", "condition": "like_new", "brand": null, "attributes": { "size": "6Y", "color": "purple" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.85, "attributes": { "size": 0.9, "color": 0.9 } }, "open_questions": [] },
-  "to-1": { "title": "Wooden Montessori puzzle set, ages 3+", "category": "toys", "condition": "good", "brand": null, "attributes": { "age_range": "3+" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "age_range": 0.9 } }, "open_questions": [] },
-  "to-2": { "title": "LEGO Star Wars Millennium Falcon 75192", "category": "toys", "condition": "good", "brand": "LEGO", "attributes": {}, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.95, "attributes": {} }, "open_questions": [] },
-  "el-1": { "title": "Misc electronics box: cables, mp3 player, hubs", "category": "electronics", "condition": "fair", "brand": null, "attributes": {}, "shipping_tier_hint": "parcel", "confidence": { "category": 0.7, "condition": 0.6, "title": 0.8, "attributes": {} }, "open_questions": ["Which items in the box should the listing name?"] },
-  "ph-1": { "title": "iPhone 13 128GB, battery 89%", "category": "phones", "condition": "good", "brand": "Apple", "attributes": { "model": "iPhone 13", "storage_gb": 128, "battery_health_pct": 89 }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.95, "attributes": { "model": 0.95, "storage_gb": 0.95, "battery_health_pct": 0.9 } }, "open_questions": [] },
-  "ph-2": { "title": "Samsung Galaxy S22 256GB, mint screen", "category": "phones", "condition": "like_new", "brand": "Samsung", "attributes": { "model": "Galaxy S22", "storage_gb": 256, "battery_health_pct": 95 }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.85, "title": 0.9, "attributes": { "model": 0.95, "storage_gb": 0.95, "battery_health_pct": 0.9 } }, "open_questions": [] },
-  "cp-1": { "title": "ThinkPad T14 i5, 16GB RAM, 512GB SSD", "category": "computers", "condition": "good", "brand": "Lenovo", "attributes": { "model": "ThinkPad T14", "ram_gb": 16, "storage_gb": 512 }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "model": 0.95, "ram_gb": 0.95, "storage_gb": 0.95 } }, "open_questions": [] },
-  "cp-2": { "title": "MacBook Air M1, 8GB / 256GB, like new", "category": "computers", "condition": "like_new", "brand": "Apple", "attributes": { "model": "MacBook Air M1", "ram_gb": 8, "storage_gb": 256 }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.85, "title": 0.9, "attributes": { "model": 0.95, "ram_gb": 0.9, "storage_gb": 0.9 } }, "open_questions": [] },
-  "cm-1": { "title": "Canon EOS R6 with 24-105, shutter 12000", "category": "cameras", "condition": "like_new", "brand": "Canon", "attributes": { "model": "Canon EOS R6", "shutter_count": 12000 }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "model": 0.95, "shutter_count": 0.95 } }, "open_questions": [] },
-  "cm-2": { "title": "GoPro Hero 9 action camera", "category": "cameras", "condition": "good", "brand": "GoPro", "attributes": { "model": "GoPro Hero 9" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "model": 0.9 } }, "open_questions": [] },
-  "ga-1": { "title": "Zelda Tears of the Kingdom, Switch, CIB", "category": "games", "condition": "like_new", "brand": "Nintendo", "attributes": { "platform": "nintendo_switch" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "platform": 0.95 } }, "open_questions": [] },
-  "ga-2": { "title": "PlayStation 5 disc edition, barely used", "category": "games", "condition": "like_new", "brand": "Sony", "attributes": { "platform": "ps5" }, "shipping_tier_hint": "bulky", "confidence": { "category": 0.95, "condition": 0.85, "title": 0.9, "attributes": { "platform": 0.95 } }, "open_questions": [] },
-  "tl-1": { "title": "Bosch cordless drill, two batteries", "category": "tools", "condition": "good", "brand": "Bosch", "attributes": { "type": "power" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "type": 0.9 } }, "open_questions": [] },
-  "tl-2": { "title": "Electric hedge trimmer, rusty guard", "category": "tools", "condition": "fair", "brand": null, "attributes": { "type": "garden" }, "shipping_tier_hint": "bulky", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.8, "attributes": { "type": 0.9 } }, "open_questions": [] },
-  "pe-1": { "title": "Foldable dog crate, medium", "category": "pets", "condition": "like_new", "brand": null, "attributes": { "type": "dog" }, "shipping_tier_hint": "bulky", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.85, "attributes": { "type": 0.9 } }, "open_questions": [] },
-  "pe-2": { "title": "60 litre aquarium with filter and light", "category": "pets", "condition": "good", "brand": null, "attributes": { "type": "aquarium" }, "shipping_tier_hint": "bulky", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.85, "attributes": { "type": 0.95 } }, "open_questions": [] },
-  "bk-1": { "title": "The Hobbit, English paperback", "category": "books", "condition": "good", "brand": null, "attributes": { "language": "English" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "language": 0.9 } }, "open_questions": [] },
-  "bk-2": { "title": "Clean Code by Robert C. Martin, like new", "category": "books", "condition": "like_new", "brand": null, "attributes": { "author": "Robert C. Martin", "language": "English" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "author": 0.95, "language": 0.9 } }, "open_questions": [] },
-  "mu-1": { "title": "Abbey Road LP, 180g reissue", "category": "vinyl", "condition": "good", "brand": null, "attributes": { "format": "vinyl", "artist": "The Beatles" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.9, "attributes": { "format": 0.95, "artist": 0.95 } }, "open_questions": [] },
-  "mu-2": { "title": "Thriller by Michael Jackson, cassette", "category": "music", "condition": "good", "brand": null, "attributes": { "format": "cassette", "artist": "Michael Jackson" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "format": 0.95, "artist": 0.95 } }, "open_questions": [] },
-  "cb-1": { "title": "Vintage Kenner Star Wars figure, loose", "category": "collectibles", "condition": "good", "brand": "Kenner", "attributes": { "franchise": "Star Wars" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.9, "attributes": { "franchise": 0.95 } }, "open_questions": [] },
-  "cb-2": { "title": "First edition Harry Potter hardcover", "category": "collectibles", "condition": "good", "brand": null, "attributes": { "franchise": "Harry Potter" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.8, "condition": 0.7, "title": 0.9, "attributes": { "franchise": 0.9 } }, "open_questions": ["Which printing is this — any number line on the copyright page?"] },
-  "bd-1": { "title": "Catan board game, German, 3-4 players", "category": "board-games", "condition": "good", "brand": null, "attributes": { "players": "3-4", "language": "German" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "players": 0.9, "language": 0.9 } }, "open_questions": [] },
-  "bd-2": { "title": "Pandemic board game, complete", "category": "board-games", "condition": "like_new", "brand": null, "attributes": {}, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": {} }, "open_questions": [] },
-  "in-1": { "title": "Yamaha acoustic guitar, full size", "category": "instruments", "condition": "good", "brand": "Yamaha", "attributes": { "instrument": "guitar" }, "shipping_tier_hint": "bulky", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "instrument": 0.95 } }, "open_questions": [] },
-  "in-2": { "title": "Fender Stratocaster, sunburst, dinged", "category": "instruments", "condition": "fair", "brand": "Fender", "attributes": { "instrument": "guitar" }, "shipping_tier_hint": "bulky", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "instrument": 0.95 } }, "open_questions": [] },
-  "bi-1": { "title": "Road bike, 28 inch wheels, 56cm frame", "category": "bikes", "condition": "good", "brand": null, "attributes": { "type": "road", "frame_size": "56cm", "wheel_size_inches": 28 }, "shipping_tier_hint": "bulky", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "type": 0.9, "frame_size": 0.9, "wheel_size_inches": 0.95 } }, "open_questions": [] },
-  "bi-2": { "title": "City e-bike, 26 inch wheels", "category": "bikes", "condition": "good", "brand": null, "attributes": { "type": "ebike", "wheel_size_inches": 26 }, "shipping_tier_hint": "bulky", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.85, "attributes": { "type": 0.9, "wheel_size_inches": 0.9 } }, "open_questions": ["What is the battery's current range per charge?"] },
-  "sp-1": { "title": "Head tennis racket, grip 2", "category": "sports", "condition": "good", "brand": "Head", "attributes": { "sport": "tennis" }, "shipping_tier_hint": "parcel", "confidence": { "category": 0.95, "condition": 0.8, "title": 0.9, "attributes": { "sport": 0.95 } }, "open_questions": [] },
-  "ho-1": { "title": "Solid oak dining table, seats four", "category": "home", "condition": "fair", "brand": null, "attributes": { "material": "oak" }, "shipping_tier_hint": "bulky", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.9, "attributes": { "material": 0.9 } }, "open_questions": [] },
-  "hb-1": { "title": "Assorted craft supplies box", "category": "hobbies", "condition": "good", "brand": null, "attributes": {}, "shipping_tier_hint": "parcel", "confidence": { "category": 0.8, "condition": 0.7, "title": 0.8, "attributes": {} }, "open_questions": [] },
-  "fa-1": { "title": "Vintage t-shirt bundle, M-L", "category": "fashion", "condition": "good", "brand": null, "attributes": {}, "shipping_tier_hint": "parcel", "confidence": { "category": 0.8, "condition": 0.8, "title": 0.85, "attributes": {} }, "open_questions": ["Which shirts are in the bundle — any brands or prints worth naming?"] },
-  "me-1": { "title": "Assorted DVD box, ~40 discs", "category": "media", "condition": "good", "brand": null, "attributes": {}, "shipping_tier_hint": "parcel", "confidence": { "category": 0.9, "condition": 0.8, "title": 0.85, "attributes": {} }, "open_questions": [] },
-  "ot-1": { "title": "Assorted screws and bolts, mixed sizes", "category": "other", "condition": "good", "brand": null, "attributes": {}, "shipping_tier_hint": "parcel", "confidence": { "category": 0.7, "condition": 0.8, "title": 0.8, "attributes": {} }, "open_questions": [] },
-  "ot-2": { "title": "Mystery box from the attic", "category": "other", "condition": "good", "brand": null, "attributes": {}, "shipping_tier_hint": "unknown", "confidence": { "category": 0.4, "condition": 0.5, "title": 0.6, "attributes": {} }, "open_questions": ["What does the box contain — can you list a few items?"] }
+  "sn-1": {
+    "title": "Nike Air Max 90 white, EU 43",
+    "category": "sneakers",
+    "condition": "like_new",
+    "brand": "Nike",
+    "attributes": {
+      "size_eu": 43,
+      "colorway": "white",
+      "has_original_box": true
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "size_eu": 0.95,
+        "colorway": 0.85,
+        "has_original_box": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "sn-2": {
+    "title": "Trail running trainers, EU 42",
+    "category": "trainers",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "size_eu": 42,
+      "has_original_box": false
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.7,
+      "title": 0.8,
+      "attributes": {
+        "size_eu": 0.9,
+        "has_original_box": 0.85
+      }
+    },
+    "open_questions": []
+  },
+  "sh-1": {
+    "title": "Leather Chelsea boots, EU 41",
+    "category": "shoes",
+    "condition": "like_new",
+    "brand": null,
+    "attributes": {
+      "size_eu": 41,
+      "material": "leather"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.85,
+      "title": 0.85,
+      "attributes": {
+        "size_eu": 0.9,
+        "material": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "sh-2": {
+    "title": "Kids' sandals, EU 28",
+    "category": "shoes",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "size_eu": 28,
+      "department": "kids"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.7,
+      "title": 0.8,
+      "attributes": {
+        "size_eu": 0.9,
+        "department": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "cl-1": {
+    "title": "Levi's 501 jeans W32 L32, blue",
+    "category": "clothing",
+    "condition": "good",
+    "brand": "Levi's",
+    "attributes": {
+      "size": "W32 L32",
+      "color": "blue",
+      "department": "men"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "size": 0.95,
+        "color": 0.9,
+        "department": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "cl-2": {
+    "title": "Wool blazer, size M, navy",
+    "category": "clothing",
+    "condition": "like_new",
+    "brand": null,
+    "attributes": {
+      "size": "M",
+      "size_letter": "M",
+      "material": "wool",
+      "color": "navy",
+      "department": "women"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.8,
+      "attributes": {
+        "size": 0.95,
+        "size_letter": 0.95,
+        "material": 0.9,
+        "color": 0.9,
+        "department": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "bg-1": {
+    "title": "Canvas backpack, olive green",
+    "category": "bags",
+    "condition": "like_new",
+    "brand": null,
+    "attributes": {
+      "material": "canvas",
+      "color": "olive green"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.85,
+      "attributes": {
+        "material": 0.9,
+        "color": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "bg-2": {
+    "title": "Leather handbag, brown",
+    "category": "bags",
+    "condition": "fair",
+    "brand": null,
+    "attributes": {
+      "material": "leather",
+      "color": "brown"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.85,
+      "attributes": {
+        "material": 0.9,
+        "color": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "ac-1": {
+    "title": "Seiko automatic watch, steel bracelet",
+    "category": "accessories",
+    "condition": "good",
+    "brand": "Seiko",
+    "attributes": {
+      "type": "watch",
+      "department": "men"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "type": 0.95,
+        "department": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "ac-2": {
+    "title": "Black silk scarf, unworn with tags",
+    "category": "accessories",
+    "condition": "new",
+    "brand": null,
+    "attributes": {
+      "type": "scarf"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.9,
+      "title": 0.85,
+      "attributes": {
+        "type": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "be-1": {
+    "title": "Nivea body lotion 400ml, unopened",
+    "category": "beauty",
+    "condition": "new",
+    "brand": "Nivea",
+    "attributes": {
+      "type": "skincare"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.95,
+      "title": 0.9,
+      "attributes": {
+        "type": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "be-2": {
+    "title": "Red lipstick, barely used",
+    "category": "beauty",
+    "condition": "like_new",
+    "brand": null,
+    "attributes": {
+      "type": "makeup"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.8,
+      "attributes": {
+        "type": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "ba-1": {
+    "title": "Bugaboo pushchair, well used, working",
+    "category": "stroller",
+    "condition": "good",
+    "brand": "Bugaboo",
+    "attributes": {
+      "type": "pushchair"
+    },
+    "shipping_tier_hint": "bulky",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.7,
+      "title": 0.85,
+      "attributes": {
+        "type": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "ba-2": {
+    "title": "Maxi-Cosi infant car seat",
+    "category": "baby",
+    "condition": "good",
+    "brand": "Maxi-Cosi",
+    "attributes": {
+      "type": "car_seat"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "type": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "kc-1": {
+    "title": "Toddler winter jacket size 104, blue",
+    "category": "kids-clothing",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "size": "104",
+      "color": "blue"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.85,
+      "attributes": {
+        "size": 0.9,
+        "color": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "kc-2": {
+    "title": "Girl's dress size 6Y, purple",
+    "category": "kids-clothing",
+    "condition": "like_new",
+    "brand": null,
+    "attributes": {
+      "size": "6Y",
+      "color": "purple"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.85,
+      "attributes": {
+        "size": 0.9,
+        "color": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "to-1": {
+    "title": "Wooden Montessori puzzle set, ages 3+",
+    "category": "toys",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "age_range": "3+"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "age_range": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "to-2": {
+    "title": "LEGO Star Wars Millennium Falcon 75192",
+    "category": "toys",
+    "condition": "good",
+    "brand": "LEGO",
+    "attributes": {},
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.95,
+      "attributes": {}
+    },
+    "open_questions": []
+  },
+  "el-1": {
+    "title": "Misc electronics box: cables, mp3 player, hubs",
+    "category": "electronics",
+    "condition": "fair",
+    "brand": null,
+    "attributes": {},
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.7,
+      "condition": 0.6,
+      "title": 0.8,
+      "attributes": {}
+    },
+    "open_questions": [
+      "Which items in the box should the listing name?"
+    ]
+  },
+  "ph-1": {
+    "title": "iPhone 13 128GB, battery 89%",
+    "category": "phones",
+    "condition": "good",
+    "brand": "Apple",
+    "attributes": {
+      "model": "iPhone 13",
+      "storage_gb": 128,
+      "battery_health_pct": 89
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.95,
+      "attributes": {
+        "model": 0.95,
+        "storage_gb": 0.95,
+        "battery_health_pct": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "ph-2": {
+    "title": "Samsung Galaxy S22 256GB, mint screen",
+    "category": "phones",
+    "condition": "like_new",
+    "brand": "Samsung",
+    "attributes": {
+      "model": "Galaxy S22",
+      "storage_gb": 256,
+      "battery_health_pct": 95
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.85,
+      "title": 0.9,
+      "attributes": {
+        "model": 0.95,
+        "storage_gb": 0.95,
+        "battery_health_pct": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "cp-1": {
+    "title": "ThinkPad T14 i5, 16GB RAM, 512GB SSD",
+    "category": "computers",
+    "condition": "good",
+    "brand": "Lenovo",
+    "attributes": {
+      "model": "ThinkPad T14",
+      "ram_gb": 16,
+      "storage_gb": 512
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "model": 0.95,
+        "ram_gb": 0.95,
+        "storage_gb": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "cp-2": {
+    "title": "MacBook Air M1, 8GB / 256GB, like new",
+    "category": "computers",
+    "condition": "like_new",
+    "brand": "Apple",
+    "attributes": {
+      "model": "MacBook Air M1",
+      "ram_gb": 8,
+      "storage_gb": 256
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.85,
+      "title": 0.9,
+      "attributes": {
+        "model": 0.95,
+        "ram_gb": 0.9,
+        "storage_gb": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "cm-1": {
+    "title": "Canon EOS R6 with 24-105, shutter 12000",
+    "category": "cameras",
+    "condition": "like_new",
+    "brand": "Canon",
+    "attributes": {
+      "model": "Canon EOS R6",
+      "shutter_count": 12000
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "model": 0.95,
+        "shutter_count": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "cm-2": {
+    "title": "GoPro Hero 9 action camera",
+    "category": "cameras",
+    "condition": "good",
+    "brand": "GoPro",
+    "attributes": {
+      "model": "GoPro Hero 9"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "model": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "ga-1": {
+    "title": "Zelda Tears of the Kingdom, Switch, CIB",
+    "category": "games",
+    "condition": "like_new",
+    "brand": "Nintendo",
+    "attributes": {
+      "platform": "Nintendo Switch"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "platform": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "ga-2": {
+    "title": "PlayStation 5 disc edition, barely used",
+    "category": "games",
+    "condition": "like_new",
+    "brand": "Sony",
+    "attributes": {
+      "platform": "ps5"
+    },
+    "shipping_tier_hint": "bulky",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.85,
+      "title": 0.9,
+      "attributes": {
+        "platform": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "tl-1": {
+    "title": "Bosch cordless drill, two batteries",
+    "category": "tools",
+    "condition": "good",
+    "brand": "Bosch",
+    "attributes": {
+      "type": "power"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "type": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "tl-2": {
+    "title": "Electric hedge trimmer, rusty guard",
+    "category": "tools",
+    "condition": "fair",
+    "brand": null,
+    "attributes": {
+      "type": "garden"
+    },
+    "shipping_tier_hint": "bulky",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.8,
+      "attributes": {
+        "type": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "pe-1": {
+    "title": "Foldable dog crate, medium",
+    "category": "pets",
+    "condition": "like_new",
+    "brand": null,
+    "attributes": {
+      "type": "dog"
+    },
+    "shipping_tier_hint": "bulky",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.85,
+      "attributes": {
+        "type": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "pe-2": {
+    "title": "60 litre aquarium with filter and light",
+    "category": "pets",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "type": "aquarium"
+    },
+    "shipping_tier_hint": "bulky",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.85,
+      "attributes": {
+        "type": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "bk-1": {
+    "title": "The Hobbit, English paperback",
+    "category": "books",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "language": "English"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "language": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "bk-2": {
+    "title": "Clean Code by Robert C. Martin, like new",
+    "category": "books",
+    "condition": "like_new",
+    "brand": null,
+    "attributes": {
+      "author": "Robert C. Martin",
+      "language": "English"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "author": 0.95,
+        "language": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "mu-1": {
+    "title": "Abbey Road LP, 180g reissue",
+    "category": "vinyl",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "format": "vinyl",
+      "artist": "The Beatles"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "format": 0.95,
+        "artist": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "mu-2": {
+    "title": "Thriller by Michael Jackson, cassette",
+    "category": "music",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "format": "cassette",
+      "artist": "Michael Jackson"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "format": 0.95,
+        "artist": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "cb-1": {
+    "title": "Vintage Kenner Star Wars figure, loose",
+    "category": "collectibles",
+    "condition": "good",
+    "brand": "Kenner",
+    "attributes": {
+      "franchise": "Star Wars"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "franchise": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "cb-2": {
+    "title": "First edition Harry Potter hardcover",
+    "category": "collectibles",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "franchise": "Harry Potter"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.8,
+      "condition": 0.7,
+      "title": 0.9,
+      "attributes": {
+        "franchise": 0.9
+      }
+    },
+    "open_questions": [
+      "Which printing is this \u2014 any number line on the copyright page?"
+    ]
+  },
+  "bd-1": {
+    "title": "Catan board game, German, 3-4 players",
+    "category": "board-games",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "players": "3-4",
+      "language": "German"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "players": 0.9,
+        "language": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "bd-2": {
+    "title": "Pandemic board game, complete",
+    "category": "board-games",
+    "condition": "like_new",
+    "brand": null,
+    "attributes": {},
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {}
+    },
+    "open_questions": []
+  },
+  "in-1": {
+    "title": "Yamaha acoustic guitar, full size",
+    "category": "instruments",
+    "condition": "good",
+    "brand": "Yamaha",
+    "attributes": {
+      "instrument": "guitar"
+    },
+    "shipping_tier_hint": "bulky",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "instrument": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "in-2": {
+    "title": "Fender Stratocaster, sunburst, dinged",
+    "category": "instruments",
+    "condition": "fair",
+    "brand": "Fender",
+    "attributes": {
+      "instrument": "guitar"
+    },
+    "shipping_tier_hint": "bulky",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "instrument": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "bi-1": {
+    "title": "Road bike, 28 inch wheels, 56cm frame",
+    "category": "bikes",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "type": "road",
+      "frame_size": "56cm",
+      "wheel_size_inches": 28
+    },
+    "shipping_tier_hint": "bulky",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "type": 0.9,
+        "frame_size": 0.9,
+        "wheel_size_inches": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "bi-2": {
+    "title": "City e-bike, 26 inch wheels",
+    "category": "bikes",
+    "condition": "good",
+    "brand": null,
+    "attributes": {
+      "type": "ebike",
+      "wheel_size_inches": 26
+    },
+    "shipping_tier_hint": "bulky",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.85,
+      "attributes": {
+        "type": 0.9,
+        "wheel_size_inches": 0.9
+      }
+    },
+    "open_questions": [
+      "What is the battery's current range per charge?"
+    ]
+  },
+  "sp-1": {
+    "title": "Head tennis racket, grip 2",
+    "category": "sports",
+    "condition": "good",
+    "brand": "Head",
+    "attributes": {
+      "sport": "tennis"
+    },
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.95,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "sport": 0.95
+      }
+    },
+    "open_questions": []
+  },
+  "ho-1": {
+    "title": "Solid oak dining table, seats four",
+    "category": "home",
+    "condition": "fair",
+    "brand": null,
+    "attributes": {
+      "material": "oak"
+    },
+    "shipping_tier_hint": "bulky",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.9,
+      "attributes": {
+        "material": 0.9
+      }
+    },
+    "open_questions": []
+  },
+  "hb-1": {
+    "title": "Assorted craft supplies box",
+    "category": "hobbies",
+    "condition": "good",
+    "brand": null,
+    "attributes": {},
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.8,
+      "condition": 0.7,
+      "title": 0.8,
+      "attributes": {}
+    },
+    "open_questions": []
+  },
+  "fa-1": {
+    "title": "Vintage t-shirt bundle, M-L",
+    "category": "fashion",
+    "condition": "good",
+    "brand": null,
+    "attributes": {},
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.8,
+      "condition": 0.8,
+      "title": 0.85,
+      "attributes": {}
+    },
+    "open_questions": [
+      "Which shirts are in the bundle \u2014 any brands or prints worth naming?"
+    ]
+  },
+  "me-1": {
+    "title": "Assorted DVD box, ~40 discs",
+    "category": "media",
+    "condition": "good",
+    "brand": null,
+    "attributes": {},
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.9,
+      "condition": 0.8,
+      "title": 0.85,
+      "attributes": {}
+    },
+    "open_questions": []
+  },
+  "ot-1": {
+    "title": "Assorted screws and bolts, mixed sizes",
+    "category": "other",
+    "condition": "good",
+    "brand": null,
+    "attributes": {},
+    "shipping_tier_hint": "parcel",
+    "confidence": {
+      "category": 0.7,
+      "condition": 0.8,
+      "title": 0.8,
+      "attributes": {}
+    },
+    "open_questions": []
+  },
+  "ot-2": {
+    "title": "Mystery box from the attic",
+    "category": "other",
+    "condition": "good",
+    "brand": null,
+    "attributes": {},
+    "shipping_tier_hint": "unknown",
+    "confidence": {
+      "category": 0.4,
+      "condition": 0.5,
+      "title": 0.6,
+      "attributes": {}
+    },
+    "open_questions": [
+      "What does the box contain \u2014 can you list a few items?"
+    ]
+  }
 }

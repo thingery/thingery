@@ -283,15 +283,6 @@ service). Until then, a daily log check stands in for alerting.
 > the service has real users. Superseded 2026-10-27: go-ahead granted (THI-404)
 > — offsite push enabled; destination and enable date are recorded on THI-404.
 
-**Rollback** to the pre-encryption pipeline (kept one cycle after the 2026-10-14
-switch): comment the `/usr/local/bin/thingery-backup` cron line, uncomment these
-two old lines:
-
-```bash
-# 0 3 * * * docker exec $(docker ps -qf name=db) pg_dump -U thingery thingery | gzip > /var/backups/thingery-$(date +\%F).sql.gz && find /var/backups -name 'thingery-*.sql.gz' -mtime +14 -delete
-# 0 4 * * * docker cp $(docker ps -qf name=app):/app/uploads /var/backups/img.tmp && tar czf /var/backups/thingery-images-$(date +\%F).tar.gz -C /var/backups/img.tmp . && rm -rf /var/backups/img.tmp && find /var/backups -name 'thingery-images-*.tar.gz' -mtime +14 -delete
-```
-
 ### Restore test (monthly, ~5 minutes)
 
 Never restore over the live database. The procedure restores into an isolated

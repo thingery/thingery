@@ -1,22 +1,26 @@
-// Carrier (EasyPost) webhook endpoint (spec THI-3 rev 2 §4.3/§5.2–§5.4; PR-7).
+// Carrier webhook endpoint (spec THI-3 rev 2 §4.3/§5.2–§5.4; PR-7; provider
+// seam THI-1246). Provider-agnostic since THI-1246: the EasyPost-specific
+// wire details (signature scheme `X-Hmac-Signature`, status map, F6
+// redaction, `easypost:<sha256>` dedupe) live in the ShippingProvider
+// adapter (src/shipping/easypost-adapter.ts → src/easypost.ts); this route
+// drives the protocol below through the interface (spec
+// docs/specs/shipping-provider-layer.md).
 //
 // Mount BEFORE the global express.json() (index.ts, same as the Stripe
 // webhook) — the HMAC signature is computed over raw bytes, so this router
 // consumes express.raw({ application/json, 512kb }) itself (F12).
 //
 // Protocol (§5.4 — verify → store → process → mark):
-//   1. HMAC-SHA256 over the raw body via the `X-Hmac-Signature` header,
-//      compared with crypto.timingSafeEqual on the digests (never === on
-//      strings); the length-mismatch throw is caught → 400 (F12). Current
-//      secret, then EASYPOST_WEBHOOK_SECRET_PREVIOUS during rotation (F13).
-//      JSON is parsed only AFTER verification succeeds (§5.3).
-//   2. Store REDACTED (F6): EasyPost `tracking_details` carry signed-for
-//      names and free-text facility descriptions — they never touch the
-//      store. Only description/mode/tracker ids/status/timestamps persist.
-//      Dedupe: EasyPost tracker webhooks carry no per-delivery event id, so
-//      external_id is a deterministic content hash (sha256 of the raw body)
-//      — a byte-identical redelivery dedupes to one row; any content change
-//      is a new event, and the transition guard keeps re-application a no-op.
+//   1. Verify over the raw body via the provider's signature header,
+//      timing-safe (never === on strings). Current secret, then the
+//      ${ID}_WEBHOOK_SECRET_PREVIOUS rotation secret (F13). The body is
+//      parsed only AFTER verification succeeds (§5.3).
+//   2. Store REDACTED (F6, in the adapter): free-text tracking details never
+//      touch the store — only description/mode/tracker ids/status/timestamps
+//      persist. Dedupe (in the adapter): external_id is a deterministic
+//      content hash — a byte-identical redelivery dedupes to one row; any
+//      content change is a new event, and the transition guard keeps
+//      re-application a no-op.
 //   3. Process transactionally: event→order resolution (F4, §5.2) —
 //      `tracker_id` first (UNIQUE, unambiguous); `(carrier, tracking_code)`
 //      fallback only with EXACTLY ONE live (non-terminal) match; zero →
@@ -24,80 +28,39 @@
 //      normalized status drives #10/#12/#14/#14b via the PR-2 core.
 //   4. Stale-but-valid transitions (late/duplicate/out-of-order) are NOT
 //      errors — 200, no state change; the machine is the arbiter. Real
-//      failures set process_error and return 500 so EasyPost retries
+//      failures set process_error and return 500 so the carrier retries
 //      (sweep rule 6, PR-8, reprocesses stored-but-errored rows).
 
-import crypto from "node:crypto";
 import express, { type Request, type Response, type Router } from "express";
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { orderFlowConfig, type OrderFlowConfig } from "./config.js";
 import { applyTransition, IllegalTransitionError, settleNothingDueRefund, type ItemStatus, type OrderRow } from "./orders.js";
 import { createRefundForOrder, getStripe } from "./stripe.js";
+import { verifyEasyPostSignature } from "./easypost.js";
+import { getShippingProvider } from "./shipping/registry.js";
+import {
+  VerificationError,
+  WebhookParseError,
+  type NormalizedStatus,
+  type RedactedCarrierEvent,
+} from "./shipping/provider.js";
+
+// Old export path (tests, potential embedders): the implementation moved to
+// src/easypost.ts with the rest of the EasyPost wire details (THI-1246).
+export { verifyEasyPostSignature };
 
 /** F4 ambiguous resolution: multiple live orders match (carrier, tracking_code)
  * — the event is stored with process_error (operator alert + sweep rule 6
- * reprocessing once the collision is fixed) and acknowledged so EasyPost does
- * not retry-loop. Never guess. */
+ * reprocessing once the collision is fixed) and acknowledged so the carrier
+ * does not retry-loop. Never guess. */
 export class AmbiguousResolutionError extends Error {}
-
-/** Normalized carrier status (§5.2) — the carrier never leaks into the machine. */
-type NormalizedStatus =
-  | "pre_transit"
-  | "in_transit"
-  | "out_for_delivery"
-  | "delivered"
-  | "return_to_sender"
-  | "failure"
-  | "unknown";
-
-/** EasyPost tracker statuses → normalized (§5.2). `available_for_pickup` is
- * still pre-delivery (the parcel waits at a location) → out_for_delivery
- * bucket → #10. Tracker-level `cancelled`/`error` (bad code, not carrier
- * failure) and anything unrecognized → unknown — logged, never a transition. */
-const EASYPOST_STATUS_MAP: Readonly<Record<string, NormalizedStatus>> = Object.freeze({
-  pre_transit: "pre_transit",
-  in_transit: "in_transit",
-  out_for_delivery: "out_for_delivery",
-  available_for_pickup: "out_for_delivery",
-  delivered: "delivered",
-  return_to_sender: "return_to_sender",
-  failure: "failure",
-});
 
 /** Non-terminal statuses — the live set for fallback resolution (F4). */
 const LIVE_STATUSES = [
   "pending", "sold", "label_issued", "in_transit", "delivered",
   "disputed", "refunding", "payout_pending",
 ] as const;
-
-function normalizeStatus(raw: string | undefined): NormalizedStatus {
-  return (raw && EASYPOST_STATUS_MAP[raw]) || "unknown";
-}
-
-const EASYPOST_SIG_PREFIX = "hmac-sha256-hex=";
-
-/** §5.3: timing-safe HMAC-SHA256 (hex) compare; catches the length-mismatch
- * throw — both digests and header are attacker-controlled lengths.
- * EasyPost sends `X-Hmac-Signature: hmac-sha256-hex=<hex>` and normalizes the
- * webhook secret with Unicode NFKD before hashing; bare `<hex>` is also
- * accepted so existing callers keep working. */
-export function verifyEasyPostSignature(raw: Buffer, header: string, secret: string): boolean {
-  try {
-    const digest = Buffer.from(
-      crypto.createHmac("sha256", secret.normalize("NFKD")).update(raw).digest("hex"),
-      "utf8",
-    );
-    const normalized = header.trim().toLowerCase();
-    const hex = normalized.startsWith(EASYPOST_SIG_PREFIX)
-      ? normalized.slice(EASYPOST_SIG_PREFIX.length)
-      : normalized;
-    const provided = Buffer.from(hex, "utf8");
-    return digest.length === provided.length && crypto.timingSafeEqual(digest, provided);
-  } catch {
-    return false;
-  }
-}
 
 export function carrierWebhookRouter(cfg: OrderFlowConfig = orderFlowConfig()): Router {
   const router = express.Router();
@@ -154,55 +117,42 @@ async function ingestCarrierWebhook(
     return;
   }
 
-  const signature = req.headers["x-hmac-signature"];
-  if (typeof signature !== "string") {
-    res.status(400).json({ error: "missing X-Hmac-Signature header" });
-    return;
-  }
-  // A3 (THI-66): surface old-secret verification so rotation completion is
-  // visible in logs, mirroring the Stripe handler (F13).
-  const verifiedCurrent = verifyEasyPostSignature(req.body, signature, cfg.easypostWebhookSecret!);
-  const verifiedPrevious =
-    !verifiedCurrent &&
-    cfg.easypostWebhookSecretPrevious !== undefined &&
-    verifyEasyPostSignature(req.body, signature, cfg.easypostWebhookSecretPrevious);
-  if (verifiedPrevious) {
-    console.warn("[webhooks:carrier] verified with EASYPOST_WEBHOOK_SECRET_PREVIOUS — finish the rotation");
-  }
-  if (!verifiedCurrent && !verifiedPrevious) {
-    res.status(400).json({ error: "signature verification failed" });
-    return;
-  }
+  const provider = getShippingProvider(cfg);
 
-  // Parse only after verification (§5.3). Invalid JSON with a valid
-  // signature is still a 400 — nothing was verifiable content.
-  let parsed: EasyPostWebhook;
+  // Verify over RAW bytes via the provider (A3/F13 rotation handled inside
+  // the adapter, including the old-secret warning). VerificationError's
+  // wireMessage keeps every 400 body byte-identical to the pre-interface
+  // endpoint. Nothing is written before verification succeeds.
   try {
-    parsed = JSON.parse(req.body.toString("utf8")) as EasyPostWebhook;
-  } catch {
-    res.status(400).json({ error: "invalid JSON body" });
-    return;
+    provider.verifyWebhook(req.body, req.headers as Record<string, string | undefined>);
+  } catch (err) {
+    if (err instanceof VerificationError) {
+      res.status(400).json({ error: err.wireMessage });
+      return;
+    }
+    throw err; // unexpected — caught by the ingest barrier → 500
   }
 
-  // Deterministic content id: EasyPost tracker webhooks carry no per-delivery
-  // event id, so dedupe on the raw bytes' sha256 (see file header).
-  const externalId = `easypost:${crypto.createHash("sha256").update(req.body).digest("hex")}`;
+  // Parse only after verification (§5.3) and REDACT at parse (F6, adapter):
+  // free-text tracking details never leave the adapter; only ids, statuses,
+  // timestamps reach the store.
+  let ev: RedactedCarrierEvent;
+  try {
+    ev = provider.parseWebhook(req.body);
+  } catch (err) {
+    if (err instanceof WebhookParseError) {
+      res.status(400).json({ error: err.wireMessage });
+      return;
+    }
+    throw err;
+  }
+
+  // Deterministic content id (adapter): a byte-identical redelivery dedupes
+  // to one row; any content change is a new event (see file header).
+  const externalId = provider.dedupeId(req.body);
   onExternalId(externalId);
 
-  // F6: REDACT at ingest — tracking_details (signed-for names, facility
-  // free text) never touch the store; only ids, statuses, timestamps.
-  const result = parsed.result;
-  const lastDetail = Array.isArray(result?.tracking_details) ? result.tracking_details.at(-1) : undefined;
-  const payload = {
-    description: typeof parsed.description === "string" ? parsed.description : null,
-    mode: parsed.mode === "test" || parsed.mode === "production" ? parsed.mode : null,
-    tracker_id: typeof result?.id === "string" ? result.id : null,
-    tracking_code: typeof result?.tracking_code === "string" ? result.tracking_code : null,
-    carrier: typeof result?.carrier === "string" ? result.carrier : null,
-    carrier_status: typeof result?.status === "string" ? result.status : null,
-    status: result ? normalizeStatus(result.status) : null,
-    occurred_at: typeof lastDetail?.datetime === "string" ? lastDetail.datetime : null,
-  };
+  const payload = ev;
 
   const stored = await pool.query<{ id: string }>(
     `INSERT INTO webhook_events (source, external_id, payload)
@@ -262,35 +212,6 @@ async function ingestCarrierWebhook(
 
 // ---------------------------------------------------------------------------
 // Event processing
-
-interface EasyPostTrackingDetail {
-  status?: string;
-  message?: string;
-  datetime?: string;
-}
-
-interface EasyPostWebhook {
-  description?: string;
-  mode?: string;
-  result?: {
-    id?: string;
-    tracking_code?: string;
-    carrier?: string;
-    status?: string;
-    tracking_details?: EasyPostTrackingDetail[];
-  };
-}
-
-export interface RedactedCarrierEvent {
-  description: string | null;
-  mode: string | null;
-  tracker_id: string | null;
-  tracking_code: string | null;
-  carrier: string | null;
-  carrier_status: string | null;
-  status: NormalizedStatus | null;
-  occurred_at: string | null;
-}
 
 /** F4 resolution: tracker_id first; (carrier, tracking_code) fallback only
  * on exactly one live match. Zero → skip; multiple → skip + operator alert. */

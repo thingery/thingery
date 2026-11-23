@@ -225,7 +225,7 @@ export async function createOrder(input: CreateOrderInput): Promise<{ order: Ord
           dimensionsMm: row.dimensions_mm,
           buyerAddress: (input.shippingAddress ?? {}) as Record<string, unknown>,
           sellerOrigin,
-          easypostEnabled: cfg.easypostEnabled,
+          easypostEnabled: cfg.shippingEnabled,
           labelMaxCostCents: cfg.labelMaxCostCents,
           quoteTimeoutMs: cfg.shippingQuoteTimeoutMs,
         });

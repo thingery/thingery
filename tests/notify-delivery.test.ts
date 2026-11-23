@@ -69,6 +69,21 @@ describe("NOTIFY_MAX_AGE_HOURS config (THI-1043 — pure)", () => {
   });
 });
 
+describe("sender identities (THI-1280 — pure)", () => {
+  it("notifyConfig defaults: noreply@ transactional, notifications@ digests, support@ Reply-To", () => {
+    const cfg = notifyConfig({});
+    expect(cfg.fromAddress).toBe("noreply@thingery.dev");
+    expect(cfg.digestFromAddress).toBe("notifications@thingery.dev");
+    expect(cfg.replyToAddress).toBe("support@thingery.dev");
+  });
+  it("env overrides parse; blank counts as unset (F1)", () => {
+    const cfg = notifyConfig({ NOTIFY_FROM_ADDRESS: "x@y.test", NOTIFY_DIGEST_FROM_ADDRESS: "d@y.test", NOTIFY_REPLY_TO_ADDRESS: " " });
+    expect(cfg.fromAddress).toBe("x@y.test");
+    expect(cfg.digestFromAddress).toBe("d@y.test");
+    expect(cfg.replyToAddress).toBe("support@thingery.dev");
+  });
+});
+
 describe("buildMailer fail-closed matrix (THI-763 PR 4 — pure)", () => {
   it("disabled flag → DryRunMailer, regardless of key", () => {
     expect(buildMailer({ NOTIFY_EMAIL_ENABLED: "false", RESEND_API_KEY: "re_test" }).kind).toBe("dry_run");
@@ -107,6 +122,32 @@ describe("ResendMailer adapter (THI-763 PR 4 — pure)", () => {
     expect(await httpErr.send({ to: "a@b.test", subject: "s", text: "t", html: "h", idempotencyKey: "k" })).toEqual({ ok: false, error: "resend: HTTP 422" });
     const netErr = new ResendMailer({ ...base, fetchImpl: (async () => { throw new Error("timeout"); }) as typeof fetch });
     expect(await netErr.send({ to: "a@b.test", subject: "s", text: "t", html: "h", idempotencyKey: "k" })).toEqual({ ok: false, error: "resend: timeout" });
+  });
+
+  it("reply_to: config default applied when the message sets none (THI-1280)", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = (async (url: string | URL, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ id: "msg-1" }), { status: 200 });
+    }) as typeof fetch;
+    const mailer = new ResendMailer({ ...base, replyToAddress: "support@example.test", fetchImpl });
+    await mailer.send({ to: "a@example.test", subject: "s", text: "t", html: "<p>h</p>", idempotencyKey: "outbox-x" });
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.reply_to).toBe("support@example.test");
+    expect(body.from).toBe("no-reply@example.test");
+  });
+
+  it("message-level from/replyTo override the configured defaults (THI-1280)", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = (async (url: string | URL, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ id: "msg-2" }), { status: 200 });
+    }) as typeof fetch;
+    const mailer = new ResendMailer({ ...base, replyToAddress: "support@example.test", fetchImpl });
+    await mailer.send({ to: "a@example.test", subject: "s", text: "t", html: "<p>h</p>", idempotencyKey: "outbox-x", from: "notifications@example.test", replyTo: "desk@example.test" });
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.from).toBe("notifications@example.test");
+    expect(body.reply_to).toBe("desk@example.test");
   });
 
   it("constructing without a key throws (loud, not open)", () => {

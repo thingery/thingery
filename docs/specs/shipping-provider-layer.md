@@ -2,14 +2,13 @@
 
 - **Status:** Proposed. This document is the required written spec for the protected paths it
   touches (`src/tools.ts` description text, a comment-only edit in `db/schema.sql`).
-  Implementation starts only after Security review of §6/§8 and CEO sign-off (THI-36).
+  Implementation starts only after spec review with recorded Security + maintainer sign-off.
 - **Date:** 2026-11-23
 - **Author:** Architect
-- **Parent:** THI-1244 (pluggable shipping provider layer + activate Shippo test mode in place
-  of EasyPost). Decision context: THI-922; address verification stays on Sendcloud: THI-911.
-- **CEO decision recorded here (binding):** label purchase and tracking stay in **one provider
-  per deployment**. The registry must allow adding providers later (e.g. Sendcloud), but a
-  deployment never mixes providers across label purchase and tracking.
+- **Decision (recorded):** label purchase and tracking stay in **one provider per deployment**.
+  The registry must allow adding providers later (e.g. Sendcloud), but a deployment never
+  mixes providers across label purchase and tracking; address verification stays on the
+  existing Sendcloud-based flow (`src/sendcloud.ts`) and is out of scope here.
 - **Scope guard:** this spec covers exactly what the code uses today — create shipment + rates
   (quote at order time), buy a label against a stored quote, register a tracker, and carrier
   webhook verification + normalization into the existing normalized statuses. Nothing else.
@@ -22,7 +21,7 @@ second-hand goods.
 Carrier automation (quotes, labels, trackers, carrier webhooks) is hard-wired to EasyPost:
 `src/easypost.ts` is imported directly by `src/shipping-quotes.ts`, `src/fulfillment.ts`,
 and `src/webhooks-carrier.ts`; reason codes, dedupe id prefixes, config fields, and the
-`db/schema.sql` comment all say "easypost". THI-1244 wants to run the same order-flow
+`db/schema.sql` comment all say "easypost". The next step is to run the same order-flow
 machinery on Shippo (test mode first) without changing order state machines, buyer/seller
 behavior, or degraded deployments — and later possibly on Sendcloud for labels/tracking.
 Today there is no seam: every provider touch point names EasyPost.
@@ -106,9 +105,9 @@ today — the seller's tracking data is stored regardless; only automation is lo
 - **IT: unknown** — docs describe "global address validation" for non-US addresses
   generically (precision messages, corrections) but publish **no country coverage list**;
   no Italy-specific statement exists in the official docs.
-- Regardless: **address verification stays on Sendcloud** (THI-911, `src/sendcloud.ts`). The
-  `ShippingProvider` interface deliberately has **no** address-validation method; the facts
-  above are recorded for THI-1244 planning only.
+- Regardless: **address verification stays on the existing Sendcloud-based flow**
+  (`src/sendcloud.ts`). The `ShippingProvider` interface deliberately has **no**
+  address-validation method; the facts above are recorded for activation planning only.
 
 ### Webhook authentication scheme
 
@@ -322,7 +321,7 @@ deployment emits `shippo_not_configured` / `shippo_error` in the same positions
 The registry is a string-keyed map id → factory. Adding a provider = new adapter implementing
 the six operations + the env suffix pair (`SENDCLOUD_API_KEY`, `SENDCLOUD_WEBHOOK_SECRET`)
 + one line in the registry + extending the `SHIPPING_PROVIDER` validation. Address
-verification (`src/sendcloud.ts`, THI-911) is **out** of the interface and untouched; a
+verification (`src/sendcloud.ts`) is **out** of the interface and untouched; a
 future Sendcloud labels/tracking adapter composes with it independently.
 
 ## Data model changes
@@ -333,7 +332,7 @@ future Sendcloud labels/tracking adapter composes with it independently.
   the *provider tracker id* (EasyPost `trk_…` or the synthesized `shippo:…` id). The only
   `db/schema.sql` edit is the line-414 **doc comment** ("EasyPost result.id" → "provider
   tracker id"). `db/schema.sql` is a protected path: this comment-only edit still ships with
-  Security review + CEO sign-off in the PR per THI-36.
+  Security review + maintainer sign-off recorded in the PR.
 - `webhook_events.source` stays `'carrier'` for both providers; `external_id` is
   provider-prefixed (`easypost:…` / `shippo:…`) so the same column serves both.
 - `label_quote` / `label_purchase` snapshots are provider-agnostic already (ids are opaque
@@ -356,10 +355,10 @@ future Sendcloud labels/tracking adapter composes with it independently.
 1. **Expand (PRs 1–3, default `easypost`):** interface + registry + adapters land with
    `SHIPPING_PROVIDER` unset ⇒ all existing behavior, all existing tests green. No schema
    change, no env change required.
-2. **Switch (activation, operational):** on the VPS, set `SHIPPING_PROVIDER=shippo` +
+2. **Switch (activation, operational):** on the deployment, set `SHIPPING_PROVIDER=shippo` +
    `SHIPPO_API_KEY` + `SHIPPO_WEBHOOK_SECRET` (+ create the Shippo webhook subscription in
-   the portal pointing at `/api/webhooks/carrier`) — DevOps runbook, THI-1244, test mode
-   first. No code change, no migration.
+   the portal pointing at `/api/webhooks/carrier`), test mode first, per the activation
+   runbook. No code change, no migration.
 3. **Contract:** none required. `src/easypost.ts` stays as the EasyPost transport used by its
    adapter; if a future cleanup wants to fold it in, that is a separate refactor PR after
    Shippo activation settles.
@@ -390,8 +389,9 @@ future Sendcloud labels/tracking adapter composes with it independently.
 ## Rollout + rollback
 
 - **Rollout:** PRs 1–3 merge and deploy behind the default (`easypost`) — no behavior change.
-  Activation is a pure env/portal operation executed by DevOps per THI-1244 (test mode
-  first), including the Shippo portal webhook subscription and the HMAC provisioning request
+  Activation is a pure env/portal operation executed by the deployment operator per the
+  runbook (test mode first), including the Shippo portal webhook subscription and the HMAC
+  provisioning request
   (10-business-day lead — start early). Production-mode activation additionally requires the
   HMAC scheme live: the URL-token/IP-allowlist options are acceptable **only** for test mode;
   Security signs off on the production verification posture (§ Security note).
@@ -412,8 +412,8 @@ future Sendcloud labels/tracking adapter composes with it independently.
   router) is unchanged.
 - F6 redaction is re-stated per provider; the Shippo adapter must drop `address_from/to`,
   `messages[]`, and `tracking_history` free text at ingest.
-- No API keys in issues, PRs, logs, or the repo (unchanged rule); provider keys stay in the
-  VPS `.env` only.
+- No API keys in logs or the repo (unchanged rule); provider keys stay in the deployment's
+  secret environment only.
 
 ## Open questions
 
@@ -424,7 +424,7 @@ future Sendcloud labels/tracking adapter composes with it independently.
 2. **HMAC timestamp freshness** — no documented freshness window. Default: none (rely on the
    transition guard, which already absorbs replays); Security may impose a window at review.
 3. **Shippo per-number tracking cost** for external (own-carrier) codes is documented as a
-   paid feature without published pricing — the activation decision (THI-1244) should confirm
+   paid feature without published pricing — the activation decision should confirm
    whether `record_tracking` registers external codes under Shippo or skips registration for
    restricted/unpaid carriers (Poste Italiane own-account requirement; Deutsche Post /
    DHL Paket not trackable at all). Default spec position: register best-effort exactly as
@@ -448,8 +448,8 @@ future Sendcloud labels/tracking adapter composes with it independently.
 4. **PR-4 — call-site swap + descriptions + schema comment.** `src/fulfillment.ts` +
    `src/shipping-quotes.ts` + `src/order-flow.ts` go through `getShippingProvider()`
    (provider-prefixed codes); `src/tools.ts` description text generalized (protected path —
-   needs Security review + CEO sign-off with this spec attached); `db/schema.sql` line-414
+   needs Security review + maintainer sign-off with this spec attached); `db/schema.sql` line-414
    comment (protected path, same PR); existing test expectations kept byte-identical under
    the default.
-5. **PR-5 — activation runbook + test-mode smoke (DevOps).** Env/portal steps, HMAC
-   provisioning request, E2E smoke on `shippo_test_`, rollback drill. Executed per THI-1244.
+5. **PR-5 — activation runbook + test-mode smoke (operator).** Env/portal steps, HMAC
+   provisioning request, E2E smoke on `shippo_test_`, rollback drill.

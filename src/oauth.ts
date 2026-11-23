@@ -732,7 +732,8 @@ const CIMD_DETAIL_MAX_CHARS = 300;
  * A client whose client_id is a metadata document URL (CIMD). Its row in oauth_clients is
  * written from the document on every authorize, so codes, grants, tokens and Connected
  * apps treat it like a registered client, and a changed document takes effect within the
- * resolver's cache lifetime. The name shown is the document's host, which the fetch
+ * resolver's cache lifetime (≤ 24 h while refreshes fail and a validated copy exists).
+ * The name shown is the document's host, which the fetch
  * proved, never its self-declared client_name. Null when the document cannot be used.
  */
 async function clientFromMetadataDocument(clientId: string): Promise<ClientRow | null> {
@@ -754,12 +755,17 @@ async function clientFromMetadataDocument(clientId: string): Promise<ClientRow |
   }
   // Cache hits stay silent: this logs the rare non-cache paths (fetch latency + attempts).
   if (resolved.source !== "cache") {
-    securityEvent("cimd_served", {
+    const served: Record<string, unknown> = {
       client_id: clientId.slice(0, 200),
       source: resolved.source,
       attempts: resolved.attempts,
       elapsed_ms: resolved.elapsedMs,
-    });
+    };
+    // Stale serves only: what failed and why the last validated copy stepped in. Sustained
+    // `source: "stale"` for one client_id is the ops signal for deliberate retention pinning.
+    if (resolved.refreshReason !== undefined) served.refresh_reason = resolved.refreshReason;
+    if (resolved.refreshDetail !== undefined) served.detail = resolved.refreshDetail.slice(0, CIMD_DETAIL_MAX_CHARS);
+    securityEvent("cimd_served", served);
   }
   let registration: ClientRegistration;
   try {

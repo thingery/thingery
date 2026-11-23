@@ -73,6 +73,10 @@ export function buildMailer(env: NodeJS.ProcessEnv = process.env): Mailer {
     );
     return new DryRunMailer("enabled without RESEND_API_KEY (fail-closed)");
   }
+  // THI-1046: the delivery sweep additionally refuses to claim rows while
+  // the mailer is dry-run (the sweep double-checks `mailer.kind`), so this
+  // misconfiguration leaves outbox rows pending — recoverable — instead of
+  // marking them 'sent' via the dry-run path.
   return new ResendMailer({ apiKey: cfg.resendApiKey, fromAddress: cfg.fromAddress });
 }
 

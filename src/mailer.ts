@@ -24,6 +24,12 @@ export interface MailMessage {
    * security-relevant — auth headers are set by the adapter, never taken
    * from a message. */
   headers?: Record<string, string>;
+  /** Optional sender-identity overrides (THI-1280). When unset, the adapter
+   * applies its configured defaults: the transactional from (noreply@) and
+   * the support@ Reply-To. Adapters that cannot honor an override ignore it
+   * and keep their configured identity — never an error. */
+  from?: string;
+  replyTo?: string;
 }
 
 export type MailSendResult =

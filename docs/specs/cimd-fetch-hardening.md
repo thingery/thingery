@@ -2,12 +2,12 @@
 
 - **Status:** Proposed. **Not a protected-path change:** the diff touches `src/oauth-cimd.ts`
   and `src/oauth.ts` only — none of `db/schema.sql`, `src/tools.ts`, `src/auth.ts`,
-  `src/routes.ts` — so the THI-36 sign-off chain is not triggered. The OAuth authorize surface
+  `src/routes.ts` — so the protected-path sign-off rule is not triggered. The OAuth authorize surface
   is security-sensitive, however (docs/security.md §2a CIMD identity, §3.3 API7 SSRF
   containment), so **Security review of this spec is requested before implementation starts**.
 - **Date:** 2026-11-23
 - **Author:** Architect
-- **Evidence:** THI-1286 description (prod, 2026-11-23): one `cimd_rejected`
+- **Evidence:** the hardening assignment's prod record (2026-11-23): one `cimd_rejected`
   `{reason: fetch_failed}` for `https://claude.ai/oauth/claude-code-client-metadata` at
   20:24:42Z during the deploy load burst (DNS miss inside the 5 s fetch budget,
   `getaddrinfo EAI_AGAIN`-class failure); the same connector connected end-to-end at
@@ -19,12 +19,13 @@
   never when no valid copy was ever seen); `cimd_rejected` gains `detail`, `attempts` and
   `elapsed_ms`, and a new `cimd_served` line covers the rare non-cache paths (fresh fetch,
   stale serve).
-- **Scope guard:** exactly the three hardening items of THI-1286. No change to the SSRF
+- **Scope guard:** exactly the three hardening items of the assignment. No change to the SSRF
   containment of §3.3 API7 (same URL rules, public-only lookup, no redirects, 5 s timeout,
   5 KB cap), no change to redirect-uri validation, the `oauth_clients` upsert, limiter
   budgets, or any MCP tool signature. The related ops finding — the box is under-provisioned
   for on-box builds; off-box image builds (Actions → ghcr → pull-only deploys) would shrink
-  the deploy bursts that trigger this failure mode — is a CEO spend decision on THI-1262 and
+  the deploy bursts that trigger this failure mode — is a separate ops spend decision on the
+  incident thread and
   stays out of scope here.
 
 Thingery is the open item database and MCP server for AI agents to list, find, and trade
@@ -38,7 +39,7 @@ failures are never cached — a single DNS miss inside the 5 s budget rejects th
 `clientFromMetadataDocument` (`src/oauth.ts`) renders the 400 "Unknown application" page.
 Claude's connect UI surfaces that as a hard failure; the user's first connect breaks even
 though the same connector succeeds minutes later. Prod hit exactly this on 2026-11-23 during
-a deploy burst (THI-1286 evidence). Diagnosis also cost a hand-reproduction because
+a deploy burst (prod evidence above). Diagnosis also cost a hand-reproduction because
 `cimd_rejected` logs only `reason` — no error detail, no elapsed time, no attempt count.
 
 ## Context (repo @ caac29f)
@@ -106,7 +107,7 @@ Every outcome is named; illegal transitions do not exist. Changes from today are
   | size cap (> 5 KB), wrong content-type, `invalid_document`, `invalid_url`, `rate_limited` | no | deterministic |
 
   Exact predicates (which node error codes count as DNS/socket) are pinned in tests.
-- **Backoff:** fixed 300 ms (mid-range of THI-1286's 250–500 ms). Single instance, single
+- **Backoff:** fixed 300 ms (mid-range of the proposed 250–500 ms). Single instance, single
   retry, no herd — no jitter, no env knob (YAGNI; constants are one-line changes). Injected
   as a constructor parameter (`retryDelayMs`) so tests run with `0`.
 - **Worst case** authorize latency: only on already-failing paths — 5 s + 0.3 s + 5 s ≈
@@ -216,7 +217,7 @@ Constants (300 ms, 24 h, 1 h TTL) are code-level one-liners if tuning is needed.
 
 ## Open questions
 
-1. **Grace window length** — 24 h proposed (THI-1286's example). Security may prefer a
+1. **Grace window length** — 24 h proposed (the assignment's example window). Security may prefer a
    shorter window (e.g. 6 h) to bound how long removed redirect_uris stay serviceable under
    a sustained upstream outage. Default stands at 24 h pending Security's verdict.
 2. **`invalid_document` under stale grace** — spec says fail closed (refresh succeeded and

@@ -37,7 +37,9 @@ const available = await dbAvailable();
 const OPS = "ops-thi780@example.test";
 
 class FailingMailer implements Mailer {
-  readonly kind = "dry_run" as const;
+  // THI-1046: the sweep refuses to claim from a dry_run mailer — this double
+  // simulates a *provider* that fails permanently.
+  readonly kind = "provider" as const;
   async send(_message: MailMessage): Promise<MailSendResult> {
     return { ok: false, error: "permanent provider failure" };
   }

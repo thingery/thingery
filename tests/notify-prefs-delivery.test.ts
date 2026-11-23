@@ -32,7 +32,9 @@ async function dbAvailable(): Promise<boolean> {
 const available = await dbAvailable();
 
 class ScriptedMailer implements Mailer {
-  readonly kind = "dry_run" as const;
+  // THI-1046: the sweep refuses to claim from a dry_run mailer — this double
+  // simulates a healthy provider.
+  readonly kind = "provider" as const;
   readonly sent: MailMessage[] = [];
   async send(message: MailMessage): Promise<MailSendResult> {
     this.sent.push({ ...message });

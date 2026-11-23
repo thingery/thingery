@@ -106,6 +106,12 @@ describe.skipIf(!available)("notify schema (THI-763 PR 1)", () => {
        VALUES ('x@example.test', 's', 't.v1', 'exploded', 'thi763-bad-status')`,
     ).catch((err) => err);
     expect(bad.code).toBe("23514"); // check_violation — illegal states rejected by the DB
+    // THI-1280 (local-dev hygiene): this file leaves rows behind on purpose
+    // (assertions below need them); clear the static keys first so re-runs
+    // against a persistent dev database stay green.
+    await db.query(
+      "DELETE FROM email_outbox WHERE dedupe_key IN ('thi763-outbox-dedupe', 'thi763-bad-status')",
+    );
     const dup = await db.query(
       `INSERT INTO email_outbox (to_email, subject, template, dedupe_key)
        VALUES ('x@example.test', 's', 't.v1', 'thi763-outbox-dedupe')`,
@@ -140,7 +146,11 @@ describe("notify config (THI-763 PR 1)", () => {
     const cfg = notifyConfig({});
     expect(cfg.emailEnabled).toBe(false);
     expect(cfg.resendApiKey).toBeUndefined();
-    expect(cfg.fromAddress).toBe("notifications@thingery.dev");
+    // THI-1280 sender identities: noreply@ for transactional (verification,
+    // order lifecycle), notifications@ for digests/operator, support@ Reply-To.
+    expect(cfg.fromAddress).toBe("noreply@thingery.dev");
+    expect(cfg.digestFromAddress).toBe("notifications@thingery.dev");
+    expect(cfg.replyToAddress).toBe("support@thingery.dev");
     expect(cfg.publicBaseUrl).toBe("http://localhost:3000");
     expect(cfg.sweepIntervalMinutes).toBe(1);
     expect(cfg.maxEmailsPerRecipientPerHour).toBe(6);
@@ -153,7 +163,10 @@ describe("notify config (THI-763 PR 1)", () => {
     expect(notifyConfig({ PUBLIC_BASE_URL: "https://p.example.dev///" }).publicBaseUrl)
       .toBe("https://p.example.dev");
     expect(notifyConfig({ NOTIFY_PUBLIC_BASE_URL: "   " }).publicBaseUrl).toBe("http://localhost:3000");
-    expect(notifyConfig({ NOTIFY_FROM_ADDRESS: "  " }).fromAddress).toBe("notifications@thingery.dev");
+    // THI-1280: default is the noreply@ transactional identity; blank is unset (F1).
+    expect(notifyConfig({ NOTIFY_FROM_ADDRESS: "  " }).fromAddress).toBe("noreply@thingery.dev");
+    expect(notifyConfig({ NOTIFY_FROM_ADDRESS: "  " }).digestFromAddress).toBe("notifications@thingery.dev");
+    expect(notifyConfig({ NOTIFY_REPLY_TO_ADDRESS: "  " }).replyToAddress).toBe("support@thingery.dev");
   });
 
   it("email flag accepts only 1/true; malformed ints fall back to defaults", () => {

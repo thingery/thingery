@@ -48,7 +48,9 @@ const MONDAY = new Date("2024-01-01T12:00:00Z"); // a known Monday
 const TUESDAY = new Date("2024-01-02T12:00:00Z");
 
 class ScriptedMailer implements Mailer {
-  readonly kind = "dry_run" as const;
+  // THI-1046: the sweep refuses to claim from a dry_run mailer — this double
+  // simulates a healthy provider.
+  readonly kind = "provider" as const;
   readonly sent: MailMessage[] = [];
   async send(message: MailMessage): Promise<MailSendResult> {
     this.sent.push({ ...message });
@@ -223,6 +225,23 @@ describe.skipIf(!available)("digest sweep + unsubscribe route (THI-780 PR 2 — 
     expect(msg).toBeDefined();
     expect(msg?.headers?.["List-Unsubscribe-Post"]).toBe("List-Unsubscribe=One-Click");
     expect(msg?.subject).toContain("Thingery digest");
+  });
+
+  it("digest sends carry the notifications@ sender and support@ Reply-To (THI-1280)", async () => {
+    // Re-arm the row the previous test already sent (delivery is terminal),
+    // so this sweep has something to claim for this recipient.
+    await db.query(
+      "UPDATE email_outbox SET status = 'pending', attempts = 0, last_error = NULL, next_attempt_at = now() - interval '1 minute' WHERE to_email = $1 AND template LIKE 'digest.%'",
+      [dailyEmail],
+    );
+    const mailer = new ScriptedMailer();
+    await runNotifyDelivery(cfg, mailer);
+    const rows = await digestRows(dailyEmail);
+    expect(rows[0].status).toBe("sent");
+    const msg = mailer.sent.find((m) => m.to === dailyEmail);
+    expect(msg).toBeDefined();
+    expect(msg?.from).toBe("notifications@thingery.dev");
+    expect(msg?.replyTo).toBe("support@thingery.dev");
   });
 
   it("one-click unsubscribe: valid token turns digest off, idempotent, pending digest cancelled", async () => {

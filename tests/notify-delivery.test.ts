@@ -35,7 +35,9 @@ const available = await dbAvailable();
 
 /** Mailer double: scriptable results + captured sends. */
 class ScriptedMailer implements Mailer {
-  readonly kind = "dry_run" as const;
+  // THI-1046: the sweep refuses to claim from a dry_run mailer, so this
+  // double simulates a healthy provider (scripted results incl. provider ids).
+  readonly kind = "provider" as const;
   readonly sent: MailMessage[] = [];
   constructor(private readonly results: MailSendResult[] = []) {}
   async send(message: MailMessage): Promise<MailSendResult> {
@@ -64,6 +66,21 @@ describe("NOTIFY_MAX_AGE_HOURS config (THI-1043 — pure)", () => {
     expect(notifyConfig({ NOTIFY_MAX_AGE_HOURS: "0" }).maxAgeHours).toBe(48); // no off-value: set a large horizon instead
     expect(notifyConfig({ NOTIFY_MAX_AGE_HOURS: "abc" }).maxAgeHours).toBe(48);
     expect(notifyConfig({ NOTIFY_MAX_AGE_HOURS: " " }).maxAgeHours).toBe(48); // F1 empty-is-unset
+  });
+});
+
+describe("sender identities (THI-1280 — pure)", () => {
+  it("notifyConfig defaults: noreply@ transactional, notifications@ digests, support@ Reply-To", () => {
+    const cfg = notifyConfig({});
+    expect(cfg.fromAddress).toBe("noreply@thingery.dev");
+    expect(cfg.digestFromAddress).toBe("notifications@thingery.dev");
+    expect(cfg.replyToAddress).toBe("support@thingery.dev");
+  });
+  it("env overrides parse; blank counts as unset (F1)", () => {
+    const cfg = notifyConfig({ NOTIFY_FROM_ADDRESS: "x@y.test", NOTIFY_DIGEST_FROM_ADDRESS: "d@y.test", NOTIFY_REPLY_TO_ADDRESS: " " });
+    expect(cfg.fromAddress).toBe("x@y.test");
+    expect(cfg.digestFromAddress).toBe("d@y.test");
+    expect(cfg.replyToAddress).toBe("support@thingery.dev");
   });
 });
 
@@ -105,6 +122,32 @@ describe("ResendMailer adapter (THI-763 PR 4 — pure)", () => {
     expect(await httpErr.send({ to: "a@b.test", subject: "s", text: "t", html: "h", idempotencyKey: "k" })).toEqual({ ok: false, error: "resend: HTTP 422" });
     const netErr = new ResendMailer({ ...base, fetchImpl: (async () => { throw new Error("timeout"); }) as typeof fetch });
     expect(await netErr.send({ to: "a@b.test", subject: "s", text: "t", html: "h", idempotencyKey: "k" })).toEqual({ ok: false, error: "resend: timeout" });
+  });
+
+  it("reply_to: config default applied when the message sets none (THI-1280)", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = (async (url: string | URL, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ id: "msg-1" }), { status: 200 });
+    }) as typeof fetch;
+    const mailer = new ResendMailer({ ...base, replyToAddress: "support@example.test", fetchImpl });
+    await mailer.send({ to: "a@example.test", subject: "s", text: "t", html: "<p>h</p>", idempotencyKey: "outbox-x" });
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.reply_to).toBe("support@example.test");
+    expect(body.from).toBe("no-reply@example.test");
+  });
+
+  it("message-level from/replyTo override the configured defaults (THI-1280)", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = (async (url: string | URL, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ id: "msg-2" }), { status: 200 });
+    }) as typeof fetch;
+    const mailer = new ResendMailer({ ...base, replyToAddress: "support@example.test", fetchImpl });
+    await mailer.send({ to: "a@example.test", subject: "s", text: "t", html: "<p>h</p>", idempotencyKey: "outbox-x", from: "notifications@example.test", replyTo: "desk@example.test" });
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.from).toBe("notifications@example.test");
+    expect(body.reply_to).toBe("desk@example.test");
   });
 
   it("constructing without a key throws (loud, not open)", () => {
@@ -347,6 +390,30 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
       "SELECT status, last_error FROM email_outbox WHERE id = $1", [id]);
     expect(row.rows[0].status).toBe("skipped");
     expect(row.rows[0].last_error).toBe("skipped:stale");
+  });
+
+  // THI-1046 (Security THI-1042, fail-securely): NOTIFY_EMAIL_ENABLED on +
+  // RESEND_API_KEY missing boots a DryRunMailer whose send() always succeeds
+  // with no provider id — the sweep must refuse to claim, or it would mark
+  // rows 'sent' with nothing delivered (terminal, false-positive ops signal).
+  // Misconfiguration window = dark window: even stale rows stay pending; the
+  // THI-1043 cutoff ages the backlog out on the first healthy sweep.
+  it("dry-run mailer + enabled flag claims nothing — rows stay pending, never 'sent' (THI-1046)", async () => {
+    const account = await seedAccount(true);
+    const fresh = await seedOutbox({ to: account.email, verified: true, accountId: account.id });
+    const stale = await seedOutbox({ to: account.email, verified: true, accountId: account.id });
+    await ageTo(stale, new Date(Date.now() - 100 * 3_600_000)); // far past the 48h cutoff
+    const dryRun = new DryRunMailer("enabled without RESEND_API_KEY (fail-closed)");
+    const r = await runNotifyDelivery(enabledCfg, dryRun);
+    expect(r).toEqual({ claimed: 0, sent: 0, skipped: 0, retried: 0, dead: 0, rateLimited: 0, staleSkipped: 0 });
+    expect(dryRun.sent).toHaveLength(0); // nothing even handed to the send path
+    for (const id of [fresh, stale]) {
+      const row = await db.query<{ status: string; attempts: number; provider_message_id: string | null }>(
+        "SELECT status, attempts, provider_message_id FROM email_outbox WHERE id = $1", [id]);
+      expect(row.rows[0].status).toBe("pending"); // recoverable — never 'sent' via dry-run
+      expect(row.rows[0].attempts).toBe(0); // misconfiguration burns no attempts
+      expect(row.rows[0].provider_message_id).toBeNull();
+    }
   });
 
   it("disabled sweep leaves even stale rows pending (dark posture unchanged)", async () => {

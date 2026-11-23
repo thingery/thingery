@@ -24,6 +24,12 @@ export interface MailMessage {
    * security-relevant — auth headers are set by the adapter, never taken
    * from a message. */
   headers?: Record<string, string>;
+  /** Optional sender-identity overrides (THI-1280). When unset, the adapter
+   * applies its configured defaults: the transactional from (noreply@) and
+   * the support@ Reply-To. Adapters that cannot honor an override ignore it
+   * and keep their configured identity — never an error. */
+  from?: string;
+  replyTo?: string;
 }
 
 export type MailSendResult =
@@ -73,6 +79,10 @@ export function buildMailer(env: NodeJS.ProcessEnv = process.env): Mailer {
     );
     return new DryRunMailer("enabled without RESEND_API_KEY (fail-closed)");
   }
+  // THI-1046: the delivery sweep additionally refuses to claim rows while
+  // the mailer is dry-run (the sweep double-checks `mailer.kind`), so this
+  // misconfiguration leaves outbox rows pending — recoverable — instead of
+  // marking them 'sent' via the dry-run path.
   return new ResendMailer({ apiKey: cfg.resendApiKey, fromAddress: cfg.fromAddress });
 }
 

@@ -14,7 +14,10 @@
 // (per-recipient/hour, per-run) leave rows pending — an over-cap recipient is
 // never burned an attempt. With NOTIFY_EMAIL_ENABLED=false (the default)
 // the sweep claims nothing: outbox rows accumulate pending — the dark-deploy
-// posture the board asked for.
+// posture the board asked for. The same nothing-happens posture applies
+// when the flag is on but the mailer is dry-run (THI-1046: the
+// enabled-without-RESEND_API_KEY misconfiguration) — a dry-run send must
+// never flip a row to the terminal 'sent'.
 
 import { pool } from "../db.js";
 import type { PoolClient } from "pg";
@@ -42,6 +45,19 @@ interface OutboxRow {
   template: string;
   payload: Record<string, unknown>;
   attempts: number;
+}
+
+/** Sender identity per mail class (THI-1280): transactional order lifecycle
+ * rows (buyer/seller namespaces) send as the configured transactional from
+ * (noreply@ — same identity the verification mail uses via the adapter
+ * default); digests and operator alerts send as notifications@ so the
+ * market-notification stream stays distinguishable from transactional mail.
+ * Replies to both route to support@ (replyToAddress, stamped below and
+ * applied adapter-wide for the direct verification path too). */
+function senderFor(row: OutboxRow, cfg: NotifyConfig): string {
+  return row.template.startsWith("digest.") || row.template.startsWith("operator.")
+    ? cfg.digestFromAddress
+    : cfg.fromAddress;
 }
 
 export interface DeliveryReport {
@@ -155,6 +171,16 @@ export async function runNotifyDelivery(
 ): Promise<DeliveryReport> {
   const report: DeliveryReport = { claimed: 0, sent: 0, skipped: 0, retried: 0, dead: 0, rateLimited: 0, staleSkipped: 0 };
   if (!cfg.emailEnabled) return report; // dark deploy: claim nothing
+  // THI-1046 (Security review THI-1042 — fail-securely): flag on but mailer
+  // dry-run is exactly the "enabled without RESEND_API_KEY" boot state
+  // (buildMailer fails closed to DryRunMailer, whose send() always reports
+  // ok with no provider id). Claiming here would flip rows to the terminal
+  // 'sent' with nothing delivered — silent loss plus a false-positive ops
+  // check on "pending → sent". Misconfiguration window = dark window:
+  // transition nothing, leave rows pending (recoverable); the THI-1043
+  // staleness cutoff ages the backlog out on the first healthy sweep after
+  // the key lands. The buildMailer boot error is the operator's signal.
+  if (mailer.kind !== "provider") return report;
 
   const client = await pool.connect();
   try {
@@ -239,6 +265,8 @@ export async function runNotifyDelivery(
           typeof row.payload.unsubscribe_url === "string" ? row.payload.unsubscribe_url : undefined;
         result = await mailer.send({
           to: row.to_email,
+          from: senderFor(row, cfg),
+          replyTo: cfg.replyToAddress,
           subject: rendered.subject,
           text: rendered.text,
           html: rendered.html,

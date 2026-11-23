@@ -12,6 +12,21 @@ import { RateLimiter } from "./rate-limit.js";
 // the default port, a DNS name (never an IP literal), every resolved address public
 // (checked inside the socket's own lookup, so a rebinding answer cannot slip past), no
 // redirects, a short timeout and a small size cap.
+//
+// Transient fetch failures (timeout, DNS/socket errors, HTTP >= 500) are retried once
+// after a short fixed delay; deterministic failures (HTTP 4xx, TLS identity errors, the
+// size cap, wrong content-type, document-level problems) are never retried.
+//
+// Stale-if-error: when a refresh cannot happen — the per-URL limiter denies it, or the
+// fetch still fails transiently after the retry — the last successfully fetched and
+// validated document may keep being served for at most STALE_GRACE_MS past its fetch.
+// Deterministic fetch failures and document-level failures never serve stale, and a URL
+// never seen valid is never served at all: fail closed.
+//
+// Security note (standing condition from the CIMD hardening security review): error
+// detail is resolver-internal text only — timeouts, HTTP statuses, OS error codes,
+// hostnames (already public in the client_id). It must never be widened to metadata
+// document fields or request payloads without a new Security review.
 
 const MAX_CLIENT_ID_URL_LEN = 2048;
 const FETCH_TIMEOUT_MS = 5_000;
@@ -21,9 +36,29 @@ const MAX_CACHE_ENTRIES = 500;
 // Per URL, not per host: failed fetches of made-up paths on a real client's host must
 // not use up that client's own budget. A good document is cached, so it is rarely refetched.
 const FETCHES_PER_URL_PER_HOUR = 20;
+// One retry for transient fetch failures: the 2026-11-23 prod incident was a single DNS
+// miss during a deploy burst. Fixed delay, no jitter — single instance, no herd.
+const RETRY_DELAY_MS = 300;
+// How long past a successful fetch a validated document may keep being served when its
+// refresh is limiter-denied or fails transiently after the retry (stale-if-error). Grace
+// anchors to the last real validated fetch, never to a stale serve, so a document is
+// never served older than this. Trust story: docs/security.md §2a — a changed document
+// takes effect within 1 h, ≤ 24 h under refresh failure.
+const STALE_GRACE_MS = 24 * 60 * 60 * 1000;
 
 export class CimdError extends Error {
-  constructor(readonly reason: "invalid_url" | "fetch_failed" | "invalid_document" | "rate_limited", detail: string) {
+  /** Set by the resolver: GETs performed for this load (all attempts). */
+  attempts?: number;
+  /** Set by the resolver: total load time in ms (all attempts). */
+  elapsedMs?: number;
+
+  constructor(
+    readonly reason: "invalid_url" | "fetch_failed" | "invalid_document" | "rate_limited",
+    /** Resolver-internal error text only — see the security note in the file header. */
+    readonly detail: string,
+    /** True when a single short-delay retry can plausibly change the outcome. */
+    readonly retryable = false,
+  ) {
     super(detail);
     this.name = "CimdError";
   }
@@ -99,8 +134,9 @@ export function publicOnlyLookup(resolve: Resolve = dns.lookup): LookupFunction 
     resolve(hostname, { family: options.family, hints: options.hints, all: true }, (err, addresses) => {
       if (err) return callback(err, "", 4);
       if (addresses.length === 0 || addresses.some((a) => isBlockedAddress(a.address))) {
+        // Distinct code: the guard's refusal is deterministic and must not be retried.
         const blocked = Object.assign(new Error(`${hostname} does not resolve to a public address`), {
-          code: "ENOTFOUND",
+          code: "EBLOCKED",
         });
         return callback(blocked, "", 4);
       }
@@ -111,17 +147,34 @@ export function publicOnlyLookup(resolve: Resolve = dns.lookup): LookupFunction 
   };
 }
 
+// DNS and socket failures that a short wait can plausibly fix (the deploy-burst incident
+// class). An allowlist: TLS/certificate errors and anything unrecognized fail without a
+// retry. The SSRF guard's own refusal uses a distinct code, so it is never retried.
+const TRANSIENT_ERROR_CODES = new Set([
+  "ENOTFOUND", "EAI_AGAIN", "EAI_NODATA", // DNS lookup
+  "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EPIPE", // socket
+]);
+
+/** True for transient DNS/socket errors; false for TLS, blocked-address and unknown errors. */
+export function isTransientNetworkError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const code = (e as NodeJS.ErrnoException).code;
+  if (typeof code === "string") return TRANSIENT_ERROR_CODES.has(code);
+  return e.message.startsWith("getaddrinfo "); // some DNS stacks report via message only
+}
+
 /** GETs the document under the fetch rules above and returns the parsed JSON. */
 export function fetchMetadataDocument(url: URL, lookup: LookupFunction = publicOnlyLookup()): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const fail = (detail: string) => reject(new CimdError("fetch_failed", detail));
+    const fail = (detail: string, retryable = false) => reject(new CimdError("fetch_failed", detail, retryable));
     const request = https.request(
       url,
       { method: "GET", headers: { accept: "application/json" }, lookup, agent: false },
       (response) => {
         if (response.statusCode !== 200) {
           response.resume();
-          return fail(`status ${response.statusCode}`); // redirects included: never followed
+          // redirects included: never followed
+          return fail(`status ${response.statusCode}`, (response.statusCode ?? 0) >= 500);
         }
         if (!/^application\/([\w.+-]+\+)?json\b/i.test(response.headers["content-type"] ?? "")) {
           response.resume();
@@ -141,11 +194,15 @@ export function fetchMetadataDocument(url: URL, lookup: LookupFunction = publicO
             reject(new CimdError("invalid_document", "document is not valid JSON"));
           }
         });
-        response.on("error", (e) => reject(e instanceof CimdError ? e : new CimdError("fetch_failed", e.message)));
+        response.on("error", (e) =>
+          reject(e instanceof CimdError ? e : new CimdError("fetch_failed", e.message, isTransientNetworkError(e))),
+        );
       },
     );
-    request.setTimeout(FETCH_TIMEOUT_MS, () => request.destroy(new CimdError("fetch_failed", "timeout")));
-    request.on("error", (e) => reject(e instanceof CimdError ? e : new CimdError("fetch_failed", e.message)));
+    request.setTimeout(FETCH_TIMEOUT_MS, () => request.destroy(new CimdError("fetch_failed", "timeout", true)));
+    request.on("error", (e) =>
+      reject(e instanceof CimdError ? e : new CimdError("fetch_failed", e.message, isTransientNetworkError(e))),
+    );
     request.end();
   });
 }
@@ -176,37 +233,113 @@ export function readMetadataDocument(document: unknown, url: URL): MetadataDocum
   return { client_id: url.href, display_name: url.host, redirect_uris: doc.redirect_uris };
 }
 
+/** What a resolve() returned and what it cost; the consumer logs it on non-cache paths. */
+export interface ResolvedClient {
+  client: MetadataDocumentClient;
+  /** cache = success cache; fresh = a validated network fetch; stale = last validated copy under refresh failure. */
+  source: "cache" | "fresh" | "stale";
+  /** GETs performed for this resolve (0 on a cache hit or a limiter-denied stale serve). */
+  attempts: number;
+  /** Time spent loading, in ms (0 on a cache hit or a limiter-denied stale serve). */
+  elapsedMs: number;
+  /** Stale serves only: why the refresh that would have replaced this copy failed. */
+  refreshReason?: string;
+  /** Stale serves only: resolver-internal detail of the refresh failure (see the header's security note). */
+  refreshDetail?: string;
+}
+
 type Fetch = (url: URL) => Promise<unknown>;
 
 /**
  * Fetches and checks documents, caching good ones for an hour and sharing one fetch
  * between concurrent requests for the same URL. Failures are not cached, but are
- * rate-limited per URL.
+ * rate-limited per URL. A transient fetch failure is retried once after a short fixed
+ * delay; the retry stays inside one load, so the rate limiter still grants one token
+ * per resolve and concurrent requests share it. When a refresh is limiter-denied or
+ * still fails transiently after the retry, the last validated copy is served stale for
+ * at most STALE_GRACE_MS past its fetch; every other failure fails closed.
  */
 export function createMetadataDocumentResolver(
   fetchDocument: Fetch = (url) => fetchMetadataDocument(url),
   now: () => number = Date.now,
+  retryDelayMs: number = RETRY_DELAY_MS,
 ) {
-  const cache = new Map<string, { client: MetadataDocumentClient; expiresAt: number }>();
-  const inFlight = new Map<string, Promise<MetadataDocumentClient>>();
+  const cache = new Map<string, { client: MetadataDocumentClient; fetchedAt: number; expiresAt: number }>();
+  const inFlight = new Map<string, Promise<ResolvedClient>>();
   const limiter = new RateLimiter(FETCHES_PER_URL_PER_HOUR, 60 * 60 * 1000);
 
-  async function load(url: URL): Promise<MetadataDocumentClient> {
-    const client = readMetadataDocument(await fetchDocument(url), url);
-    if (cache.size >= MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value as string);
-    cache.set(url.href, { client, expiresAt: now() + CACHE_TTL_MS });
-    return client;
+  // State-machine rows 4 and 7 of docs/specs/cimd-fetch-hardening.md: a validated copy may
+  // step in only when the refresh was limiter-denied, or the fetch still failed
+  // transiently after its retry. Everything else — invalid_document (the refresh
+  // succeeded and said no), non-transient fetch_failed (4xx, TLS, size cap, content
+  // type), an expired grace window, or no copy ever seen valid — rethrows: fail closed.
+  function staleAfterFailedRefresh(href: string, error: CimdError, attempts: number, elapsedMs: number): ResolvedClient {
+    const staleEligible = error.reason === "rate_limited" || (error.reason === "fetch_failed" && error.retryable);
+    const stale = staleEligible ? cache.get(href) : undefined;
+    if (!stale || stale.fetchedAt + STALE_GRACE_MS < now()) throw error;
+    return {
+      client: stale.client,
+      source: "stale",
+      attempts,
+      elapsedMs,
+      refreshReason: error.reason,
+      refreshDetail: error.detail,
+    };
   }
 
-  return async function resolve(clientId: string): Promise<MetadataDocumentClient> {
+  async function load(url: URL): Promise<ResolvedClient> {
+    const startedAt = now();
+    let attempts = 0;
+    try {
+      let document: unknown;
+      attempts = 1;
+      try {
+        document = await fetchDocument(url);
+      } catch (e) {
+        // The retry wraps the fetch only — never readMetadataDocument: a deterministic
+        // content failure would fail again identically.
+        if (!(e instanceof CimdError) || e.reason !== "fetch_failed" || !e.retryable) throw e;
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+        attempts = 2;
+        document = await fetchDocument(url);
+      }
+      const client = readMetadataDocument(document, url);
+      if (cache.size >= MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value as string);
+      // fetchedAt anchors the stale grace window; it is written only here, on a real
+      // validated fetch, never on a stale serve — grace never extends itself.
+      const fetchedAt = now();
+      cache.set(url.href, { client, fetchedAt, expiresAt: fetchedAt + CACHE_TTL_MS });
+      return { client, source: "fresh", attempts, elapsedMs: now() - startedAt };
+    } catch (e) {
+      // Attach what happened so the consumer can log it (cimd_rejected enrichment).
+      if (e instanceof CimdError) {
+        e.attempts = attempts;
+        e.elapsedMs = now() - startedAt;
+      }
+      throw e;
+    }
+  }
+
+  return async function resolve(clientId: string): Promise<ResolvedClient> {
     const url = parseMetadataDocumentUrl(clientId);
     if (!url) throw new CimdError("invalid_url", "client_id is not a valid metadata document URL");
     const cached = cache.get(url.href);
-    if (cached && cached.expiresAt > now()) return cached.client;
+    if (cached && cached.expiresAt > now()) {
+      return { client: cached.client, source: "cache", attempts: 0, elapsedMs: 0 };
+    }
     const pending = inFlight.get(url.href);
     if (pending) return pending;
-    if (!limiter.allow(url.href)) throw new CimdError("rate_limited", "too many fetches of this document");
-    const fetching = load(url).finally(() => inFlight.delete(url.href));
+    if (!limiter.allow(url.href)) {
+      return staleAfterFailedRefresh(url.href, new CimdError("rate_limited", "too many fetches of this document"), 0, 0);
+    }
+    // The stale fallback lives on the shared promise, so concurrent resolvers of the same
+    // URL see one outcome (row 3 of the state machine) instead of racing their own.
+    const fetching = load(url)
+      .catch((e: unknown) => {
+        if (!(e instanceof CimdError)) throw e;
+        return staleAfterFailedRefresh(url.href, e, e.attempts ?? 0, e.elapsedMs ?? 0);
+      })
+      .finally(() => inFlight.delete(url.href));
     inFlight.set(url.href, fetching);
     return fetching;
   };

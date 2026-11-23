@@ -10,6 +10,7 @@ import {
   createMetadataDocumentResolver,
   isMetadataDocumentClientId,
   type MetadataDocumentClient,
+  type ResolvedClient,
 } from "./oauth-cimd.js";
 
 // MCP OAuth one-click onboarding — spec THI-11 rev 2.
@@ -723,29 +724,53 @@ async function clientById(clientId: string): Promise<ClientRow | null> {
 
 const resolveMetadataDocument = createMetadataDocumentResolver();
 
+// Error detail is resolver-internal only (hostnames, statuses, OS error codes); a standing
+// security review condition keeps it from ever growing into document fields or payloads.
+const CIMD_DETAIL_MAX_CHARS = 300;
+
 /**
  * A client whose client_id is a metadata document URL (CIMD). Its row in oauth_clients is
  * written from the document on every authorize, so codes, grants, tokens and Connected
  * apps treat it like a registered client, and a changed document takes effect within the
- * resolver's cache lifetime. The name shown is the document's host, which the fetch
+ * resolver's cache lifetime (≤ 24 h while refreshes fail and a validated copy exists).
+ * The name shown is the document's host, which the fetch
  * proved, never its self-declared client_name. Null when the document cannot be used.
  */
 async function clientFromMetadataDocument(clientId: string): Promise<ClientRow | null> {
-  const rejected = (reason: string): null => {
-    securityEvent("cimd_rejected", { reason, client_id: clientId.slice(0, 200) });
+  const rejected = (reason: string, extra: Record<string, unknown> = {}): null => {
+    securityEvent("cimd_rejected", { reason, client_id: clientId.slice(0, 200), ...extra });
     return null;
   };
-  let document: MetadataDocumentClient;
+  let resolved: ResolvedClient;
   try {
-    document = await resolveMetadataDocument(clientId);
+    resolved = await resolveMetadataDocument(clientId);
   } catch (e) {
-    if (e instanceof CimdError) return rejected(e.reason);
+    if (e instanceof CimdError) {
+      const extra: Record<string, unknown> = { detail: e.detail.slice(0, CIMD_DETAIL_MAX_CHARS) };
+      if (e.attempts !== undefined) extra.attempts = e.attempts;
+      if (e.elapsedMs !== undefined) extra.elapsed_ms = e.elapsedMs;
+      return rejected(e.reason, extra);
+    }
     throw e;
+  }
+  // Cache hits stay silent: this logs the rare non-cache paths (fetch latency + attempts).
+  if (resolved.source !== "cache") {
+    const served: Record<string, unknown> = {
+      client_id: clientId.slice(0, 200),
+      source: resolved.source,
+      attempts: resolved.attempts,
+      elapsed_ms: resolved.elapsedMs,
+    };
+    // Stale serves only: what failed and why the last validated copy stepped in. Sustained
+    // `source: "stale"` for one client_id is the ops signal for deliberate retention pinning.
+    if (resolved.refreshReason !== undefined) served.refresh_reason = resolved.refreshReason;
+    if (resolved.refreshDetail !== undefined) served.detail = resolved.refreshDetail.slice(0, CIMD_DETAIL_MAX_CHARS);
+    securityEvent("cimd_served", served);
   }
   let registration: ClientRegistration;
   try {
     // Same redirect URI rules as dynamic registration; it throws only RegistrationError.
-    registration = validateClientRegistration({ redirect_uris: document.redirect_uris });
+    registration = validateClientRegistration({ redirect_uris: resolved.client.redirect_uris });
   } catch {
     return rejected("invalid_redirect_uri");
   }
@@ -754,7 +779,7 @@ async function clientFromMetadataDocument(clientId: string): Promise<ClientRow |
      VALUES ($1, $2, NULL, $3)
      ON CONFLICT (client_id) DO UPDATE SET client_name = EXCLUDED.client_name, redirect_uris = EXCLUDED.redirect_uris
      RETURNING client_id, client_name, client_uri, redirect_uris`,
-    [document.client_id, document.display_name, registration.redirect_uris],
+    [resolved.client.client_id, resolved.client.display_name, registration.redirect_uris],
   );
   return rows[0];
 }
@@ -1193,6 +1218,11 @@ function mountToken(app: Express): void {
       }
       const client = await clientById(clientId);
       if (!client) {
+        securityEvent("token_exchange_failed", {
+          reason: "unknown_client",
+          client_id: clientId.slice(0, 200),
+          ip: req.ip,
+        });
         tokenError(res, "invalid_client", "unknown client"); // swept/unknown client (§2.9)
         return;
       }
@@ -1207,14 +1237,23 @@ function mountToken(app: Express): void {
   );
 
   async function handleCodeExchange(body: Record<string, string>, clientId: string, res: Response): Promise<void> {
+    // THI-1219: every silent 4xx here was invisible server-side — the claude.ai
+    // connector outage (grants issued, zero tokens minted site-wide) took a
+    // read-only DB pull to even localize. Failures now emit one security event
+    // each; no code, verifier or token material is ever logged (spec §4.5).
+    // Replay paths keep their dedicated code_replay event (family revocation).
+    const fail = (reason: string, error: string, description: string): void => {
+      securityEvent("token_exchange_failed", { reason, client_id: clientId.slice(0, 200), ip: res.req?.ip });
+      tokenError(res, error, description);
+    };
     const { code, redirect_uri: redirectUri, resource, code_verifier: verifier } = body;
     if (!code || !redirectUri || !verifier) {
-      tokenError(res, "invalid_request", "code, redirect_uri and code_verifier are required");
+      fail("missing_params", "invalid_request", "code, redirect_uri and code_verifier are required");
       return;
     }
     // Pre-check the verifier shape before any hash computation (§2.6).
     if (!CODE_VERIFIER_RE.test(verifier)) {
-      tokenError(res, "invalid_grant", "malformed code_verifier");
+      fail("malformed_code_verifier", "invalid_grant", "malformed code_verifier");
       return;
     }
     const { rows } = await pool.query<{
@@ -1231,7 +1270,7 @@ function mountToken(app: Express): void {
         FROM oauth_codes WHERE code_hash = $1`, [sha256Hex(code)]);
     const row = rows[0];
     if (!row) {
-      tokenError(res, "invalid_grant", "unknown authorization code");
+      fail("unknown_code", "invalid_grant", "unknown authorization code");
       return;
     }
     if (row.consumed_at) {
@@ -1251,14 +1290,24 @@ function mountToken(app: Express): void {
     }
     const expired = new Date(row.expires_at).getTime() <= Date.now();
     if (expired) {
-      tokenError(res, "invalid_grant", "authorization code expired"); // no grant effect (§2.9)
+      fail("code_expired", "invalid_grant", "authorization code expired"); // no grant effect (§2.9)
       return;
     }
     if (row.client_id !== clientId || row.redirect_uri !== redirectUri) {
-      tokenError(res, "invalid_grant", "code is not bound to this client or redirect URI");
+      fail("client_or_redirect_mismatch", "invalid_grant", "code is not bound to this client or redirect URI");
       return;
     }
-    if (row.resource !== null && row.resource !== resource) {
+    if (resource !== undefined && row.resource !== null && row.resource !== resource) {
+      // RFC 8707 audience binding (THI-1219 delta): the code's audience is
+      // pinned at authorize (resource must equal ${issuer}/mcp there), so
+      // row.resource is either that URI or null (authorize without resource).
+      // A token request that PRESENTS a resource must match the binding. One
+      // that omits it is treated as asking for the code's own audience:
+      // Thingery serves exactly one resource, so omission cannot widen the
+      // grant — while strict rejection deterministically broke clients that
+      // bind at authorize but omit the parameter at exchange (the shape seen
+      // from claude.ai connector attempts: grants issued, zero tokens ever
+      // minted, THI-1219).
       tokenError(res, "invalid_grant", "resource does not match the authorized audience"); // RFC 8707
       return;
     }
@@ -1268,7 +1317,7 @@ function mountToken(app: Express): void {
       verifierDigest.length !== challengeDigest.length ||
       !crypto.timingSafeEqual(verifierDigest, challengeDigest)
     ) {
-      tokenError(res, "invalid_grant", "PKCE verification failed");
+      fail("pkce_verification_failed", "invalid_grant", "PKCE verification failed");
       return;
     }
 
@@ -1296,7 +1345,7 @@ function mountToken(app: Express): void {
     } catch (e) {
       await db.query("ROLLBACK").catch(() => {});
       console.error("oauth: code exchange failed:", (e as Error).message);
-      tokenError(res, "invalid_grant", "exchange failed");
+      fail("exchange_fault", "invalid_grant", "exchange failed");
     } finally {
       db.release();
     }

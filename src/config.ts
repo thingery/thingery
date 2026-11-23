@@ -235,8 +235,16 @@ export interface NotifyConfig {
   emailEnabled: boolean;
   // Resend provider key (plan §3: managed provider, not self-hosted SMTP).
   resendApiKey: string | undefined;
-  // Sender identity (plan §3: no-reply, no Reply-To — adopted decision #4).
+  // Transactional sender identity (THI-1280): verification and order-lifecycle
+  // mail sends as noreply@ (send-only, no inbox behind it). Replies to any
+  // platform mail route to support@ via replyToAddress.
   fromAddress: string;
+  // Market-notification sender identity (THI-1280): digests and operator
+  // alerts send as notifications@. Kept separate from noreply@ so the two
+  // streams can be told apart and reputation-tuned independently.
+  digestFromAddress: string;
+  // Reply-To for platform mail (THI-1280): user replies land at support@.
+  replyToAddress: string;
   // Absolute base for deep links: NOTIFY_PUBLIC_BASE_URL overrides
   // PUBLIC_BASE_URL, then the dev default (plan §3).
   publicBaseUrl: string;
@@ -283,7 +291,9 @@ export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig
   return {
     emailEnabled: flag === "1" || flag === "true",
     resendApiKey: value("RESEND_API_KEY"),
-    fromAddress: value("NOTIFY_FROM_ADDRESS") ?? "notifications@thingery.dev",
+    fromAddress: value("NOTIFY_FROM_ADDRESS") ?? "noreply@thingery.dev",
+    digestFromAddress: value("NOTIFY_DIGEST_FROM_ADDRESS") ?? "notifications@thingery.dev",
+    replyToAddress: value("NOTIFY_REPLY_TO_ADDRESS") ?? "support@thingery.dev",
     publicBaseUrl: (
       value("NOTIFY_PUBLIC_BASE_URL") ??
       value("PUBLIC_BASE_URL") ??

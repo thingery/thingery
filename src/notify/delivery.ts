@@ -47,6 +47,19 @@ interface OutboxRow {
   attempts: number;
 }
 
+/** Sender identity per mail class (THI-1280): transactional order lifecycle
+ * rows (buyer/seller namespaces) send as the configured transactional from
+ * (noreply@ — same identity the verification mail uses via the adapter
+ * default); digests and operator alerts send as notifications@ so the
+ * market-notification stream stays distinguishable from transactional mail.
+ * Replies to both route to support@ (replyToAddress, stamped below and
+ * applied adapter-wide for the direct verification path too). */
+function senderFor(row: OutboxRow, cfg: NotifyConfig): string {
+  return row.template.startsWith("digest.") || row.template.startsWith("operator.")
+    ? cfg.digestFromAddress
+    : cfg.fromAddress;
+}
+
 export interface DeliveryReport {
   claimed: number;
   sent: number;
@@ -252,6 +265,8 @@ export async function runNotifyDelivery(
           typeof row.payload.unsubscribe_url === "string" ? row.payload.unsubscribe_url : undefined;
         result = await mailer.send({
           to: row.to_email,
+          from: senderFor(row, cfg),
+          replyTo: cfg.replyToAddress,
           subject: rendered.subject,
           text: rendered.text,
           html: rendered.html,

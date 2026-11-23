@@ -1193,6 +1193,11 @@ function mountToken(app: Express): void {
       }
       const client = await clientById(clientId);
       if (!client) {
+        securityEvent("token_exchange_failed", {
+          reason: "unknown_client",
+          client_id: clientId.slice(0, 200),
+          ip: req.ip,
+        });
         tokenError(res, "invalid_client", "unknown client"); // swept/unknown client (§2.9)
         return;
       }
@@ -1207,14 +1212,23 @@ function mountToken(app: Express): void {
   );
 
   async function handleCodeExchange(body: Record<string, string>, clientId: string, res: Response): Promise<void> {
+    // THI-1219: every silent 4xx here was invisible server-side — the claude.ai
+    // connector outage (grants issued, zero tokens minted site-wide) took a
+    // read-only DB pull to even localize. Failures now emit one security event
+    // each; no code, verifier or token material is ever logged (spec §4.5).
+    // Replay paths keep their dedicated code_replay event (family revocation).
+    const fail = (reason: string, error: string, description: string): void => {
+      securityEvent("token_exchange_failed", { reason, client_id: clientId.slice(0, 200), ip: res.req?.ip });
+      tokenError(res, error, description);
+    };
     const { code, redirect_uri: redirectUri, resource, code_verifier: verifier } = body;
     if (!code || !redirectUri || !verifier) {
-      tokenError(res, "invalid_request", "code, redirect_uri and code_verifier are required");
+      fail("missing_params", "invalid_request", "code, redirect_uri and code_verifier are required");
       return;
     }
     // Pre-check the verifier shape before any hash computation (§2.6).
     if (!CODE_VERIFIER_RE.test(verifier)) {
-      tokenError(res, "invalid_grant", "malformed code_verifier");
+      fail("malformed_code_verifier", "invalid_grant", "malformed code_verifier");
       return;
     }
     const { rows } = await pool.query<{
@@ -1231,7 +1245,7 @@ function mountToken(app: Express): void {
         FROM oauth_codes WHERE code_hash = $1`, [sha256Hex(code)]);
     const row = rows[0];
     if (!row) {
-      tokenError(res, "invalid_grant", "unknown authorization code");
+      fail("unknown_code", "invalid_grant", "unknown authorization code");
       return;
     }
     if (row.consumed_at) {
@@ -1251,14 +1265,24 @@ function mountToken(app: Express): void {
     }
     const expired = new Date(row.expires_at).getTime() <= Date.now();
     if (expired) {
-      tokenError(res, "invalid_grant", "authorization code expired"); // no grant effect (§2.9)
+      fail("code_expired", "invalid_grant", "authorization code expired"); // no grant effect (§2.9)
       return;
     }
     if (row.client_id !== clientId || row.redirect_uri !== redirectUri) {
-      tokenError(res, "invalid_grant", "code is not bound to this client or redirect URI");
+      fail("client_or_redirect_mismatch", "invalid_grant", "code is not bound to this client or redirect URI");
       return;
     }
-    if (row.resource !== null && row.resource !== resource) {
+    if (resource !== undefined && row.resource !== null && row.resource !== resource) {
+      // RFC 8707 audience binding (THI-1219 delta): the code's audience is
+      // pinned at authorize (resource must equal ${issuer}/mcp there), so
+      // row.resource is either that URI or null (authorize without resource).
+      // A token request that PRESENTS a resource must match the binding. One
+      // that omits it is treated as asking for the code's own audience:
+      // Thingery serves exactly one resource, so omission cannot widen the
+      // grant — while strict rejection deterministically broke clients that
+      // bind at authorize but omit the parameter at exchange (the shape seen
+      // from claude.ai connector attempts: grants issued, zero tokens ever
+      // minted, THI-1219).
       tokenError(res, "invalid_grant", "resource does not match the authorized audience"); // RFC 8707
       return;
     }
@@ -1268,7 +1292,7 @@ function mountToken(app: Express): void {
       verifierDigest.length !== challengeDigest.length ||
       !crypto.timingSafeEqual(verifierDigest, challengeDigest)
     ) {
-      tokenError(res, "invalid_grant", "PKCE verification failed");
+      fail("pkce_verification_failed", "invalid_grant", "PKCE verification failed");
       return;
     }
 
@@ -1296,7 +1320,7 @@ function mountToken(app: Express): void {
     } catch (e) {
       await db.query("ROLLBACK").catch(() => {});
       console.error("oauth: code exchange failed:", (e as Error).message);
-      tokenError(res, "invalid_grant", "exchange failed");
+      fail("exchange_fault", "invalid_grant", "exchange failed");
     } finally {
       db.release();
     }

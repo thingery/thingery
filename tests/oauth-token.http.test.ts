@@ -240,6 +240,21 @@ describe.skipIf(!available)("oauth token + revoke endpoints (HTTP)", () => {
     expect(((await wrongResource.json()) as { error: string }).error).toBe("invalid_grant");
   });
 
+  it("THI-1219: a resource-bound code still exchanges when the token request omits resource (claude.ai shape)", async () => {
+    const code = await mintCode("thgc_tok1", { resource: `${issuer}/mcp` });
+    const res = await tokenRequest({
+      grant_type: "authorization_code",
+      client_id: "thgc_tok1",
+      code,
+      redirect_uri: REDIRECT_URI,
+      code_verifier: verifier,
+    });
+    expect(res.status).toBe(200);
+    const pair = (await res.json()) as { access_token: string; refresh_token: string };
+    expect(pair.access_token).toMatch(/^thgo_/);
+    expect(pair.refresh_token).toMatch(/^thgr_/);
+  });
+
   it("rejects unknown clients and unsupported grant types", async () => {
     const unknown = await tokenRequest({ grant_type: "authorization_code", client_id: "thgc_missing", code: "x", redirect_uri: REDIRECT_URI, code_verifier: verifier });
     expect(unknown.status).toBe(400);

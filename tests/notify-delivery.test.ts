@@ -35,7 +35,9 @@ const available = await dbAvailable();
 
 /** Mailer double: scriptable results + captured sends. */
 class ScriptedMailer implements Mailer {
-  readonly kind = "dry_run" as const;
+  // THI-1046: the sweep refuses to claim from a dry_run mailer, so this
+  // double simulates a healthy provider (scripted results incl. provider ids).
+  readonly kind = "provider" as const;
   readonly sent: MailMessage[] = [];
   constructor(private readonly results: MailSendResult[] = []) {}
   async send(message: MailMessage): Promise<MailSendResult> {
@@ -347,6 +349,30 @@ describe.skipIf(!available)("delivery sweep (THI-763 PR 4 — DB)", () => {
       "SELECT status, last_error FROM email_outbox WHERE id = $1", [id]);
     expect(row.rows[0].status).toBe("skipped");
     expect(row.rows[0].last_error).toBe("skipped:stale");
+  });
+
+  // THI-1046 (Security THI-1042, fail-securely): NOTIFY_EMAIL_ENABLED on +
+  // RESEND_API_KEY missing boots a DryRunMailer whose send() always succeeds
+  // with no provider id — the sweep must refuse to claim, or it would mark
+  // rows 'sent' with nothing delivered (terminal, false-positive ops signal).
+  // Misconfiguration window = dark window: even stale rows stay pending; the
+  // THI-1043 cutoff ages the backlog out on the first healthy sweep.
+  it("dry-run mailer + enabled flag claims nothing — rows stay pending, never 'sent' (THI-1046)", async () => {
+    const account = await seedAccount(true);
+    const fresh = await seedOutbox({ to: account.email, verified: true, accountId: account.id });
+    const stale = await seedOutbox({ to: account.email, verified: true, accountId: account.id });
+    await ageTo(stale, new Date(Date.now() - 100 * 3_600_000)); // far past the 48h cutoff
+    const dryRun = new DryRunMailer("enabled without RESEND_API_KEY (fail-closed)");
+    const r = await runNotifyDelivery(enabledCfg, dryRun);
+    expect(r).toEqual({ claimed: 0, sent: 0, skipped: 0, retried: 0, dead: 0, rateLimited: 0, staleSkipped: 0 });
+    expect(dryRun.sent).toHaveLength(0); // nothing even handed to the send path
+    for (const id of [fresh, stale]) {
+      const row = await db.query<{ status: string; attempts: number; provider_message_id: string | null }>(
+        "SELECT status, attempts, provider_message_id FROM email_outbox WHERE id = $1", [id]);
+      expect(row.rows[0].status).toBe("pending"); // recoverable — never 'sent' via dry-run
+      expect(row.rows[0].attempts).toBe(0); // misconfiguration burns no attempts
+      expect(row.rows[0].provider_message_id).toBeNull();
+    }
   });
 
   it("disabled sweep leaves even stale rows pending (dark posture unchanged)", async () => {

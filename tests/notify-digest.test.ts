@@ -48,7 +48,9 @@ const MONDAY = new Date("2024-01-01T12:00:00Z"); // a known Monday
 const TUESDAY = new Date("2024-01-02T12:00:00Z");
 
 class ScriptedMailer implements Mailer {
-  readonly kind = "dry_run" as const;
+  // THI-1046: the sweep refuses to claim from a dry_run mailer — this double
+  // simulates a healthy provider.
+  readonly kind = "provider" as const;
   readonly sent: MailMessage[] = [];
   async send(message: MailMessage): Promise<MailSendResult> {
     this.sent.push({ ...message });

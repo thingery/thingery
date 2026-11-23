@@ -133,8 +133,17 @@ between documents) and be a public client (no secret). The reserved-brand blockl
 intentionally **not** applied to CIMD hosts: it could not work there (a rule blocking
 the substring "claude" would block `claude.ai` itself) and need not — a DNS name is
 self-verifying in a way free text never was. Residual: a changed document takes effect
-for new flows within the fetch cache's lifetime (1 h); codes bind `client_id` +
-validated `redirect_uri` at issuance, so `redirect_uris` changed mid-flow widen nothing.
+for new flows within the fetch cache's lifetime (1 h, **≤ 24 h under refresh failure** —
+when a refresh is limiter-denied or fails transiently after its one retry, the last
+successfully fetched *and validated* copy keeps being served for at most 24 h past its
+fetch; a document that now fails validation, a deterministically failing fetch (4xx, TLS,
+size cap, content type), a lapsed grace window, and a client never seen valid all fail
+closed — nothing stale is ever invented); codes bind `client_id` + validated
+`redirect_uri` at issuance, so `redirect_uris` changed mid-flow widen nothing. Note on
+observability: the `cimd_served` security-event line records a document *served* (fresh
+fetch or stale grace) — it fires before redirect-uri validation and the `oauth_clients`
+upsert, so it is not a record of an accepted client; a served document can still be
+rejected moments later by validation.
 
 **Refresh tokens rotate-or-die — a deliberate support-surface tradeoff.** Refresh tokens
 are one-time-use and rotate on every exchange; any replay of a rotated token — including
@@ -313,7 +322,7 @@ retention window retires them — see the restore-drill warning in
 | API4 | Unrestricted Resource Consumption | 🟡 | Broken IP attribution (H1), uncapped uploads (H3), cost-bearing external calls per listing/chat. Rate limits *exist* on paper for `/mcp`, auth, chat; chat cost is now hard-capped by the THI-180 daily token budget (residuals: restart resets, estimate-fallback under-count on non-usage-reporting providers — see §3.4). |
 | API5 | Function Level Authorization | ✅ | Every write tool requires seller; public tools are read-only by construction. |
 | API6 | Sensitive Business Flows | ❌ | Signup and listing-creation flows have no abuse controls beyond (broken) IP limits. → H4 |
-| API7 | Server Side Request Forgery | 🟡 contained | One server-side fetch of a user-chosen URL exists today: when `client_id` is an `https://` URL, `/oauth/authorize` fetches it as an OAuth Client ID Metadata Document (CIMD, PR #290; `src/oauth-cimd.ts`). Containment: https on the default port with a DNS hostname (IP literals, userinfo, fragments, dot segments rejected; ≤ 2048 bytes), every resolved address must be public — checked *inside the socket's own lookup*, so DNS rebinding cannot slip a private address past (loopback, RFC 1918, CGNAT, link-local/metadata, and v4-mapped/NAT64/6to4/Teredo ranges all refused, fail-closed), redirects never followed, 5 s timeout, 5 KB response cap, JSON content-type only, 20 failed fetches per URL per hour, 1 h / 500-entry success cache. Everything else stays no-fetch: images are stored, not fetched; embed/LLM URLs come from env. Webhooks remain future work — see §2 boundary 6 before the first one ships. See §2a for what CIMD means for client identity. |
+| API7 | Server Side Request Forgery | 🟡 contained | One server-side fetch of a user-chosen URL exists today: when `client_id` is an `https://` URL, `/oauth/authorize` fetches it as an OAuth Client ID Metadata Document (CIMD, PR #290; `src/oauth-cimd.ts`). Containment: https on the default port with a DNS hostname (IP literals, userinfo, fragments, dot segments rejected; ≤ 2048 bytes), every resolved address must be public — checked *inside the socket's own lookup*, so DNS rebinding cannot slip a private address past (loopback, RFC 1918, CGNAT, link-local/metadata, and v4-mapped/NAT64/6to4/Teredo ranges all refused, fail-closed), redirects never followed, 5 s timeout, 5 KB response cap, JSON content-type only, transient fetch failures retried once after a fixed short delay (deterministic failures — 4xx, TLS identity, size cap, content type — never retried), 20 failed fetches per URL per hour, 1 h / 500-entry success cache; when a refresh is limiter-denied or still fails transiently after the retry, the last validated copy may be served stale for at most 24 h past its fetch (fail-closed otherwise). Everything else stays no-fetch: images are stored, not fetched; embed/LLM URLs come from env. Webhooks remain future work — see §2 boundary 6 before the first one ships. See §2a for what CIMD means for client identity. |
 | API8 | Security Misconfiguration | ⚠️ | Baseline headers shipped (CSP without inline script, HSTS, nosniff, Referrer-Policy; `x-powered-by` off). Still open: `trust proxy` unset, `SESSION_SECRET` not wired into prod compose. → H1 |
 | API9 | Inventory | ✅ small | One repo, one VPS, one npm package, one MCP registry entry. Stdio mode (`npx thingery`) is a second deployment shape — keep it in mind when adding env-dependent features. |
 | API10 | Unsafe Consumption of APIs | ⚠️ | LLM/embedding responses are trusted: `embedText` casts responses to `number[]` without validation; LLM `tool_calls` are executed directly (bounded by the seller session and a 6-round loop). Acceptable now; revisit with H5. |

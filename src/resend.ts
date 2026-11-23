@@ -18,6 +18,7 @@ export interface ResendOptions {
   apiKey?: string; // default: RESEND_API_KEY (empty = unset, F1)
   baseUrl?: string; // default: https://api.resend.com (tests override)
   fromAddress?: string; // default: notifyConfig().fromAddress (NOTIFY_FROM_ADDRESS)
+  replyToAddress?: string; // default: notifyConfig().replyToAddress (NOTIFY_REPLY_TO_ADDRESS)
   fetchImpl?: typeof fetch; // test seam
 }
 
@@ -30,6 +31,7 @@ export class ResendMailer implements Mailer {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly from: string;
+  private readonly replyTo: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(opts: ResendOptions = {}) {
@@ -41,8 +43,13 @@ export class ResendMailer implements Mailer {
     }
     this.apiKey = key;
     this.baseUrl = opts.baseUrl ?? "https://api.resend.com";
-    // Plan §3 adopted decision #4: fixed no-reply sender, no Reply-To.
+    // THI-1280 (supersedes plan §3 adopted decision #4): transactional sends
+    // default to noreply@, and every send carries the support@ Reply-To so
+    // user replies land in a monitored alias. Per-message from/replyTo on the
+    // MailMessage overrides these (delivery sweep stamps digests as
+    // notifications@).
     this.from = opts.fromAddress ?? notifyConfig().fromAddress;
+    this.replyTo = opts.replyToAddress ?? notifyConfig().replyToAddress;
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
@@ -56,7 +63,10 @@ export class ResendMailer implements Mailer {
           "Idempotency-Key": message.idempotencyKey,
         },
         body: JSON.stringify({
-          from: this.from,
+          from: message.from ?? this.from,
+          ...(message.replyTo ?? this.replyTo
+            ? { reply_to: message.replyTo ?? this.replyTo }
+            : {}),
           to: message.to,
           subject: message.subject,
           text: message.text,

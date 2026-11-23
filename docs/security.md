@@ -147,6 +147,72 @@ user. We accept that tradeoff; `refresh_replay` security events are the support 
 to watch. Optional future hardening if disconnect complaints spike: a short (~30 s)
 grace window for just-rotated tokens instead of an instant family kill.
 
+## 2b. OAuth audience binding — the single-resource invariant
+
+Thingery's authorization server and its resource server are the same origin, and the
+AS serves **exactly one protected resource**: `${issuer}/mcp` — the only value
+advertised at `/.well-known/oauth-protected-resource` (`src/oauth.ts`
+`protectedResourceDoc`) and the only value `/oauth/authorize` accepts (anything else
+is `invalid_target`). Access and refresh tokens are opaque random values stored
+hashed in `oauth_tokens` — **no audience claim, no audience column** — and are
+validated only at the deployment's own `/mcp` gate. `issuer` is per-deployment
+(`PUBLIC_BASE_URL`, else the request origin), so a token can never be valid at
+another deployment's resource server either.
+
+**Relaxed resource echo at token exchange is safe only under this invariant**
+(THI-1219 / PR #360, reviewed in THI-1220). RFC 8707 resource indicators exist to
+prevent cross-audience token substitution; that attack requires ≥2 audiences. A code
+exchange that *presents* a `resource` must match the code's binding (`invalid_grant`
+otherwise), but an exchange that *omits* the parameter is treated as asking for the
+code's own audience — strict echo was relaxed because strict rejection
+deterministically broke clients that bind `resource` at authorize yet omit it at
+exchange (the claude.ai connector shape: grants issued, zero tokens ever minted).
+With exactly one resource, an omission-path token is indistinguishable from a
+presented-path one and is usable only at this deployment's `/mcp`: omission cannot
+widen the grant. The refresh path never required a resource echo at all, so the two
+grant paths are now symmetric.
+
+**The invariant is load-bearing — breaking it requires reverting the echo first.**
+Before this AS ever serves a second resource, or before AS and RS split into
+separate origins, one of these must ship *first*: (a) revert token exchange to
+strict echo (a presented `resource` is required and must match), and/or (b) persist
+the code's `resource` onto the token grant (`oauth_grants`/`oauth_tokens` carry none
+today — `db/schema.sql`) and **enforce audience at the RS gate** on `/mcp`. A second
+audience shipping without either is a token-confusion vulnerability (RFC 8707 §3,
+Security Considerations), not a configuration change. PRs touching `src/oauth.ts`
+re-check this invariant per §10.
+
+**Known edge, same invariant (pre-existing, not a regression):** a code authorized
+*without* `resource` (`oauth_codes.resource IS NULL`) accepts **any** presented
+resource at exchange — the binding check skips when the code carries no audience. In
+a single-RS AS this is a no-op: there is no wrong audience to substitute, so it is
+recorded here rather than fixed. It is subsumed by the invariant above — the moment
+a second resource exists, this edge becomes an audience-substitution path and closes
+with it.
+
+**Token-endpoint security events — detection signal, not an oracle.** Since PR #360,
+every failure at `/oauth/token` emits a server-side security event (logs only;
+HTTP responses are unchanged and disclose no more than before). Families:
+
+- `token_exchange_failed` `{reason, client_id ≤200 chars, ip}` — every non-replay
+  code-exchange failure (unknown client, missing/malformed params, unknown/expired
+  code, client or redirect mismatch, failed PKCE). `reason` is a short internal
+  enum; `client_id` is attacker-controlled input, truncated and JSON-escaped so it
+  cannot forge log lines. Before this event, the claude.ai-class outage took a DB
+  pull to even localize; now it is greppable.
+- `code_replay` `{client_id, grant_id, ip}` — a consumed authorization code
+  presented again: theft signal per RFC 6749 §4.1.2; the entire grant family is
+  revoked, not just the presentation.
+- `refresh_wrong_client` `{client_id, grant_id, ip}` — valid refresh token,
+  wrong client: lifted-from-a-config theft signature; family revoked.
+- `refresh_replay` `{client_id, grant_id, ip}` — a rotated-then-reused refresh
+  token: the pair was duplicated; family revoked (§2a rotate-or-die).
+
+**Never logged at any of these sites:** the authorization code, the
+`code_verifier`, or any token material. Event volume is flood-bounded by the
+token-endpoint rate limiters (60/h per IP+client_id, default 600/h per IP via
+`OAUTH_TOKEN_IP_HOURLY_LIMIT`).
+
 ## 3. Threat model
 
 ### 3.1 Named risks
@@ -1018,7 +1084,7 @@ are met and names where the remediation is tracked.
 
 ## 10. Keeping this document honest
 
-Review triggers: any PR touching `src/auth.ts`, `src/rate-limit.ts`, `src/routes.ts`,
+Review triggers: any PR touching `src/auth.ts`, `src/oauth.ts`, `src/rate-limit.ts`, `src/routes.ts`,
 `src/chat.ts`, `src/tools.ts`, `db/schema.sql`, the CI/deploy workflows, or the VPS
 runbook must check whether this document still tells the truth and update it in the same
 PR (or open a follow-up issue saying what changed). The Security role re-verifies the

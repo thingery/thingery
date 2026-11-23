@@ -10,6 +10,7 @@ import {
   createMetadataDocumentResolver,
   fetchMetadataDocument,
   isBlockedAddress,
+  isTransientNetworkError,
   parseMetadataDocumentUrl,
   publicOnlyLookup,
   readMetadataDocument,
@@ -174,5 +175,139 @@ describe("createMetadataDocumentResolver", () => {
 
     await expect(resolve("https://10.0.0.1/metadata")).rejects.toMatchObject({ reason: "invalid_url" });
     expect(fetchDocument).not.toHaveBeenCalled();
+  });
+
+  it("reports a cache hit with no attempts", async () => {
+    let now = 0;
+    const fetchDocument = vi.fn().mockResolvedValue(DOCUMENT);
+    const resolve = createMetadataDocumentResolver(fetchDocument, () => now);
+
+    await resolve(CLIENT_ID);
+    const resolved = await resolve(CLIENT_ID);
+    expect(resolved.source).toBe("cache");
+    expect(resolved.attempts).toBe(0);
+    expect(fetchDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a transient failure once and reports a fresh resolve with 2 attempts", async () => {
+    const fetchDocument = vi
+      .fn()
+      .mockRejectedValueOnce(new CimdError("fetch_failed", "timeout", true))
+      .mockResolvedValueOnce(DOCUMENT);
+    const resolve = createMetadataDocumentResolver(fetchDocument, () => 0, 0);
+
+    const resolved = await resolve(CLIENT_ID);
+    expect(fetchDocument).toHaveBeenCalledTimes(2);
+    expect(resolved.source).toBe("fresh");
+    expect(resolved.attempts).toBe(2);
+    expect(resolved.client).toEqual({
+      client_id: CLIENT_ID,
+      display_name: "claude.ai",
+      redirect_uris: DOCUMENT.redirect_uris,
+    });
+  });
+
+  it("serves the retry's success from cache afterwards", async () => {
+    const fetchDocument = vi
+      .fn()
+      .mockRejectedValueOnce(new CimdError("fetch_failed", "timeout", true))
+      .mockResolvedValueOnce(DOCUMENT);
+    const resolve = createMetadataDocumentResolver(fetchDocument, () => 0, 0);
+
+    await resolve(CLIENT_ID);
+    const resolved = await resolve(CLIENT_ID);
+    expect(resolved.source).toBe("cache");
+    expect(fetchDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry deterministic failures", async () => {
+    const fetchDocument = vi.fn().mockRejectedValue(new CimdError("fetch_failed", "status 404", false));
+    const resolve = createMetadataDocumentResolver(fetchDocument, () => 0, 0);
+
+    const error = await resolve(CLIENT_ID).catch((e) => e as CimdError);
+    expect(error.reason).toBe("fetch_failed");
+    expect(error.attempts).toBe(1);
+    expect(fetchDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("attaches attempts and elapsed time when every attempt fails", async () => {
+    let tick = 0;
+    const fetchDocument = vi.fn().mockRejectedValue(new CimdError("fetch_failed", "timeout", true));
+    const resolve = createMetadataDocumentResolver(fetchDocument, () => (tick += 5), 0);
+
+    const error = await resolve(CLIENT_ID).catch((e) => e as CimdError);
+    expect(error.reason).toBe("fetch_failed");
+    expect(error.attempts).toBe(2);
+    expect(error.elapsedMs).toBeGreaterThan(0);
+    expect(fetchDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares one load (and its retry) between concurrent requests", async () => {
+    const fetchDocument = vi
+      .fn()
+      .mockRejectedValueOnce(new CimdError("fetch_failed", "getaddrinfo EAI_AGAIN claude.ai", true))
+      .mockResolvedValueOnce(DOCUMENT);
+    const resolve = createMetadataDocumentResolver(fetchDocument, () => 0, 0);
+
+    const [a, b] = await Promise.all([resolve(CLIENT_ID), resolve(CLIENT_ID)]);
+    expect(fetchDocument).toHaveBeenCalledTimes(2); // one load, one retry — not two loads
+    expect(a.client).toEqual(b.client);
+    expect(a.attempts).toBe(2);
+  });
+
+  it.each([
+    ["timeout", new CimdError("fetch_failed", "timeout", true), 2],
+    ["DNS EAI_AGAIN", new CimdError("fetch_failed", "getaddrinfo EAI_AGAIN claude.ai", true), 2],
+    ["HTTP 503", new CimdError("fetch_failed", "status 503", true), 2],
+    ["HTTP 404", new CimdError("fetch_failed", "status 404", false), 1],
+    ["TLS identity", new CimdError("fetch_failed", "Hostname/IP does not match certificate's altnames", false), 1],
+    ["size cap", new CimdError("fetch_failed", "document too large", false), 1],
+    ["content-type", new CimdError("fetch_failed", "not JSON", false), 1],
+    ["invalid document", new CimdError("invalid_document", "client_id in the document does not match its URL", false), 1],
+  ])("classification: %s → %i fetch call(s)", async (_label, error, expectedCalls) => {
+    const fetchDocument = vi.fn().mockRejectedValue(error);
+    const resolve = createMetadataDocumentResolver(fetchDocument, () => 0, 0);
+
+    await expect(resolve(CLIENT_ID)).rejects.toBe(error);
+    expect(fetchDocument).toHaveBeenCalledTimes(expectedCalls);
+  });
+
+  it("burns one limiter token per resolve, not per attempt", async () => {
+    const fetchDocument = vi.fn().mockRejectedValue(new CimdError("fetch_failed", "timeout", true));
+    const resolve = createMetadataDocumentResolver(fetchDocument, () => 0, 0);
+
+    for (let i = 0; i < 20; i++) {
+      await expect(resolve(CLIENT_ID)).rejects.toMatchObject({ reason: "fetch_failed", attempts: 2 });
+    }
+    expect(fetchDocument).toHaveBeenCalledTimes(40); // 20 resolves × 2 GETs, still one token each
+    await expect(resolve(CLIENT_ID)).rejects.toMatchObject({ reason: "rate_limited" });
+    expect(fetchDocument).toHaveBeenCalledTimes(40); // no fetch behind the limiter
+  });
+});
+
+describe("isTransientNetworkError", () => {
+  it.each(["ENOTFOUND", "EAI_AGAIN", "EAI_NODATA", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "EPIPE"])(
+    "treats %s as transient",
+    (code) => {
+      expect(isTransientNetworkError(Object.assign(new Error("x"), { code }))).toBe(true);
+    },
+  );
+
+  it("treats getaddrinfo failures without a code as transient", () => {
+    expect(isTransientNetworkError(new Error("getaddrinfo EAI_AGAIN claude.ai"))).toBe(true);
+  });
+
+  it.each([
+    "ERR_TLS_CERT_ALTNAME_INVALID",
+    "CERT_HAS_EXPIRED",
+    "DEPTH_ZERO_SELF_SIGNED_CERT",
+    "EBLOCKED",
+    "EACCES",
+  ])("treats %s as not transient", (code) => {
+    expect(isTransientNetworkError(Object.assign(new Error("x"), { code }))).toBe(false);
+  });
+
+  it("treats non-errors as not transient", () => {
+    expect(isTransientNetworkError("timeout")).toBe(false);
   });
 });

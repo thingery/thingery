@@ -32,6 +32,10 @@ const EXPECTED: Record<
   // seller input — one LLM call, nothing persisted (readOnlyHint). It calls
   // out to the operator's LLM provider, hence openWorldHint.
   draft_listing: { title: "Draft a listing", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  // THI-816 (P1-4 format_listing, spec THI-813 §5): deterministic string
+  // assembly over the seller's own item — no LLM, no external call, nothing
+  // persisted, same args → same copy (idempotentHint); openWorldHint false.
+  format_listing: { title: "Format listing for another platform", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   update_listing: { title: "Update listing", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   create_order: { title: "Create order", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   cancel_order: { title: "Cancel order", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },

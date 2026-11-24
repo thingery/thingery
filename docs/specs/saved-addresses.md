@@ -129,14 +129,23 @@ Amended 2026-11-19: the check runs on Sendcloud's v3 address validation
 (`verifySendcloudAddress`, `src/sendcloud.ts`) — EasyPost remains the labels/tracking
 processor only. It runs when both `SENDCLOUD_API_KEY` and `SENDCLOUD_VALIDATE_CARRIER_CODE`
 are set (the validate API requires a carrier available on the account). Saving or editing an
-address calls the validation once. The result is stored in `verification`:
+address calls the validation once. The result is stored in `verification`.
+
+**Rev 2 (shipping-provider-layer spec): the check now runs on the ACTIVE shipping provider's
+interface** (`verifyAddress` + capability flag; Shippo when `SHIPPING_PROVIDER=shippo` +
+`SHIPPO_API_KEY`), with a provider-prefixed `reason` code added on `unverified`. The Sendcloud
+paragraph above describes the retired path; the statuses, storage, and caps below are
+unchanged and remain authoritative.
 
 | `status` | Meaning | UI |
 |---|---|---|
 | `verified` | Deliverable as written | Nothing extra |
 | `suggested` | Deliverable with corrections | "Did you mean …?" with the suggestion; one tap to accept it |
-| `unverified` | The carrier could not confirm it | A warning; the address can still be saved and used |
+| `unverified` | The provider could not confirm it | A warning; the address can still be saved and used |
 | `not_checked` | No key, provider down, or limit reached | Nothing extra |
+
+On `unverified` records an optional provider-prefixed `reason` code (max 80 chars, e.g.
+`shippo_address_invalid`) may ride along — value-free, never address content.
 
 Rules for the check:
 - **Advisory only:** carrier data has gaps in some countries, so a valid address must never be

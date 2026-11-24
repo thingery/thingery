@@ -19,6 +19,29 @@ An agent publishes a listing in three calls:
 
 Then `my_listings` lists the seller's items, and `update_listing` marks one reserved or sold, changes the price or edits the text.
 
+## Single-player mode
+
+Thingery works with zero buyers: catalog items now, sell them later. The same three tools above plus two more cover the whole loop.
+
+<Steps>
+  <Step title="Draft from a photo or one line">
+    `draft_listing` turns one photo (base64, max 5 MB) and/or a one-line description into a **proposal**: title, category, condition, brand, registry-validated attributes, per-field confidence, a fair-market-value range from real comparable listings, and `open_questions` to confirm with the seller. Nothing is created or published — review the draft, then call `create_listing` yourself. It costs one LLM call per draft on the operator's account (10 drafts/hour/seller, plus a deployment-wide daily budget; exhausted budgets fail closed until the next UTC day, and a text-only draft is the cheaper path). If the deployment has no extraction key configured, the call fails closed — identify and price the item manually instead.
+  </Step>
+  <Step title="Save to private inventory">
+    `create_listing` accepts `status: "stored"` (default `"active"`). A stored item is your private inventory: buyers, search and other agents never see it — `get_item` answers `not_found` to anyone but the owner, and it is excluded from buyer-alert matching. You see your stored items with `my_listings` (optionally `status: "stored"`).
+  </Step>
+  <Step title="Flip to for-sale">
+    `update_listing` with `status: "active"` puts a stored item on the market instantly — photos, attributes, price and search indexing are all preserved, so there is no re-entry. Buyer alerts fire on the flip. Transition rules: only an `active` item can be stored; a stored item flips to `active` or `deleted` only; a live order blocks storing (typed errors `invalid_item_transition` / `item_in_order`).
+  </Step>
+  <Step title="Export listing copy">
+    `format_listing` turns one of your items into ready-to-paste copy for Subito, Vinted, Wallapop or eBay — a title clamped to the platform limit, a structured description with a market-range line, platform-labeled fields, and a versioned JSON envelope for API use. `language`: `"it"` (default) or `"en"`. Deterministic and export-only: nothing is posted anywhere; you paste the copy yourself.
+  </Step>
+</Steps>
+
+### Draft photo privacy
+
+When a draft is created, the photo and text are sent to the LLM provider configured by this Thingery deployment solely to produce the structured draft. Photos are stripped of metadata (EXIF/GPS) and downsampled before they leave the server, and inputs are not stored: nothing is retained from the extraction call — no images, no model conversation. Only the listing the seller explicitly confirms and publishes is saved. Design records: [ADR 0010](https://github.com/thingery/thingery/blob/main/docs/adr/0010-stored-status.md) covers the `stored` status; the draft extraction pipeline is documented in the [tool reference](/tools/listings).
+
 ## Listings need a photo
 
 A listing with no photo is **pending**: it is hidden from search, browse and category counts, and its item page shows placeholder art and is not indexed.
@@ -46,4 +69,4 @@ To get paid through Thingery with buyer protection, a seller finishes Stripe onb
 
 ## Agent skill
 
-The [`sell-item` skill](https://github.com/thingery/thingery/blob/main/skills/sell-item/SKILL.md) walks an agent through the whole pipeline: photos, identifying the item, pricing and publishing.
+The [`sell-item` skill](https://github.com/thingery/thingery/blob/main/skills/sell-item/SKILL.md) walks an agent through the whole pipeline: photos, identifying the item, pricing, publishing — or saving to private inventory and exporting platform copy.

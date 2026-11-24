@@ -144,7 +144,7 @@ export function orderFlowConfig(): OrderFlowConfig {
   // ignored with a boot warning (never silently mixed). An unrecognized value
   // fails closed: boot error + shipping fully disabled, regardless of which
   // API keys are present.
-  const AVAILABLE_SHIPPING_PROVIDERS = ["easypost"] as const;
+  const AVAILABLE_SHIPPING_PROVIDERS = ["easypost", "shippo"] as const;
   const providerRaw = envValue("SHIPPING_PROVIDER");
   let shippingProvider: ShippingProviderId = "easypost";
   let shippingSelectionValid = true;

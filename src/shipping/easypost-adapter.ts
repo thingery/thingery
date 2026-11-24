@@ -165,4 +165,15 @@ export class EasyPostShippingProvider implements ShippingProvider {
     // row; any content change is a new event (transition guard no-ops).
     return `${this.id}:${crypto.createHash("sha256").update(raw).digest("hex")}`;
   }
+
+  /** No verification capability in scope (amended spec): verification under
+   *  a default/easypost deployment is `not_checked` — identical to today's
+   *  behavior for deployments without a Sendcloud key (the feature shipped
+   *  dark; no live Sendcloud account exists). The services pre-check the
+   *  flag BEFORE caps, so no budget is ever consumed on this path. */
+  readonly supportsAddressVerification = false;
+
+  verifyAddress(_input: ProviderAddress, _signal?: AbortSignal): Promise<null> {
+    return Promise.resolve(null);
+  }
 }

@@ -11,6 +11,7 @@
 import type { OrderFlowConfig } from "../config.js";
 import type { ShippingProvider, ShippingProviderId } from "./provider.js";
 import { EasyPostShippingProvider } from "./easypost-adapter.js";
+import { ShippoShippingProvider } from "./shippo-adapter.js";
 
 /** Adding a provider: implement ShippingProvider in src/shipping/, add the
  *  factory here, extend AVAILABLE_SHIPPING_PROVIDERS (src/config.ts), and add
@@ -24,11 +25,10 @@ export function getShippingProvider(cfg: OrderFlowConfig): ShippingProvider {
         webhookSecretPrevious: cfg.carrierWebhookSecretPrevious,
       });
     case "shippo":
-      // No shippo adapter exists yet (THI-1247 extends the registry);
-      // config.ts already fails SHIPPING_PROVIDER=shippo closed, so this is
-      // unreachable through config — never fabricate a provider for an id
-      // without an adapter.
-      throw new Error('no shipping provider adapter for "shippo"');
+      return new ShippoShippingProvider({
+        webhookSecret: cfg.carrierWebhookSecret,
+        webhookSecretPrevious: cfg.carrierWebhookSecretPrevious,
+      });
   }
 }
 

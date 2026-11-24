@@ -2,7 +2,11 @@
 
 - **Status:** Accepted design, Security-reviewed (design note v2) — implementation in flight
 - **Date:** 2026-11-18; amended 2026-11-19 (provider moved to Sendcloud v3 — verification
-  only; labels/tracking stay on EasyPost)
+  only; labels/tracking stay on EasyPost); **rev 2 (shipping-provider-layer spec): the
+  check runs on the ACTIVE shipping provider's interface** (`verifyAddress` + capability
+  flag; Shippo when `SHIPPING_PROVIDER=shippo`). The Sendcloud sections below describe the
+  retired path — kept for history; the state machine, caps, cache, F2, and §5a rules are
+  unchanged and remain authoritative.
 - **Author:** Architect
 - **Decision:** product decision, 2026-11-18 — shippable orders get one advisory carrier
   address check at creation; a suggested correction pauses the order once and lets the buyer

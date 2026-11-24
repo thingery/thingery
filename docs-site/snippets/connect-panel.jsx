@@ -99,6 +99,23 @@ export const ConnectPanel = ({ url = "https://thingery.dev/mcp" }) => {
           code: `code --add-mcp '${vscodeConfig}'`,
         },
         {
+          title: "OpenCode",
+          body: "Add this to opencode.json. OpenCode signs in with OAuth when the server asks for it.",
+          code: JSON.stringify(
+            {
+              "$schema": "https://opencode.ai/config.json",
+              mcp: { servers: { thingery: { type: "remote", url } } },
+            },
+            null,
+            2,
+          ),
+        },
+        {
+          title: "Pi",
+          body: "Run this once in your terminal, then sign in: /mcp login thingery in a session, or pi mcp login thingery from the shell.",
+          code: `pi mcp add thingery --url ${url}`,
+        },
+        {
           title: "Any MCP client",
           body: "Add this URL as a remote server over Streamable HTTP. Clients without OAuth send an API key instead.",
           code: url,

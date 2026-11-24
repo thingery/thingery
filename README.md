@@ -70,7 +70,7 @@ rejected with `400` rather than silently falling back to the full tool set.
 | Topic | Where |
 |---|---|
 | First search and first listing | [Quickstart](https://docs.thingery.dev/quickstart) |
-| Claude, ChatGPT, Cursor, VS Code, stdio, plain HTTP | [Connect a client](https://docs.thingery.dev/connect) |
+| Claude, ChatGPT, Cursor, VS Code, OpenCode, Pi, stdio, plain HTTP | [Connect a client](https://docs.thingery.dev/connect) |
 | OAuth and API keys | [Authentication](https://docs.thingery.dev/authentication) |
 | Selling, buying, orders, alerts, wanted board | [Guides](https://docs.thingery.dev/guides/selling) |
 | Every MCP tool and its parameters | [MCP tools](https://docs.thingery.dev/tools/overview) |

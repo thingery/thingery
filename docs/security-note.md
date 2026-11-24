@@ -34,7 +34,7 @@ Read this list before trusting Thingery with anything sensitive.
 - **In-memory rate limiting.** Limits are per-process (single instance today); a multi-instance deployment would need shared state.
 - **External image URLs.** Listings may reference third-party image URLs; viewing them can disclose your IP to that host. We recommend image hosts you trust.
 - **CSP allows inline styles** (`style-src 'unsafe-inline'`) — cosmetic risk, but not strict CSP.
-- **npm/hosted feature drift.** The npm package (0.1.2, 16 tools) lags the hosted endpoint (20 tools incl. buyer intents); [releases](https://github.com/thingery/thingery/releases) track the delta.
+- **npm/hosted feature drift.** The npm package and the hosted endpoint release separately and can drift; as of 2026-11-24 the npm package is 0.2.0 and the hosted canonical `/mcp` exposes 43 tools. [Releases](https://github.com/thingery/thingery/releases) track the delta.
 
 ## Reporting security issues
 

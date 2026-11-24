@@ -90,7 +90,7 @@ Connectors Directory) should use the directory profile instead of the canonical 
 https://thingery.dev/mcp?profile=directory
 ```
 
-It registers only the 15 item-discovery, listing-authoring, and wanted-board tools;
+It registers only the 18 item-discovery, listing-authoring, and wanted-board tools;
 ordering and payments complete on thingery.dev. The canonical `/mcp` (no parameter)
 keeps the full tool surface for self-hosters, registries, and direct clients.
 Authentication is identical on both URLs — included seller tools keep the OAuth

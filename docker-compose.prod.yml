@@ -158,13 +158,19 @@ services:
     volumes:
       # Uploaded item images survive redeploys
       - uploads:/app/uploads
-    # THI-312: keep stdout/stderr (security events, startup) on disk across
-    # container restarts, bounded by rotation. See docs/deploy-vps.md §7.
+    # THI-312: keep stdout/stderr (security events, startup) on disk. THI-1330:
+    # the app writes to the host's persistent systemd journal instead of the
+    # json-file driver, because json-file is per-container and every deploy
+    # recreate (new container ID) starts an empty log — wiping the window that
+    # log-based watches and forensics need. Journal entries survive container
+    # recreation; `docker logs` still works for the running container. The
+    # stable `tag` gives `journalctl -t thingery-app` a query path that is
+    # invariant across deploys. Rotation is the journal's own vacuum (see
+    # docs/deploy-vps.md §7). db/caddy keep json-file (unchanged blast radius).
     logging:
-      driver: json-file
+      driver: journald
       options:
-        max-size: "10m"
-        max-file: "3"
+        tag: "thingery-app"
     # Internal only; Caddy terminates TLS and proxies to it.
     expose:
       - "3000"

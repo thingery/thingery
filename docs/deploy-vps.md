@@ -1094,25 +1094,39 @@ the next rebuild starts filling the cache again; nothing else depends on it.
 
 ## 7. Logs: Caddy access log + container output
 
-THI-312: every container's stdout/stderr goes to Docker's `json-file` driver with
-rotation (`max-size: 10m`, `max-file: 3` per service — `docker-compose.prod.yml`),
-and the Caddyfile has an access-log directive (`log` in the `thingery.dev` site
-block), so each request logs client IP, method, path, status, and User-Agent as one
-JSON line.
+THI-312: container stdout/stderr stays on disk; THI-1330 extends that across deploy
+**recreates**. The `app` service logs to the host's persistent systemd journal
+(`logging: driver: journald`, `tag: thingery-app` in `docker-compose.prod.yml`) —
+journal entries are keyed per-message, not per-container, so they survive the
+countless `thingery-app-1` recreations an auto-deploy performs. `db`, `caddy`, and
+the `web` overlay services keep the `json-file` driver with rotation
+(`max-size: 10m`, `max-file: 3` per service). The Caddyfile has an access-log
+directive (`log` in the `thingery.dev` site block), so each request logs client IP,
+method, path, status, and User-Agent as one JSON line.
 
 - **Read them:**
-  `docker compose -f docker-compose.prod.yml logs caddy` (access log) and
-  `... logs app` (startup + security events). `-f` follows, `--since 1h` limits.
-- **Survives restarts:** a `docker compose restart`, a crash, or a VPS reboot keeps
-  the same container and its log file (`restart: unless-stopped` reuses the
-  container). A *recreate* (deploy or compose/config change) starts a fresh log
-  file — the nightly DB backups remain the durable record of state; these logs are
-  for operational debugging, not an audit trail.
-- **Bounded disk:** at most 3 × 10 MB per service — no disk-fill risk on the small
-  VPS disk.
+  `docker compose -f docker-compose.prod.yml logs caddy` (access log),
+  `... logs app` or `docker logs thingery-app-1` (app — running container only), and
+  `sudo journalctl -t thingery-app` (app — full history). `-f` follows,
+  `--since 1h` / `--since "2026-11-23 22:30" --until "2026-11-24 06:10"` limit.
+- **Survives restarts and recreates (app, THI-1330):** restarts, crashes, VPS
+  reboots, *and* deploy-driven recreates all keep app logs readable — the journal is
+  written by the host daemon and outlives every container. Query a pre-deploy window
+  even after the old container is gone:
+  `sudo journalctl -t thingery-app --since ... --until ...`.
+  (`CONTAINER_NAME=thingery-app-1` / `CONTAINER_ID_FULL=<id>` filters also work, as
+  does `journalctl CONTAINER_NAME=... -f`.) `db`/`caddy` keep the THI-312 caveat:
+  same-container restarts preserve their `json-file` logs; a recreate starts a
+  fresh log file — nightly DB backups remain the durable record of state.
+- **Bounded disk (app):** app stdout is small in practice (~0.4 MB/day observed),
+  and the journal self-vacuums to host defaults (≤10% of the filesystem, stops at
+  15% free) — `journalctl --disk-usage` shows the total, `sudo journalctl --vacuum-size=500M`
+  shrinks it on demand. Note journald applies rate limiting (~10k messages/30s);
+  a pathological app burst would be sampled, not dropped silently — look for
+  "Suppressed" lines. `json-file` services stay bounded at 3 × 10 MB each.
 - **Confidentiality:** access lines contain client IPs and user agents — operator
-  data, not public data. Do not paste raw access logs into public issues; strip IPs
-  first.
+  data, not public data. The journal is root/`systemd-journal`-group-readable only.
+  Do not paste raw access logs into public issues; strip IPs first.
 
 ## 8. Scaling later
 

@@ -36,7 +36,13 @@ permissions:
   pull-requests: read   # list merged PRs and their reviews
   issues: write         # create/append the tracking alert issue
   actions: read         # read own run history for the incremental window
-  administration: read  # read branch protection on main
+  # NOTE: `administration` is NOT a valid workflow permission scope: the
+  # built-in GITHUB_TOKEN cannot hold admin scope, and an invalid scope
+  # makes GitHub reject the whole file (startup_failure on every trigger;
+  # observed on every gate-integrity run since 2026-11-19). Branch
+  # protection is therefore unreadable from Actions: the script degrades
+  # to an explicit "drift check skipped" log line; the enforce_admins
+  # baseline is verified owner-scope per THI-1061 remediation (a).
 
 concurrency:
   group: gate-integrity

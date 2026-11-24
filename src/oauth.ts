@@ -10,6 +10,7 @@ import {
   createMetadataDocumentResolver,
   isMetadataDocumentClientId,
   type MetadataDocumentClient,
+  type ResolvedClient,
 } from "./oauth-cimd.js";
 
 // MCP OAuth one-click onboarding — spec THI-11 rev 2.
@@ -723,29 +724,53 @@ async function clientById(clientId: string): Promise<ClientRow | null> {
 
 const resolveMetadataDocument = createMetadataDocumentResolver();
 
+// Error detail is resolver-internal only (hostnames, statuses, OS error codes); a standing
+// security review condition keeps it from ever growing into document fields or payloads.
+const CIMD_DETAIL_MAX_CHARS = 300;
+
 /**
  * A client whose client_id is a metadata document URL (CIMD). Its row in oauth_clients is
  * written from the document on every authorize, so codes, grants, tokens and Connected
  * apps treat it like a registered client, and a changed document takes effect within the
- * resolver's cache lifetime. The name shown is the document's host, which the fetch
+ * resolver's cache lifetime (≤ 24 h while refreshes fail and a validated copy exists).
+ * The name shown is the document's host, which the fetch
  * proved, never its self-declared client_name. Null when the document cannot be used.
  */
 async function clientFromMetadataDocument(clientId: string): Promise<ClientRow | null> {
-  const rejected = (reason: string): null => {
-    securityEvent("cimd_rejected", { reason, client_id: clientId.slice(0, 200) });
+  const rejected = (reason: string, extra: Record<string, unknown> = {}): null => {
+    securityEvent("cimd_rejected", { reason, client_id: clientId.slice(0, 200), ...extra });
     return null;
   };
-  let document: MetadataDocumentClient;
+  let resolved: ResolvedClient;
   try {
-    document = await resolveMetadataDocument(clientId);
+    resolved = await resolveMetadataDocument(clientId);
   } catch (e) {
-    if (e instanceof CimdError) return rejected(e.reason);
+    if (e instanceof CimdError) {
+      const extra: Record<string, unknown> = { detail: e.detail.slice(0, CIMD_DETAIL_MAX_CHARS) };
+      if (e.attempts !== undefined) extra.attempts = e.attempts;
+      if (e.elapsedMs !== undefined) extra.elapsed_ms = e.elapsedMs;
+      return rejected(e.reason, extra);
+    }
     throw e;
+  }
+  // Cache hits stay silent: this logs the rare non-cache paths (fetch latency + attempts).
+  if (resolved.source !== "cache") {
+    const served: Record<string, unknown> = {
+      client_id: clientId.slice(0, 200),
+      source: resolved.source,
+      attempts: resolved.attempts,
+      elapsed_ms: resolved.elapsedMs,
+    };
+    // Stale serves only: what failed and why the last validated copy stepped in. Sustained
+    // `source: "stale"` for one client_id is the ops signal for deliberate retention pinning.
+    if (resolved.refreshReason !== undefined) served.refresh_reason = resolved.refreshReason;
+    if (resolved.refreshDetail !== undefined) served.detail = resolved.refreshDetail.slice(0, CIMD_DETAIL_MAX_CHARS);
+    securityEvent("cimd_served", served);
   }
   let registration: ClientRegistration;
   try {
     // Same redirect URI rules as dynamic registration; it throws only RegistrationError.
-    registration = validateClientRegistration({ redirect_uris: document.redirect_uris });
+    registration = validateClientRegistration({ redirect_uris: resolved.client.redirect_uris });
   } catch {
     return rejected("invalid_redirect_uri");
   }
@@ -754,7 +779,7 @@ async function clientFromMetadataDocument(clientId: string): Promise<ClientRow |
      VALUES ($1, $2, NULL, $3)
      ON CONFLICT (client_id) DO UPDATE SET client_name = EXCLUDED.client_name, redirect_uris = EXCLUDED.redirect_uris
      RETURNING client_id, client_name, client_uri, redirect_uris`,
-    [document.client_id, document.display_name, registration.redirect_uris],
+    [resolved.client.client_id, resolved.client.display_name, registration.redirect_uris],
   );
   return rows[0];
 }

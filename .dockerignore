@@ -1,6 +1,9 @@
 node_modules
 dist
-.env
+# .env* (not just .env): .env.bak-* snapshots must never ship in a build
+# context (THI-1363); the Dockerfile copies explicit paths, this is defense
+# in depth for future COPY patterns.
+.env*
 .git
 .github
 tests

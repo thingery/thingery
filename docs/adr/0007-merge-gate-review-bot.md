@@ -1,8 +1,8 @@
 # ADR 0007: Second reviewer identity (`thingery-review-bot`) and the 1-review merge gate
 
-- **Status:** Accepted, amended 2026-10-31 (board ruling THI-225; security review THI-224; implementation THI-446). Reviewer identity amended from GitHub App to machine user after live drill evidence — see Decision. Amended 2026-11-17 (THI-957): Decision 3 credential-delivery wording aligned with the implemented runtime-scoped env mechanism; approve-last rule added to Consequences (review-attachment race observed on PR #316). Amended 2026-11-19 (THI-1074; CEO decision from the THI-1054 sweep review THI-1057): Decision 6 adds a **named second reviewer for Security-authored PRs**, and Decision 3's "Security never authors PRs" assumption is corrected — see the exception record for PR #339. Amended 2026-11-21 (THI-836): a Security-owned scheduled sweep re-queues mechanical re-approval for approvals dismissed by a push.
+- **Status:** Accepted, amended 2026-10-31 (board ruling THI-225; security review THI-224; implementation THI-446). Reviewer identity amended from GitHub App to machine user after live drill evidence — see Decision. Amended 2026-11-17 (THI-957): Decision 3 credential-delivery wording aligned with the implemented runtime-scoped env mechanism; approve-last rule added to Consequences (review-attachment race observed on PR #316). Amended 2026-11-19 (THI-1074; CEO decision from the THI-1054 sweep review THI-1057): Decision 6 adds a **named second reviewer for Security-authored PRs**, and Decision 3's "Security never authors PRs" assumption is corrected — see the exception record for PR #339. Amended 2026-11-21 (THI-836): a Security-owned scheduled sweep re-queues mechanical re-approval for approvals dismissed by a push. Amended 2026-11-24 (THI-1375; security review THI-1377): Decision 6 gains the **proven-pure update-merge carve-out** — a named second review survives a pure update-merge of `origin/main` when the executor sha256-proves the PR patch byte-identical in the PR thread; approve-last and void-on-any-other-push are unchanged (motivating case: PR #375).
 - **Date:** 2026-10
-- **Related:** THI-36 (agents merge, no human in the loop), THI-224 (deploy-credential security review), THI-225 (merge-gate ruling), THI-449 (drill: bot approval submitted, not counted), THI-957 (approve-last rule; Decision 3 delivery wording), THI-1054 (PR sweep), THI-1057 (post-hoc review that surfaced the SoD exception), THI-1074 (named second reviewer for Security-authored PRs), THI-836 (merge-gate heal sweep; this amendment)
+- **Related:** THI-36 (agents merge, no human in the loop), THI-224 (deploy-credential security review), THI-225 (merge-gate ruling), THI-449 (drill: bot approval submitted, not counted), THI-957 (approve-last rule; Decision 3 delivery wording), THI-1054 (PR sweep), THI-1057 (post-hoc review that surfaced the SoD exception), THI-1074 (named second reviewer for Security-authored PRs), THI-836 (merge-gate heal sweep), THI-1363 / PR #375 (motivating case for the update-merge carve-out), THI-1372 + THI-1374 (the observed void cycle), THI-1375 (update-merge carve-out amendment; this amendment), THI-1377 (security review of the carve-out: APPROVE, F1–F3 applied)
 
 ## Context
 
@@ -98,6 +98,58 @@ merge without waiting for a human).
    time-sensitive security remediation more than once in a month — whichever comes
    first.
 
+   *Amendment (2026-11-24, THI-1375): proven-pure update-merge carve-out.* Under strict
+   "branches must be up to date" protection, every unrelated merge to `main` forces an
+   update-merge push on an open PR, and the settings above void the named review each time —
+   even though no byte of the PR patch changed (observed twice in one day on PR #375:
+   THI-1372 void → THI-1374 re-review, stale on arrival). Rule: a push replacing the
+   approved head `H1` with head `H2` does **not** void the named review if and only if the
+   executor posts the following evidence in the PR thread and the named reviewer
+   **recomputes** all four checks from git before re-attaching the verdict (posted evidence
+   is a claim; the reviewer's independent recomputation is the control):
+
+   1. sha256 of `git diff origin/main...HEAD` is identical at `H1` and `H2` — the PR patch
+      is byte-identical although its base moved (three-dot diff, so the base shift itself is
+      excluded from the digest);
+   2. `git diff H1..H2 -- <PR files>` is empty, scoped to the files of the three-dot diff
+      (the unscoped two-dot diff between the heads necessarily contains `main`'s own changes
+      and is never empty);
+   3. `H2` is a merge commit whose parents are exactly [`H1`, `M`], where `M` is the
+      then-current `origin/main` tip (verify: `git merge-base --is-ancestor M origin/main`),
+      and `git rev-list H2 ^H1 ^M` = {`H2`} — no commit enters `H2` except through `H1` or
+      `M`;
+   4. required CI checks green and the bot approval present at `H2` (re-queued by the
+      THI-836 sweep if the push dismissed it).
+
+   Check 3 deliberately excludes commits reachable from `M`: when `main` advanced via a
+   merge commit, the naive `H1..H2` form also lists the commits that merge brought in (they
+   are unreachable from `H1`) and would false-reject a genuine pure merge — the explicit
+   `--is-ancestor` check additionally blocks a fabricated off-`main` second parent
+   (security review THI-1377, attack scenario B).
+
+   On proof, the named reviewer re-attaches the verdict at `H2` — a fresh approval or
+   comment naming `H2`, postdating the push, citing the proof evidence — **without
+   re-reviewing content**. GitHub's mechanical dismissal still fires on the push; the
+   carve-out defines when the verdict transfers without content re-review, not GitHub's
+   state. If any check fails, or the push is anything other than a merge of `origin/main`
+   (new author commit, amend, squash), the review is void as today and a full re-review is
+   required. An update-merge that needed conflict resolution is pure only if checks 1–2
+   still hold on the resolved result; a resolution that changed any byte of the PR patch is
+   not pure. If `main` advances again before merge, the last re-attached verdict becomes the
+   new `H1` and the procedure repeats — the proof digests are invariant to further `main`
+   advances as long as `origin/main` does not contain the PR's commits (if histories
+   entangle, the merge base shifts, the digests diverge, and the carve-out fails closed to a
+   full re-review); merging stays approve-last at the final head. Either
+   the reviewer or the author may execute the update-merge (first used on PR #375, where the
+   reviewer executed it): executing a proven-pure merge involves no content decision, and
+   reviewer-executed sequencing closes the THI-957 attachment race outright because the
+   reviewer controls push-then-approve. The executor's push is made with the standard
+   writable identity exactly like any author push; the reviewer credential itself
+   (`pull_requests`-only, Decision 1) structurally cannot push, so Decision 3's
+   reviewer-only credential reach is unchanged. Proof obligations are identical for either executor;
+   any push failing proof is a merge-gate violation (incident, reported to the THI-1065
+   detection control).
+
 ## Alternatives considered
 
 - **Do nothing (0 reviews, rely on CI + gitleaks):** rejected — automated-only gating for code
@@ -127,7 +179,9 @@ merge without waiting for a human).
   only. This is the accepted cost of deferring the hire; the revisit trigger is named in
   Decision 6.
 - `dismiss_stale_reviews` + `require_last_push_approval` mean a push after approval invalidates
-  it: approve last, merge immediately; re-approve after any new push.
+  it: approve last, merge immediately; re-approve after any new push — except a proven-pure
+  update-merge (Decision 6 carve-out, THI-1375), which re-attaches the existing verdict without
+  content re-review.
 - **Dismissed-approval heal sweep (2026-11-21, THI-836):** the settings above dismiss the bot
   approval on any push to an approved PR, but nothing re-created the review task, so an approved PR
   could strand at `REVIEW_REQUIRED` until someone noticed (PR #279 stranded ~3 h on 2026-11-15;
@@ -137,7 +191,16 @@ merge without waiting for a human).
   THI-835 equivalence procedure). Any change to the diff requires full re-review — the sweep never
   mechanically approves a changed diff. The sweep is read-only on GitHub: it never approves and
   never merges. Approval still happens only through the reviewer-role task flow (Decision 3), and
-  merging stays with the author.
+  merging stays with the author. The sweep's equivalence predicate is authorship-agnostic: it
+  checks patch byte-identity only, never who executed an update-merge (THI-1375), so it already
+  covers reviewer-executed proven-pure update-merges without modification.
+- **Update-merge churn (2026-11-24, THI-1375):** strict up-to-date protection plus
+  dismiss-on-push means every unrelated `main` advance voids open named reviews even on
+  byte-identical patches (twice in one day on PR #375). The Decision-6 carve-out keeps the
+  gate's strength — content can never change under a surviving verdict, because checks 1–2 bind
+  every byte of the patch — while removing the full re-review loop. GitHub settings are
+  unchanged: dismissals still fire mechanically; the carve-out governs the re-attachment SOP,
+  not GitHub's state machine.
 - **Approve-last discipline (2026-11-17, PR #316, THI-957):** a push landing *before* the
   approval is submitted is caught by neither setting — GitHub attaches the approval to
   the new head with **no dismissal event** (`dismiss_stale_reviews` only reacts to pushes
@@ -154,6 +217,40 @@ merge without waiting for a human).
 - The gate flip is reversible (`required_approving_review_count: 0`) — exercised for real on
   2026-10-31 when the App drill failed the "counted" test; rollback was verified within the
   same minute. This is the documented un-wedge for any future gate failure.
+
+## Amendment evidence (appended 2026-11-24, THI-1375)
+
+Motivating case, recomputed from git on 2026-11-24: PR thingery/thingery#375 (THI-1363,
+Security-authored, merged as `c519e7f`). Sequence: the named second review was voided at its
+head (THI-1372) → re-review issued at `6c18b68` (THI-1374), already stale on arrival after
+unrelated docs-only merges landed on `main` → the reviewer executed the update-merge itself,
+producing head `9ba70f5` with parents exactly [`6c18b68`, `4d039e8` (then-`main` tip)],
+`git rev-list 6c18b68..9ba70f5` = {`9ba70f5`, `4d039e8`}, sha256 of
+`git diff origin/main...HEAD` identical at both heads
+(`712b4189b432d30c9cd351fd71381a2b55c897d4870402d90e5ff04618b433f7`), and
+`git diff 6c18b68 9ba70f5 -- .dockerignore .gitignore docs/security.md` empty. The literal
+`H1..H2` rev-list form sufficed on that day only because both `main` advances were
+squash-style single-parent commits — exactly why the rule text uses the shape-agnostic
+`H2 ^H1 ^M` form (THI-1377, scenario B). The reviewer approved at `9ba70f5` — the
+named-review APPROVE comment of 2026-11-24T14:41:03Z naming `9ba70f5` is the verifiable
+approve-last record — and the PR merged through the gate. sha256 of what actually landed on
+`main` (`git diff 4d039e8..c519e7f`) equals the proven digest: what landed is byte-for-byte
+what was approved. Evidence-hygiene note (THI-1377): the bot approval's API record shows
+`submitted_at` 13:52:23Z while attached to `9ba70f5`, a commit created 14:37:23Z — internally
+inconsistent GitHub-side bookkeeping, consistent with a dismiss/re-approve path; the merge
+passed live `require_last_push_approval` enforcement and the THI-1065 gate-integrity detector
+raised no alert, so the named-review comment remains the authoritative approve-last evidence.
+Without the carve-out this cycle repeats on every `main` advance; with it, the second
+void would have been a mechanical re-attachment.
+
+Open questions from THI-1375, decided here: (1) the THI-836 sweep needs no change — its
+re-queue predicate is content-based (the THI-835 byte-identity procedure) and covers
+reviewer-executed update-merges unchanged; distinguishing executor identity was rejected
+(zero security gain, extra state). (2) Proof automation deferred, not adopted: a CI check can
+only attest digests it computes at push time — equality still needs the executor-supplied
+pre-push baseline, so automation adds convenience, not trust; the binding control is the
+named reviewer's independent recomputation. Revisit when proven-pure update-merges sustain
+≥5 per rolling week, or after any disputed or fabricated-evidence incident.
 
 ## Implementation record (2026-11-06, appended by the gate's own acceptance drill)
 

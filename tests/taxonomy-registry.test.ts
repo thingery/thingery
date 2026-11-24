@@ -1,7 +1,8 @@
-// Registry-content tests — taxonomy PR 2 (spec THI-734 §5.1–5.3, task THI-736).
+// Registry-content tests — taxonomy PR 2 (spec THI-734 §5.1–5.3, task THI-736)
+// extended by THI-820 PR 1 (PC/homelab facets + pc-components/networking/nas).
 // Asserts the seeded registry itself, not the code paths around it (those are
 // PR 1's tests): tree shape (8 parentless rows — 7 departments + 'other' —
-// over 21 leaves), the two-level invariant, all 14 legacy slugs surviving,
+// over 24 leaves), the two-level invariant, all 14 legacy slugs surviving,
 // the §5.3 alias seeds and alias invariants, facet attribute definitions
 // (department enum on fashion rows, size_letter on clothing) with legacy
 // definitions intact, and D7 convergence (DO UPDATE): a hand-diverged row and
@@ -40,7 +41,7 @@ const available = await dbAvailable();
 const TREE: Record<string, string[]> = {
   fashion: ["accessories", "bags", "beauty", "clothing", "shoes", "sneakers"],
   kids: ["baby", "kids-clothing", "toys"],
-  electronics: ["cameras", "computers", "games", "phones"],
+  electronics: ["cameras", "computers", "games", "nas", "networking", "pc-components", "phones"],
   home: ["pets", "tools"],
   media: ["books", "music"],
   hobbies: ["board-games", "collectibles", "instruments"],
@@ -62,6 +63,9 @@ const ALIASES: Record<string, string[]> = {
   phones: ["smartphone"],
   computers: ["laptop"],
   music: ["vinyl", "records"],
+  "pc-components": ["pc-parts", "computer-parts", "gpu", "cpu", "motherboard", "ram"],
+  networking: ["router", "routers", "network-switch", "networking-gear"],
+  nas: ["storage-server", "network-storage", "diskstation"],
 };
 
 interface RegistryRow {
@@ -109,12 +113,12 @@ describe.skipIf(!available)("taxonomy registry content (THI-734 §5.1–5.3)", (
     }
   });
 
-  it("seeds 29 rows: 8 parentless (7 departments + other) over 21 leaves", async () => {
+  it("seeds 32 rows: 8 parentless (7 departments + other) over 24 leaves", async () => {
     const rows = await registry();
-    expect(rows).toHaveLength(29);
+    expect(rows).toHaveLength(32);
     const parentless = rows.filter((r) => r.parent === null).map((r) => r.name).sort();
     expect(parentless).toEqual([...Object.keys(TREE)].sort());
-    expect(rows.filter((r) => r.parent !== null)).toHaveLength(21);
+    expect(rows.filter((r) => r.parent !== null)).toHaveLength(24);
   });
 
   it("wires the department → children tree exactly per spec §5.1", async () => {
@@ -249,6 +253,45 @@ describe.skipIf(!available)("taxonomy registry content (THI-734 §5.1–5.3)", (
     expect(defs("cameras").shutter_count).toMatchObject({ type: "number" });
     expect(defs("baby").type).toMatchObject({ type: "string", enum: ["pushchair", "car_seat", "nursery", "other"] });
     expect(defs("kids-clothing").size).toMatchObject({ type: "string", required: true });
+
+    // THI-820 PR 1 (PC/homelab): computers facets deepened — legacy keys keep
+    // their shape, all new keys are optional (no new required on existing rows).
+    const computers = defs("computers");
+    expect(computers.model).toMatchObject({ type: "string", required: true });
+    expect(computers.ram_gb).toMatchObject({ type: "number" });
+    expect(computers.storage_gb).toMatchObject({ type: "number" });
+    expect(computers.cpu_socket).toMatchObject({ type: "string" });
+    expect(computers.ram_type).toMatchObject({ type: "string", enum: ["ddr3", "ddr4", "ddr5", "other"] });
+    expect(computers.rack_units).toMatchObject({ type: "number" });
+    for (const key of ["cpu_model", "ram_speed_mhz", "storage_type", "gpu_model", "form_factor"]) {
+      expect(computers[key], `computers.${key} declared`).toBeDefined();
+      expect(computers[key]?.required, `computers.${key} stays optional`).toBeUndefined();
+    }
+
+    // New PC/homelab leaves carry their THI-820 §3.2–3.4 definitions.
+    const parts = defs("pc-components");
+    expect(parts.type).toMatchObject({
+      type: "string",
+      required: true,
+      enum: ["cpu", "gpu", "motherboard", "ram", "storage", "psu", "case", "cooling", "expansion_card", "cable_adapter", "other"],
+    });
+    expect(parts.socket).toMatchObject({ type: "string" });
+    expect(parts.vram_gb).toMatchObject({ type: "number" });
+    expect(parts.form_factor).toMatchObject({ type: "string", enum: ["atx", "micro_atx", "mini_itx", "other"] });
+    const net = defs("networking");
+    expect(net.type).toMatchObject({
+      type: "string",
+      required: true,
+      enum: ["switch", "router", "access_point", "firewall", "modem", "patch_panel", "pdu", "other"],
+    });
+    expect(net.ports).toMatchObject({ type: "number" });
+    expect(net.poe).toMatchObject({ type: "boolean" });
+    expect(net.managed).toMatchObject({ type: "boolean" });
+    expect(net.rack_units).toMatchObject({ type: "number" });
+    const nas = defs("nas");
+    expect(nas.model).toMatchObject({ type: "string", required: true });
+    expect(nas.drive_bays).toMatchObject({ type: "number" });
+    expect(nas.drive_form).toMatchObject({ type: "string", enum: ["2.5in", "3.5in", "m2", "mixed", "other"] });
   });
 
   it("validates new facets and keeps legacy values accepted (validateAttributes over the live registry)", async () => {
@@ -273,5 +316,19 @@ describe.skipIf(!available)("taxonomy registry content (THI-734 §5.1–5.3)", (
     // music: 'instrument' stays a valid legacy format value even though new
     // instrument listings are steered to hobbies/instruments by description.
     expect(validateAttributes(liveDefs("music"), { format: "instrument" })).toEqual([]);
+
+    // THI-820 PR 1: legacy computers payloads without new keys stay accepted;
+    // new facets validate when present; new leaves enforce their required key.
+    expect(validateAttributes(liveDefs("computers"), { model: "ThinkCentre M720q" })).toEqual([]);
+    expect(validateAttributes(liveDefs("computers"), { model: "M720q", cpu_socket: "LGA1151", ram_type: "ddr4", rack_units: 1 })).toEqual([]);
+    expect(validateAttributes(liveDefs("computers"), { model: "M720q", ram_type: "ddr9" }).join("; ")).toContain("ram_type");
+    expect(validateAttributes(liveDefs("computers"), { model: "M720q", rack_units: "1U" }).join("; ")).toContain("rack_units");
+    expect(validateAttributes(liveDefs("pc-components"), { type: "gpu", vram_gb: 16 })).toEqual([]);
+    expect(validateAttributes(liveDefs("pc-components"), { vram_gb: 16 }).join("; ")).toContain('"type"');
+    expect(validateAttributes(liveDefs("pc-components"), { type: "tape_drive" }).join("; ")).toContain("type");
+    expect(validateAttributes(liveDefs("networking"), { type: "switch", ports: 8, port_speed_mbps: 10000, poe: true, managed: true })).toEqual([]);
+    expect(validateAttributes(liveDefs("networking"), { ports: 8 }).join("; ")).toContain('"type"');
+    expect(validateAttributes(liveDefs("nas"), { model: "DS923+", drive_bays: 4, drive_form: "3.5in" })).toEqual([]);
+    expect(validateAttributes(liveDefs("nas"), { drive_bays: 4 }).join("; ")).toContain("model");
   });
 });

@@ -14,6 +14,12 @@
 //   - the 8 MiB cap still 413s (DoS bound unchanged)
 //   - every other /api route keeps the global 256kb cap
 //
+// THI-1360 adds the pre-auth cost bound on top: the anon gate
+// (draftListingAnonBodyGate, mounted first in body-parsers.ts) answers the
+// unauthenticated in-envelope case 401 BEFORE the body is read or parsed —
+// so the >256kb anonymous tests below also pin "parse cost never paid"
+// (their bodies are deliberately invalid JSON: a parse would 400).
+//
 // No database required except the authenticated full-size case (a real
 // seller row + signed session cookie), which skips cleanly without one.
 
@@ -93,6 +99,41 @@ describe("POST /api/draft-listing body-cap envelope (THI-1197)", () => {
       draftPort = (server.address() as { port: number }).port;
       const big = JSON.stringify({ text: "a".repeat(GLOBAL_JSON_BODY_LIMIT + 64 * 1024) });
       const res = await postDraft(big, null);
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ error: "Sign in to draft a listing." });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  // THI-1360: the gate must answer 401 BEFORE any parse. Differential: the
+  // body is deliberately NOT JSON — if the scoped parser ran first it would
+  // 400 (entity.parse.failed); the gate answering 401 proves the 8 MiB
+  // buffer + JSON.parse cost was never paid for an anonymous caller. Fails
+  // against the pre-gate code (400).
+  it("anonymous in-envelope non-JSON body → 401 before parse (THI-1360: no anonymous parse cost)", async () => {
+    const server = buildApp();
+    try {
+      draftPort = (server.address() as { port: number }).port;
+      const big = "x".repeat(GLOBAL_JSON_BODY_LIMIT + 64 * 1024);
+      const res = await postDraft(big, null);
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ error: "Sign in to draft a listing." });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  // THI-1360: cookie presence must not buy the parse — a structurally
+  // invalid session value resolves anonymous with zero DB work, so the gate
+  // must still 401 pre-parse. (No database needed: splitSessionToken rejects
+  // before any SELECT.) Fails against the pre-gate code (400).
+  it("garbage session cookie + in-envelope non-JSON body → 401 before parse (gate trusts no cookie shape)", async () => {
+    const server = buildApp();
+    try {
+      draftPort = (server.address() as { port: number }).port;
+      const big = "x".repeat(GLOBAL_JSON_BODY_LIMIT + 64 * 1024);
+      const res = await postDraft(big, `${SESSION_COOKIE}=not-a-session`);
       expect(res.status).toBe(401);
       expect(await res.json()).toMatchObject({ error: "Sign in to draft a listing." });
     } finally {

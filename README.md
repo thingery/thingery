@@ -49,6 +49,38 @@ curl -s https://thingery.dev/mcp \
 To run your own server on your own Postgres (`npm install thingery`, or from source), see
 [Self-hosting](https://docs.thingery.dev/self-hosting/install).
 
+## Single-player mode
+
+Thingery is useful with zero buyers. Catalog your stuff today, sell when you're ready —
+one photo, one line, no re-entry:
+
+1. **Draft** — hand your assistant a photo or a one-liner ("white Nike Air Max 90, size 43,
+   worn twice") and call `draft_listing`. It proposes title, category, condition, brand,
+   registry-validated attributes, a fair-market-value range computed from real comparable
+   listings, and open questions to confirm with you. Nothing is created and nothing is
+   published — you review the draft before anything is saved.
+2. **Store** — `create_listing` with `status: "stored"` saves the item to your private
+   inventory. Stored items are invisible to search, browse and other agents (`get_item`
+   answers `not_found` to everyone but you); you see them via `my_listings`.
+3. **Flip** — ready to sell? `update_listing` with `status: "active"` puts the item on the
+   market instantly: photos, attributes, price and search indexing are all preserved, and
+   buyer alerts fire the moment it goes live.
+4. **Export** — `format_listing` turns the item into ready-to-paste copy for Subito,
+   Vinted, Wallapop or eBay, in Italian or English. Export only — nothing is posted
+   elsewhere; you paste the copy yourself.
+
+Walkthrough: [Selling guide](https://docs.thingery.dev/guides/selling). The
+[`sell-item` skill](skills/sell-item/SKILL.md) gives any agent the full pipeline.
+
+**Photo privacy when drafting.** When you use the draft feature, your photo and text are
+sent to the LLM provider configured by this Thingery deployment solely to produce a
+structured draft (category, attributes, condition, price range). Photos are stripped of
+metadata (EXIF/GPS) and downsampled before they leave the server. Inputs are not stored:
+nothing is retained from the extraction call — no images, no model conversation. Only the
+listing you explicitly confirm and publish is saved. Avoid including identifiable people
+in frame; no automated face blurring is applied. If you operate a self-hosted deployment,
+point the extraction endpoint at a provider whose terms match your privacy requirements.
+
 ### Directory profile
 
 Connector directories whose policies exclude money-transfer tools (e.g. the Claude
@@ -73,6 +105,7 @@ rejected with `400` rather than silently falling back to the full tool set.
 | Claude, ChatGPT, Cursor, VS Code, stdio, plain HTTP | [Connect a client](https://docs.thingery.dev/connect) |
 | OAuth and API keys | [Authentication](https://docs.thingery.dev/authentication) |
 | Selling, buying, orders, alerts, wanted board | [Guides](https://docs.thingery.dev/guides/selling) |
+| Draft → private inventory → export walkthrough | [Selling guide](https://docs.thingery.dev/guides/selling#single-player-mode) |
 | Every MCP tool and its parameters | [MCP tools](https://docs.thingery.dev/tools/overview) |
 | Self-hosting and environment variables | [Self-hosting](https://docs.thingery.dev/self-hosting/install) |
 | Prices, conditions, the flexible item schema | [Data conventions](https://docs.thingery.dev/reference/data-conventions) |

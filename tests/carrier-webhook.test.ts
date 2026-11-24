@@ -69,9 +69,10 @@ function buildApp(cfg?: Partial<OrderFlowConfig>): express.Express {
   const app = express();
   app.use(
     carrierWebhookRouter({
+      shippingProvider: "easypost",
       carrierWebhookReady: true,
-      easypostWebhookSecret: SECRET,
-      easypostWebhookSecretPrevious: PREVIOUS,
+      carrierWebhookSecret: SECRET,
+      carrierWebhookSecretPrevious: PREVIOUS,
       disputeWindowHours: 48,
       ...cfg,
     } as unknown as OrderFlowConfig),
@@ -307,7 +308,7 @@ describe.skipIf(!available)("Carrier webhook endpoint (HTTP)", () => {
   });
 
   it("returns 503 with no write when the webhook is not configured (F1)", async () => {
-    const uncfg = buildApp({ carrierWebhookReady: false, easypostWebhookSecret: undefined });
+    const uncfg = buildApp({ carrierWebhookReady: false, carrierWebhookSecret: undefined });
     await new Promise<void>((resolve) => {
       const srv = uncfg.listen(0, "127.0.0.1", () => {
         (uncfg as unknown as { _port: number })._port = (srv.address() as net.AddressInfo).port;

@@ -21,7 +21,10 @@
 //    the caller's transaction, row lock, or pool client.
 
 import { pool } from "./db.js";
-import { createEasyPostShipment, pickEasyPostRate, type EasyPostAddressInput, type EasyPostRate } from "./easypost.js";
+import { orderFlowConfig } from "./config.js";
+import { createEasyPostShipment, type EasyPostRate } from "./easypost.js";
+import { getShippingProvider } from "./shipping/registry.js";
+import { pickRate, type ProviderAddress, type ShippingProvider, type ShippingProviderId } from "./shipping/provider.js";
 
 /** Quote mode is EUR-only (spec §1): rates are selected and stored in the
  *  account base currency so every amount_cents is comparable by plain
@@ -68,7 +71,7 @@ export interface LabelQuoteSnapshot {
 export type ShippingQuoteFallbackReason =
   | "off_platform_payment" // not a Stripe order — off-platform is spec §7 unchanged
   | "not_shippable" // local pickup: nothing to quote
-  | "easypost_not_configured" // degraded deployment — flat mode, byte-compatible
+  | `${ShippingProviderId}_not_configured` // degraded/misconfigured deployment — flat mode; under the default provider this is exactly "easypost_not_configured"
   | "no_weight" // listing carries no weight_grams
   | "no_seller_default_address" // seller has no default saved address (or it is incomplete)
   | "non_eur_order" // quote mode is EUR-only
@@ -94,15 +97,20 @@ export interface ShippingQuoteInputs {
   dimensionsMm: string | null; // listing dimensions_mm ("LxWxH")
   buyerAddress: Record<string, unknown>; // orders.shipping_address (creation-time snapshot)
   sellerOrigin: QuoteAddress | null; // seller default saved address, completeness-checked
-  easypostEnabled: boolean; // cfg.easypostEnabled
+  easypostEnabled: boolean; // "a shipping provider is configured" (cfg.shippingEnabled); field name kept for seam stability with existing tests/callers
   labelMaxCostCents: number; // cfg.labelMaxCostCents (A1)
   quoteTimeoutMs: number; // cfg.shippingQuoteTimeoutMs
 }
 
 /** Injectable seams (same discipline as the easypost/fulfillment tests:
- *  unit tests stub the provider call; the DB read below is the only sql here). */
+ *  unit tests stub the provider call; the DB read below is the only sql here).
+ *  `provider` overrides the registry-selected provider (tests/future multi-
+ *  provider routing); `createShipment` overrides the call seam itself with
+ *  the pre-interface signature, which the default now adapts onto the
+ *  provider interface — existing stubs keep working unchanged. */
 export interface ShippingQuoteDeps {
   createShipment?: typeof createEasyPostShipment;
+  provider?: ShippingProvider;
   now?: () => Date;
 }
 
@@ -143,7 +151,7 @@ function dimensionsToMm(raw: string): { length: number; width: number; height: n
 
 /** Snapshot address → the easypost client's domain shape (postal_code →
  *  postalCode). Pure; the only place the two shapes meet. */
-function toEasyPostAddress(a: QuoteAddress): EasyPostAddressInput {
+function toProviderAddress(a: QuoteAddress): ProviderAddress {
   return {
     name: a.name,
     line1: a.line1,
@@ -156,9 +164,10 @@ function toEasyPostAddress(a: QuoteAddress): EasyPostAddressInput {
 
 /** Cheapest EUR rate from a quote — the selection the buyer pays for and the
  *  label is later bought against. Non-EUR rates are never selectable (spec
- *  §3); reuse of the label-purchase picker on the EUR-filtered list. Pure. */
+ *  §3); reuse of the provider-independent rate picker on the EUR-filtered
+ *  list. Pure. */
 export function selectQuoteRate(rates: readonly EasyPostRate[]): EasyPostRate | null {
-  return pickEasyPostRate(rates.filter((r) => r.currency === SHIPPING_QUOTE_CURRENCY));
+  return pickRate(rates.filter((r) => r.currency === SHIPPING_QUOTE_CURRENCY));
 }
 
 /**
@@ -174,12 +183,21 @@ export async function resolveShippingQuote(
   inputs: ShippingQuoteInputs,
   deps: ShippingQuoteDeps = {},
 ): Promise<ShippingQuoteOutcome> {
-  const createShipment = deps.createShipment ?? createEasyPostShipment;
+  // Provider-selected at call time from the deployment config (THI-1246);
+  // the provider id prefixes the not_configured reason, so default
+  // deployments emit the exact strings they always have.
+  const provider = deps.provider ?? getShippingProvider(orderFlowConfig());
+  const createShipment: typeof createEasyPostShipment =
+    deps.createShipment ??
+    (async (input, _opts, signal) => {
+      const shipment = await provider.createShipment(input, signal);
+      return shipment ? { id: shipment.shipmentId, rates: shipment.rates } : null;
+    });
   const fallback = (reason: ShippingQuoteFallbackReason): ShippingQuoteOutcome => ({ mode: "flat", reason });
 
   if (inputs.paymentMode !== "stripe") return fallback("off_platform_payment");
   if (inputs.fulfillment !== "shipping") return fallback("not_shippable");
-  if (!inputs.easypostEnabled) return fallback("easypost_not_configured");
+  if (!inputs.easypostEnabled) return fallback(`${provider.id}_not_configured`);
   if (!(typeof inputs.weightGrams === "number" && inputs.weightGrams > 0)) return fallback("no_weight");
   if (!inputs.sellerOrigin) return fallback("no_seller_default_address");
   if (inputs.orderCurrency !== SHIPPING_QUOTE_CURRENCY) return fallback("non_eur_order");
@@ -199,15 +217,15 @@ export async function resolveShippingQuote(
         // destination as stored, the listing's parcel. Nothing else rides in
         // from the order row — a §5 re-quote from the snapshot reproduces
         // this call byte-for-byte.
-        toAddress: toEasyPostAddress(destination),
-        fromAddress: toEasyPostAddress(inputs.sellerOrigin),
+        toAddress: toProviderAddress(destination),
+        fromAddress: toProviderAddress(inputs.sellerOrigin),
         weightGrams,
         ...(dimensionsMm ? { dimensionsMm: dimensionsToMm(dimensionsMm) } : {}),
       },
       {},
       AbortSignal.timeout(inputs.quoteTimeoutMs), // C3: bounded, rides into the fetch
     );
-    if (!shipment) return fallback("easypost_not_configured"); // key vanished between cfg read and call — flat
+    if (!shipment) return fallback(`${provider.id}_not_configured`); // key vanished between cfg read and call — flat
     shipmentId = shipment.id;
     rates = shipment.rates;
   } catch (err) {

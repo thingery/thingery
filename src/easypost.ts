@@ -12,9 +12,25 @@
 // can retry via a tracking correction, §2.3 #23).
 
 import { envValue } from "./config.js";
+import crypto from "node:crypto";
+import {
+  ProviderError,
+  pickRate,
+  type BoughtLabel,
+  type ProviderAddress,
+  type ProviderShipmentInput,
+  type ShipmentRate,
+} from "./shipping/provider.js";
+
+// THI-1246: this module is now the EasyPost TRANSPORT behind the
+// ShippingProvider interface (src/shipping/provider.ts, adapter in
+// src/shipping/easypost-adapter.ts). All EasyPost-specific wire behavior
+// (auth, endpoints, error mapping, signature scheme) stays here so later
+// providers never touch the order flow or ingest route.
 
 export interface TrackerRef {
-  id: string; // EasyPost tracker id ("trk_…"), unique per registration
+  id: string; // provider tracker id (EasyPost "trk_…"), unique per registration —
+  // structurally identical to shipping/provider.ts TrackerRef
 }
 
 export interface EasyPostOptions {
@@ -123,22 +139,51 @@ export interface EasyPostBoughtLabel {
 }
 
 /** Non-2xx EasyPost response, with the provider's error code when present.
- *  Service layers map this onto their user-facing error codes. */
-export class EasyPostError extends Error {
-  readonly status: number;
-  readonly code: string | undefined;
-
+ *  A ProviderError (src/shipping/provider.ts) so service layers can catch
+ *  provider faults generically; message/status/code semantics unchanged. */
+export class EasyPostError extends ProviderError {
   constructor(what: string, status: number, code?: string) {
-    super(code ? `easypost ${what} failed: HTTP ${status} (${code})` : `easypost ${what} failed: HTTP ${status}`);
+    super(
+      code ? `easypost ${what} failed: HTTP ${status} (${code})` : `easypost ${what} failed: HTTP ${status}`,
+      status,
+      code,
+    );
     this.name = "EasyPostError";
-    this.status = status;
-    this.code = code;
   }
 }
 
 function basicAuthHeader(apiKey: string): string {
   // EasyPost HTTP basic auth: the API key is the username.
   return `Basic ${Buffer.from(`${apiKey}:`).toString("base64")}`;
+}
+
+const EASYPOST_SIG_PREFIX = "hmac-sha256-hex=";
+
+/**
+ * §5.3: timing-safe HMAC-SHA256 (hex) compare; catches the length-mismatch
+ * throw — both digests and header are attacker-controlled lengths.
+ * EasyPost sends `X-Hmac-Signature: hmac-sha256-hex=<hex>` and normalizes the
+ * webhook secret with Unicode NFKD before hashing; bare `<hex>` is also
+ * accepted so existing callers keep working. Moved here from
+ * src/webhooks-carrier.ts (THI-1246): EasyPost-specific wire detail owned by
+ * the transport; the ingest route reaches it via the ShippingProvider
+ * interface, and the old export path stays available via re-export.
+ */
+export function verifyEasyPostSignature(raw: Buffer, header: string, secret: string): boolean {
+  try {
+    const digest = Buffer.from(
+      crypto.createHmac("sha256", secret.normalize("NFKD")).update(raw).digest("hex"),
+      "utf8",
+    );
+    const normalized = header.trim().toLowerCase();
+    const hex = normalized.startsWith(EASYPOST_SIG_PREFIX)
+      ? normalized.slice(EASYPOST_SIG_PREFIX.length)
+      : normalized;
+    const provided = Buffer.from(hex, "utf8");
+    return digest.length === provided.length && crypto.timingSafeEqual(digest, provided);
+  } catch {
+    return false;
+  }
 }
 
 /** POSTs JSON to the EasyPost v2 API and maps error responses onto
@@ -336,17 +381,15 @@ export async function buyEasyPostLabel(
  * e.g. "DHL" matches "DHLExpress"). A preference that matches nothing
  * returns null — the caller errors rather than silently spending on a
  * carrier the seller did not ask for. Pure; no network, no key.
+ *
+ * THI-1246: selection is provider-independent, so the implementation lives
+ * in src/shipping/provider.ts (pickRate) and every provider selects
+ * identically. This wrapper keeps today's name/signature for callers+tests.
  */
 export function pickEasyPostRate(
   rates: readonly EasyPostRate[],
   carrierPreference?: string,
 ): EasyPostRate | null {
-  const want = carrierPreference?.trim().toLowerCase();
-  const eligible = want ? rates.filter((r) => r.carrier.toLowerCase().includes(want)) : rates;
-  let best: EasyPostRate | null = null;
-  for (const r of eligible) {
-    if (best === null || r.costCents < best.costCents) best = r;
-  }
-  return best;
+  return pickRate(rates, carrierPreference);
 }
 

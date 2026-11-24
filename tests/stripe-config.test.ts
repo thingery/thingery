@@ -8,6 +8,7 @@ import { envValue, envInt, orderFlowConfig } from "../src/config.js";
 const NAMES = [
   "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET_PREVIOUS",
   "EASYPOST_API_KEY", "EASYPOST_WEBHOOK_SECRET", "EASYPOST_WEBHOOK_SECRET_PREVIOUS",
+  "SHIPPING_PROVIDER", "SHIPPO_API_KEY", "SHIPPO_WEBHOOK_SECRET", "SHIPPO_WEBHOOK_SECRET_PREVIOUS",
   "ADMIN_API_KEY",
   "PAYMENT_DEADLINE_HOURS", "DISPUTE_WINDOW_HOURS", "SYSTEM_CONFIRMED_DISPUTE_WINDOW_HOURS",
   "PICKUP_AUTOCONFIRM_DAYS", "IN_TRANSIT_STUCK_DAYS", "STALE_SOLD_DAYS",
@@ -64,7 +65,8 @@ describe("orderFlowConfig — fail-closed degradation", () => {
     expect(cfg.stripePaymentsEnabled).toBe(false);
     expect(cfg.stripeMode).toBeNull();
     expect(cfg.stripeWebhookReady).toBe(false);
-    expect(cfg.easypostEnabled).toBe(false);
+    expect(cfg.shippingEnabled).toBe(false);
+    expect(cfg.shippingProvider).toBe("easypost");
     expect(cfg.adminRouteEnabled).toBe(false);
     // Rev 3 §11.3 defaults (rules 8–9) and §4.4 defaults.
     expect(cfg.disputeAutorefundHours).toBe(72);
@@ -122,9 +124,11 @@ describe("orderFlowConfig — fail-closed degradation", () => {
     for (const n of NAMES) setEnv(n, undefined);
     setEnv("EASYPOST_API_KEY", "EZABC");
     const cfg = orderFlowConfig();
-    expect(cfg.easypostEnabled).toBe(true);
+    expect(cfg.shippingEnabled).toBe(true);
     expect(cfg.carrierWebhookReady).toBe(false);
+    expect(cfg.carrierWebhookSecret).toBeUndefined();
     setEnv("EASYPOST_WEBHOOK_SECRET", "easy_sec");
     expect(orderFlowConfig().carrierWebhookReady).toBe(true);
+    expect(orderFlowConfig().carrierWebhookSecret).toBe("easy_sec");
   });
 });

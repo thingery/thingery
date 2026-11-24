@@ -493,7 +493,7 @@ export function registerTools(
   // hint booleans — the directory portal flags tools whose annotations lack
   // one. It mirrors the tool-level `title` string exactly; both are pinned
   // per-tool in tests/tool-annotations.test.ts (same frozen-table policy as
-  // the hints), and tests/mcp-directory-profile.test.ts pins the 15 profile
+  // the hints), and tests/mcp-directory-profile.test.ts pins the 18 profile
   // titles.
   server.registerTool(
     "describe_category",

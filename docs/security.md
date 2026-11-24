@@ -656,7 +656,16 @@ If a secret appears anywhere it shouldn't: rotate it first, then clean up, then 
 
 Concretely:
 
-- `.env` is gitignored and dockerignored (verified). Placeholders only in `.env.example`.
+- `.env` is gitignored and dockerignored (verified); the patterns cover `.env*`, so
+  snapshot copies (`.env.bak-*`) can never enter git history or a docker build
+  context. Placeholders only in `.env.example`.
+- **`.env` backup snapshots never live in the app tree.** Before editing `.env` on a
+  server, copy it to a dedicated directory outside the app tree (e.g.
+  `/opt/thingery-env-backups`, dir 0700, files 0600, keep the last ~10) and let the
+  copy step prune. Snapshotting `.env` beside the app (`.env.bak-*` in `/opt/thingery`)
+  accumulates unbounded, shows up in every `git status` and every docker build
+  context, and preserves rotated-but-maybe-unrevoked old secret values forever
+  (THI-1363).
 - CI secrets (`DEPLOY_SSH_KEY`, `NPM_TOKEN`) are referenced as `${{ secrets.* }}` only.
 - Logs: current code logs no secrets, and error paths return exception messages — keep
   it that way when adding features; never `console.log` a key, header, or cookie.

@@ -1,9 +1,14 @@
 node_modules/
 dist/
-.env
+# .env* (not just .env): snapshot copies like .env.bak-webpin-* must never
+# enter git history either (THI-1363). .env.example stays tracked.
+.env*
+!.env.example
 *.log
 .DS_Store
 uploads/
+# daily metrics snapshots (docs/metrics.md) are runtime output, not content
+metrics/
 
 # secrets — never commit, never paste anywhere
 secret/

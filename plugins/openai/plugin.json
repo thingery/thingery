@@ -27,6 +27,7 @@
           "Track orders, shipments and disputes"
         ],
         "websiteURL": "https://thingery.dev",
+        "documentationURL": "https://thingery.dev/docs",
         "supportURL": "https://github.com/thingery/thingery/issues",
         "privacyPolicyURL": "https://thingery.dev/privacy",
         "termsOfServiceURL": "https://thingery.dev/terms",
@@ -35,8 +36,8 @@
           "List what I'm currently selling",
           "Help me sell my coffee machine"
         ],
-        "brandColor": "#0f7b6c",
-        "brandColorDark": "#2dd4bf",
+        "brandColor": "#FFCE1F",
+        "brandColorDark": "#E8B500",
         "composerIcon": "./assets/icon.png",
         "composerIconDark": "./assets/icon-dark.png",
         "logo": "./assets/logo.png",

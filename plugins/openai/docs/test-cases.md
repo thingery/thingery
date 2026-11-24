@@ -9,9 +9,12 @@ keeps a listing-tool positive plus the invalid-token and not-found negatives
 from the original scope, and adds an order positive and an order negative
 because OpenAI's review exercises a purchase flow on commerce apps.
 
-Tool baseline: 3 public reads (`describe_category`, `search_items`, `get_item`)
-+ 13 OAuth-protected tools (`src/tools.ts` `PROTECTED_TOOLS`, repo baseline
-`6be661e` or newer; drafted against `63b499c`).
+Tool baseline: the full-profile MCP server at `https://thingery.dev/mcp`
+registers **45 tools** — 35 OAuth-protected (`src/tools.ts` `PROTECTED_TOOLS`)
+plus 10 public/session reads — and grows with the product; the 5 positive and
+3 negative cases below reference only 6 of them (`describe_category`,
+`search_items`, `get_item`, `create_listing`, `my_listings`, `create_order`),
+all re-verified to exist on main (2026-11-24, THI-1191).
 
 ## Reviewer account setup (entered in the portal, never in the ZIP)
 

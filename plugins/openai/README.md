@@ -1,9 +1,9 @@
 # OpenAI plugin package — Thingery ([THI-218](https://github.com/thingery/thingery))
 
 Submission package for the ChatGPT connector directory: Thingery's MCP server
-`https://thingery.dev/mcp` (parent THI-212). Drafted against repo baseline
-`63b499c` (review baseline `6be661e` or newer) — tool surface: 3 public reads
-+ 13 OAuth-protected tools.
+`https://thingery.dev/mcp` (parent THI-212). Tool surface refreshed 2026-11-24
+(THI-1191): the full-profile server registers 45 tools — 35 OAuth-protected
+plus 10 public/session reads (`src/tools.ts`); this package exercises 6 of them.
 
 ## Contents
 

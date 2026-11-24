@@ -66,6 +66,7 @@ export const TOOL_PAGES: ToolPage[] = [
       "add_item_image",
       "my_listings",
       "update_listing",
+      "format_listing",
     ],
   },
   {

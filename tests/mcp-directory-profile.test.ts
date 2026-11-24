@@ -5,9 +5,9 @@
 // decision: card ce4cd554 on THI-613, 2026-11-11, "Option A"). These tests
 // FAIL on any add or remove:
 //
-//   1. The literal 17-name list below is the pin — editing it is a deliberate,
+//   1. The literal 18-name list below is the pin — editing it is a deliberate,
 //      reviewed act (it changes what the Claude listing can do).
-//   2. `?profile=directory` must register exactly those 17 tools — a new
+//   2. `?profile=directory` must register exactly those 18 tools — a new
 //      money-touching tool added to src/tools.ts cannot silently leak into
 //      the directory listing because it is not on the include list.
 //   3. The canonical /mcp (no param) is unchanged: the full surface (41//      registered tools for anonymous/API-key/OAuth callers, plus 3 more
@@ -40,6 +40,7 @@ const DIRECTORY_PIN: readonly string[] = [
   "describe_category",
   "draft_listing",
   "expire_wanted",
+  "format_listing",
   "get_item",
   // THI-923: public seller summary — a pure public read; on the include list
   // by spec v2 (same review lane as this pin).
@@ -55,7 +56,7 @@ const DIRECTORY_PIN: readonly string[] = [
   "update_wanted",
 ];
 
-/** THI-769: the annotations.title pin for the same 17 tools (Anthropic
+/** THI-769: the annotations.title pin for the same 18 tools (Anthropic
  *  directory review criteria — every tool's annotations must carry a title).
  *  Keys mirror DIRECTORY_PIN; a tool added to the profile without a pinned
  *  title fails the tests below. Same reviewed-edit policy as the name pin. */
@@ -66,6 +67,7 @@ const DIRECTORY_TITLE_PIN: Readonly<Record<string, string>> = {
   describe_category: "Describe category",
   draft_listing: "Draft a listing",
   expire_wanted: "Expire wanted post",
+  format_listing: "Format listing for another platform",
   get_item: "Get item details",
   get_seller_summary: "Get seller summary",
   get_wanted: "Get wanted post",
@@ -80,7 +82,7 @@ const DIRECTORY_TITLE_PIN: Readonly<Record<string, string>> = {
 };
 
 /** The money/order/PII/intent/account surface that must NEVER appear in
- *  the directory listing (THI-614 exclude list — everything except the 17;
+ *  the directory listing (THI-614 exclude list — everything except the 18;
  *  grew 19→22 when #249/#250 added session-only account tools, which stay *  excluded here deliberately). */
 const EXCLUDED_PIN: readonly string[] = [
   "buy_shipping_label",
@@ -152,19 +154,19 @@ describe("parseToolProfile (query-value semantics, THI-614)", () => {
 });
 
 describe("directory profile pin (registration-time gating)", () => {
-  it("DIRECTORY_PROFILE_TOOLS is exactly the pinned 17-name include list", () => {
+  it("DIRECTORY_PROFILE_TOOLS is exactly the pinned 18-name include list", () => {
     expect([...DIRECTORY_PROFILE_TOOLS].sort()).toEqual([...DIRECTORY_PIN]);
-    expect(DIRECTORY_PIN.length).toBe(17);
+    expect(DIRECTORY_PIN.length).toBe(18);
   });
 
-  it("profile 'directory' registers exactly the pinned 17 tools — no add, no remove", () => {
+  it("profile 'directory' registers exactly the pinned 18 tools — no add, no remove", () => {
     const { server, registered } = captureServer();
     registerTools(server, { seller: null }, "directory");
     expect([...registered.keys()].sort()).toEqual([...DIRECTORY_PIN]);
   });
 
   // THI-769: the directory review criteria require annotations.title on
-  // every tool — pin the 17 exact strings, their mirror of the tool-level
+  // every tool — pin the 18 exact strings, their mirror of the tool-level
   // title, and the ≤64-char cap.
   it("every directory tool carries its pinned annotations.title (THI-769)", () => {
     expect(Object.keys(DIRECTORY_TITLE_PIN).sort()).toEqual([...DIRECTORY_PIN]);
@@ -191,7 +193,7 @@ describe("directory profile pin (registration-time gating)", () => {
   it("default registration (no profile arg) is unchanged: all 40 base tools incl. every excluded one", () => {
     const { server, registered } = captureServer();
     registerTools(server, { seller: null });
-    expect(registered.size).toBe(42);    // The base surface carries every non-session excluded tool; the 3
+    expect(registered.size).toBe(43);    // The base surface carries every non-session excluded tool; the 3
     // session-only ones join only under a web session (next test).
     const baseExcluded = EXCLUDED_PIN.filter((n) => !SESSION_ONLY_TOOLS.has(n));
     expect(baseExcluded.length).toBe(24);
@@ -215,13 +217,13 @@ describe("directory profile pin (registration-time gating)", () => {
   });
 
   it("session-only account tools (#249/#250) register on full but NEVER on directory", () => {
-    // The web session adds 3 account-settings tools to the full profile (42
-    // → 45); on the directory profile the same session still gets exactly
-    // the 17 — account management cannot leak into the directory listing.
+    // The web session adds 3 account-settings tools to the full profile (43
+    // → 46); on the directory profile the same session still gets exactly
+    // the 18 — account management cannot leak into the directory listing.
     const fakeSeller = { id: "11111111-1111-1111-1111-111111111111" } as import("../src/db.js").SellerRow;
     const full = captureServer();
     registerTools(full.server, { seller: fakeSeller, credential: "session" });
-    expect(full.registered.size).toBe(45);
+    expect(full.registered.size).toBe(46);
     for (const name of SESSION_ONLY_TOOLS) {
       expect(full.registered.has(name)).toBe(true);
     }
@@ -290,7 +292,7 @@ describe("/mcp?profile=directory (HTTP, DB-free)", () => {
     return (body.result?.tools as { name: string }[]).map((t) => t.name);
   }
 
-  it("?profile=directory serves exactly the pinned 17 tools over tools/list", async () => {
+  it("?profile=directory serves exactly the pinned 18 tools over tools/list", async () => {
     const names = await toolNames("/mcp?profile=directory");
     expect(names.sort()).toEqual([...DIRECTORY_PIN]);
   });
@@ -311,9 +313,9 @@ describe("/mcp?profile=directory (HTTP, DB-free)", () => {
     }
   });
 
-  it("default /mcp (no param) still serves the full surface (42 tools for a non-session caller)", async () => {
+  it("default /mcp (no param) still serves the full surface (43 tools for a non-session caller)", async () => {
     const names = await toolNames("/mcp");
-    expect(names.length).toBe(42);
+    expect(names.length).toBe(43);
     for (const name of EXCLUDED_PIN.filter((n) => !SESSION_ONLY_TOOLS.has(n))) {
       expect(names).toContain(name);
     }
@@ -321,12 +323,12 @@ describe("/mcp?profile=directory (HTTP, DB-free)", () => {
 
   it("?profile=full is the same canonical full surface", async () => {
     const names = await toolNames("/mcp?profile=full");
-    expect(names.length).toBe(42);
+    expect(names.length).toBe(43);
   });
 
   it("empty ?profile= value falls back to the full surface", async () => {
     const names = await toolNames("/mcp?profile=");
-    expect(names.length).toBe(42);
+    expect(names.length).toBe(43);
   });
 
   it("initialize works anonymously on the profile URL (public reads stay free)", async () => {

@@ -10,7 +10,7 @@
 //   2. `?profile=directory` must register exactly those 18 tools — a new
 //      money-touching tool added to src/tools.ts cannot silently leak into
 //      the directory listing because it is not on the include list.
-//   3. The canonical /mcp (no param) is unchanged: the full surface (41//      registered tools for anonymous/API-key/OAuth callers, plus 3 more
+//   3. The canonical /mcp (no param) is unchanged: the full surface (43//      registered tools for anonymous/API-key/OAuth callers, plus 3 more
 //      session-only account tools under the web session — #249/#250), with
 //      every excluded order/payment/payout/intent/address/account tool still
 //      present.

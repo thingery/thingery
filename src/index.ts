@@ -13,6 +13,7 @@ import { startWantedSweepTimer } from "./wanted-sweep.js";
 import { RateLimiter } from "./rate-limit.js";
 import { pool } from "./db.js";
 import { mountApiRoutes } from "./routes.js";
+import { mountBodyParsers } from "./body-parsers.js";
 import { mountOpenaiAppsChallenge } from "./openai-apps-challenge.js";
 import { stripeWebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
@@ -116,8 +117,11 @@ function runHttp(): void {
   app.use(resendWebhookRouter());
 
   // Browser API (accounts + chat). /mcp above consumes the raw body stream,
-  // so the JSON parser starts here and never touches MCP traffic.
-  app.use(express.json({ limit: "256kb" }));
+  // so the JSON parsers start here and never touch MCP traffic.
+  // THI-1197: mountBodyParsers adds the scoped 8 MiB parser for the
+  // draft-listing photo route BEFORE the global 256kb parser (one shared
+  // mount list for prod + HTTP tests — the drift that hid THI-1196 F1).
+  mountBodyParsers(app);
   mountOauthRoutes(app); // OAuth discovery + DCR (spec THI-11 §4.1) — after the JSON parser, like /api
   // /api router + its app-level terminal JSON error middleware (spec THI-58
   // PR-1): mount position unchanged, right where the router sat before.

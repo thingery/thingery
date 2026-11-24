@@ -25,6 +25,7 @@
     "public",
     "!public/demos",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {

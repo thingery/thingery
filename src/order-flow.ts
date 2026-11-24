@@ -415,7 +415,14 @@ function needsBuyerAddressConsent(order: Pick<OrderRow, "payment_mode">): boolea
  *  (shippingAddressForSeller), and never on list surfaces (my_orders carries
  *  metadata only — no order state, no consent state, no new disclosure
  *  channel). null = not_checked, omit the field. */
-type VerificationMeta = { status: ShippingVerificationRecord["status"]; checked_at: string };
+type VerificationMeta = {
+  status: ShippingVerificationRecord["status"];
+  checked_at: string;
+  /** Provider-prefixed reason code (unverified only) — additive, value-free;
+   *  the tools.ts description stays true: status and checked_at, plus the
+   *  reason code when there is one. */
+  reason?: string;
+};
 export function shippingVerificationFor(
   order: Pick<OrderRow, "buyer_id" | "shipping_verification">,
   viewerId: string,
@@ -443,7 +450,11 @@ export function shippingVerificationFor(
 ): ShippingVerificationRecord | VerificationMeta | null {
   const record = order.shipping_verification;
   if (!record) return null;
-  const meta: VerificationMeta = { status: record.status, checked_at: record.checked_at };
+  const meta: VerificationMeta = {
+    status: record.status,
+    checked_at: record.checked_at,
+    ...(record.status === "unverified" && record.reason !== undefined ? { reason: record.reason } : {}),
+  };
   if (order.buyer_id === viewerId) return record;
   if (surface === "list") return meta;
   return shippingAddressForSeller(order as Parameters<typeof shippingAddressForSeller>[0], viewerId) ? record : meta;

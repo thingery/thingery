@@ -14,9 +14,13 @@
 // scheme, error mapping, status normalization, webhook verification + F6
 // redaction, dedupe id format) lives in its adapter.
 //
-// Address verification is deliberately NOT part of this interface — it stays
-// on its own flow (src/sendcloud.ts), independent of the label/tracking
-// provider (spec scope guard).
+// Address verification IS part of this interface (amended spec): the active
+// provider verifies addresses too — one provider per deployment covers
+// labels, tracking AND verification, never a mix. The Sendcloud v3 path
+// (src/sendcloud.ts) is retired from the active flow and stays dormant until
+// its contract-PR deletion. EasyPost declares no verification capability
+// (supportsAddressVerification = false ⇒ services skip the check before any
+// budget is spent); Shippo implements it with the spec's 6-row mapping.
 
 /** The provider ids the platform knows, in the platform's vocabulary. The
  *  AVAILABLE set per build is smaller (see AVAILABLE_SHIPPING_PROVIDERS in
@@ -146,6 +150,15 @@ export interface RedactedCarrierEvent {
   occurred_at: string | null;
 }
 
+/** Provider-mapped verification outcome (amended spec). `reason` carries
+ *  provider-prefixed code strings only — no address values, no provider prose
+ *  (value-free, F3 discipline). `suggested` rides as a ProviderAddress; the
+ *  callers re-validate it (F2) before any store or return. */
+export type ProviderAddressVerification =
+  | { status: "verified" }
+  | { status: "unverified"; reason?: string } // e.g. "shippo_address_invalid"
+  | { status: "suggested"; suggestion: ProviderAddress };
+
 /** Per-provider env-var conventions: the API key lives in `${ID}_API_KEY`,
  *  the webhook secret in `${ID}_WEBHOOK_SECRET` (+ `_PREVIOUS` rotation).
  *  config.ts reads only the selected provider's pair; service layers reuse
@@ -232,4 +245,21 @@ export interface ShippingProvider {
    *  provider today documents a per-delivery event id; the scheme stays
    *  uniform across providers. */
   dedupeId(raw: Buffer): string;
+
+  /** Static capability flag. false ⇒ verifyAddress always returns null and
+   *  the service skips the check BEFORE caps (no budget consumed — the
+   *  availability pre-check, invariant 1 of the verification spec). */
+  readonly supportsAddressVerification: boolean;
+
+  /** Advisory address verification. Null ⇔ verification unavailable (provider
+   *  key unset OR unsupported capability) — the callers' `not_checked`.
+   *  Throws ProviderError on provider faults; callers treat ANY throw as
+   *  `not_checked` (failure-open invariant, unchanged). Must respect `signal`
+   *  (the services pass a ≤3s deadline). Sends only the typed address fields
+   *  — never the buyer's name, never free text (data minimisation, same
+   *  discipline as the Sendcloud wire contract). A mapped suggestion rides as
+   *  a ProviderAddress; callers re-validate it before any store or return
+   *  (F2) and downgrade identical-to-input "corrections" (not corrections). */
+  verifyAddress(input: ProviderAddress, signal?: AbortSignal):
+    Promise<ProviderAddressVerification | null>;
 }

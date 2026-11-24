@@ -1,7 +1,8 @@
 // Saved shipping addresses v1 core (spec docs/specs/saved-addresses.md,
 // rollout step 1): the account-owned address store behind the MCP account
-// tools (step 2), the web settings routes (step 3) and advisory EasyPost
-// verification (step 4). Foundation first — nothing calls this module until
+// tools (step 2), the web settings routes (step 3) and advisory provider
+// verification (step 4, now via the active shipping provider — amended
+// spec). Foundation first — nothing calls this module until
 // those land. Mirrors src/wanted.ts conventions throughout.
 //
 // PII minimization is the load-bearing rule here (spec Goal 3, review
@@ -17,12 +18,10 @@ import { pool } from "./db.js";
 import { normalizeCountryCode, CountryCodeError } from "./countries.js";
 import { RateLimiter } from "./rate-limit.js";
 import { logSecurityEvent } from "./security-events.js";
-import { envValue } from "./config.js";
-import {
-  verifySendcloudAddress,
-  type SendcloudAddressInput,
-  type SendcloudAddressSuggestion,
-} from "./sendcloud.js";
+import { orderFlowConfig } from "./config.js";
+import { getShippingProvider } from "./shipping/registry.js";
+import { ADDRESS_VERIFY_TIMEOUT_MS } from "./address-verification.js";
+import type { ProviderAddress, ShippingProvider } from "./shipping/provider.js";
 
 /** Fan-out controls (spec "Security and privacy"): module constants,
  *  deliberately not env-configurable — same posture as the wanted caps.
@@ -37,7 +36,7 @@ export const MAX_ADDRESSES_PER_ACCOUNT = 10;
 export const addressWriteLimiter = new RateLimiter(30, 60 * 60_000);
 
 /** Spec "Verification (advisory)": 20 checks per account per day — a ceiling,
- *  not an expected rate (EasyPost charges per check). Over the limit is
+ *  not an expected rate (the provider charges per check). Over the limit is
  *  not_checked, never an error. Same token-bucket semantics as the write
  *  bucket (review note N2): an average-rate ceiling over a 24h window with
  *  burst-after-idle, not a wall-clock calendar cap — so "about 20/day" in
@@ -49,11 +48,10 @@ export const addressVerificationLimiter = new RateLimiter(20, 24 * 60 * 60_000);
  *  zod-enforced on every read back (AddressVerificationSchema below). */
 export const MAX_VERIFICATION_SUGGESTED_LENGTH = 200;
 
-/** The advisory verification state machine (spec "Verification"): one of
- *  ADDRESS_VERIFICATION_STATUSES, mirrored by the DB CHECK on
- *  account_addresses.verification. The check never blocks a save; the
- *  EasyPost fetch that produces the non-default statuses lands in rollout
- *  step 4 — until then every row stays not_checked. */
+/** The advisory verification state machine (spec "Verification", amended:
+ *  the ACTIVE provider verifies — one provider per deployment covers labels,
+ *  tracking and verification; without a verification-capable provider every
+ *  row stays not_checked). The check never blocks a save. */
 export const ADDRESS_VERIFICATION_STATUSES = ["verified", "suggested", "unverified", "not_checked"] as const;
 export type AddressVerificationStatus = (typeof ADDRESS_VERIFICATION_STATUSES)[number];
 
@@ -65,6 +63,10 @@ export interface AddressVerification {
    *  untrusted provider text (review condition C4). Never returned through
    *  MCP tools — the summary carries the status only. */
   suggested?: string;
+  /** Provider-prefixed reason code when status is "unverified" (e.g.
+   *  "shippo_address_invalid") — a code string only: never address values,
+   *  never provider prose. */
+  reason?: string;
 }
 
 /** C4, enforced at the read boundary: every verification JSONB read back
@@ -76,6 +78,9 @@ export const AddressVerificationSchema = z.object({
   status: z.enum(ADDRESS_VERIFICATION_STATUSES),
   checked_at: z.string().optional(),
   suggested: z.string().max(MAX_VERIFICATION_SUGGESTED_LENGTH).optional(),
+  // Code-string only, capped — same untrusted-provider-output discipline as
+  // `suggested` (C4). Values observed in the wild are far shorter.
+  reason: z.string().max(80).optional(),
 });
 
 export function parseAddressVerification(json: unknown): AddressVerification {
@@ -151,15 +156,11 @@ export interface AddressInput {
   country: string;
 }
 
-/** Test seams for the advisory verification: production resolves the env
- *  key and the global fetch — both injectable so tests never touch the
- *  network and never depend on the host environment. */
+/** Test seam for the advisory verification: production resolves the boot
+ *  provider selection from the registry — injectable so tests never touch
+ *  the network and never depend on the host environment. */
 export interface AddressVerificationDeps {
-  apiKey?: string;
-  /** Sendcloud's validate API requires a carrier available on the account
-   *  (default env: SENDCLOUD_VALIDATE_CARRIER_CODE); unset → not_checked. */
-  carrierCode?: string;
-  fetchImpl?: typeof fetch;
+  provider?: ShippingProvider;
 }
 
 /** Wholesale field replacement (update_listing semantics) plus the
@@ -368,17 +369,18 @@ export async function markAddressUsed(accountId: string, addressId: string): Pro
     .catch(() => {}); // advisory stamp — swallow, never fail the order
 }
 
-// --- Advisory EasyPost verification (spec "Verification (advisory)",
-// rollout step 4) ----------------------------------------------------------
+// --- Advisory verification via the active shipping provider (spec
+// "Verification (advisory)", rollout step 4; amended spec: provider seam) ---
 //
 // Runs on save and edit ONLY — never on list, never at order time. Every
-// failure mode (no key, over the daily ceiling, provider error, the C3
-// timeout) maps to not_checked: saving never fails because of verification,
-// and a valid address is never refused (advisory only).
+// failure mode (unconfigured provider, capability missing, over the daily
+// ceiling, provider error, the C3 timeout) maps to not_checked: saving never
+// fails because of verification, and a valid address is never refused
+// (advisory only).
 
 const NOT_CHECKED: AddressVerification = { status: "not_checked" };
 
-function toSendcloudInput(input: AddressInput): SendcloudAddressInput {
+function toProviderInput(input: AddressInput): ProviderAddress {
   return {
     name: input.name,
     line1: input.line1,
@@ -394,14 +396,14 @@ function norm(s: string): string {
   return s.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-/** True when the carrier-confirmed address differs from what the user typed
+/** True when the provider-confirmed address differs from what the user typed
  *  (delivery fields only — a name-only difference is not a correction). */
-function addressDiffers(input: AddressInput, corrected: SendcloudAddressSuggestion): boolean {
+function addressDiffers(input: AddressInput, corrected: ProviderAddress): boolean {
   return (
     norm(input.line1) !== norm(corrected.line1) ||
     norm(input.line2 ?? "") !== norm(corrected.line2 ?? "") ||
     norm(input.city) !== norm(corrected.city) ||
-    norm(input.postal_code) !== norm(corrected.postal_code) ||
+    norm(input.postal_code) !== norm(corrected.postalCode) ||
     norm(input.country) !== norm(corrected.country)
   );
 }
@@ -410,11 +412,11 @@ function addressDiffers(input: AddressInput, corrected: SendcloudAddressSuggesti
  *  each component whitespace-collapsed and capped to its field bound, the
  *  whole line capped at MAX_VERIFICATION_SUGGESTED_LENGTH. Synthesized here
  *  from the corrected fields — the provider's raw response is never stored. */
-function suggestedLine(corrected: SendcloudAddressSuggestion): string {
+function suggestedLine(corrected: ProviderAddress): string {
   const line1 = corrected.line1.trim().replace(/\s+/g, " ").slice(0, 200);
   const line2 = corrected.line2?.trim().replace(/\s+/g, " ").slice(0, 200);
   const city = corrected.city.trim().replace(/\s+/g, " ").slice(0, 80);
-  const postal = corrected.postal_code.trim().slice(0, 20);
+  const postal = corrected.postalCode.trim().slice(0, 20);
   const country = corrected.country.trim().slice(0, 2);
   const line = [line1, ...(line2 ? [line2] : []), `${city} ${postal}`, country].join(", ");
   return line.length > MAX_VERIFICATION_SUGGESTED_LENGTH
@@ -422,35 +424,44 @@ function suggestedLine(corrected: SendcloudAddressSuggestion): string {
     : line;
 }
 
-/** One advisory check: resolves the env key unless deps override it, draws
- *  from the 20/day bucket only when a check can actually run, and maps
- *  every outcome onto the four-status state machine (spec table). Exported
- *  for tests; never touches the database. */
+/** One advisory check: resolves the boot provider (unless deps override it),
+ *  pre-checks availability + verification capability BEFORE the cap (an
+ *  unavailable provider never costs budget), draws from the 20/day bucket
+ *  only when a check can actually run, and maps every outcome onto the
+ *  four-status state machine (spec table). Exported for tests; never touches
+ *  the database. */
 export async function verifyAddressAdvisory(
   accountId: string,
   input: AddressInput,
   deps?: AddressVerificationDeps,
 ): Promise<AddressVerification> {
-  const apiKey = deps?.apiKey ?? envValue("SENDCLOUD_API_KEY");
-  const carrierCode = deps?.carrierCode ?? envValue("SENDCLOUD_VALIDATE_CARRIER_CODE");
-  if (apiKey === undefined || carrierCode === undefined) return NOT_CHECKED;
+  const provider = deps?.provider ?? getShippingProvider(orderFlowConfig());
+  if (!provider.isConfigured() || !provider.supportsAddressVerification) return NOT_CHECKED;
   if (!addressVerificationLimiter.allow(`seller:${accountId}`)) return NOT_CHECKED;
   try {
-    const result = await verifySendcloudAddress(toSendcloudInput(input), {
-      apiKey,
-      carrierCode,
-      ...(deps?.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
-    });
+    const result = await provider.verifyAddress(
+      toProviderInput(input),
+      AbortSignal.timeout(ADDRESS_VERIFY_TIMEOUT_MS),
+    );
     if (result === null) return NOT_CHECKED;
     const checked_at = new Date().toISOString();
     if (result.status === "verified") return { status: "verified", checked_at };
-    if (result.status === "suggested" && addressDiffers(input, result.suggestion)) {
-      return { status: "suggested", checked_at, suggested: suggestedLine(result.suggestion) };
+    if (result.status === "suggested") {
+      if (addressDiffers(input, result.suggestion)) {
+        return { status: "suggested", checked_at, suggested: suggestedLine(result.suggestion) };
+      }
+      // An identical-to-input "correction" is not a correction (same rule
+      // as the order-time seam) — plain unverified, no reason code.
+      return { status: "unverified", checked_at };
     }
-    return { status: "unverified", checked_at };
+    return {
+      status: "unverified",
+      checked_at,
+      ...(result.reason !== undefined ? { reason: result.reason } : {}),
+    };
   } catch (e) {
     // Spec "Failure" + C3: provider error or timeout → not_checked. The
-    // logged message carries no address content (EasyPostError is
+    // logged message carries no address content (provider errors are
     // status+code only); the address itself never reaches a log line.
     console.error("address verification failed (ignored):", e instanceof Error ? e.message : e);
     return NOT_CHECKED;

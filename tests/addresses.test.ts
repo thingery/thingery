@@ -264,87 +264,115 @@ describe("addressToSummary (C2 allowlist)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Advisory verification (spec "Verification (advisory)", rollout step 4).
-// Shared stub: an EasyPost-shaped address-verification response where
-// `address` overrides the corrected fields the carrier returns.
+// Advisory verification (spec "Verification (advisory)", rollout step 4,
+// amended: the ACTIVE provider verifies — one provider per deployment covers
+// labels, tracking and verification). Tests drive the production path:
+// SHIPPING_PROVIDER=shippo + SHIPPO_API_KEY with the global fetch stubbed.
 
-/** Sendcloud /api/v3/addresses/validate fixture: one recommended:false entry
- *  plus (when result.recommended) a recommended:true entry whose address is
- *  the input unless overridden. */
-function sendcloudVerifyFetch(
-  result: { valid: boolean | null; recommended?: boolean; address?: Partial<AddressInput> },
-  calls: number[] = [],
-): typeof fetch {
-  return (async () => {
-    calls.push(1);
-    const a = result.address ?? {};
-    return new Response(
-      JSON.stringify({
-        input_address_is_valid: result.valid,
-        results: [
-          {
-            validation_method: null,
-            recommended: result.recommended ?? false,
-            address: {
-              address_line_1: a.line1 ?? "Via Roma 1",
-              address_line_2: a.line2 ?? null,
-              house_number: null,
-              city: a.city ?? "Milano",
-              postal_code: a.postal_code ?? "20121",
-              country_code: a.country ?? "IT",
-            },
-            analysis: null,
+/** Shippo v2 validate fixture built from the recorded key fields. */
+function shippoValidateBody(result: {
+  value: "valid" | "partially_valid" | "invalid";
+  recommended?: boolean; // attach a recommended_address (corrected fields below)
+  score?: "high" | "medium" | "low";
+  changed?: string[];
+  address?: Partial<AddressInput>; // the recommended_address overrides
+}): Record<string, unknown> {
+  const a = result.address ?? {};
+  const analysis: Record<string, unknown> = {
+    validation_result: { value: result.value },
+    changed_attributes: result.changed ?? (result.recommended ? ["postal"] : []),
+  };
+  if (result.score) analysis.confidence_result = { score: result.score };
+  return {
+    analysis,
+    ...(result.recommended
+      ? {
+          recommended_address: {
+            street1: a.line1 ?? "Via Roma 1",
+            ...(a.line2 !== undefined ? { street2: a.line2 } : {}),
+            city: a.city ?? "Milano",
+            zip_code: a.postal_code ?? "20121",
+            country: a.country ?? "IT",
           },
-        ],
-      }),
-      { status: 200 },
-    );
-  }) as typeof fetch;
+        }
+      : {}),
+  };
 }
 
-describe("advisory verification — verifyAddressAdvisory (spec step 4)", () => {
+const jsonRes = (body: unknown, status = 200): Response =>
+  new Response(JSON.stringify(body), { status }) as Response;
+
+function stubShippo(body: Record<string, unknown>, calls: number[] = []): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      calls.push(1);
+      return jsonRes(body);
+    }),
+  );
+}
+
+function setShippoEnv(): void {
+  process.env.SHIPPING_PROVIDER = "shippo";
+  process.env.SHIPPO_API_KEY = "shippo_test_KEY";
+}
+
+function clearProviderEnv(): void {
+  for (const n of ["SHIPPING_PROVIDER", "SHIPPO_API_KEY", "SHIPPO_WEBHOOK_SECRET", "EASYPOST_API_KEY", "SENDCLOUD_API_KEY", "SENDCLOUD_VALIDATE_CARRIER_CODE"]) {
+    delete process.env[n];
+  }
+}
+
+describe("advisory verification — verifyAddressAdvisory (spec step 4, provider seam)", () => {
   beforeEach(() => {
     addressVerificationLimiter.reset();
-    delete process.env.SENDCLOUD_API_KEY; // tests must never read the host env
-    delete process.env.SENDCLOUD_VALIDATE_CARRIER_CODE;
+    clearProviderEnv(); // tests must never read the host env
   });
   afterEach(() => {
     addressVerificationLimiter.reset();
-    delete process.env.SENDCLOUD_API_KEY;
-    delete process.env.SENDCLOUD_VALIDATE_CARRIER_CODE;
+    clearProviderEnv();
+    vi.unstubAllGlobals();
   });
 
-  it("no key → not_checked, no network call, no bucket draw", async () => {
+  it("provider unconfigured → not_checked, no network call, no bucket draw", async () => {
     const calls: number[] = [];
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: undefined, fetchImpl: sendcloudVerifyFetch({ valid: true }, calls) });
+    stubShippo(shippoValidateBody({ value: "valid" }), calls);
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input());
     expect(v).toEqual({ status: "not_checked" });
     expect(calls).toHaveLength(0);
   });
 
-  it("key without a carrier code → not_checked (the validate API needs both)", async () => {
+  it("capability flag false (easypost configured) → not_checked before any cap or call", async () => {
+    process.env.EASYPOST_API_KEY = "EZABC"; // configured — but no verification capability
     const calls: number[] = [];
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "SC_key", fetchImpl: sendcloudVerifyFetch({ valid: true }, calls) });
+    stubShippo(shippoValidateBody({ value: "valid" }), calls);
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input());
     expect(v).toEqual({ status: "not_checked" });
     expect(calls).toHaveLength(0);
   });
 
   it("over the 20/day ceiling → not_checked, no fetch (never an error)", async () => {
+    setShippoEnv();
     const key = `seller:${ACCOUNT_ID}`;
     for (let i = 0; i < 20; i++) expect(addressVerificationLimiter.allow(key)).toBe(true);
     const calls: number[] = [];
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: sendcloudVerifyFetch({ valid: true }, calls) });
+    stubShippo(shippoValidateBody({ value: "valid" }), calls);
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input());
     expect(v).toEqual({ status: "not_checked" });
     expect(calls).toHaveLength(0);
   });
 
   it("provider error or the C3 timeout → not_checked (saving never fails)", async () => {
-    const failing = (() => Promise.reject(new Error("network down"))) as unknown as typeof fetch;
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: failing });
+    setShippoEnv();
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("network down"))));
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input());
     expect(v).toEqual({ status: "not_checked" });
   });
 
   it("valid as written → verified with an ISO checked_at", async () => {
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: sendcloudVerifyFetch({ valid: true }) });
+    setShippoEnv();
+    stubShippo(shippoValidateBody({ value: "valid" }));
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input());
     expect(v.status).toBe("verified");
     expect(typeof v.checked_at).toBe("string");
     expect(new Date(v.checked_at!).toString()).not.toBe("Invalid Date");
@@ -352,47 +380,68 @@ describe("advisory verification — verifyAddressAdvisory (spec step 4)", () => 
   });
 
   it("case- and whitespace-only 'corrections' are not suggestions — unverified", async () => {
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), {
-      apiKey: "SC_key",
-      carrierCode: "dhl",
-      fetchImpl: sendcloudVerifyFetch({ valid: false, recommended: true, address: { city: "  MILANO ", line1: "via   roma 1" } }),
-    });
+    setShippoEnv();
+    stubShippo(
+      shippoValidateBody({
+        value: "partially_valid",
+        recommended: true,
+        score: "high",
+        address: { city: "  MILANO ", line1: "via   roma 1" },
+      }),
+    );
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input());
     expect(v.status).toBe("unverified");
     expect("suggested" in v).toBe(false);
   });
 
   it("corrected postal code → suggested with a one-line correction", async () => {
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), {
-      apiKey: "SC_key",
-      carrierCode: "dhl",
-      fetchImpl: sendcloudVerifyFetch({ valid: false, recommended: true, address: { postal_code: "20122", line2: "Scala B" } }),
-    });
+    setShippoEnv();
+    stubShippo(
+      shippoValidateBody({
+        value: "partially_valid",
+        recommended: true,
+        score: "high",
+        address: { postal_code: "20122", line2: "Scala B" },
+      }),
+    );
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input());
     expect(v).toMatchObject({ status: "suggested" });
     expect(v.suggested).toBe("Via Roma 1, Scala B, Milano 20122, IT");
   });
 
-  it("the validator being unavailable (null) → not_checked", async () => {
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), {
-      apiKey: "SC_key",
-      carrierCode: "dhl",
-      fetchImpl: sendcloudVerifyFetch({ valid: null }),
-    });
-    expect(v).toEqual({ status: "not_checked" });
+  it("invalid → unverified with the provider-prefixed reason code stored", async () => {
+    setShippoEnv();
+    stubShippo(
+      shippoValidateBody({
+        value: "invalid",
+        recommended: true, // a false-negative recommendation is ignored
+        score: "high",
+      }),
+    );
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input());
+    expect(v).toEqual({ status: "unverified", checked_at: expect.any(String), reason: "shippo_address_invalid" });
   });
 
   it("caps provider text at the C4 limit even for pathological fields", async () => {
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), {
-      apiKey: "SC_key",
-      carrierCode: "dhl",
-      fetchImpl: sendcloudVerifyFetch({ valid: false, recommended: true, address: { line1: "V".repeat(600) } }),
-    });
+    setShippoEnv();
+    stubShippo(
+      shippoValidateBody({
+        value: "partially_valid",
+        recommended: true,
+        score: "high",
+        address: { line1: "V".repeat(600) },
+      }),
+    );
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input());
     expect(v.status).toBe("suggested");
     expect(v.suggested!.length).toBeLessThanOrEqual(MAX_VERIFICATION_SUGGESTED_LENGTH);
     expect(v.suggested!.endsWith("…")).toBe(true);
   });
 
   it("nothing recommended → unverified (still advisory: the save stands)", async () => {
-    const v = await verifyAddressAdvisory(ACCOUNT_ID, input(), { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: sendcloudVerifyFetch({ valid: false }) });
+    setShippoEnv();
+    stubShippo(shippoValidateBody({ value: "partially_valid", score: "low" }));
+    const v = await verifyAddressAdvisory(ACCOUNT_ID, input());
     expect(v.status).toBe("unverified");
     expect("suggested" in v).toBe(false);
   });
@@ -402,6 +451,15 @@ describe("parseAddressVerification (C4 read-boundary cap)", () => {
   it("passes a valid object through", () => {
     const v = { status: "suggested" as const, checked_at: "2026-01-01T00:00:00Z", suggested: "Via Roma 10" };
     expect(parseAddressVerification(v)).toEqual(v);
+  });
+
+  it("passes an unverified reason code through; degrades an over-cap reason to not_checked", () => {
+    expect(parseAddressVerification({ status: "unverified", reason: "shippo_address_invalid", checked_at: "2026-01-01T00:00:00Z" })).toEqual({
+      status: "unverified",
+      reason: "shippo_address_invalid",
+      checked_at: "2026-01-01T00:00:00Z",
+    });
+    expect(parseAddressVerification({ status: "unverified", reason: "x".repeat(81) })).toEqual({ status: "not_checked" });
   });
 
   it("degrades an over-cap suggested to not_checked", () => {
@@ -545,34 +603,49 @@ describe.skipIf(!available)("addresses (db)", () => {
   });
 
   it("persists the advisory verification on save and edit (spec step 4)", async () => {
+    setShippoEnv();
     const accountId = await seedAccount();
-    const saved = await saveAddress(accountId, input(), {
-      verification: { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: sendcloudVerifyFetch({ valid: true }) },
-    });
-    expect(saved.verification).toMatchObject({ status: "verified" });
-    // Persisted, not just returned: reload through the read path.
-    const reloaded = await listAddresses(accountId);
-    expect(reloaded[0].verification).toMatchObject({ status: "verified" });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonRes(shippoValidateBody({ value: "valid" })))
+      .mockResolvedValueOnce(
+        jsonRes(shippoValidateBody({ value: "partially_valid", recommended: true, score: "high", address: { postal_code: "20198" } })),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const saved = await saveAddress(accountId, input());
+      expect(saved.verification).toMatchObject({ status: "verified" });
+      // Persisted, not just returned: reload through the read path.
+      const reloaded = await listAddresses(accountId);
+      expect(reloaded[0].verification).toMatchObject({ status: "verified" });
 
-    const updated = await updateAddress(
-      accountId,
-      saved.id,
-      { address: input({ postal_code: "20199" }), is_default: false },
-      { verification: { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: sendcloudVerifyFetch({ valid: false, recommended: true, address: { postal_code: "20198" } }) } },
-    );
-    expect(updated.verification).toMatchObject({ status: "suggested", suggested: expect.stringContaining("20198") });
-    const after = await getOwnedAddress(accountId, saved.id);
-    expect(after.verification).toMatchObject({ status: "suggested" });
-    await client.query(`DELETE FROM sellers WHERE id = $1`, [accountId]);
+      const updated = await updateAddress(accountId, saved.id, {
+        address: input({ postal_code: "20199" }),
+        is_default: false,
+      });
+      expect(updated.verification).toMatchObject({ status: "suggested", suggested: expect.stringContaining("20198") });
+      const after = await getOwnedAddress(accountId, saved.id);
+      expect(after.verification).toMatchObject({ status: "suggested" });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+      clearProviderEnv();
+      await client.query(`DELETE FROM sellers WHERE id = $1`, [accountId]);
+    }
   });
 
   it("a failing provider leaves the row saved at not_checked — never fails the save", async () => {
+    setShippoEnv();
     const accountId = await seedAccount();
-    const failing = (() => Promise.reject(new Error("timeout"))) as unknown as typeof fetch;
-    const saved = await saveAddress(accountId, input(), { verification: { apiKey: "SC_key", carrierCode: "dhl", fetchImpl: failing } });
-    expect(saved.verification).toEqual({ status: "not_checked" });
-    const reloaded = await listAddresses(accountId);
-    expect(reloaded[0].verification).toEqual({ status: "not_checked" });
-    await client.query(`DELETE FROM sellers WHERE id = $1`, [accountId]);
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("timeout"))));
+    try {
+      const saved = await saveAddress(accountId, input());
+      expect(saved.verification).toEqual({ status: "not_checked" });
+      const reloaded = await listAddresses(accountId);
+      expect(reloaded[0].verification).toEqual({ status: "not_checked" });
+    } finally {
+      vi.unstubAllGlobals();
+      clearProviderEnv();
+      await client.query(`DELETE FROM sellers WHERE id = $1`, [accountId]);
+    }
   });
 });

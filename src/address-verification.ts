@@ -1,34 +1,48 @@
-// Order-time address verification (docs/specs/order-address-verification.md).
+// Order-time address verification (docs/specs/order-address-verification.md,
+// amended by docs/specs/shipping-provider-layer.md).
 //
-// Advisory Sendcloud address validation, run inside createOrder's transaction
-// before the item reservation. The state machine is failure-open by design:
-// any provider problem (unset key, error, timeout, over cap) resolves to
-// "not_checked" and the order proceeds exactly as it did before this module
-// existed. Nothing here can block an order that the platform could ship
-// before — a correction pauses the order once, with the suggestion in hand.
+// Advisory address validation via the ACTIVE shipping provider (one provider
+// per deployment covers labels, tracking and verification — the provider
+// capability flag decides; EasyPost declares none and stays degraded, Shippo
+// implements the 6-row mapping; the Sendcloud v3 path is dormant), run inside
+// createOrder's transaction before the item reservation. The state machine is
+// failure-open by design: any provider problem (unconfigured provider, missing
+// capability, error, timeout, over cap) resolves to "not_checked" and the
+// order proceeds exactly as it did before this module existed. Nothing here
+// can block an order that the platform could ship before — a correction
+// pauses the order once, with the suggestion in hand.
 //
 // Privacy invariants (spec §Privacy and security):
-// - Raw provider responses never travel past sendcloud.ts; suggestions are
-//   re-validated to the exact ShippingAddress shape (validateSuggestionAddress)
-//   before any cache write, store, or return. A malformed suggestion downgrades
-//   to "unverified" — provider output is never surfaced as-is.
+// - Raw provider responses never travel past the provider adapter; suggestions
+//   are re-validated to the exact ShippingAddress shape
+//   (validateSuggestionAddress) before any cache write, store, or return. A
+//   malformed suggestion downgrades to "unverified" — provider output is
+//   never surfaced as-is.
 // - Nothing about a verification failure is logged with address values: the
 //   module throws no provider-derived errors and its results carry no raw
-//   payload. checked_at timestamps are ISO UTC.
+//   payload. checked_at timestamps are ISO UTC; reason carries provider-
+//   prefixed code strings only, never address values or provider prose.
 // - Dedup cache keys are salted SHA-256 digests (account id + normalized
 //   address) — no plaintext addresses in memory beyond the in-flight call.
 
 import { createHash } from "node:crypto";
-import { envNonNegativeInt, envValue } from "./config.js";
-import { verifySendcloudAddress } from "./sendcloud.js";
+import { envNonNegativeInt, orderFlowConfig } from "./config.js";
+import { getShippingProvider } from "./shipping/registry.js";
 import { RateLimiter } from "./rate-limit.js";
 import { isIsoCountryCode, normalizeCountryCode } from "./countries.js";
+import type { ProviderAddress, ShippingProvider } from "./shipping/provider.js";
 import type { ShippingAddress } from "./order-flow.js";
 
 /** How long a verification outcome is reused for the same address (spec: 10
  *  minutes). Within the TTL an identical re-submission skips the provider
  *  entirely; past it the check runs fresh and overwrites. */
 const CACHE_TTL_MS = 10 * 60_000;
+
+/** Hard deadline for the provider check (spec: verification must never stall
+ *  the create_order transaction beyond ~3s). Passed as an AbortSignal the
+ *  provider adapter must respect; any timeout/throw lands in not_checked.
+ *  Shared with the saved-addresses surface (same deadline both seams). */
+export const ADDRESS_VERIFY_TIMEOUT_MS = 3_000;
 
 /** Per-account provider budget: 20 checks per account per day (RateLimiter
  *  bucket "addrverify:{accountId}", 24h window). Deliberately shared: this is
@@ -47,7 +61,7 @@ const GLOBAL_DAILY_CAP_DEFAULT = 1_000;
  *  suggested address; `kept` = the buyer chose to keep their typed address. */
 export type ShippingVerificationRecord =
   | { status: "verified"; checked_at: string }
-  | { status: "unverified"; checked_at: string }
+  | { status: "unverified"; checked_at: string; reason?: string }
   | { status: "suggested"; kept: true; suggestion: ShippingAddress; checked_at: string }
   | { status: "suggested"; accepted: true; checked_at: string };
 
@@ -79,13 +93,9 @@ export class AddressSuggestedError extends Error {
 }
 
 export interface VerifyOrderAddressOptions {
-  /** Test seams — production callers pass nothing. */
-  apiKey?: string;
-  /** Sendcloud requires a carrier available on the account; unset →
-   *  degraded mode (not_checked), exactly like a missing key. */
-  carrierCode?: string;
-  baseUrl?: string;
-  fetchImpl?: typeof fetch;
+  /** Provider seam — production callers pass nothing (the registry's boot
+   *  selection is used). Tests inject a provider directly. */
+  provider?: ShippingProvider;
   now?: () => number;
   cacheTtlMs?: number;
 }
@@ -93,6 +103,7 @@ export interface VerifyOrderAddressOptions {
 interface CachedOutcome {
   status: "verified" | "unverified" | "suggested";
   suggestion?: ShippingAddress;
+  reason?: string; // provider-prefixed code string (unverified only)
   checkedAt: string;
 }
 
@@ -143,6 +154,34 @@ export function validateSuggestionAddress(raw: unknown): ShippingAddress | null 
 }
 
 const ADDRESS_KEYS = ["name", "line1", "line2", "city", "postal_code", "country"] as const;
+
+/** Domain → provider mapping (postal_code → postalCode) so nothing downstream
+ *  sees wire field names; the provider adapter owns its own wire format. */
+function toProviderAddress(a: ShippingAddress): ProviderAddress {
+  return {
+    name: a.name,
+    line1: a.line1,
+    ...(a.line2 !== undefined ? { line2: a.line2 } : {}),
+    city: a.city,
+    postalCode: a.postal_code,
+    country: a.country,
+  };
+}
+
+/** Provider → domain mapping for a suggestion. The wire has no name field
+ *  (the check sends only typed fields) — carry the caller's name, same rule
+ *  as the Sendcloud mapper had. Output goes through validateSuggestionAddress
+ *  (F2) before anything is stored or returned. */
+function suggestionFromProvider(p: ProviderAddress, name: string): unknown {
+  return {
+    name,
+    line1: p.line1,
+    ...(p.line2 !== undefined ? { line2: p.line2 } : {}),
+    city: p.city,
+    postal_code: p.postalCode,
+    country: p.country,
+  };
+}
 
 /** Normalized form for identity comparisons and cache keys: trimmed strings,
  *  uppercased ISO country, line2 omitted when empty. Two submissions the
@@ -210,13 +249,12 @@ export async function verifyOrderAddress(input: {
   const now = opts.now ?? Date.now;
   const ttl = opts.cacheTtlMs ?? CACHE_TTL_MS;
 
-  // Degraded mode first: no credentials means today's behavior, byte for
-  // byte — no caps consumed, no cache writes, no suggestion flow. The
-  // validate API needs a key AND a carrier available on the account; a
-  // missing either keeps the feature entirely absent.
-  const apiKey = opts.apiKey ?? envValue("SENDCLOUD_API_KEY");
-  const carrierCode = opts.carrierCode ?? envValue("SENDCLOUD_VALIDATE_CARRIER_CODE");
-  if (!apiKey || !carrierCode) return { kind: "not_checked" };
+  // Degraded mode first — and BEFORE any cap is consumed (invariant 1: an
+  // unavailable provider or a provider without a verification capability
+  // never costs budget). Either miss means today's degraded behavior, byte
+  // for byte: no caps consumed, no cache writes, no suggestion flow.
+  const provider = opts.provider ?? getShippingProvider(orderFlowConfig());
+  if (!provider.isConfigured() || !provider.supportsAddressVerification) return { kind: "not_checked" };
 
   const nowMs = now();
   const keyA = cacheKey(input.accountId, input.address);
@@ -243,7 +281,16 @@ export async function verifyOrderAddress(input: {
       return { kind: "record", record: { status: "suggested", accepted: true, checked_at: cached.checkedAt } };
     }
     if (cached.status === "verified") return { kind: "record", record: { status: "verified", checked_at: cached.checkedAt } };
-    if (cached.status === "unverified") return { kind: "record", record: { status: "unverified", checked_at: cached.checkedAt } };
+    if (cached.status === "unverified") {
+      return {
+        kind: "record",
+        record: {
+          status: "unverified",
+          ...(cached.reason !== undefined ? { reason: cached.reason } : {}),
+          checked_at: cached.checkedAt,
+        },
+      };
+    }
     // suggested + typed address unchanged → same pause again (no new call).
     return { kind: "suggested", suggestion: cached.suggestion!, checkedAt: cached.checkedAt };
   }
@@ -257,45 +304,37 @@ export async function verifyOrderAddress(input: {
   if (!state.limiter.allow(`addrverify:${input.accountId}`)) return { kind: "not_checked" };
   dailyCounter.count += 1; // spend counted even if the provider call fails
 
-  // Provider call, wrapped: sendcloud.ts maps the response; ANY throw (network,
+  // Provider call, wrapped: the adapter maps the response; ANY throw (network,
   // timeout, non-2xx, malformed JSON) lands here → not_checked. The raw error
   // is dropped, never logged with context — nothing provider-derived leaks.
   let outcome: CachedOutcome;
   try {
-    // Domain → provider mapping happens here (postal_code → postalCode) so
-    // sendcloud.ts stays domain-agnostic and nothing downstream sees wire
-    // field names.
-    const result = await verifySendcloudAddress(
-      {
-        name: input.address.name,
-        line1: input.address.line1,
-        ...(input.address.line2 !== undefined ? { line2: input.address.line2 } : {}),
-        city: input.address.city,
-        postalCode: input.address.postal_code,
-        country: input.address.country,
-      },
-      {
-        apiKey,
-        carrierCode,
-        ...(opts.baseUrl !== undefined ? { baseUrl: opts.baseUrl } : {}),
-        ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
-      },
+    const result = await provider.verifyAddress(
+      toProviderAddress(input.address),
+      AbortSignal.timeout(ADDRESS_VERIFY_TIMEOUT_MS),
     );
-    if (!result) return { kind: "not_checked" }; // degraded (key vanished mid-call)
+    if (result === null) return { kind: "not_checked" }; // degraded (provider vanished mid-call)
+    const checkedAt = new Date(nowMs).toISOString();
     if (result.status === "verified") {
-      outcome = { status: "verified", checkedAt: new Date(nowMs).toISOString() };
-    } else if (result.status === "unverified" || !result.suggestion) {
-      outcome = { status: "unverified", checkedAt: new Date(nowMs).toISOString() };
-    } else {
+      outcome = { status: "verified", checkedAt };
+    } else if (result.status === "suggested") {
       // F2 gate: provider output becomes a suggestion only after it validates
       // to the exact ShippingAddress shape. Identical-to-input "corrections"
       // are not corrections — plain unverified.
-      const suggestion = validateSuggestionAddress(result.suggestion);
+      const suggestion = validateSuggestionAddress(suggestionFromProvider(result.suggestion, input.address.name));
       if (!suggestion || sameAddress(input.address, suggestion)) {
-        outcome = { status: "unverified", checkedAt: new Date(nowMs).toISOString() };
+        outcome = { status: "unverified", checkedAt };
       } else {
-        outcome = { status: "suggested", suggestion, checkedAt: new Date(nowMs).toISOString() };
+        outcome = { status: "suggested", suggestion, checkedAt };
       }
+    } else {
+      // unverified — pass the provider-prefixed reason code through
+      // (value-free; never address values or provider prose).
+      outcome = {
+        status: "unverified",
+        ...(result.reason !== undefined ? { reason: result.reason } : {}),
+        checkedAt,
+      };
     }
   } catch {
     return { kind: "not_checked" };
@@ -316,6 +355,10 @@ export async function verifyOrderAddress(input: {
     record:
       outcome.status === "verified"
         ? { status: "verified", checked_at: outcome.checkedAt }
-        : { status: "unverified", checked_at: outcome.checkedAt },
+        : {
+            status: "unverified",
+            ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+            checked_at: outcome.checkedAt,
+          },
   };
 }

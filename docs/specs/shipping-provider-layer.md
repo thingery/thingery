@@ -6,12 +6,15 @@
 - **Date:** 2026-11-23
 - **Author:** Architect
 - **Decision (recorded):** label purchase and tracking stay in **one provider per deployment**.
-  The registry must allow adding providers later (e.g. Sendcloud), but a deployment never
-  mixes providers across label purchase and tracking; address verification stays on the
-  existing Sendcloud-based flow (`src/sendcloud.ts`) and is out of scope here.
+  The registry must allow adding providers later, but a deployment never
+  mixes providers across label purchase and tracking. **Rev 2 amendment:** address
+  verification ALSO moves onto the provider interface — one provider per deployment covers
+  labels, tracking, and verification; the retired Sendcloud verification client goes dormant
+  (in-tree, unconfigured, pending its contract-PR removal).
 - **Scope guard:** this spec covers exactly what the code uses today — create shipment + rates
   (quote at order time), buy a label against a stored quote, register a tracker, and carrier
-  webhook verification + normalization into the existing normalized statuses. Nothing else.
+  webhook verification + normalization into the existing normalized statuses. Rev 2 adds
+  advisory address verification on the same interface (§ Amendment below). Nothing else.
 
 Thingery is the open item database and MCP server for AI agents to list, find, and trade
 second-hand goods.
@@ -105,9 +108,12 @@ today — the seller's tracking data is stored regardless; only automation is lo
 - **IT: unknown** — docs describe "global address validation" for non-US addresses
   generically (precision messages, corrections) but publish **no country coverage list**;
   no Italy-specific statement exists in the official docs.
-- Regardless: **address verification stays on the existing Sendcloud-based flow**
-  (`src/sendcloud.ts`). The `ShippingProvider` interface deliberately has **no**
-  address-validation method; the facts above are recorded for activation planning only.
+- **Rev 2:** the IT/DE validate behavior recorded here became the verification wire
+  contract (§ Amendment). With a **test** token, non-US validation is a pass-through (no
+  real validation) — test-mode activation must not be read as "verification works"; the
+  nine fixtures freeze the expected live behavior. **Live** global validation is a paid,
+  per-validation charge — pricing must be confirmed before production activation (§ Open
+  questions).
 
 ### Webhook authentication scheme
 
@@ -316,13 +322,116 @@ deployment emits `shippo_not_configured` / `shippo_error` in the same positions
   still works for live orders).
 - No data migration is needed in either direction.
 
-### Sendcloud non-preclusion
+### Sendcloud retirement + verification on the interface (rev 2)
 
 The registry is a string-keyed map id → factory. Adding a provider = new adapter implementing
-the six operations + the env suffix pair (`SENDCLOUD_API_KEY`, `SENDCLOUD_WEBHOOK_SECRET`)
-+ one line in the registry + extending the `SHIPPING_PROVIDER` validation. Address
-verification (`src/sendcloud.ts`) is **out** of the interface and untouched; a
-future Sendcloud labels/tracking adapter composes with it independently.
+the six operations + the env suffix pair (`<PROVIDER>_API_KEY`, `<PROVIDER>_WEBHOOK_SECRET`)
++ one line in the registry + extending the `SHIPPING_PROVIDER` validation.
+
+**Rev 2:** address verification is now ON the interface (see the amendment below). The retired
+Sendcloud verification client (`src/sendcloud.ts`) is dormant: in-tree, its env variables are
+gone from `.env.example`, nothing constructs or calls it, and its tests keep the transport
+mapping correct until a post-activation contract PR removes it. Removal of that file is a
+cleanup decision, not part of this spec's rollout.
+
+## Amendment (rev 2): address verification moves onto the provider interface
+
+### Problem
+
+Address verification today is a parallel, provider-specific path: `src/address-verification.ts`
+and `src/addresses.ts` construct a Sendcloud client directly, with Sendcloud-scoped env
+variables. That breaks the one-provider-per-deployment discipline (two vendors per deployment),
+duplicates the verify/transport/mapping plumbing per vendor, and pins verification to a provider
+whose validate API cannot be exercised in test mode. The active-provider model already exists
+(`getShippingProvider()`); verification belongs behind it.
+
+### Decision
+
+The `ShippingProvider` interface gains advisory address verification:
+
+- `readonly supportsAddressVerification: boolean` — capability flag. EasyPost: `false` (its
+  adapter's `verifyAddress` returns `null`); Shippo: `true`. Callers check availability +
+  capability **before** any cap consumption, so an EasyPost deployment spends no verification
+  budget.
+- `verifyAddress(input: ProviderAddress, signal?: AbortSignal): Promise<ProviderAddressVerification | null>`
+  — returns `null` when unconfigured/degraded (caller maps to `not_checked`), the outcome
+  otherwise, and **throws** on any transport fault (network, non-2xx, timeout, malformed JSON)
+  — callers map every throw to `not_checked` (failure-open invariant unchanged).
+- `dedupeId(raw: Record<string, unknown>): string` — content-hash event dedupe, already on the
+  interface for webhooks; Shippo implements `shippo:<sha256>`.
+- `ProviderAddressVerification = { status: "verified" } | { status: "unverified"; reason?: string }
+  | { status: "suggested"; suggestion: ProviderAddress }` — the `reason` code is additive on
+  `unverified` only, provider-prefixed (`shippo_address_invalid`, `shippo_address_low_confidence`),
+  schema-capped at 80 chars, and flows additively through the storage/serialization layers
+  (`orders.shipping_verification`, saved-address verification, §5a visibility matrix — seller
+  metadata carries it too; it is a value-free code, no address content).
+
+Exactly one provider per deployment covers labels + tracking + verification. `orders.shipping_verification`
+remains plain JSONB (no DDL — the new `reason` key rides inside the existing object).
+
+### Shippo validate wire contract (frozen at activation)
+
+- `GET /v2/addresses/validate` with query params `street1`, `street2`, `city`, `zip_code`,
+  `country` (ISO-2). **No `name` field exists on the wire — the recipient's name is never sent**
+  (type-enforced: the transport takes a `Pick` of the input without `name`).
+- Response carries `analysis.validation_result.value` ∈ `valid` | `partially_valid` | `invalid`,
+  `analysis.changed_attributes: string[]`, an optional `recommended_address` (with its own
+  `confidence_result.score` ∈ `high` | `medium` | `low`), and an optional analysis-level `reason`
+  string. **No boolean `is_valid` field exists in v2.** Score/changed nesting has recorded
+  ambiguity (recommended-scoped vs analysis-scoped vs root) — the adapter reads all three in a
+  fixed order; the exact nesting is confirmed at provisioning before production activation
+  (§ Open questions).
+- Deadline: ≤3s per call (`AbortSignal.timeout`), shared with the existing verification timeout.
+
+### Outcome mapping (explicit transitions — every response lands in exactly one row)
+
+| # | Response condition | Outcome | `reason` |
+|---|---|---|---|
+| 1 | `value = "valid"` | `verified` | — |
+| 2 | `partially_valid`, changed attrs = province only (`state_province`) | `verified` — not a suggestion; deliverable as typed | — |
+| 3 | `partially_valid` + recommended + an eligible changed attr (street/city/postal spellings) + score `high` | `suggested` (F2-revalidated by callers; identical-to-input downgrades to plain `unverified`) | — |
+| 4 | `partially_valid` + score `low` or `medium` | `unverified` | `shippo_address_low_confidence` |
+| 5 | `value = "invalid"` | `unverified` — `recommended_address` **ignored** (false negatives must not rewrite the address) | `shippo_address_invalid` |
+| 6 | anything else (missing analysis, unknown value, malformed fields) | `unverified` | — |
+
+Any transport throw / timeout / non-2xx / malformed JSON → callers map to `not_checked`
+(row 0, unchanged failure-open invariant; never cached, never consumes the dedupe cache).
+
+### Fixtures (nine IT/DE cases — frozen as the adapter test contract)
+
+| # | Live case | Mocked key fields | Expected outcome |
+|---|---|---|---|
+| 1 | IT street typo corrected | `partially_valid`, changed `street`, score `high` | `suggested` |
+| 2 | IT wrong CAP corrected | `partially_valid`, changed `postal`, score `high` | `suggested` |
+| 3 | IT province added | `partially_valid`, changed `state_province` only | `verified` (rule 2) |
+| 4 | IT false negative ("Piazza del Duomo 1, Milano" → `address_premise_invalid`) | `invalid` | `unverified` + `shippo_address_invalid`; recommended ignored |
+| 5 | DE correct address recognised | `valid` | `verified` |
+| 6 | DE second correct address recognised | `valid` | `verified` |
+| 7 | DE wrong PLZ corrected, `high` | `partially_valid`, changed `postal`, score `high` | `suggested` |
+| 8 | DE street typo ("Lindn"), not flagged invalid | `partially_valid`, score `low` | `unverified` + `shippo_address_low_confidence` |
+| 9 | DE nonexistent street ("Xyzstraße 999") | `partially_valid`, score `low` | `unverified` + `shippo_address_low_confidence` |
+
+### Unchanged invariants (asserted, not assumed)
+
+Verification stays advisory and failure-open end to end: provider unconfigured or capability
+false → `not_checked` with zero calls and zero budget consumed; caps (20/account/day shared
+with the saved-addresses path, global `ADDRESS_VERIFICATION_DAILY_CAP`, `0` = kill switch)
+unchanged; 10-minute dedupe cache unchanged; F2 suggestion re-validation unchanged; §5a
+visibility matrix unchanged except the additive `reason` on `unverified` records; storage
+shape unchanged (`orders.shipping_verification` JSONB, saved-address verification JSONB).
+`src/tools.ts` needs **no change**: the existing tool descriptions remain true with the
+additive `reason`.
+
+### Rollout (amendment delta)
+
+Same PR as the adapter (single-purpose: one provider ships with its verification). Env:
+`SHIPPO_API_KEY` + `SHIPPO_WEBHOOK_SECRET`(+`_PREVIOUS`) in `.env.example`; operator runbook
++ security statements updated in the same PR. Test mode first — with a test token the
+validate endpoint is a pass-through, so test-mode verification is plumbing-only. Production
+activation requires: HMAC verification live, Address Validation pricing confirmed, and the
+wire-name freeze resolved (§ Open questions). Rollback: unset `SHIPPO_*` keys → verification
+returns to `not_checked`-only behavior byte-compatible with a non-verifying deployment; no
+schema rollback exists or is needed.
 
 ## Data model changes
 
@@ -411,7 +520,10 @@ future Sendcloud labels/tracking adapter composes with it independently.
   Shippo inside its adapter; the mount-order constraint (before `express.json()`, raw-body
   router) is unchanged.
 - F6 redaction is re-stated per provider; the Shippo adapter must drop `address_from/to`,
-  `messages[]`, and `tracking_history` free text at ingest.
+  `messages[]`, and `tracking_history` free text at ingest; the validate request is
+  data-minimised by construction (street lines, city, postal code, ISO country only — the
+  recipient's **name is never sent** and the wire has no field for it; no phone; provider
+  responses are parsed and reduced to status/reason/suggestion, never stored raw).
 - No API keys in logs or the repo (unchanged rule); provider keys stay in the deployment's
   secret environment only.
 
@@ -429,6 +541,16 @@ future Sendcloud labels/tracking adapter composes with it independently.
    restricted/unpaid carriers (Poste Italiane own-account requirement; Deutsche Post /
    DHL Paket not trackable at all). Default spec position: register best-effort exactly as
    today, accept the documented restrictions as failures-to-automate (non-fatal).
+4. **Address Validation pricing (production)** — live global validation is a paid,
+   per-validation charge with no published rate at spec time. The 20/account/day + global
+   ceiling budgets bound spend, but the unit price must be confirmed before enabling live
+   mode. Test mode is free and unaffected.
+5. **Validate wire-name freeze** — `changed_attributes` values (`street`, `postal`,
+   `state_province`), the `confidence_result.score` nesting (recommended-scoped vs
+   analysis-scoped vs root), and the exact `reason` prose are taken from recorded live
+   evidence; provisioning/docs confirm them before production activation. If they differ,
+   the fixture + mapping rows are corrected in one PR before enabling live mode (recorded
+   here, never silently).
 
 ## Implementation steps (each PR-sized, one purpose, <~300 lines)
 
@@ -453,3 +575,13 @@ future Sendcloud labels/tracking adapter composes with it independently.
    the default.
 5. **PR-5 — activation runbook + test-mode smoke (operator).** Env/portal steps, HMAC
    provisioning request, E2E smoke on `shippo_test_`, rollback drill.
+6. **PR-6 — verification moves behind the provider interface (amendment).**
+   `src/shipping/provider.ts` (capability flag + `verifyAddress` + `ProviderAddressVerification`),
+   `src/shipping/shippo-adapter.ts` (validate transport + 6-row mapping) and
+   `src/shippo.ts` (transport units); `src/shipping/easypost-adapter.ts` (flag false);
+   seam swap in `src/address-verification.ts` + `src/addresses.ts` + `src/order-flow.ts`
+   (`reason` additive, availability pre-check before caps); `.env.example`, operator runbook,
+   and security statements updated. `src/tools.ts` untouched (descriptions stay true);
+   `src/sendcloud.ts` goes dormant (env vars removed from `.env.example`); tests: nine
+   fixtures at the adapter seam + state-machine/cap/cache/F2/serialization suites driven
+   through the provider seam.

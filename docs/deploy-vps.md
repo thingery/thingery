@@ -785,10 +785,17 @@ payouts. Rolling forward again = restore the same three lines (or rotate keys an
 keep the old webhook secret in `STRIPE_WEBHOOK_SECRET_PREVIOUS` for zero-downtime
 verification).
 
-**Known gap.** No carrier (EasyPost) keys are configured on this deployment, so
+**Known gap.** No carrier keys are configured on this deployment, so
 `in_transit` orders cannot advance via carrier webhooks. Orders reach `delivered`
 via buyer `confirm_receipt` (state machine T6/T13) and payouts release via buyer
-`release_funds` (T17) or the dispute-window sweep (T16).
+`release_funds` (T17) or the dispute-window sweep (T16). Enabling a carrier:
+set `SHIPPING_PROVIDER` to exactly one of `easypost` / `shippo` plus that
+provider's `*_API_KEY` and `*_WEBHOOK_SECRET` (`*_WEBHOOK_SECRET_PREVIOUS`
+enables zero-downtime rotation), then restart. Keep Shippo in test mode
+(`shippo_test_` token) until a real production label and one production
+address-validate call have confirmed the wire field names; address verification
+stays advisory and failure-open the whole time (unconfigured provider →
+`not_checked`, no behavior change).
 
 ### 5.4 Item report review triage: enabling the board notification (THI-788 step 3)
 

@@ -49,21 +49,22 @@ interface Captured {
   config: { description?: string; inputSchema?: Record<string, z.ZodTypeAny> };
 }
 
+const registered = new Map<string, Captured>();
+
+registerTools(
+  {
+    registerTool(name: string, config: Captured["config"]) {
+      registered.set(name, { config });
+    },
+  } as never,
+  { seller: null },
+);
+
+const schema = z.object(registered.get("create_listing")!.config.inputSchema!);
+const base = { title: "Valid title", price_cents: 12500 };
+const parseImages = (images: unknown) => schema.safeParse({ ...base, images });
+
 describe("create_listing images: http(s) scheme allowlist (schema)", () => {
-  const registered = new Map<string, Captured>();
-
-  registerTools(
-    {
-      registerTool(name: string, config: Captured["config"]) {
-        registered.set(name, { config });
-      },
-    } as never,
-    { seller: null },
-  );
-
-  const schema = z.object(registered.get("create_listing")!.config.inputSchema!);
-  const base = { title: "Valid title", price_cents: 12500 };
-  const parseImages = (images: unknown) => schema.safeParse({ ...base, images });
 
   it("accepts https and http image URLs (incl. uppercase scheme)", () => {
     expect(parseImages(["https://example.com/a.jpg"]).success).toBe(true);
@@ -106,6 +107,61 @@ describe("create_listing images: http(s) scheme allowlist (schema)", () => {
   });
 });
 
+// ------------------------------------- zod v4 URL-normalization class (THI-333)
+
+// THI-333 (follow-up from the THI-326 zod 3 -> 4.6.7 bump; Security notes on
+// THI-327 / PR #134): zod v4's z.string().url() validates through the WHATWG
+// parser, which accepts leading/trailing whitespace + C0 padding, and stores
+// the JS-trimmed input — NOT the fully WHATWG-canonicalized href. Concretely
+// (pinned on zod 4.6.7): scheme/host case and inner characters are preserved,
+// no trailing slash is added, and a leading U+0000 survives .url() (trim does
+// not remove it; only our refine catches it). Chained refines now gate the
+// normalized value, so padded http(s) image URLs are accepted and stored
+// trimmed. These pins make a future zod bump fail loudly instead of silently
+// shifting what parses — and what we store on items.
+describe("create_listing images: zod v4 URL-normalization class (THI-333 pin)", () => {
+  it("accepts whitespace/C0-padded http(s) URLs and stores them trimmed", () => {
+    const lead = parseImages([" https://example.com/a.jpg"]);
+    expect(lead.success).toBe(true);
+    if (lead.success) expect(lead.data.images).toEqual(["https://example.com/a.jpg"]);
+
+    // tab/newline prefix, space + vertical-tab suffix (all JS-trim class)
+    const mixed = parseImages(["\t\nhttp://x.example/p.png \u000b"]);
+    expect(mixed.success).toBe(true);
+    if (mixed.success) expect(mixed.data.images).toEqual(["http://x.example/p.png"]);
+
+    // uppercase scheme survives, padding does not
+    const upper = parseImages([" HTTPS://EXAMPLE.COM"]);
+    expect(upper.success).toBe(true);
+    if (upper.success) expect(upper.data.images).toEqual(["HTTPS://EXAMPLE.COM"]);
+  });
+
+  it("stores trim-only, not the WHATWG-canonicalized href (normalization-class tripwire)", () => {
+    // If a future zod switches .url() to new URL(input).href, scheme and host
+    // would be lowercased, the inner space %-encoded, and a trailing slash
+    // added — this exact-value assertion is the tripwire for that shift.
+    const r = parseImages([" HTTPS://Ex.COM/P A.PNG "]);
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.images).toEqual(["HTTPS://Ex.COM/P A.PNG"]);
+  });
+
+  it("padding cannot smuggle a non-http(s) scheme past the refine", () => {
+    // .url() itself accepts every padded value below; the http(s) refine gates
+    // the trimmed value, so each is still rejected with the allowlist message.
+    // The U+0000-prefixed case also proves the refine is stricter than .url(),
+    // which happily returns the NUL-prefixed string.
+    for (const bad of [
+      " javascript:alert(1)",
+      "\tdata:image/png;base64,iVBORw0KGgo=",
+      "\u0000https://e.com/x.jpg",
+    ]) {
+      const r = parseImages([bad]);
+      expect(r.success, JSON.stringify(bad)).toBe(false);
+      if (!r.success) expect(r.error.issues[0].message).toContain("http(s)");
+    }
+  });
+});
+
 // ------------------------------------------------- MCP transport (SDK layer)
 
 describe("create_listing images: scheme allowlist through the MCP transport", () => {
@@ -120,6 +176,28 @@ describe("create_listing images: scheme allowlist through the MCP transport", ()
       const res = (await client.callTool({
         name: "create_listing",
         arguments: { title: "Valid title", price_cents: 12500, images: ["javascript:alert(1)"] },
+      })) as { isError?: boolean; content?: { text?: string }[] };
+      expect(res.isError).toBe(true);
+      const text = res.content?.[0]?.text ?? "";
+      expect(text).toContain("-32602");
+      expect(text).toContain("http(s)");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("a padded javascript: URL still fails input validation end-to-end (THI-333)", async () => {
+    // THI-333: zod v4 trims before validating, so padding cannot smuggle a
+    // scheme past the refine — the same typed -32602 as the unpadded case.
+    const server = buildServer({ seller: null });
+    const client = new Client({ name: "thi333-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const res = (await client.callTool({
+        name: "create_listing",
+        arguments: { title: "Valid title", price_cents: 12500, images: [" javascript:alert(1)"] },
       })) as { isError?: boolean; content?: { text?: string }[] };
       expect(res.isError).toBe(true);
       const text = res.content?.[0]?.text ?? "";

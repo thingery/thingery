@@ -411,7 +411,8 @@ CREATE TABLE IF NOT EXISTS orders (
                                                             -- visible only to order parties (§4.1)
   carrier             TEXT,
   tracking_code       TEXT,
-  tracker_id          TEXT UNIQUE,     -- carrier-aggregator tracker id (EasyPost result.id) —
+  tracker_id          TEXT UNIQUE,     -- provider tracker id (EasyPost "trk_…" or the active
+                                       -- provider's namespaced id, THI-1246) —
                                        -- PRIMARY webhook event-resolution key (F4, §5.2)
   label_url           TEXT,            -- https-only; stored and returned as data, never a link (F16)
   shipping_address_shared_at TIMESTAMPTZ,  -- off_platform only: when the buyer agreed to show the seller

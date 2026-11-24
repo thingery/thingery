@@ -15,11 +15,25 @@ import { pool } from "./db.js";
 import type { OrderRow } from "./orders.js";
 import { applyTransition, transitionsFrom, IllegalTransitionError } from "./orders.js";
 import { orderFlowConfig } from "./config.js";
+import {
+  ProviderError,
+  pickRate,
+  providerApiKeyEnv,
+  type BoughtLabel,
+  type ProviderAddress,
+  type ProviderShipment,
+  type ShippingProvider,
+  type ShipmentRate,
+} from "./shipping/provider.js";
 import { OrderFlowError } from "./order-flow.js";
 import { shippingAddressForSeller } from "./order-flow.js";
 import { createTransferForOrder, getStripe } from "./stripe.js";
 import { createEasyPostTracker } from "./easypost.js";
-import { buyEasyPostLabel, createEasyPostShipment, pickEasyPostRate, EasyPostError, type EasyPostAddressInput, type EasyPostBoughtLabel, type EasyPostRate } from "./easypost.js";
+// THI-1246: the provider transport is reached only via the ShippingProvider
+// interface (src/shipping/registry.ts → src/shipping/provider.ts); easypost.ts
+// keeps the EasyPost wire details.
+
+import { getShippingProvider } from "./shipping/registry.js";
 import type { LabelQuoteSnapshot, QuoteAddress } from "./shipping-quotes.js";
 import { logSecurityEvent } from "./security-events.js";
 
@@ -88,9 +102,11 @@ export async function refundLabelLineForOrder(order: OrderRow): Promise<string> 
 /**
  * Seller records tracking (#5 sold → label_issued, shipping only) or
  * corrects it pre-transit (#23 — not a state change: fields replaced and
- * logged as an event while still label_issued). Registers an EasyPost
- * tracker when the deployment has EASYPOST_API_KEY (best-effort — failures
- * are event-logged, the order still advances; the carrier only automates).
+ * logged as an event while still label_issued). Registers a carrier tracker
+ * via the deployment's shipping provider when configured (best-effort —
+ * failures are event-logged, the order still advances; the carrier only
+ * automates). Disabled/missing provider ⇒ stored-without-automation, as in
+ * the pre-interface degraded mode.
  */
 export async function recordTracking(
   orderId: string,
@@ -103,7 +119,11 @@ export async function recordTracking(
   let trackerRegistered = false;
   let note: string | undefined;
   try {
-    const tracker = await createEasyPostTracker(input.carrier, input.trackingCode);
+    const cfg = orderFlowConfig();
+    const provider = getShippingProvider(cfg);
+    const tracker = cfg.shippingEnabled
+      ? await provider.registerTracker(input.carrier, input.trackingCode, `thingery:${orderId}`)
+      : null;
     if (tracker) {
       trackerId = tracker.id;
       trackerRegistered = true;
@@ -230,7 +250,7 @@ export interface LabelPurchaseSnapshot {
 export interface BuyShippingLabelInput {
   /** Seller's from address — zod-validated at the tool layer (F16 parity with
    *  the buyer address); never persisted (spec YAGNI, per-call). */
-  fromAddress: EasyPostAddressInput;
+  fromAddress: ProviderAddress;
   weightGrams?: number; // default: the item's listing estimate, else required
   dimensionsMm?: { length: number; width: number; height: number }; // default: the item's
   carrierPreference?: string; // optional carrier name substring, e.g. "DHL"
@@ -261,7 +281,7 @@ function parseDimensionsMm(raw: string | null | undefined): { length: number; wi
 }
 
 /** orders.shipping_address (wire/storage shape) → the client's domain shape. */
-function storedAddressToDomain(a: Record<string, unknown>): EasyPostAddressInput {
+function storedAddressToDomain(a: Record<string, unknown>): ProviderAddress {
   const str = (k: string): string | undefined => (typeof a[k] === "string" && (a[k] as string).length > 0 ? (a[k] as string) : undefined);
   const name = str("name");
   const line1 = str("line1");
@@ -314,7 +334,7 @@ function nextUtcMidnight(): Date {
 /** QuoteAddress (snapshot) → the provider's domain shape — the only mapping
  *  used on the quote-mode paths so the snapshot fully determines the
  *  shipment (§5.3: re-quote never reads re-resolved account data). */
-function quoteAddressToDomain(a: QuoteAddress): EasyPostAddressInput {
+function quoteAddressToDomain(a: QuoteAddress): ProviderAddress {
   return {
     name: a.name,
     line1: a.line1,
@@ -390,7 +410,8 @@ async function enforceQuoteModeSpendGuards(
 async function persistBoughtLabel(
   orderId: string,
   sellerId: string,
-  label: EasyPostBoughtLabel,
+  label: BoughtLabel,
+  provider: ShippingProvider,
   fundedBy?: "buyer_quote",
 ): Promise<BuyShippingLabelResult> {
   const snapshot: LabelPurchaseSnapshot = {
@@ -408,7 +429,7 @@ async function persistBoughtLabel(
       orderId,
       trigger: "label_purchased",
       actor: { type: "seller", id: sellerId },
-      reason: `label bought via EasyPost (${label.carrier} ${label.service}, ${labelCost(label.costCents, label.currency)}${fundedBy ? ", buyer-funded" : ""})`,
+      reason: `label bought via ${provider.displayName} (${label.carrier} ${label.service}, ${labelCost(label.costCents, label.currency)}${fundedBy ? ", buyer-funded" : ""})`,
       sets: {
         carrier: label.carrier,
         tracking_code: label.trackingCode,
@@ -431,7 +452,7 @@ async function persistBoughtLabel(
       logSecurityEvent({ type: "label_bought_orphan", order_id: orderId, shipment_id: label.shipmentId }, { sellerId });
       throw new OrderFlowError(
         "invalid_transition",
-        `${err.message} — the label was already bought (EasyPost shipment ${label.shipmentId}); an operator alert was filed for reconciliation and no tracking was recorded on this order.`,
+        `${err.message} — the label was already bought (${provider.displayName} shipment ${label.shipmentId}); an operator alert was filed for reconciliation and no tracking was recorded on this order.`,
       );
     }
     throw err;
@@ -447,6 +468,25 @@ async function buyQuoteModeLabel(
   quote: LabelQuoteSnapshot,
 ): Promise<BuyShippingLabelResult> {
   const cfg = orderFlowConfig();
+  const provider = getShippingProvider(cfg);
+
+  // Fail-closed on a BROKEN provider selection (SHIPPING_PROVIDER invalid ⇒
+  // shipping disabled): refuse before any spend gate runs. A normally
+  // degraded deployment (key unset) does NOT hit this — its behavior is the
+  // unchanged null-path below, byte-identical message and order of checks.
+  const selectionInvalid = !cfg.shippingEnabled && provider.isConfigured();
+  const notConfigured = (tail: string): OrderFlowError =>
+    new OrderFlowError(
+      `${provider.id}_not_configured`,
+      selectionInvalid
+        ? `Shipping is disabled on this deployment (the SHIPPING_PROVIDER selection is invalid — see the boot log). ${tail}`
+        : `Shipping labels are not configured on this deployment (${providerApiKeyEnv(provider.id)} unset). ${tail}`,
+    );
+  if (selectionInvalid) {
+    throw notConfigured(
+      "Record your own carrier label with record_tracking instead — the buyer's shipping line is refunded when you do.",
+    );
+  }
 
   if (!quoteDestinationMatches(quote, order.shipping_address)) {
     throw new OrderFlowError(
@@ -456,42 +496,40 @@ async function buyQuoteModeLabel(
   }
 
   // Path A — the exact paid rate: cost is the paid amount (guards bound it).
-  // If EasyPost rejects it (rate/shipment no longer purchasable) or the key
-  // is unset, fall through to the snapshot-only re-quote.
+  // If the provider rejects it (rate/shipment no longer purchasable) or the
+  // key is unset, fall through to the snapshot-only re-quote.
   try {
     await enforceQuoteModeSpendGuards(order, { costCents: quote.amount_cents, currency: quote.currency }, cfg);
-    const label = await buyEasyPostLabel(quote.shipment_id, quote.rate_id);
+    const label = await provider.buyLabel(quote.shipment_id, quote.rate_id);
     if (label) {
-      return await persistBoughtLabel(order.id, sellerId, label, "buyer_quote");
+      return await persistBoughtLabel(order.id, sellerId, label, provider, "buyer_quote");
     }
-    throw new OrderFlowError(
-      "easypost_not_configured",
-      "Shipping labels are not configured on this deployment (EASYPOST_API_KEY unset). Record your own carrier label with record_tracking instead — the buyer's shipping line is refunded when you do.",
+    throw notConfigured(
+      "Record your own carrier label with record_tracking instead — the buyer's shipping line is refunded when you do.",
     );
   } catch (err) {
-    if (!(err instanceof EasyPostError)) throw err;
+    if (!(err instanceof ProviderError)) throw err;
     // Rate or shipment no longer purchasable — re-quote solely from snapshot
     // fields (§5.3): never re-resolved account data.
-    let shipment;
+    let shipment: ProviderShipment | null;
     try {
       const dims = parseDimensionsMm(quote.dimensions_mm);
-      shipment = await createEasyPostShipment({
+      shipment = await provider.createShipment({
         toAddress: quoteAddressToDomain(quote.destination),
         fromAddress: quoteAddressToDomain(quote.origin),
         weightGrams: quote.weight_grams,
         ...(dims ? { dimensionsMm: dims } : {}),
       });
     } catch (quoteErr) {
-      throw new OrderFlowError("easypost_error", `EasyPost refused to re-quote this shipment: ${describeProviderError(quoteErr)}`);
+      throw new OrderFlowError(`${provider.id}_error`, `${provider.displayName} refused to re-quote this shipment: ${describeProviderError(quoteErr)}`);
     }
     if (!shipment) {
-      throw new OrderFlowError(
-        "easypost_not_configured",
-        "Shipping labels are not configured on this deployment (EASYPOST_API_KEY unset). Record your own carrier label with record_tracking instead — the buyer's shipping line is refunded when you do.",
+      throw notConfigured(
+        "Record your own carrier label with record_tracking instead — the buyer's shipping line is refunded when you do.",
       );
     }
-    const selectable = shipment.rates.filter((r: EasyPostRate) => r.currency.toUpperCase() === LABEL_BASE_CURRENCY);
-    let rate = pickEasyPostRate(selectable); // cheapest EUR
+    const selectable = shipment.rates.filter((r: ShipmentRate) => r.currency.toUpperCase() === LABEL_BASE_CURRENCY);
+    let rate = pickRate(selectable); // cheapest EUR
     if (!rate) {
       throw new OrderFlowError(
         "label_no_rate",
@@ -501,7 +539,7 @@ async function buyQuoteModeLabel(
     // carrier_preference is honored only when its cheapest match does not
     // exceed the paid amount (§5.3) — otherwise ignored for the cheapest.
     if (input.carrierPreference) {
-      const preferred = pickEasyPostRate(selectable, input.carrierPreference);
+      const preferred = pickRate(selectable, input.carrierPreference);
       if (preferred && preferred.costCents <= quote.amount_cents) rate = preferred;
     }
     // Rate-up rule (§5.4): the deployment never supplements a buyer-funded
@@ -515,22 +553,21 @@ async function buyQuoteModeLabel(
     await enforceQuoteModeSpendGuards(order, rate, cfg);
     let label;
     try {
-      label = await buyEasyPostLabel(shipment.id, rate.id);
+      label = await provider.buyLabel(shipment.shipmentId, rate.id);
     } catch (buyErr) {
-      throw new OrderFlowError("easypost_error", `EasyPost refused the label purchase: ${describeProviderError(buyErr)}`);
+      throw new OrderFlowError(`${provider.id}_error`, `${provider.displayName} refused the label purchase: ${describeProviderError(buyErr)}`);
     }
     if (!label) {
-      throw new OrderFlowError(
-        "easypost_not_configured",
-        "Shipping labels are not configured on this deployment (EASYPOST_API_KEY unset). Record your own carrier label with record_tracking instead — the buyer's shipping line is refunded when you do.",
+      throw notConfigured(
+        "Record your own carrier label with record_tracking instead — the buyer's shipping line is refunded when you do.",
       );
     }
     await pool.query(
       `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload)
        VALUES ($1, 'label_requoted', 'seller', $2, 'paid rate no longer purchasable — re-quoted from snapshot', $3::jsonb)`,
-      [order.id, sellerId, JSON.stringify({ shipment_id: shipment.id, rate_id: rate.id, amount_cents: rate.costCents, currency: rate.currency, paid_amount_cents: quote.amount_cents })],
+      [order.id, sellerId, JSON.stringify({ shipment_id: shipment.shipmentId, rate_id: rate.id, amount_cents: rate.costCents, currency: rate.currency, paid_amount_cents: quote.amount_cents })],
     );
-    return await persistBoughtLabel(order.id, sellerId, label, "buyer_quote");
+    return await persistBoughtLabel(order.id, sellerId, label, provider, "buyer_quote");
   }
 }
 
@@ -623,31 +660,42 @@ export async function buyShippingLabel(
   const dimensionsMm = input.dimensionsMm ?? parseDimensionsMm(item.rows[0]?.dimensions_mm);
 
   const cfg = orderFlowConfig();
+  const provider = getShippingProvider(cfg);
+
+  // Fail-closed on a BROKEN provider selection (see buyQuoteModeLabel): a
+  // normally degraded deployment (key unset) keeps the unchanged null-path
+  // below, byte-identical message.
+  if (!cfg.shippingEnabled && provider.isConfigured()) {
+    throw new OrderFlowError(
+      `${provider.id}_not_configured`,
+      `Shipping is disabled on this deployment (the SHIPPING_PROVIDER selection is invalid — see the boot log). Record your own carrier label with record_tracking instead.`,
+    );
+  }
 
   // Quote rates — no money moves until /buy. Null = degraded mode (key unset).
-  let shipment;
+  let shipment: ProviderShipment | null;
   try {
-    shipment = await createEasyPostShipment({
+    shipment = await provider.createShipment({
       toAddress: storedAddressToDomain(toAddress),
       fromAddress: input.fromAddress,
       weightGrams,
       ...(dimensionsMm ? { dimensionsMm } : {}),
     });
   } catch (err) {
-    throw new OrderFlowError("easypost_error", `EasyPost refused to quote this shipment: ${describeProviderError(err)}`);
+    throw new OrderFlowError("easypost_error", `${provider.displayName} refused to quote this shipment: ${describeProviderError(err)}`);
   }
   if (!shipment) {
     throw new OrderFlowError(
-      "easypost_not_configured",
-      "Shipping labels are not configured on this deployment (EASYPOST_API_KEY unset). Record your own carrier label with record_tracking instead.",
+      `${provider.id}_not_configured`,
+      `Shipping labels are not configured on this deployment (${providerApiKeyEnv(provider.id)} unset). Record your own carrier label with record_tracking instead.`,
     );
   }
 
   // Selection (spec §3): non-base-currency rates are skipped here so every
   // stored cost_cents is comparable by plain integer; then cheapest (or the
   // cheapest carrier-preference match) wins.
-  const selectable = shipment.rates.filter((r: EasyPostRate) => r.currency.toUpperCase() === LABEL_BASE_CURRENCY);
-  const rate = pickEasyPostRate(selectable, input.carrierPreference);
+  const selectable = shipment.rates.filter((r: ShipmentRate) => r.currency.toUpperCase() === LABEL_BASE_CURRENCY);
+  const rate = pickRate(selectable, input.carrierPreference);
   if (!rate) {
     throw new OrderFlowError(
       "label_no_rate",
@@ -704,22 +752,22 @@ export async function buyShippingLabel(
   // The one spend call.
   let label;
   try {
-    label = await buyEasyPostLabel(shipment.id, rate.id);
+    label = await provider.buyLabel(shipment.shipmentId, rate.id);
   } catch (err) {
-    throw new OrderFlowError("easypost_error", `EasyPost refused the label purchase: ${describeProviderError(err)}`);
+    throw new OrderFlowError("easypost_error", `${provider.displayName} refused the label purchase: ${describeProviderError(err)}`);
   }
   if (!label) {
     throw new OrderFlowError(
-      "easypost_not_configured",
-      "Shipping labels are not configured on this deployment (EASYPOST_API_KEY unset). Record your own carrier label with record_tracking instead.",
+      `${provider.id}_not_configured`,
+      `Shipping labels are not configured on this deployment (${providerApiKeyEnv(provider.id)} unset). Record your own carrier label with record_tracking instead.`,
     );
   }
 
-  return await persistBoughtLabel(orderId, sellerId, label);
+  return await persistBoughtLabel(orderId, sellerId, label, provider);
 }
 
 function describeProviderError(err: unknown): string {
-  if (err instanceof EasyPostError) return err.message;
+  if (err instanceof ProviderError) return err.message;
   return (err as Error).message;
 }
 

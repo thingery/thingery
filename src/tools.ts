@@ -1779,7 +1779,7 @@ export function registerTools(
         "create_order would quote at checkout (same carrier selection: cheapest EUR rate under " +
         "the per-label cap). Returns { quotable: true, estimate: { amount_cents, currency, " +
         "carrier, service }, valid_for_minutes, binding: false } or { quotable: false, reason } " +
-        "(no_weight, no_seller_default_address, easypost_not_configured, no_eur_rate, " +
+        "(no_weight, no_seller_default_address, provider_not_configured (e.g. easypost_not_configured), no_eur_rate, " +
         "rate_above_cap, not_shippable, …). Estimates are display-only: the amount charged at " +
         "checkout is re-quoted server-side and may differ. Rate-limited per account (20/hour). " +
         "Requires authentication.",
@@ -1860,7 +1860,7 @@ export function registerTools(
           dimensionsMm: row.dimensions_mm,
           buyerAddress: shippingAddress,
           sellerOrigin,
-          easypostEnabled: cfg.easypostEnabled,
+          easypostEnabled: cfg.shippingEnabled,
           labelMaxCostCents: cfg.labelMaxCostCents,
           quoteTimeoutMs: cfg.shippingQuoteTimeoutMs,
         });
@@ -1999,7 +1999,7 @@ export function registerTools(
         "Seller records shipment details after shipping a sold item — carrier and tracking code " +
         "(order moves sold → label_issued; shippable orders only — pickups have nothing to ship). " +
         "Registers a carrier tracker when the " +
-        "deployment has EasyPost configured, so status updates (in transit, delivered) arrive " +
+        "deployment has a shipping provider configured, so status updates (in transit, delivered) arrive " +
         "automatically. Calling it again while still label_issued CORRECTS the tracking details.",
       inputSchema: {
         order_id: z.string().uuid(),
@@ -2043,7 +2043,7 @@ export function registerTools(
       },
       description:
         "Seller buys a shipping label through the platform on a sold, shippable order (sold → label_issued): " +
-        "the platform quotes EasyPost rates, buys the cheapest EUR one (or the cheapest matching " +
+        "the platform quotes carrier rates via the deployment's shipping provider, buys the cheapest EUR one (or the cheapest matching " +
         "carrier_preference), and stores carrier + tracking + label URL and a purchase snapshot. " +
         "On an order whose shipping the buyer paid at checkout (label-quote mode), the label is bought " +
         "against the paid quote — from_address/weight/dimensions are locked to the quoted snapshot, " +
@@ -2054,8 +2054,8 @@ export function registerTools(
         "over-limit calls fail with a clear error before anything is bought. Off_platform orders need the " +
         "buyer's address consent first (share_shipping_address); Stripe orders are ready as soon as they " +
         "are sold. Replaying the call on the same label-issued order returns the stored label without a " +
-        "second purchase. Without EASYPOST_API_KEY the deployment is in degraded mode: the call fails " +
-        "with easypost_not_configured and the seller ships manually via record_tracking instead.",
+        "second purchase. Without the configured provider's API key the deployment is in degraded mode: the call fails " +
+        "with <provider>_not_configured (e.g. easypost_not_configured) and the seller ships manually via record_tracking instead.",
       inputSchema: {
         order_id: z.string().uuid(),
         from_address: z.object({
@@ -2083,7 +2083,7 @@ export function registerTools(
       if (!seller) return err("Missing or invalid Authorization: Bearer API key (thg_...) or OAuth token (thgo_...)", "unauthorized");
       try {
         // from_address arrives zod-parsed as snake_case (postal_code) — the
-        // exact shape registered above; the domain type EasyPostAddressInput
+        // exact shape registered above; the domain type ProviderAddress
         // is camelCase (postalCode) and toWireAddress reads that exact field.
         // A bare cast here once compiled fine while shipping zip: undefined
         // to EasyPost and failing every live quote (THI-953). The mapping

@@ -105,7 +105,8 @@ function runHttp(): void {
   app.use(stripeWebhookRouter(cfg));
 
   // Carrier webhook (spec THI-3 §4.3/§5): same raw-body-before-JSON
-  // constraint; fail-closed 503 stub until EASYPOST_WEBHOOK_SECRET is set.
+  // constraint; fail-closed 503 stub until the selected shipping provider's
+  // webhook secret (e.g. EASYPOST_WEBHOOK_SECRET) is set.
   app.use(carrierWebhookRouter(cfg));
 
   // Resend bounce webhook (THI-760 plan Phase 2 / THI-780): raw-body HMAC,

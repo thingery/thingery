@@ -17,6 +17,23 @@
 //         stub (PR-7), carrierWebhookReady = false.
 //   - ADMIN_API_KEY shorter than 32 chars → the admin route stays disabled
 //     (PR-9), adminRouteEnabled = false.
+//
+// Shipping provider selection (THI-1246, spec docs/specs/shipping-provider-layer.md):
+// SHIPPING_PROVIDER names the one carrier provider for the deployment
+// (case-insensitive; default "easypost"). The selected provider's own env
+// pair `${ID}_API_KEY` / `${ID}_WEBHOOK_SECRET` (+_PREVIOUS rotation) carries
+// its configuration; env vars of other providers are ignored with a boot
+// warning. An UNRECOGNIZED selection fails closed: boot error + shipping
+// disabled (order quotes fall back to flat rate, label purchase errors
+// easypost_not_configured-style, the carrier webhook mounts as a 503 stub).
+// Rollback = flip SHIPPING_PROVIDER back — zero DDL, zero data migration.
+
+import {
+  SHIPPING_PROVIDER_IDS,
+  providerApiKeyEnv,
+  providerWebhookSecretEnv,
+  type ShippingProviderId,
+} from "./shipping/provider.js";
 
 /** Empty/whitespace strings count as unset (F1). */
 export function envValue(name: string): string | undefined {
@@ -55,11 +72,16 @@ export interface OrderFlowConfig {
   stripeWebhookReady: boolean;
   stripeWebhookSecret: string | undefined;
   stripeWebhookSecretPrevious: string | undefined; // rotation (F13)
-  // EasyPost carrier automation (optional per deployment; degraded mode).
-  easypostEnabled: boolean;
+  // Shipping provider (THI-1246): exactly ONE carrier provider per
+  // deployment — id/scoped rate + tracker ids make runtime mixing a non-issue
+  // by construction. easypostEnabled's old role ("a provider is configured")
+  // is shippingEnabled; easypostWebhookSecret(-Previous) become the carrier-
+  // neutral carrierWebhookSecret(-Previous) for the SELECTED provider.
+  shippingProvider: ShippingProviderId;
+  shippingEnabled: boolean;
   carrierWebhookReady: boolean;
-  easypostWebhookSecret: string | undefined;
-  easypostWebhookSecretPrevious: string | undefined;
+  carrierWebhookSecret: string | undefined;
+  carrierWebhookSecretPrevious: string | undefined;
   // Admin dispute route (PR-9): disabled unless the key is long enough (F7).
   adminRouteEnabled: boolean;
   // Admin UI (THI-562 work item 3, spec docs/specs/admin-dispute-ui.md):
@@ -114,9 +136,48 @@ export function orderFlowConfig(): OrderFlowConfig {
 
   const stripeWebhookSecret = envValue("STRIPE_WEBHOOK_SECRET");
   const stripeWebhookSecretPrevious = envValue("STRIPE_WEBHOOK_SECRET_PREVIOUS");
-  const easypostKey = envValue("EASYPOST_API_KEY");
-  const easypostWebhookSecret = envValue("EASYPOST_WEBHOOK_SECRET");
-  const easypostWebhookSecretPrevious = envValue("EASYPOST_WEBHOOK_SECRET_PREVIOUS");
+
+  // --- Shipping provider selection (THI-1246) ----------------------------
+  // Exactly one provider per deployment. Case-insensitive id; unset → the
+  // default ("easypost", today's behavior). Only the SELECTED provider's env
+  // pair is read; another provider's keys present in the environment are
+  // ignored with a boot warning (never silently mixed). An unrecognized value
+  // fails closed: boot error + shipping fully disabled, regardless of which
+  // API keys are present.
+  const AVAILABLE_SHIPPING_PROVIDERS = ["easypost"] as const;
+  const providerRaw = envValue("SHIPPING_PROVIDER");
+  let shippingProvider: ShippingProviderId = "easypost";
+  let shippingSelectionValid = true;
+  if (providerRaw !== undefined) {
+    const candidate = providerRaw.toLowerCase();
+    if ((AVAILABLE_SHIPPING_PROVIDERS as readonly string[]).includes(candidate)) {
+      shippingProvider = candidate as ShippingProviderId;
+    } else {
+      shippingSelectionValid = false;
+      console.error(
+        `[config] SHIPPING_PROVIDER=${JSON.stringify(providerRaw)} is not a valid provider ` +
+          `(expected ${AVAILABLE_SHIPPING_PROVIDERS.map((p) => `"${p}"`).join(" or ")}, case-insensitive) — ` +
+          "shipping is DISABLED (fail-closed). Fix SHIPPING_PROVIDER to re-enable.",
+      );
+    }
+  }
+  // Other vocabulary ids must not leak into a deployment pointed at a
+  // different provider: warn loudly, ignore completely.
+  for (const other of SHIPPING_PROVIDER_IDS) {
+    if (other === shippingProvider) continue;
+    const otherKey = envValue(providerApiKeyEnv(other));
+    const otherSecret = envValue(providerWebhookSecretEnv(other));
+    if (otherKey !== undefined || otherSecret !== undefined) {
+      console.warn(
+        `[config] ${providerApiKeyEnv(other)} or ${providerWebhookSecretEnv(other)} is set but ` +
+          `SHIPPING_PROVIDER=${shippingProvider} — ignoring it (one provider per deployment).`,
+      );
+    }
+  }
+  const shippingApiKey = envValue(providerApiKeyEnv(shippingProvider));
+  const carrierWebhookSecret = envValue(providerWebhookSecretEnv(shippingProvider));
+  const carrierWebhookSecretPrevious = envValue(`${providerWebhookSecretEnv(shippingProvider)}_PREVIOUS`);
+
   const adminKey = envValue("ADMIN_API_KEY");
   const sessionSecret = envValue("SESSION_SECRET");
 
@@ -133,10 +194,12 @@ export function orderFlowConfig(): OrderFlowConfig {
     stripeWebhookReady: stripeKey !== undefined && stripeWebhookSecret !== undefined,
     stripeWebhookSecret,
     stripeWebhookSecretPrevious: stripeWebhookSecret !== undefined ? stripeWebhookSecretPrevious : undefined,
-    easypostEnabled: easypostKey !== undefined,
-    carrierWebhookReady: easypostWebhookSecret !== undefined,
-    easypostWebhookSecret,
-    easypostWebhookSecretPrevious: easypostWebhookSecret !== undefined ? easypostWebhookSecretPrevious : undefined,
+    shippingProvider,
+    shippingEnabled: shippingSelectionValid && shippingApiKey !== undefined,
+    carrierWebhookReady: shippingSelectionValid && carrierWebhookSecret !== undefined,
+    carrierWebhookSecret: shippingSelectionValid ? carrierWebhookSecret : undefined,
+    carrierWebhookSecretPrevious:
+      shippingSelectionValid && carrierWebhookSecret !== undefined ? carrierWebhookSecretPrevious : undefined,
     adminRouteEnabled: adminKey !== undefined && adminKey.length >= 32,
     adminUiEnabled:
       adminKey !== undefined && adminKey.length >= 32 &&
@@ -260,9 +323,10 @@ export function logConfigBootReport(cfg: OrderFlowConfig = orderFlowConfig()): O
   } else {
     console.log("[config] Stripe payments not configured — order tools answer payments_not_configured (kill switch)");
   }
-  if (cfg.easypostEnabled && !cfg.carrierWebhookReady) {
+  if (cfg.shippingEnabled && !cfg.carrierWebhookReady) {
     console.error(
-      "[config] EASYPOST_API_KEY is set but EASYPOST_WEBHOOK_SECRET is unset — " +
+      `[config] ${providerApiKeyEnv(cfg.shippingProvider)} is set but ` +
+        `${providerWebhookSecretEnv(cfg.shippingProvider)} is unset — ` +
         "the carrier webhook endpoint will mount as a 503 stub.",
     );
   }

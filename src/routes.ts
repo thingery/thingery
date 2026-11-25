@@ -117,7 +117,13 @@ import { pool } from "./db.js";
 import { orderFlowConfig, envValue } from "./config.js";
 import { applyTransition, IllegalTransitionError, settleNothingDueRefund, type OrderRow } from "./orders.js";
 import { logSecurityEvent } from "./security-events.js";
-import { page, escapeHtml } from "./web-pages.js";
+import {
+  emailVerifiedPage,
+  emailVerificationFailedPage,
+  emailVerificationRateLimitedPage,
+  page,
+  escapeHtml,
+} from "./web-pages.js";
 import { getStripe, createRefundForOrder, createTransferForOrder, isNothingDueRefund, retrieveTransfer, getPayoutSetup } from "./stripe.js";
 
 const authAttemptLimiter = new RateLimiter(10, 60 * 60_000); // 10 signups/logins per IP per hour
@@ -692,26 +698,47 @@ api.get("/notifications/unsubscribe", asyncHandler(async (req: Request, res: Res
   res.json({ ok: true, message: "Digests are off. Transactional email about your orders and money stays on.", preferences });
 }));
 
+// THI-1522 (spec docs/specs/email-verification-confirmation.md): every HTML
+// response of /verify-email carries the capability-URL hardening (F15 — the
+// request URL carries the token): never cached, referrer never leaves the
+// origin. One helper so the header set happens in exactly one place.
+function sendVerifyEmailHtml(res: Response, status: number, html: string): void {
+  res.set("Cache-Control", "no-store");
+  res.set("Referrer-Policy", "same-origin");
+  res.status(status).send(html);
+}
+
 // THI-760 Phase 0 / THI-762: consume a verification token from an email link
 // (browser-friendly GET). Uniform failure: unknown, expired, reused, and
 // malformed tokens are one 400 body — no account identifier is input, so
 // there is nothing to enumerate; success is the only signal. Rate-limited
 // per IP: tokens are 256-bit random (brute force is not the threat), the cap
 // just keeps the link-consumption endpoint from hammering the DB.
+// THI-1522: the primary consumer is a human clicking the email link, so the
+// three respond sites branch on ONE negotiation up front — browsers (Accept
+// prefers text/html) get the friendly confirmation pages from
+// src/web-pages.ts, while every other client keeps today's JSON byte-for-byte
+// ("json" is listed first on purpose: `Accept: */*` — what default fetch
+// sends — matches it, preserving the programmatic contract). Handler order
+// of operations is unchanged: limiter → token check → security event → respond.
 api.get("/verify-email", asyncHandler(async (req: Request, res: Response) => {
+  const wantsHtml = req.accepts(["json", "html"]) === "html";
   if (!emailVerifyLimiter.allow(`ip:${clientIp(req)}`)) {
     logSecurityEvent({ type: "rate_limit", route: "/api/verify-email" }, { ip: clientIp(req) });
-    res.status(429).json({ error: "Too many attempts. Try again later." });
+    if (wantsHtml) sendVerifyEmailHtml(res, 429, emailVerificationRateLimitedPage());
+    else res.status(429).json({ error: "Too many attempts. Try again later." });
     return;
   }
   const token = typeof req.query.token === "string" ? req.query.token : "";
   const sellerId = EMAIL_VERIFICATION_TOKEN_RE.test(token) ? await verifyEmailToken(token) : null;
   if (!sellerId) {
-    res.status(400).json({ error: "Invalid or expired verification link." });
+    if (wantsHtml) sendVerifyEmailHtml(res, 400, emailVerificationFailedPage()); // one fixed body — no oracle
+    else res.status(400).json({ error: "Invalid or expired verification link." });
     return;
   }
   logSecurityEvent({ type: "email_verified", outcome: "success" }, { sellerId });
-  res.json({ ok: true, email_verified: true });
+  if (wantsHtml) sendVerifyEmailHtml(res, 200, emailVerifiedPage());
+  else res.json({ ok: true, email_verified: true });
 }));
 
 // THI-760 Phase 0 / THI-762: resend (or first-time issue, for legacy accounts)

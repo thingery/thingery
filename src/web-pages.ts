@@ -506,6 +506,68 @@ export async function payoutSetupReturnPage(_req: Request, res: Response): Promi
   res.send(page("Payout setup — Thingery", "Payout setup", body));
 }
 
+/** THI-1522 (spec docs/specs/email-verification-confirmation.md): friendly
+ *  HTML landing pages for GET /api/verify-email — the verification email
+ *  links a human straight at the API route, so its respond sites
+ *  content-negotiate: browsers (Accept prefers text/html) get one of these
+ *  pages, every other client keeps today's JSON bodies byte-for-byte.
+ *  Pure renderers in the order-return-page style: page() shell, no DB, no
+ *  request data, no JS — and no token ever echoed. The failure body is ONE
+ *  fixed string for every failure mode (unknown/expired/replayed/malformed/
+ *  missing — no oracle) and the rate-limit copy is static (no counts or
+ *  retry math). The route supplies Cache-Control: no-store and
+ *  Referrer-Policy: same-origin on every HTML response (the request URL
+ *  carries the token — same hardening rationale as F15). */
+export function emailVerifiedPage(): string {
+  return page(
+    "Email confirmed — Thingery",
+    "Your Thingery email address is verified.",
+    `
+  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents</p>
+  <h1>Email confirmed</h1>
+  <p>Your email address is verified — your assistant can now list, find, and trade on your behalf.</p>
+  <p class="meta">Thingery is the open item database and MCP server for AI agents to list,
+  find, and trade second-hand goods.</p>`,
+    undefined,
+    true,
+  );
+}
+
+/** One body for every failure mode — the uniform-400 property of the
+ *  verification gate (docs/security.md §"Verification gate") carries over
+ *  to the HTML landing unchanged. */
+export function emailVerificationFailedPage(): string {
+  return page(
+    "This link didn't work — Thingery",
+    "This verification link is invalid, expired, or was already used.",
+    `
+  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents</p>
+  <h1>This link didn't work</h1>
+  <p>The verification link is invalid, expired, or was already used. If you just clicked it
+  twice, your email is likely already confirmed — <a href="/login.html">log in</a> to check.</p>
+  <p class="meta">Ask your assistant for a fresh link, or use “resend verification email”
+  in your account settings.</p>
+  <p class="meta"><a href="/">Thingery</a></p>`,
+    undefined,
+    true,
+  );
+}
+
+/** Static copy only — no attempt counts, no retry math (Security N4). */
+export function emailVerificationRateLimitedPage(): string {
+  return page(
+    "Too many attempts — Thingery",
+    "Too many verification attempts. Try again later.",
+    `
+  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents</p>
+  <h1>Too many attempts</h1>
+  <p>Too many attempts. Try again later.</p>
+  <p class="meta"><a href="/">Thingery</a></p>`,
+    undefined,
+    true,
+  );
+}
+
 /** Terminal error middleware for the website surface (THI-54).
  *
  * Mounted last in src/index.ts, after the page routes and the static

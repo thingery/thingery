@@ -1,8 +1,9 @@
 // Registry-content tests — taxonomy PR 2 (spec THI-734 §5.1–5.3, task THI-736)
-// extended by THI-820 PR 1 (PC/homelab facets + pc-components/networking/nas).
+// extended by THI-820 PR 1 (PC/homelab facets + pc-components/networking/nas)
+// and THI-820 PR 2 (camera facets + camera-lenses/camera-accessories).
 // Asserts the seeded registry itself, not the code paths around it (those are
 // PR 1's tests): tree shape (8 parentless rows — 7 departments + 'other' —
-// over 24 leaves), the two-level invariant, all 14 legacy slugs surviving,
+// over 26 leaves), the two-level invariant, all 14 legacy slugs surviving,
 // the §5.3 alias seeds and alias invariants, facet attribute definitions
 // (department enum on fashion rows, size_letter on clothing) with legacy
 // definitions intact, and D7 convergence (DO UPDATE): a hand-diverged row and
@@ -41,7 +42,7 @@ const available = await dbAvailable();
 const TREE: Record<string, string[]> = {
   fashion: ["accessories", "bags", "beauty", "clothing", "shoes", "sneakers"],
   kids: ["baby", "kids-clothing", "toys"],
-  electronics: ["cameras", "computers", "games", "nas", "networking", "pc-components", "phones"],
+  electronics: ["camera-accessories", "camera-lenses", "cameras", "computers", "games", "nas", "networking", "pc-components", "phones"],
   home: ["pets", "tools"],
   media: ["books", "music"],
   hobbies: ["board-games", "collectibles", "instruments"],
@@ -66,6 +67,8 @@ const ALIASES: Record<string, string[]> = {
   "pc-components": ["pc-parts", "computer-parts", "gpu", "cpu", "motherboard", "ram"],
   networking: ["router", "routers", "network-switch", "networking-gear"],
   nas: ["storage-server", "network-storage", "diskstation"],
+  "camera-lenses": ["lens", "lenses"],
+  "camera-accessories": ["tripod", "speedlight", "camera-bag"],
 };
 
 interface RegistryRow {
@@ -113,12 +116,12 @@ describe.skipIf(!available)("taxonomy registry content (THI-734 §5.1–5.3)", (
     }
   });
 
-  it("seeds 32 rows: 8 parentless (7 departments + other) over 24 leaves", async () => {
+  it("seeds 34 rows: 8 parentless (7 departments + other) over 26 leaves", async () => {
     const rows = await registry();
-    expect(rows).toHaveLength(32);
+    expect(rows).toHaveLength(34);
     const parentless = rows.filter((r) => r.parent === null).map((r) => r.name).sort();
     expect(parentless).toEqual([...Object.keys(TREE)].sort());
-    expect(rows.filter((r) => r.parent !== null)).toHaveLength(24);
+    expect(rows.filter((r) => r.parent !== null)).toHaveLength(26);
   });
 
   it("wires the department → children tree exactly per spec §5.1", async () => {
@@ -292,6 +295,45 @@ describe.skipIf(!available)("taxonomy registry content (THI-734 §5.1–5.3)", (
     expect(nas.model).toMatchObject({ type: "string", required: true });
     expect(nas.drive_bays).toMatchObject({ type: "number" });
     expect(nas.drive_form).toMatchObject({ type: "string", enum: ["2.5in", "3.5in", "m2", "mixed", "other"] });
+
+    // THI-820 PR 2 (camera gear): cameras facets deepened — legacy keys keep
+    // their shape (model stays optional), all new keys are optional.
+    const cams = defs("cameras");
+    expect(cams.model).toMatchObject({ type: "string" });
+    expect(cams.shutter_count).toMatchObject({ type: "number" });
+    expect(cams.type).toMatchObject({
+      type: "string",
+      enum: ["dslr", "mirrorless", "compact", "film", "instant", "action", "drone", "other"],
+    });
+    expect(cams.sensor_format).toMatchObject({
+      type: "string",
+      enum: ["full_frame", "aps_c", "micro_four_thirds", "1_inch", "medium_format", "other"],
+    });
+    expect(cams.lens_mount).toMatchObject({ type: "string" });
+    expect(cams.video_max_res).toMatchObject({ type: "string", enum: ["720p", "1080p", "4k", "6k", "8k", "other"] });
+    expect(cams.ibis).toMatchObject({ type: "boolean" });
+    expect(cams.weather_sealed).toMatchObject({ type: "boolean" });
+    for (const key of ["type", "sensor_format", "lens_mount", "megapixels", "video_max_res", "ibis", "weather_sealed"]) {
+      expect(cams[key]?.required, `cameras.${key} stays optional`).toBeUndefined();
+    }
+
+    // New camera leaves carry their THI-820 §3.6–3.7 definitions.
+    const lens = defs("camera-lenses");
+    expect(lens.lens_mount).toMatchObject({ type: "string", required: true });
+    expect(lens.focal_length_mm).toMatchObject({ type: "string" });
+    expect(lens.max_aperture).toMatchObject({ type: "string" });
+    expect(lens.zoom).toMatchObject({ type: "boolean" });
+    expect(lens.image_stabilization).toMatchObject({ type: "boolean" });
+    expect(lens.filter_thread_mm).toMatchObject({ type: "number" });
+    const acc = defs("camera-accessories");
+    expect(acc.type).toMatchObject({
+      type: "string",
+      required: true,
+      enum: ["flash", "tripod", "filter", "battery", "grip", "strap", "bag", "memory_card", "light", "remote", "cable", "cleaning", "other"],
+    });
+    expect(acc.compatible_mount).toMatchObject({ type: "string" });
+    expect(acc.capacity_mah).toMatchObject({ type: "number" });
+    expect(acc.load_kg).toMatchObject({ type: "number" });
   });
 
   it("validates new facets and keeps legacy values accepted (validateAttributes over the live registry)", async () => {
@@ -330,5 +372,23 @@ describe.skipIf(!available)("taxonomy registry content (THI-734 §5.1–5.3)", (
     expect(validateAttributes(liveDefs("networking"), { ports: 8 }).join("; ")).toContain('"type"');
     expect(validateAttributes(liveDefs("nas"), { model: "DS923+", drive_bays: 4, drive_form: "3.5in" })).toEqual([]);
     expect(validateAttributes(liveDefs("nas"), { drive_bays: 4 }).join("; ")).toContain("model");
+
+    // THI-820 PR 2: legacy cameras payloads (even empty) stay accepted; new
+    // facets validate when present; new leaves enforce their required key.
+    expect(validateAttributes(liveDefs("cameras"), {})).toEqual([]);
+    expect(validateAttributes(liveDefs("cameras"), { shutter_count: 12500 })).toEqual([]);
+    expect(validateAttributes(liveDefs("cameras"), {
+      model: "A7 III", type: "mirrorless", sensor_format: "full_frame", lens_mount: "Sony E", megapixels: 24, video_max_res: "4k", ibis: true, weather_sealed: true,
+    })).toEqual([]);
+    expect(validateAttributes(liveDefs("cameras"), { sensor_format: "medium format" }).join("; ")).toContain("sensor_format");
+    expect(validateAttributes(liveDefs("cameras"), { megapixels: "24" }).join("; ")).toContain("megapixels");
+    expect(validateAttributes(liveDefs("camera-lenses"), {
+      lens_mount: "Sony E", focal_length_mm: "24-70", max_aperture: "f/2.8", zoom: true, image_stabilization: true, filter_thread_mm: 77,
+    })).toEqual([]);
+    expect(validateAttributes(liveDefs("camera-lenses"), { focal_length_mm: "50" }).join("; ")).toContain("lens_mount");
+    expect(validateAttributes(liveDefs("camera-lenses"), { lens_mount: "Sony E", zoom: "yes" }).join("; ")).toContain("zoom");
+    expect(validateAttributes(liveDefs("camera-accessories"), { type: "tripod", load_kg: 8 })).toEqual([]);
+    expect(validateAttributes(liveDefs("camera-accessories"), { filter_size_mm: 77 }).join("; ")).toContain('"type"');
+    expect(validateAttributes(liveDefs("camera-accessories"), { type: "drone" }).join("; ")).toContain("type");
   });
 });

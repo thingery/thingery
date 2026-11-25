@@ -1108,6 +1108,14 @@ block + a file under `metrics/`), then `tail -1 /var/log/thingery-daily-metrics.
 the next day. Read any snapshot with
 `cat /opt/thingery/metrics/daily-*.json | jq .`
 
+Every summary line includes a `synthetic:` strip (sellers / open items /
+active items — organic-only exclusion per `scripts/synthetic-sellers.sql`,
+docs/ops-smoke-policy.md "Audit"). Nonzero synthetic **items** mean an ops
+fixture outlived its run and one may be publicly browsable: sweep identities
+with `scripts/check-fixture-leaks.sh`, take the items down same-day
+(moderation-runbook §2/§4), and file a scoped cleanup task — never silently
+delete (policy rule 4).
+
 **Rollback:** `sudo rm /etc/cron.d/thingery-daily-metrics` — collection stops;
 existing snapshots stay. The script only reads containers/DB and writes under
 `metrics/`; it never mutates app or Caddy state.

@@ -95,7 +95,7 @@ Idempotent and converging: re-running (or deploying) always yields the schema.sq
 
 † = existing slug, unchanged name. Attribute definitions listed are the *declared* set; undeclared keys keep passing through.
 
-> **THI-820 amendment (2026-11, PC/homelab half — PR 1):** `computers` gains 8 optional PC/homelab facets; new `electronics` leaves `pc-components`, `networking`, `nas`. Rows 29→32, leaves 21→24. The camera-gear half (`cameras` facets + `camera-lenses`, `camera-accessories`) lands in PR 2; all new keys on existing rows are optional, `required` is used only on brand-new rows.
+> **Registry amendment (2026-11, facet deepening — PC/homelab half, PR 1):** `computers` gains 8 optional PC/homelab facets; new `electronics` leaves `pc-components`, `networking`, `nas`. Rows 29→32, leaves 21→24. The camera-gear half (`cameras` facets + `camera-lenses`, `camera-accessories`) lands in PR 2; all new keys on existing rows are optional, `required` is used only on brand-new rows.
 
 | Slug | Parent | New? | Description | Declared attributes |
 |---|---|---|---|---|
@@ -112,12 +112,12 @@ Idempotent and converging: re-running (or deploying) always yields the schema.sq
 | `toys`† | kids | | Toys and playthings (tabletop games → board-games) | `age_range` |
 | `electronics`† | — | | Consumer electronics (misc; see phones, computers, cameras, games, pc-components, networking, nas) | `model`, `warranty_months` (number) |
 | `phones`† | electronics | | Mobile phones | `model` (req), `storage_gb`, `battery_health_pct` |
-| `computers`† | electronics | | Laptops and desktops (PC/homelab facets, THI-820) | `model` (req), `cpu_model`, `cpu_socket`, `ram_gb`, `ram_type` enum [ddr3,ddr4,ddr5,other], `ram_speed_mhz`, `storage_gb`, `storage_type` enum [nvme,ssd,hdd,emmc,other], `gpu_model`, `form_factor` enum [tower,desktop,sff,all_in_one,rack,laptop,other], `rack_units` |
+| `computers`† | electronics | | Laptops and desktops (PC/homelab facets, 2026-11 amendment) | `model` (req), `cpu_model`, `cpu_socket`, `ram_gb`, `ram_type` enum [ddr3,ddr4,ddr5,other], `ram_speed_mhz`, `storage_gb`, `storage_type` enum [nvme,ssd,hdd,emmc,other], `gpu_model`, `form_factor` enum [tower,desktop,sff,all_in_one,rack,laptop,other], `rack_units` |
 | `cameras` | electronics | new | Cameras, lenses, drones | `model`, `shutter_count` (number) |
 | `games`† | electronics | | Video games and consoles (tabletop → board-games) | `platform` enum (unchanged, req) |
-| `pc-components` | electronics | new (THI-820) | PC parts sold separately: CPUs, GPUs, motherboards, RAM, PSUs, cases | `type` (req) enum [cpu,gpu,motherboard,ram,storage,psu,case,cooling,expansion_card,cable_adapter,other], `socket`, `chipset`, `ram_type` enum [ddr3,ddr4,ddr5,other], `capacity_gb`, `speed_mhz`, `vram_gb`, `wattage`, `tdp_watts`, `form_factor` enum [atx,micro_atx,mini_itx,other] |
-| `networking` | electronics | new (THI-820) | Homelab network gear: switches, routers, access points, firewalls | `type` (req) enum [switch,router,access_point,firewall,modem,patch_panel,pdu,other], `ports`, `port_speed_mbps`, `poe` (bool), `managed` (bool), `rack_units` |
-| `nas` | electronics | new (THI-820) | NAS enclosures and storage servers | `model` (req), `drive_bays`, `drive_form` enum [2.5in,3.5in,m2,mixed,other], `ram_gb`, `cpu_model`, `rack_units` |
+| `pc-components` | electronics | new (2026-11) | PC parts sold separately: CPUs, GPUs, motherboards, RAM, PSUs, cases | `type` (req) enum [cpu,gpu,motherboard,ram,storage,psu,case,cooling,expansion_card,cable_adapter,other], `socket`, `chipset`, `ram_type` enum [ddr3,ddr4,ddr5,other], `capacity_gb`, `speed_mhz`, `vram_gb`, `wattage`, `tdp_watts`, `form_factor` enum [atx,micro_atx,mini_itx,other] |
+| `networking` | electronics | new (2026-11) | Homelab network gear: switches, routers, access points, firewalls | `type` (req) enum [switch,router,access_point,firewall,modem,patch_panel,pdu,other], `ports`, `port_speed_mbps`, `poe` (bool), `managed` (bool), `rack_units` |
+| `nas` | electronics | new (2026-11) | NAS enclosures and storage servers | `model` (req), `drive_bays`, `drive_form` enum [2.5in,3.5in,m2,mixed,other], `ram_gb`, `cpu_model`, `rack_units` |
 | `home`† | — | | Furniture and household (incl. appliances; DIY/garden → tools) | `material`, `color` |
 | `tools` | home | new | DIY, power tools, garden | `type` enum [power,hand,garden,other] |
 | `pets` | home | new | Pet supplies: beds, carriers, aquariums | `type` enum [dog,cat,bird,small_animal,aquarium,other] |
@@ -159,7 +159,7 @@ Invariants asserted by tests (not triggers): every parent exists (FK), every par
 | `networking` | `router`, `routers`, `network-switch`, `networking-gear` |
 | `nas` | `storage-server`, `network-storage`, `diskstation` |
 
-Rules: aliases are lowercase; an alias never shadows a canonical name (exact match wins); one alias maps to exactly one canonical. Input case is normalized before resolution (existing `.toLowerCase()` behavior). THI-820 deliberately omits `switch`/`switches` as aliases of `networking` — typed as a category the word is ambiguous with Nintendo Switch (games); revisiting is a seed-data edit with zero blast radius.
+Rules: aliases are lowercase; an alias never shadows a canonical name (exact match wins); one alias maps to exactly one canonical. Input case is normalized before resolution (existing `.toLowerCase()` behavior). This amendment deliberately omits `switch`/`switches` as aliases of `networking` — typed as a category the word is ambiguous with Nintendo Switch (games); revisiting is a seed-data edit with zero blast radius.
 
 ### 5.4 Resolution/expansion semantics (explicit — no undefined behavior)
 

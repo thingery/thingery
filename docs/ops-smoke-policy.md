@@ -87,6 +87,15 @@ anchor.
 Anything this returns that is not covered by an open ops issue is exactly the
 kind of debt those audits found — file it, do not silently delete it.
 
+The predicate has one executable home: `scripts/synthetic-sellers.sql`, which
+`scripts/daily-metrics.sh` and `scripts/check-fixture-leaks.sh` load — keep
+this section and that file in sync. Every daily metrics snapshot already
+classifies with it: all listings/sellers counts are **organic-only by
+default**, and the snapshot's `synthetic` strip (sellers / open items /
+active items) makes a leak visible in the daily cron output. Sweep identities
+with `scripts/check-fixture-leaks.sh` (exit != 0 when fixture items survived
+their run); that script's output is the scoped-cleanup worklist.
+
 ## Tested how
 
 The SQL guard above is the exact pattern executed end-to-end during a real

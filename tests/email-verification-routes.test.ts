@@ -97,6 +97,94 @@ describe.skipIf(!available)("email verification routes (THI-762 PR 2)", () => {
     }
   });
 
+  // --- THI-1522 (spec docs/specs/email-verification-confirmation.md):
+  // content-negotiated HTML confirmation pages. Browsers (Accept prefers
+  // text/html) land on a friendly page; every non-HTML-preferred client —
+  // including `Accept: */*` default fetch — keeps the legacy JSON bodies
+  // byte-for-byte. Security notes N1–N5 pinned below.
+
+  it("THI-1522: browser Accept gets the HTML confirmation page; token never echoes (test plan 1, N3)", async () => {
+    const email = `thi1522-html-ok-${runTag}@example.test`;
+    const { body } = await signupAndLogin(email);
+    const token: string = body.email_verification.token;
+
+    const res = await fetch(`${base}/api/verify-email?token=${encodeURIComponent(token)}`, {
+      headers: { accept: "text/html" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html"); // N3
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("referrer-policy")).toBe("same-origin");
+    const html = await res.text();
+    expect(html).toContain("Email confirmed");
+    expect(html).not.toContain(token); // N3: the URL secret never echoes into any HTML body
+    const row = await db.query(`SELECT email_verified_at FROM sellers WHERE email = $1`, [email]);
+    expect(row.rows[0].email_verified_at).not.toBeNull(); // DB effect unchanged (existing assertion shape)
+  });
+
+  it("THI-1522: all HTML failure modes are one byte-identical 400 body, ETag-stable (test plan 2, N2)", async () => {
+    const email = `thi1522-html-fail-${runTag}@example.test`;
+    const { body } = await signupAndLogin(email);
+    const token: string = body.email_verification.token;
+    await fetch(`${base}/api/verify-email?token=${encodeURIComponent(token)}`); // consume → replay is now a failure
+
+    const accept = { accept: "text/html" };
+    const results = [
+      await fetch(`${base}/api/verify-email?token=${encodeURIComponent(token)}`, { headers: accept }), // replay
+      await fetch(`${base}/api/verify-email?token=garbage`, { headers: accept }), // malformed
+      await fetch(`${base}/api/verify-email`, { headers: accept }), // missing
+    ];
+    const bodies: string[] = [];
+    const etags: Array<string | null> = [];
+    for (const res of results) {
+      expect(res.status).toBe(400);
+      expect(res.headers.get("content-type")).toContain("text/html"); // N3
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("referrer-policy")).toBe("same-origin");
+      etags.push(res.headers.get("etag"));
+      bodies.push(await res.text());
+    }
+    expect(bodies[0]).toContain("This link didn't work");
+    expect(new Set(bodies).size).toBe(1); // byte-identical across replay/malformed/missing — no oracle (N2)
+    expect(new Set(etags).size).toBe(1); // ETag-stable for the uniform body (N2)
+    for (const html of bodies) expect(html).not.toContain(token); // N3
+  });
+
+  it("THI-1522: rate-limited browser request gets a static 429 HTML page (test plan 3, N4)", async () => {
+    // Own a fresh limiter bucket via a distinct X-Forwarded-For — the
+    // limiters in src/routes.ts are module-level singletons shared across
+    // tests (same pattern as tests/api-error-handling.test.ts T3). The 60/h
+    // per-IP bucket drains on token-less requests (uniform 400, no DB hit);
+    // the next one trips 429.
+    const headers = { accept: "text/html", "x-forwarded-for": `203.0.113.152-${runTag}` };
+    let res = await fetch(`${base}/api/verify-email`, { headers });
+    for (let i = 0; res.status !== 429 && i < 65; i++) {
+      res = await fetch(`${base}/api/verify-email`, { headers });
+    }
+    expect(res.status).toBe(429);
+    expect(res.headers.get("content-type")).toContain("text/html"); // N3
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("referrer-policy")).toBe("same-origin");
+    const html = await res.text();
+    expect(html).toContain("Too many attempts"); // static copy — no counts/retry math (N4)
+  });
+
+  it("THI-1522: `Accept: */*` keeps the exact legacy JSON bodies (test plan 4)", async () => {
+    const email = `thi1522-json-legacy-${runTag}@example.test`;
+    const { body } = await signupAndLogin(email);
+    const token: string = body.email_verification.token;
+    const headers = { accept: "*/*" }; // what Node/undici default fetch sends
+
+    const ok = await fetch(`${base}/api/verify-email?token=${encodeURIComponent(token)}`, { headers });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toContain("application/json");
+    expect(await ok.json()).toEqual({ ok: true, email_verified: true }); // legacy contract byte-for-byte
+
+    const bad = await fetch(`${base}/api/verify-email?token=garbage`, { headers });
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toEqual({ error: "Invalid or expired verification link." }); // exact legacy body
+  });
+
   it("POST /api/me/resend-email-verification: auth, uniform ok, rate limit", async () => {
     const email = `thi762-r-resend-${runTag}@example.test`;
     const { setCookie } = await signupAndLogin(email);

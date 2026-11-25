@@ -60,16 +60,29 @@ COMMIT;
 
 ## Audit query — leftovers are findable
 
-Any run can sweep for synthetic leftovers (read-only):
+Any run can sweep for synthetic leftovers (read-only). The `WHERE` clause is
+the **canonical synthetic-seller predicate** (first codified in the THI-1501
+audit, 2026-11-25): ops-tagged accounts plus every test domain actually
+observed in prod. An earlier four-domain version of this query missed 13
+untagged synthetic sellers on other test domains — treat the list below as
+the source of truth and extend it whenever a new run introduces a new domain.
 
 ```sql
 SELECT id, email, created_at,
        (SELECT count(*) FROM items i WHERE i.seller_id = s.id) AS items
 FROM sellers s
-WHERE email LIKE 'ops+%' OR email LIKE '%@thingery.test'
-   OR email LIKE '%@demo.thingery.dev' OR email LIKE '%@example.com'
+WHERE email LIKE 'ops+%'
+   OR email LIKE '%@thingery.test'      OR email LIKE '%@test.thingery.dev'
+   OR email LIKE '%@demo.thingery.dev'  OR email LIKE '%@example.com'
+   OR email LIKE '%@example.test'       OR email LIKE '%@e2e-test.invalid'
+   OR email LIKE '%mail-tester.com'
 ORDER BY created_at;
 ```
+
+Notes: sellers with `NULL` email are legacy API-key-era accounts and count as
+organic (the `LIKE` predicates exclude them naturally). Do **not** classify
+by item-title markers — titles are mutable; the email tag is the identity
+anchor.
 
 Anything this returns that is not covered by an open ops issue is exactly the
 kind of debt those audits found — file it, do not silently delete it.
@@ -78,5 +91,7 @@ kind of debt those audits found — file it, do not silently delete it.
 
 The SQL guard above is the exact pattern executed end-to-end during a real
 production purge: 20/21 targets deleted, 1 correctly skipped on
-`orders_buyer_id_fkey`, with before/after counts recorded in the run's task;
-the audit query is the one used for the source audit.
+`orders_buyer_id_fkey`, with before/after counts recorded in the run's task.
+The extended audit predicate above is the one used for the 2026-11-25 source
+audit (THI-1501), where it surfaced the 13 untagged misses the four-domain
+version had let accumulate.

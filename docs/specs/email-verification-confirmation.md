@@ -1,8 +1,8 @@
-# Spec: verify-email link lands on a friendly confirmation page (THI-1515)
+# Spec: verify-email link lands on a friendly confirmation page (#390)
 
 - **Status:** Proposed — awaiting Security review (protected path: `src/routes.ts`) + CEO sign-off. Verdicts to be stated in the implementation PR description per protected-path policy (`AGENTS.md` rule 2).
 - **Date:** 2026-11-25
-- **Origin:** THI-1515 (user-reported, 2026-11-25: clicking the email-verification link lands on raw JSON `{"ok":true,"email_verified":true}`). Found during THI-1045.
+- **Origin:** [GitHub issue #390](https://github.com/thingery/thingery/issues/390) (user-reported, 2026-11-25: clicking the email-verification link lands on raw JSON `{"ok":true,"email_verified":true}`).
 - **Touches:** `src/web-pages.ts` (page renderers), `src/routes.ts` (`/api/verify-email` handler — **protected path**), `tests/email-verification-routes.test.ts`, this doc. No `db/schema.sql`, no `src/auth.ts`, no email-template change.
 
 ## Problem
@@ -11,7 +11,7 @@ The verification email links to `GET /api/verify-email?token=…`, which returns
 
 ## Context
 
-- The endpoint is a deliberately "browser-friendly GET" (comment at `src/routes.ts`, THI-760 Phase 0 / THI-762): its primary consumer is a human clicking an email link. No programmatic consumer is known; tests are the only JSON dependency.
+- The endpoint is a deliberately "browser-friendly GET" (comment at `src/routes.ts`; see docs/security.md §"Verification gate"): its primary consumer is a human clicking an email link. No programmatic consumer is known; tests are the only JSON dependency.
 - The repo already renders human-facing HTML pages server-side for exactly this pattern: the Stripe order/payout **return pages** (`src/web-pages.ts` `orderReturnPage`, `payoutSetupReturnPage`) — capability-URL pages with `Cache-Control: no-store`, `Referrer-Policy: same-origin`, uniform unknown-id body, no JS needed.
 - Thingery is self-hostable: the open-source core must give a good experience standalone. The consumer website lives in the private `platform` repo (`apps/web`); the legacy `website/` in this repo is frozen.
 - The baseline security headers (`src/security-headers.ts`) apply to every response, including this one; `Referrer-Policy` baseline is `strict-origin-when-cross-origin` (query strings are not sent cross-origin), and the order-return page additionally pins `same-origin` because its URL carries a secret.
@@ -33,7 +33,7 @@ Alternatives rejected:
 
 - **302 redirect to the consumer website** (`thingery.dev` app route): breaks self-hosters (no platform website deployed; core must stand alone); a redirect that carries the token leaks it into the target's URL/logs, and stripping it adds a second hop plus a new SPA route in the private repo for zero user gain. Rejected.
 - **Always HTML, drop the JSON body:** mutates a working API contract for unknown programmatic callers. Rejected (content negotiation is strictly additive).
-- **Status 200 for HTML failures** (order-return-page style "same status for known/unknown"): rejected — the order page guards an order UUID; here the uniform-400 property is documented THI-762 security behavior, keep it.
+- **Status 200 for HTML failures** (order-return-page style "same status for known/unknown"): rejected — the order page guards an order UUID; here the uniform-400 property is documented verification-gate security behavior (docs/security.md), keep it.
 
 ### Page design (in `src/web-pages.ts`, following `orderReturnBody` conventions)
 
@@ -69,7 +69,7 @@ None needed — additive code change, no schema step (expand-contract trivially 
 
 ## Rollout + rollback
 
-- **Rollout:** normal feature branch + PR + green CI; agents merge (THI-36). Deploy via the documented deploy runbook (DevOps executes when ready). No migration, no env change, no config.
+- **Rollout:** normal feature branch + PR + green CI; agents merge (repo `AGENTS.md` merge policy). Deploy via the documented deploy runbook (DevOps executes when ready). No migration, no env change, no config.
 - **Rollback:** revert the PR. Email links, token flow, and stored data are unaffected by both deploy and rollback.
 - **Blast radius:** registry-listed MCP installs and npm users of the tools — unaffected (not an MCP tool; JSON contract preserved). Self-hosted instances — get the friendly page on upgrade, still work standalone. Live sessions — unaffected. Emails in flight — unchanged URL, better landing.
 

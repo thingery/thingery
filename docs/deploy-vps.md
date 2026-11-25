@@ -913,13 +913,16 @@ env in `docker-compose.prod.yml`; **values live only in the VPS `.env`**.
 `https://thingery.dev/api/webhooks/resend` answers fail-closed 503 and hard
 bounces are untracked (a dead address keeps being retried per notification,
 then dead-letters). When set, the endpoint verifies Resend's HMAC signature
-(`t=…,v1=…` over raw bytes, 5-min replay window) and on `email.bounced`
-suppresses the address (`sellers.email_bounced_at`) and skips its pending
-outbox rows — idempotent on redelivery (`src/webhooks-resend.ts`).
+(`t=…,v1=…` over raw bytes, 5-min replay window) and on `email.bounced` or
+`email.complained` (THI-1486) suppresses the address (`sellers.email_bounced_at`
+— the general email-suppression timestamp, honored by the delivery sweep and
+verification re-arm; the per-row marker records which event fired) and skips
+its pending outbox rows — idempotent on redelivery (`src/webhooks-resend.ts`).
 
 **Wiring:** generate the secret server-side, put the SAME value in the app
 `.env` and in the Resend dashboard's webhook endpoint
-(`https://thingery.dev/api/webhooks/resend`, event `email.bounced`):
+(`https://thingery.dev/api/webhooks/resend`, events `email.bounced`,
+`email.complained`):
 
 ```bash
 cd /opt/thingery
@@ -932,8 +935,8 @@ docker compose -f docker-compose.prod.yml up -d app   # env changes recreate
 
 **Verification:** `curl -i -X POST https://thingery.dev/api/webhooks/resend \
 -H 'content-type: application/json' -d '{}'` → **400** `signature verification
-failed` (a 503 means the secret is still unset). Real bounces log
-`[webhooks:resend] bounce suppressed: …` in the app container.
+failed` (a 503 means the secret is still unset). Real bounces/complaints log
+`[webhooks:resend] bounce|complaint suppressed: …` in the app container.
 
 **2. `OPERATOR_ALERT_EMAIL` — operator alert mailbox.** While unset,
 dead-letter and sweep anomaly alerts (stuck money, stale disputes, dead

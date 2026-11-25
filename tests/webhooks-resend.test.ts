@@ -173,3 +173,96 @@ describe.skipIf(!available)("POST /api/webhooks/resend (THI-780 PR 1)", () => {
     }
   });
 });
+
+// THI-1486: `email.complained` (spam report) must suppress like a bounce.
+// Regression against the pre-fix behavior — the old handler answered
+// 200 {"ignored":"email.complained"} with zero writes, so an address that
+// reported our mail as spam kept receiving it. Own seller + outbox row so
+// assertions are independent of the bounce block's state above.
+describe.skipIf(!available)("POST /api/webhooks/resend complaint suppression (THI-1486)", () => {
+  let db: pg.Client;
+  let server: Server;
+  let base = "";
+  const runTag = crypto.randomBytes(4).toString("hex");
+  let email = "";
+  let sellerId = "";
+  let pendingOutboxId = "";
+
+  beforeAll(async () => {
+    process.env.RESEND_WEBHOOK_SECRET = SECRET;
+    db = new pg.Client({ connectionString });
+    await db.connect();
+    await db.query(readFileSync(path.resolve(__dirname, "..", "db", "schema.sql"), "utf8"));
+
+    email = `thi1486-${runTag}-${crypto.randomUUID().slice(0, 8)}@example.test`;
+    const r = await db.query<{ id: string }>(
+      `INSERT INTO sellers (email, password_hash, display_name, email_verified_at)
+       VALUES ($1, 'x', 'THI-1486 Complaint', now()) RETURNING id`, [email],
+    );
+    sellerId = r.rows[0].id;
+    const notif = await db.query<{ id: string }>(
+      `INSERT INTO notifications (recipient_id, event_type, role, payload, dedupe_key)
+       VALUES ($1, 'seller.item_sold', 'seller', '{}'::jsonb, $2) RETURNING id`,
+      [sellerId, `thi1486:${crypto.randomUUID()}`],
+    );
+    const outbox = await db.query<{ id: string }>(
+      `INSERT INTO email_outbox (notification_id, to_email, subject, template, payload, dedupe_key, next_attempt_at)
+       VALUES ($1, $2, 's', 'seller.item_sold.v1', '{}'::jsonb, $3, now() - interval '1 minute') RETURNING id`,
+      [notif.rows[0].id, email, notif.rows[0].id],
+    );
+    pendingOutboxId = outbox.rows[0].id;
+
+    const app = express();
+    app.use(resendWebhookRouter());
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, "127.0.0.1", () => {
+        base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+        resolve();
+      });
+    });
+  });
+  afterAll(async () => {
+    delete process.env.RESEND_WEBHOOK_SECRET;
+    server?.close();
+    await db.end().catch(() => {});
+  });
+
+  async function post(body: string): Promise<Response> {
+    return fetch(`${base}/api/webhooks/resend`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "resend-signature": sign(body) },
+      body,
+    });
+  }
+
+  it("signed complaint → account suppressed, pending rows cancelled", async () => {
+    const body = JSON.stringify({ type: "email.complained", data: { email } });
+    const res = await post(body);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, suppressed: true });
+    const s = await db.query<{ bounced: boolean }>(
+      `SELECT (email_bounced_at IS NOT NULL) AS bounced FROM sellers WHERE id = $1`, [sellerId],
+    );
+    expect(s.rows[0].bounced).toBe(true);
+    const outbox = await db.query<{ status: string; last_error: string | null }>(
+      "SELECT status, last_error FROM email_outbox WHERE id = $1", [pendingOutboxId],
+    );
+    expect(outbox.rows[0]).toMatchObject({ status: "skipped", last_error: "skipped:complained" });
+  });
+
+  it("complaint redelivery is a no-op (idempotent suppression)", async () => {
+    const body = JSON.stringify({ type: "email.complained", data: { email } });
+    const res = await post(body);
+    expect(res.status).toBe(200);
+    const outbox = await db.query<{ attempts: number; status: string; last_error: string | null }>(
+      "SELECT attempts, status, last_error FROM email_outbox WHERE id = $1", [pendingOutboxId],
+    );
+    expect(outbox.rows[0]).toMatchObject({ attempts: 0, status: "skipped", last_error: "skipped:complained" });
+  });
+
+  it("complaint for an unknown email → 200 ok (nothing to suppress; no enumeration)", async () => {
+    const body = JSON.stringify({ type: "email.complained", data: { email: `nobody-${runTag}@example.test` } });
+    const res = await post(body);
+    expect(res.status).toBe(200);
+  });
+});

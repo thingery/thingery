@@ -55,7 +55,9 @@ interface OutboxRow {
  * Replies to both route to support@ (replyToAddress, stamped below and
  * applied adapter-wide for the direct verification path too). */
 function senderFor(row: OutboxRow, cfg: NotifyConfig): string {
-  return row.template.startsWith("digest.") || row.template.startsWith("operator.")
+  return row.template.startsWith("digest.") ||
+    row.template.startsWith("operator.") ||
+    row.template.startsWith("ops.")
     ? cfg.digestFromAddress
     : cfg.fromAddress;
 }
@@ -105,10 +107,15 @@ async function accountGate(
   db: PoolClient,
   row: OutboxRow,
 ): Promise<{ ok: true } | { ok: false; reason: SkipReason }> {
-  // Internal operator rows (notification_id NULL, operator.* template) ride
-  // the outbox for delivery/retry but are not account mail — no account
-  // gates apply (operator-alerts PR of this phase).
-  if (row.notification_id === null && row.template.startsWith("operator.")) return { ok: true };
+  // Internal operator rows (notification_id NULL, operator.* / ops.*
+  // template) ride the outbox for delivery/retry but are not account mail —
+  // no account gates apply (operator-alerts PR of this phase; ops.* is the
+  // THI-1451 item-report mirror — the report alias is an internal mailbox,
+  // not a marketplace account, so the Phase 0 gate deliberately bypasses it).
+  if (row.notification_id === null &&
+      (row.template.startsWith("operator.") || row.template.startsWith("ops."))) {
+    return { ok: true };
+  }
   const acct = await db.query<{ verified: boolean; bounced: boolean; prefs: unknown }>(
     `SELECT (email_verified_at IS NOT NULL) AS verified,
             (email_bounced_at IS NOT NULL) AS bounced,

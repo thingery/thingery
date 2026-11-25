@@ -9,6 +9,7 @@ import {
   attributeShapeErrors,
   AttributeValidationError,
   attributeFilterClause,
+  definitionErrors,
   UNDECLARED_KEY_PATTERN,
   type Attributes,
   type CategoryRow,
@@ -608,13 +609,35 @@ export async function updateItem(
   if (update.condition !== undefined) sets.push(`condition = ${add(update.condition)}`);
   // Attributes are replaced wholesale (not merged) — agents should read,
   // modify, write. Keeps the semantics predictable. Shape caps (THI-83 §3.5)
-  // are enforced here: update_listing historically validated nothing, and
-  // this is the single choke point for both MCP and chat callers.
+  // are enforced first, pure, before any DB roundtrip. THI-1369 (Security F1,
+  // THI-1366): registry parity with create_listing — the replacement payload
+  // must satisfy the item's stored category definitions (declared-required
+  // keys present, declared keys type/enum-valid); undeclared keys still pass
+  // through. This is the single choke point for both MCP and chat callers.
   if (update.attributes !== undefined) {
     const shapeErrors = attributeShapeErrors(update.attributes);
     if (shapeErrors.length > 0) {
       logSecurityEvent({ type: "listing_write", action: writeAction(update.status), outcome: "rejected" }, { sellerId });
       throw new AttributeValidationError(shapeErrors);
+    }
+    // One indexed read, paid only on the attributes path. Fallbacks mirror
+    // create-listing trust boundaries: row missing/not owned (the UPDATE's
+    // not-found path reports that) or category absent from the registry
+    // (items.category has no FK; legacy rows) → no declared set → shape
+    // caps only, never a new failure mode.
+    const { rows: defRows } = await pool.query<
+      { attribute_definitions: CategoryRow["attribute_definitions"] | null }
+    >(
+      `SELECT c.attribute_definitions
+       FROM items i LEFT JOIN categories c ON c.name = i.category
+       WHERE i.id = $1 AND i.seller_id = $2`,
+      [id, sellerId],
+    );
+    const definitions = defRows[0]?.attribute_definitions;
+    const defErrors = definitions ? definitionErrors(definitions, update.attributes) : [];
+    if (defErrors.length > 0) {
+      logSecurityEvent({ type: "listing_write", action: writeAction(update.status), outcome: "rejected" }, { sellerId });
+      throw new AttributeValidationError(defErrors);
     }
     sets.push(`attributes = ${add(JSON.stringify(update.attributes))}::jsonb`);
   }

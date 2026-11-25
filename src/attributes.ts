@@ -66,14 +66,17 @@ export class AttributeValidationError extends Error {
   }
 }
 
-/** Validate attributes against a category's definitions.
- *  Shape caps (attributeShapeErrors) run first, so every caller inherits
- *  them; definition checks follow. Returns error messages; empty = valid. */
-export function validateAttributes(
+/** Registry-definition checks only (no shape caps): for each declared key,
+ *  required-present / type / enum against the payload. Undeclared keys pass
+ *  through — definitions are guidance for them, not law (module header).
+ *  THI-1369 (Security F1): extracted from validateAttributes so the update
+ *  path (updateItem) runs the same declared-key checks create_listing runs,
+ *  after its own shape-cap gate. Returns error messages; empty = valid. */
+export function definitionErrors(
   definitions: AttributeDefinition[],
   attributes: Attributes,
 ): string[] {
-  const errors: string[] = [...attributeShapeErrors(attributes)];
+  const errors: string[] = [];
 
   for (const def of definitions) {
     const value = attributes[def.key];
@@ -93,6 +96,16 @@ export function validateAttributes(
   }
 
   return errors;
+}
+
+/** Validate attributes against a category's definitions.
+ *  Shape caps (attributeShapeErrors) run first, so every caller inherits
+ *  them; definition checks follow. Returns error messages; empty = valid. */
+export function validateAttributes(
+  definitions: AttributeDefinition[],
+  attributes: Attributes,
+): string[] {
+  return [...attributeShapeErrors(attributes), ...definitionErrors(definitions, attributes)];
 }
 
 /** Build the JSONB containment clause for attribute filters.

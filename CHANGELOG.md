@@ -12,6 +12,18 @@ may change without a major version bump.
 
 ### Changed
 
+- **`update_listing` attribute registry validation (THI-1369).** Update payloads
+  that replace `attributes` are now validated against the item's stored
+  category definitions — the same checks `create_listing` has always run
+  (declared-required keys present, declared keys type/enum-valid, undeclared
+  keys pass through). Previously the update path enforced shape caps only
+  (64 entries / 128-char keys / 500-char values), so agents could drop a
+  required attribute (e.g. a game's `platform`) or write wrong-case enum
+  values that create would reject. Rejections use the same structured
+  `invalid_attributes` error as create. Payloads valid under create rules
+  keep working; updates that do not touch `attributes` are unaffected, and
+  items whose category is missing from the registry keep shape-caps-only
+  behavior.
 - **zod v4 internals (THI-326).** Request validation now runs on zod 4.x. Tool
   behavior contracts are unchanged, but consumer-visible surfaces drifted:
   - **Error wording:** stock zod messages surfaced inside MCP `INVALID_PARAMS`

@@ -958,6 +958,30 @@ the 503 stub (Resend retries, then disables the endpoint), alerts return to
 log-only. Blast radius: the app container only (inbound webhook route already
 proxied by Caddy; no schema, no ports, no db changes).
 
+**3. `REPORT_ALERT_EMAIL` — item-report alias mailbox (THI-1451).** While
+unset, item reports stay log-only (DB row + triage task, no email). When set,
+each committed item report also plans one deduped account-less
+`ops.item_reported.v1` outbox row (`dedupe_key report:{id}` — at-most-once
+per report, ever) to that mailbox, delivered by the ordinary delivery sweep
+past the verified-recipient gate (the alias is internal mail, not account
+mail). Bodies are PII-minimal: report id, item URL, reason slug, timestamp —
+never the motivation free-text. Same address guidance as
+`OPERATOR_ALERT_EMAIL`: point it at a mailbox that exists (Thingery's own
+deployment uses the `report@thingery.dev` alias). Review reports are not
+mirrored — scope is item reports.
+
+**Wiring:** append `REPORT_ALERT_EMAIL=<mailbox>` to the VPS `.env`, recreate
+the app container (same command as above).
+
+**Verification:** submit an item report, then check `email_outbox` for the
+`ops.item_reported.v1` row (`dedupe_key = report:<id>`) and the sweep log for
+its `sent` transition; the triage task still fires unchanged (independent
+path).
+
+**Rollback:** unset the variable in `.env` + recreate — reports return to
+row + triage only, no email. Blast radius: the app container only (one
+compose passthrough; no schema, no ports, no db changes).
+
 ### 5.6 Deploy blocked: "Not possible to fast-forward, aborting" (THI-1364)
 
 The deploy wrapper runs `git pull --ff-only` (§5.0), so every deploy fails with

@@ -36,6 +36,7 @@ import { pool } from "./db.js";
 import { RateLimiter } from "./rate-limit.js";
 import { logSecurityEvent } from "./security-events.js";
 import { createReportReviewTask, reportReviewConfig } from "./report-review-notify.js";
+import { planItemReportEmail } from "./notify/operator.js";
 
 /** Spec: canned causes, stable slugs. The DB CHECK mirrors this list
  *  exactly; labels live in the frontend i18n (private repo). */
@@ -202,6 +203,23 @@ export async function createItemReport(
          RETURNING id, status, created_at`,
         [input.reporterAccountId, input.itemId, input.reason, motivation],
       );
+      // THI-1451 (THI-1479 plan Phase C): mirror the report to the report
+      // alias as an account-less ops.item_reported.v1 outbox row. Written
+      // inside THIS transaction — atomic with the report (the row commits
+      // iff the report commits; dedupe report:{id} keeps it at-most-once) —
+      // and DELIVERED off the request path by the notify sweep (the outbox
+      // pattern: a local INSERT here, no external call; THI-1066 still
+      // governs the triage POST below). Ride mode never fails the report:
+      // an insert failure is swallowed + logged (operator-alert posture).
+      // Review reports intentionally have no mirror yet (ops.review_reported
+      // would be its own slice — scope here is item reports per the plan).
+      await planItemReportEmail({
+        reportId: inserted.rows[0].id,
+        itemId: input.itemId,
+        reason: input.reason,
+        createdAt: inserted.rows[0].created_at,
+        client: db,
+      });
       await db.query("COMMIT");
       // Triage task creation is scheduled after COMMIT (spec) and off the
       // request path (THI-1066): no external call holds the insert lock, a

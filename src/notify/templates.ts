@@ -541,6 +541,23 @@ export function renderOrderEmail(
         : [];
       return renderOperatorAlert({ title: str("title") ?? "Thingery operator alert", lines });
     }
+    // THI-1451 (THI-1479 plan Phase C): item-report mirror to the report
+    // alias — account-less row, bypasses account gates for the same reason
+    // operator.* does. Same PII-minimal discipline: ids, reason slug,
+    // timestamp only; the motivation free-text (UNTRUSTED user content)
+    // never enters the payload, so it can never leak into the mail body.
+    case "ops.item_reported": {
+      const itemId = str("item_id") ?? "";
+      return renderOperatorAlert({
+        title: "New item report — Thingery",
+        lines: [
+          `Report: ${str("report_id") ?? "?"}`,
+          `Item: ${itemId ? `${baseUrl}/item/${itemId}` : "?"}`, 
+          `Reason: ${str("reason") ?? "?"}`,
+          `Reported at: ${str("created_at") ?? "?"}`,
+        ],
+      });
+    }
     default:
       throw new Error(`renderOrderEmail: unknown event type ${eventType}`);
   }

@@ -119,6 +119,14 @@ services:
       # (src/notify/operator.ts plans nothing without an address).
       RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
       OPERATOR_ALERT_EMAIL: ${OPERATOR_ALERT_EMAIL:-}
+      # Item-report alias email (THI-1451, THI-1479 plan Phase C).
+      # Passthrough only: value lives in the VPS .env, never in this repo.
+      # Unset ⇒ report emails stay log-only (src/notify/operator.ts plans
+      # nothing without an address — the same dark default as
+      # OPERATOR_ALERT_EMAIL, so self-hosted deployments never mail the
+      # Thingery project alias). Thingery's own deployment sets
+      # report@thingery.dev.
+      REPORT_ALERT_EMAIL: ${REPORT_ALERT_EMAIL:-}
       # Item report review triage (THI-788 step 3, activation THI-802).
       # Passthrough only: values live in the VPS .env. The seam stays
       # disabled unless BOTH REPORT_REVIEW_CREATE_URL and

@@ -269,6 +269,13 @@ export interface NotifyConfig {
    * console-only (Phase 1 posture); set ⇒ sweep rules 7/9 + delivery
    * dead-letters mirror there as account-less operator.* outbox rows. */
   operatorAlertEmail: string | undefined;
+  /** Item-report alert mailbox (THI-1451, THI-1479 plan Phase C). Unset ⇒
+   * report emails stay log-only — the same dark-default posture as
+   * operatorAlertEmail, so a self-hosted deployment never mails the
+   * Thingery project alias by default. Set (prod: report@thingery.dev) ⇒
+   * each committed item report mirrors one account-less
+   * ops.item_reported.v1 outbox row (src/notify/operator.ts). */
+  reportAlertEmail: string | undefined;
 }
 
 export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig {
@@ -306,6 +313,7 @@ export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig
     resendWebhookSecret: value("RESEND_WEBHOOK_SECRET"),
     digestIntervalMinutes: int("NOTIFY_DIGEST_INTERVAL_MINUTES", 60),
     operatorAlertEmail: value("OPERATOR_ALERT_EMAIL") ?? undefined,
+    reportAlertEmail: value("REPORT_ALERT_EMAIL") ?? undefined,
   };
 }
 

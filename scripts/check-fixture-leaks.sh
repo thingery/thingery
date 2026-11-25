@@ -39,8 +39,12 @@ db_psql() {
 }
 
 # One row per synthetic seller: id, email, created_at, open/active/total items.
-# The trailing awk drops psql's "(N rows)" footer — data rows carry >= 6 tabs.
-ROWS=$(db_psql -F'\t' -c "
+# Data rows always carry 6 fields; the trailing awk drops any stray non-data
+# line as defense in depth.
+# -F$'\t' (ANSI-C quoting): psql's -F does no escape processing — a literal
+# backslash-t would make every row single-field and the sweep would falsely
+# report "clean" (review-bot finding on THI-1506).
+ROWS=$(db_psql -F$'\t' -c "
   SELECT s.id, coalesce(s.email, '(NULL email)'), s.created_at,
          count(i.id) FILTER (WHERE i.status <> 'deleted') AS items_open,
          count(i.id) FILTER (WHERE i.status = 'active')  AS items_active,

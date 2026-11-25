@@ -68,6 +68,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+[[ "$HOURS" =~ ^[0-9]+$ ]] || { echo "--hours must be a non-negative integer" >&2; exit 2; }
+
 # --- 0. Synthetic-seller ids (organic-only filtering, THI-1506) --------------
 # Needed by the log-side jq (activated_callers). Fault-tolerant: a down DB
 # must not abort earlier than the original SQL section did — on failure the
@@ -133,7 +135,10 @@ SHARING_METRICS=$(printf '%s\n' "$RAW_LINES" | jq -s '
 # Organic-only by default: the NOT EXISTS/EXISTS clauses against the canonical
 # predicate (scripts/synthetic-sellers.sql) split every count into organic
 # (headline) and synthetic (leak strip). NULL-email sellers = legacy = organic.
-SQL_METRICS=$(db_psql -F'\t' -c "
+# -F$'\t' (ANSI-C quoting): psql's -F does no escape processing, so a literal
+# backslash-t would join fields with the 2-char sequence \t and break the IFS
+# split below (review-bot finding on THI-1506).
+SQL_METRICS=$(db_psql -F$'\t' -c "
   SELECT
     (SELECT count(*) FROM items i WHERE i.created_at > now() - interval '${HOURS} hours' AND i.status <> 'deleted'
        AND NOT EXISTS (SELECT 1 FROM sellers s WHERE s.id = i.seller_id AND ($PRED))) AS sql_created,

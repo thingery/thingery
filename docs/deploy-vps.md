@@ -955,6 +955,40 @@ the 503 stub (Resend retries, then disables the endpoint), alerts return to
 log-only. Blast radius: the app container only (inbound webhook route already
 proxied by Caddy; no schema, no ports, no db changes).
 
+### 5.6 Deploy blocked: "Not possible to fast-forward, aborting" (THI-1364)
+
+The deploy wrapper runs `git pull --ff-only` (§5.0), so every deploy fails with
+`fatal: Not possible to fast-forward, aborting.` when `/opt/thingery`'s local
+history has diverged from `origin/main` — typically after a main history
+rewrite. The code is fine; the checkout is just stranded, and the workflow
+stays red until it is realigned.
+
+**Recovery (verified working, THI-1362).** On the VPS, run as the **deploy
+user** — the tree is deploy-owned, and `sudo -u deploy` also sidesteps git's
+root `safe.directory` guard. First fetch and inspect:
+
+```bash
+sudo -u deploy bash -c 'cd /opt/thingery && git fetch origin && git status --porcelain'
+```
+
+Proceed **only if the tracked tree is clean**. Untracked files (`.env`,
+`.env.bak-*`, other local-only material) are untouched by the reset; a
+*tracked* modification must be explained before continuing. Then hard-align
+the checkout and re-deploy via the workflow's manual trigger (operator
+machine, needs `gh` + repo access):
+
+```bash
+sudo -u deploy bash -c 'cd /opt/thingery && git reset --hard origin/main'
+gh workflow run deploy.yml --repo thingery/thingery
+```
+
+Verify as for any deploy: the workflow log shows the
+`thingery-deploy: done at <sha>` marker (§5.0) with `<sha>` matching
+`origin/main`, then `/healthz` reports the same commit. Rollback path is
+inherent — the reset only moves to already-published main history and the
+re-deploy is the standard wrapper steps (schema apply is idempotent; blast
+radius: db + app + Caddy exactly as any deploy).
+
 ## 6. LLM guard: provider balance/failure detection
 
 If the LLM provider account balance hits zero, chat fails SILENTLY without a

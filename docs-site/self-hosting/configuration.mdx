@@ -35,6 +35,18 @@ The chat API (`POST /api/chat`) runs on a model you configure. The server ships 
 | `CHAT_TURNS_HOURLY_AUTHED`, `CHAT_TURNS_HOURLY_ANON` | Chat turns per hour, per account and per IP. Defaults `60` and `10` |
 | `CHAT_DAILY_TOKEN_BUDGET` | Daily token budget for the whole server. Default `2000000`; `0` removes it |
 
+## Item drafts
+
+`draft_listing` runs on the same kind of endpoint as chat. With neither `EXTRACTION_API_KEY` nor `LLM_API_KEY` set, the tool fails closed — every other tool keeps working.
+
+| Variable | Purpose |
+|---|---|
+| `EXTRACTION_API_URL`, `EXTRACTION_API_KEY`, `EXTRACTION_MODEL` | Any OpenAI-compatible chat completions endpoint used to turn a photo or one-line description into a listing draft. Falls back to the `LLM_*` chat variables when unset — point `EXTRACTION_*` at a different provider if your chat model can't take images |
+| `EXTRACTION_DAILY_CALL_CAP` | Deployment-wide draft calls per UTC day. Default `200`; `0` removes the cap |
+| `EXTRACTION_DAILY_TOKEN_BUDGET` | Deployment-wide daily token budget for drafts. Default `1000000`; `0` removes it |
+
+Drafts are rate-limited to 10 per seller per hour on top of these caps. Photos are metadata-stripped and downsampled before they reach the provider, and draft inputs are never stored — see the [selling guide](/guides/selling#draft-photo-privacy).
+
 ## OAuth
 
 | Variable | Purpose |

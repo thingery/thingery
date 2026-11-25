@@ -11,6 +11,14 @@
 #                     checked against SQL truth (items table)
 # plus a small liquidity strip (live items, sellers) and npm downloads.
 #
+# Organic-only by default (THI-1506): every listings/sellers count and
+# `activated_callers` EXCLUDES synthetic ops fixtures — sellers matching the
+# canonical predicate in scripts/synthetic-sellers.sql (docs/ops-smoke-policy.md
+# "Audit"). NULL-email sellers are legacy accounts and stay organic. The
+# `synthetic` strip reports exactly what was excluded (raw = organic +
+# synthetic): nonzero synthetic ITEMS mean a fixture outlived its run — sweep
+# identities with scripts/check-fixture-leaks.sh and file per policy rule 4.
+#
 # Sources (all read-only):
 #   - app container stdout (docker compose logs): THI-371 `tool_call` dispatch
 #     lines + THI-394 `tool_result` outcome lines (see docs/metrics.md)
@@ -40,6 +48,18 @@ COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 OUT_DIR="${THINGERY_METRICS_DIR:-./metrics}"
 CTR_WINDOW=600 # seconds between search and get_item for click-through
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Canonical synthetic-seller predicate (WHERE fragment, sellers aliased `s`),
+# shared with scripts/check-fixture-leaks.sh. Strip full-line comments and
+# blank lines, join to one line for splicing into the SQL below.
+PRED="$(sed -e '/^--/d' -e '/^$/d' "$SCRIPT_DIR/synthetic-sellers.sql" | tr '\n' ' ')"
+
+# psql against the compose db service, tuples-only/unaligned (read-only use).
+db_psql() {
+  docker compose -f "$COMPOSE_FILE" exec -T db psql -X -U "${POSTGRES_USER:-thingery}" \
+    -d "${POSTGRES_DB:-thingery}" -t -A "$@"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --hours) HOURS="$2"; shift 2 ;;
@@ -48,11 +68,20 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+[[ "$HOURS" =~ ^[0-9]+$ ]] || { echo "--hours must be a non-negative integer" >&2; exit 2; }
+
+# --- 0. Synthetic-seller ids (organic-only filtering, THI-1506) --------------
+# Needed by the log-side jq (activated_callers). Fault-tolerant: a down DB
+# must not abort earlier than the original SQL section did — on failure the
+# organic-only log-side exclusion is disabled ([] = exclude nothing) and the
+# SQL section below fails as it always has.
+SYNTH_IDS=$(db_psql -c "SELECT coalesce(json_agg(s.id), '[]'::json) FROM sellers s WHERE $PRED" | head -1) || SYNTH_IDS="[]"
+
 # --- 1. Capture analytics lines from the app container ----------------------
 RAW_LINES=$(docker compose -f "$COMPOSE_FILE" logs --no-log-prefix --since "${HOURS}h" app 2>/dev/null \
   | jq -Rr 'fromjson? // empty' | jq -c 'select(.type == "tool_call" or .type == "tool_result" or .type == "page_view")' || true)
 
-LOG_METRICS=$(printf '%s\n' "$RAW_LINES" | jq -s '
+LOG_METRICS=$(printf '%s\n' "$RAW_LINES" | jq -s --argjson synth_ids "${SYNTH_IDS:-[]}" '
   # ISO ts (with millis) -> epoch seconds
   def sec: (.[0:19] + "Z") | fromdateiso8601;
   (map(select(.type == "tool_result"))) as $r
@@ -63,7 +92,10 @@ LOG_METRICS=$(printf '%s\n' "$RAW_LINES" | jq -s '
       dispatches: ($d | length),
       results: ($r | length),
       calls_ok: ([$r[] | select(.ok == true)] | length),
-      activated_callers: ([$r[] | select(.ok == true and .sellerId != null) | .sellerId] | unique | length),
+      # organic-only: ops-fixture callers (synthetic seller ids, section 0) do
+      # not count as activation. Anon calls stay unattributable (docs/metrics.md).
+      activated_callers: ([$r[] | .sellerId as $sid
+        | select(.ok == true and $sid != null and ($synth_ids | index($sid) | not)) | $sid] | unique | length),
       anon_useful_calls: ([$r[] | select(.ok == true and .sellerId == null)] | length),
       searches: ($searches | length),
       searches_with_results: ([$searches[] | select((.results // 0) > 0)] | length),
@@ -100,20 +132,36 @@ SHARING_METRICS=$(printf '%s\n' "$RAW_LINES" | jq -s '
     }')
 
 # --- 2. SQL truth for the listing funnel + liquidity strip ------------------
-SQL_METRICS=$(docker compose -f "$COMPOSE_FILE" exec -T db psql -X -U "${POSTGRES_USER:-thingery}" -d "${POSTGRES_DB:-thingery}" \
-  -t -A -F'	' -c "
+# Organic-only by default: the NOT EXISTS/EXISTS clauses against the canonical
+# predicate (scripts/synthetic-sellers.sql) split every count into organic
+# (headline) and synthetic (leak strip). NULL-email sellers = legacy = organic.
+# -F$'\t' (ANSI-C quoting): psql's -F does no escape processing, so a literal
+# backslash-t would join fields with the 2-char sequence \t and break the IFS
+# split below (review-bot finding on THI-1506).
+SQL_METRICS=$(db_psql -F$'\t' -c "
   SELECT
-    (SELECT count(*) FROM items WHERE created_at > now() - interval '${HOURS} hours' AND status <> 'deleted') AS sql_created,
-    (SELECT count(*) FROM items WHERE created_at > now() - interval '${HOURS} hours' AND status <> 'deleted'
-       AND (NOT photo_required OR cardinality(images) > 0)) AS sql_published,
-    (SELECT count(*) FROM items WHERE created_at > now() - interval '${HOURS} hours' AND status <> 'deleted'
-       AND photo_required AND cardinality(images) = 0) AS sql_pending_photo,
-    (SELECT count(*) FROM items WHERE status = 'active' AND (NOT photo_required OR cardinality(images) > 0)) AS live_items,
-    (SELECT count(*) FROM sellers WHERE created_at > now() - interval '${HOURS} hours') AS new_sellers,
-    (SELECT count(*) FROM sellers) AS sellers_total" \
+    (SELECT count(*) FROM items i WHERE i.created_at > now() - interval '${HOURS} hours' AND i.status <> 'deleted'
+       AND NOT EXISTS (SELECT 1 FROM sellers s WHERE s.id = i.seller_id AND ($PRED))) AS sql_created,
+    (SELECT count(*) FROM items i WHERE i.created_at > now() - interval '${HOURS} hours' AND i.status <> 'deleted'
+       AND (NOT i.photo_required OR cardinality(i.images) > 0)
+       AND NOT EXISTS (SELECT 1 FROM sellers s WHERE s.id = i.seller_id AND ($PRED))) AS sql_published,
+    (SELECT count(*) FROM items i WHERE i.created_at > now() - interval '${HOURS} hours' AND i.status <> 'deleted'
+       AND i.photo_required AND cardinality(i.images) = 0
+       AND NOT EXISTS (SELECT 1 FROM sellers s WHERE s.id = i.seller_id AND ($PRED))) AS sql_pending_photo,
+    (SELECT count(*) FROM items i WHERE i.status = 'active' AND (NOT i.photo_required OR cardinality(i.images) > 0)
+       AND NOT EXISTS (SELECT 1 FROM sellers s WHERE s.id = i.seller_id AND ($PRED))) AS live_items,
+    (SELECT count(*) FROM sellers s WHERE s.created_at > now() - interval '${HOURS} hours'
+       AND (NOT ($PRED) OR s.email IS NULL)) AS new_sellers,
+    (SELECT count(*) FROM sellers s WHERE NOT ($PRED) OR s.email IS NULL) AS sellers_total,
+    (SELECT count(*) FROM sellers s WHERE $PRED) AS synthetic_sellers_total,
+    (SELECT count(*) FROM items i WHERE i.status <> 'deleted'
+       AND EXISTS (SELECT 1 FROM sellers s WHERE s.id = i.seller_id AND ($PRED))) AS synthetic_items_open,
+    (SELECT count(*) FROM items i WHERE i.status = 'active'
+       AND EXISTS (SELECT 1 FROM sellers s WHERE s.id = i.seller_id AND ($PRED))) AS synthetic_items_active" \
   | head -1)
 
-IFS="	" read -r SQL_CREATED SQL_PUBLISHED SQL_PENDING LIVE_ITEMS NEW_SELLERS SELLERS_TOTAL <<< "$SQL_METRICS"
+IFS="	" read -r SQL_CREATED SQL_PUBLISHED SQL_PENDING LIVE_ITEMS NEW_SELLERS SELLERS_TOTAL \
+  SYNTH_SELLERS SYNTH_ITEMS_OPEN SYNTH_ITEMS_ACTIVE <<< "$SQL_METRICS"
 
 # --- 3. npm downloads (public API, best effort) ------------------------------
 NPM_DL=$(curl -fsS --max-time 10 "https://api.npmjs.org/downloads/point/last-day/thingery" 2>/dev/null | jq -r '.downloads // empty' || true)
@@ -130,6 +178,8 @@ jq -n \
   --argjson sql_created "${SQL_CREATED:-0}" --argjson sql_published "${SQL_PUBLISHED:-0}" \
   --argjson sql_pending "${SQL_PENDING:-0}" --argjson live_items "${LIVE_ITEMS:-0}" \
   --argjson new_sellers "${NEW_SELLERS:-0}" --argjson sellers_total "${SELLERS_TOTAL:-0}" \
+  --argjson synthetic_sellers "${SYNTH_SELLERS:-0}" --argjson synthetic_items_open "${SYNTH_ITEMS_OPEN:-0}" \
+  --argjson synthetic_items_active "${SYNTH_ITEMS_ACTIVE:-0}" \
   --argjson npm "${NPM_DL:-null}" \
   '{ generated_at: (now | todateiso8601),
      window_hours: $hours,
@@ -150,6 +200,7 @@ jq -n \
        log_created_visible: $log.listing_created_visible, log_first_photo_publishes: $log.first_photo_publishes,
        sql_created: $sql_created, sql_published: $sql_published, sql_pending_photo: $sql_pending },
      liquidity: { live_items: $live_items, new_sellers: $new_sellers, sellers_total: $sellers_total },
+     synthetic: { sellers_total: $synthetic_sellers, items_open: $synthetic_items_open, items_active: $synthetic_items_active },
      sharing: $sharing,
      npm_downloads_1d: $npm }' > "$SNAP"
 
@@ -158,4 +209,5 @@ jq -r '"activation:      callers with >=1 OK call: \(.activation.activated_calle
        "search:          \(.search.searches) searches, \(.search.with_results) with results (\(.search.success_pct // "n/a")% success), \(.search.click_through) with follow-up get_item (\(.search.ctr_pct // "n/a")% CTR, 10-min window)",
        "listing funnel:  attempts \(.listings.log_attempts) -> created \(.listings.log_created) -> visible at create \(.listings.log_created_visible) | SQL truth: created \(.listings.sql_created), published \(.listings.sql_published), pending photo \(.listings.sql_pending_photo)",
        "liquidity:       live items \(.liquidity.live_items) | new sellers \(.liquidity.new_sellers) | npm dl (1d) \(.npm_downloads_1d // "n/a")",
+       "synthetic:       \(.synthetic.sellers_total) sellers, \(.synthetic.items_open) open items (\(.synthetic.items_active) active) | nonzero items = fixture leak -> scripts/check-fixture-leaks.sh",
        "sharing:         \(.sharing.item_views) item views (\(.sharing.item_views_human) human, \(.sharing.unfurl_bot_views) unfurl bots) | origins \(.sharing.human_by_origin.direct // 0) direct / \(.sharing.human_by_origin.internal // 0) internal / \(.sharing.human_by_origin.external // 0) external | \(.sharing.share_attributable_views) share-attributable | top referrers: \(.sharing.top_ref_hosts | if length > 0 then map("\(.host) x\(.views)") | join(", ") else "none" end)"' "$SNAP"

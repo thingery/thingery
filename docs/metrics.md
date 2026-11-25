@@ -13,6 +13,17 @@ The weekly funnel report tracks three numbers. All are computable from real
 events via **`scripts/daily-metrics.sh`** (run on the VPS from `/opt/thingery`;
 cron-daily per docs/deploy-vps.md §6b) or ad-hoc with the jq below.
 
+**Organic-only by default (THI-1506):** every listings/sellers count
+(`sql_*`, `liquidity.*`) and `activated_callers` excludes synthetic ops
+fixtures — sellers matching the canonical predicate in
+`scripts/synthetic-sellers.sql` (`ops+`-tagged accounts + test mail domains;
+NULL-email sellers are legacy API-key-era accounts and stay organic).
+The snapshot's `synthetic` strip (`sellers_total` / `items_open` /
+`items_active`) reports exactly what was excluded, so raw = organic +
+synthetic and fixture leaks surface in the daily cron output; identities via
+`scripts/check-fixture-leaks.sh`. Definitions in
+[ops-smoke-policy.md](ops-smoke-policy.md) "Audit".
+
 | Metric | Definition | Source |
 |---|---|---|
 | `activated_callers` | Sellers with ≥ 1 **successful** (`ok:true`) tool call in window — first useful action; per-seller first-useful timestamps are derivable from the same lines | `tool_result` lines |
@@ -32,7 +43,15 @@ rotate; snapshots survive. Definitions live in the JSON itself
 
 - Anonymous callers share one coarse `"anon"` bucket — anonymous click-through
 correlates the bucket, not an individual caller. Authenticated sellers
-(sellerId) correlate exactly.
+(sellerId) correlate exactly. Anonymous calls also cannot be classified
+organic/synthetic (the log line carries no seller identity) — ops runs that
+call anonymously inflate `anon_useful_calls`; keep smoke calls authenticated
+(ops-smoke-policy rule 1) so the synthetic exclusion can see them.
+- Synthetic-caller exclusion of `activated_callers` joins on the seller row
+still existing: a fixture whose seller row was already hard-deleted counts as
+organic in windows predating the deletion. SQL-truth metrics (`sql_*`,
+`liquidity.*`) classify live rows and are exact; the `synthetic` strip is the
+truth for the current state.
 - `first_photo_publishes` counts every successful `add_item_image` whose item
 is visible afterwards, including second photos of already-visible items; the
 exact publish count is `sql_published`.

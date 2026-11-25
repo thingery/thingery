@@ -11,12 +11,18 @@
 //      digests (never === on strings); reject stale timestamps (> 5 min) so
 //      a captured payload cannot be replayed forever.
 //   3. JSON is parsed only AFTER verification (§5.3 discipline).
-//   4. `email.bounced` → suppress: set sellers.email_bounced_at (once —
-//      idempotent UPDATE … WHERE NULL) and flip that address's pending
-//      outbox rows to skipped:bounced. The delivery sweep's accountGate
-//      then never claims another send to a bounced address. Every other
-//      event type is acknowledged 200 without action (Resend must not
-//      retry-loop on events we deliberately ignore).
+//   4. `email.bounced` and `email.complained` (THI-1486) → suppress: set
+//      sellers.email_bounced_at (once — idempotent UPDATE … WHERE NULL)
+//      and flip that address's pending outbox rows to skipped with a
+//      type-specific marker (skipped:bounced / skipped:complained).
+//      email_bounced_at is the GENERAL email-suppression timestamp: the
+//      delivery sweep's accountGate (src/notify/delivery.ts) and the
+//      verification re-arm gate (src/auth.ts issueEmailVerification) both
+//      read it, so a complained address stops receiving every account
+//      mail class too. The trigger source stays observable via the outbox
+//      marker + the log line. Every other event type is acknowledged 200
+//      without action (Resend must not retry-loop on events we
+//      deliberately ignore).
 //
 // Idempotency: all writes are guarded conditional UPDATEs — a redelivered
 // bounce is a no-op (webhook-idempotency lens).
@@ -98,13 +104,16 @@ async function handleResendWebhook(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  if (event.type !== "email.bounced") {
+  // Suppression-class events (THI-780 bounces, THI-1486 complaints): the
+  // marker is the type-specific last_error tag recorded on skipped rows.
+  const marker = event.type === "email.bounced" ? "bounced" : event.type === "email.complained" ? "complained" : null;
+  if (!marker) {
     res.json({ ok: true, ignored: event.type ?? "unknown" });
     return;
   }
   const email = typeof event.data?.email === "string" ? event.data.email.trim().toLowerCase() : "";
   if (!email) {
-    res.status(400).json({ error: "bounce event without email" });
+    res.status(400).json({ error: "suppression event without email" });
     return;
   }
   // Suppress: mark the account once; cancel everything still pending to the
@@ -114,12 +123,12 @@ async function handleResendWebhook(req: Request, res: Response): Promise<void> {
     [email],
   );
   const pending = await pool.query(
-    `UPDATE email_outbox SET status = 'skipped', last_error = 'skipped:bounced'
+    `UPDATE email_outbox SET status = 'skipped', last_error = $2
       WHERE to_email = $1 AND status = 'pending' RETURNING id`,
-    [email],
+    [email, `skipped:${marker}`],
   );
   console.log(
-    `[webhooks:resend] bounce suppressed: email=${email} account=${account.rows.length > 0 ? account.rows[0].id : "none"} ` +
+    `[webhooks:resend] ${marker} suppressed: email=${email} account=${account.rows.length > 0 ? account.rows[0].id : "none"} ` +
       `pending_skipped=${pending.rows.length}`,
   );
   res.json({ ok: true, suppressed: true });

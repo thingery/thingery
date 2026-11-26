@@ -12,6 +12,14 @@ may change without a major version bump.
 
 ### Changed
 
+- **Order email text fixes (THI-1585).** Order emails no longer show raw
+  internal codes: cancel/refund reasons, dispute outcomes, and order
+  statuses render in plain English (unknown values fall back to neutral
+  copy, never the raw code), and the payment deadline renders as a
+  readable date with an explicit UTC time zone instead of a raw ISO
+  timestamp. The never-rendered "Pay here" link parameter was removed —
+  buyers pay via their assistant's checkout link, as before.
+
 - **`update_listing` attribute registry validation (THI-1369).** Update payloads
   that replace `attributes` are now validated against the item's stored
   category definitions — the same checks `create_listing` has always run

@@ -1,14 +1,24 @@
 name: no-private-paths
 
-# Repo-boundary guardrail (THI-565): company-private material must never land
-# in the public repo (thingery/thingery holds the open-source core only; the
-# company side lives in thingery/platform). Fails any PR that adds or modifies
-# deny-listed paths. CODEOWNERS cannot express "must not exist"; a path check
-# can. Deny-list from the THI-573 proposal (§5):
-#   apps/ deploy/ billing/ ops/ website/ — active now (prophylactic);
-#   website/ retired by #237 (→ public/), denied so it can never return.
+# Repo-boundary guardrails (THI-565, THI-1619):
+#   1. no-private-paths — company-private material must never land in the
+#      public repo (thingery/thingery holds the open-source core only; the
+#      company side lives in thingery/platform). Fails any PR that adds or
+#      modifies deny-listed paths. CODEOWNERS cannot express "must not
+#      exist"; a path check can. Deny-list from the THI-573 proposal (§5):
+#      apps/ deploy/ billing/ ops/ website/ — active now (prophylactic);
+#      website/ retired by #237 (→ public/), denied so it can never return.
+#   2. tracked-tree-guard — git stores a symlink as a 120000-mode file blob,
+#      so workspace symlinks bypass directory-only .gitignore forms; twice a
+#      node_modules symlink rode a PR via `git add -A` (69cf21e, #402).
+#      Fails any PR that tracks a symlink blob or a node_modules path, and
+#      any main push whose full tree contains one (catches direct pushes and
+#      admin merges that bypass the PR gate). Symlink targets are additionally
+#      scanned for internal-topology leaks (defense in depth).
 on:
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
 
 permissions:
@@ -16,6 +26,9 @@ permissions:
 
 jobs:
   no-private-paths:
+    # PR-only: the path deny-list needs github.base_ref; main pushes are
+    # covered by tracked-tree-guard below.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,3 +53,17 @@ jobs:
             echo "Company-side work (website, apps, deploy, billing, ops) belongs in thingery/platform (THI-565)."
           fi
           exit $rc
+
+  tracked-tree-guard:
+    name: Tracked-tree guard (symlink blobs / node_modules / topology leaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # merge-base diff on PRs; full tree on main pushes
+      - name: Scan PR diff for tracked symlink blobs and node_modules paths
+        if: github.event_name == 'pull_request'
+        run: bash .github/scripts/check-tracked-tree.sh pr origin/main
+      - name: Full-tree scan for tracked symlink blobs and node_modules paths
+        if: github.event_name == 'push'
+        run: bash .github/scripts/check-tracked-tree.sh tree

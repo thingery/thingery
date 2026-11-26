@@ -1,4 +1,9 @@
 node_modules/
+# no-slash form: git stores a symlink as a 120000-mode file BLOB, which the
+# directory-only `node_modules/` pattern never matched — that gap let `git add
+# -A` sweep a workspace node_modules symlink into history (69cf21e, #402).
+# The no-slash form matches files and symlinks too; keep both lines.
+node_modules
 dist/
 # .env* (not just .env): snapshot copies like .env.bak-webpin-* must never
 # enter git history either (THI-1363). .env.example stays tracked.

@@ -95,6 +95,17 @@ services:
       EASYPOST_API_KEY: ${EASYPOST_API_KEY:-}
       EASYPOST_WEBHOOK_SECRET: ${EASYPOST_WEBHOOK_SECRET:-}
       EASYPOST_WEBHOOK_SECRET_PREVIOUS: ${EASYPOST_WEBHOOK_SECRET_PREVIOUS:-}
+      # Shipping provider selection + Shippo (THI-1248). Passthrough only:
+      # values live in the VPS .env. Empty/unset SHIPPING_PROVIDER keeps the
+      # code default ("easypost"); "shippo" switches labels, tracking, carrier
+      # webhooks and address verification to Shippo. Only the selected
+      # provider's keys are read. SHIPPO_WEBHOOK_SECRET is required before the
+      # carrier webhook endpoint verifies deliveries;
+      # SHIPPO_WEBHOOK_SECRET_PREVIOUS enables zero-downtime secret rotation.
+      SHIPPING_PROVIDER: ${SHIPPING_PROVIDER:-}
+      SHIPPO_API_KEY: ${SHIPPO_API_KEY:-}
+      SHIPPO_WEBHOOK_SECRET: ${SHIPPO_WEBHOOK_SECRET:-}
+      SHIPPO_WEBHOOK_SECRET_PREVIOUS: ${SHIPPO_WEBHOOK_SECRET_PREVIOUS:-}
       # Address verification — Sendcloud v3 (ships dark: empty/unset keeps the
       # advisory check degraded, i.e. not_checked). SENDCLOUD_API_KEY is the
       # basic-auth credential ("key:secret" pair, or a single token as the

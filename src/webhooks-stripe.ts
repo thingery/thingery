@@ -527,6 +527,15 @@ async function handlePaymentSuccess(db: PoolClient, event: Stripe.Event, cfg: Or
 // Exported for sweep rule 6 reprocessing (§4.5): re-fetches the event by id
 // from the Stripe API (the stored payload is redacted, F6) and re-applies it.
 export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cfg: OrderFlowConfig): Promise<void> {
+  // F5 defense-in-depth (THI-1694 R2): the ingest livemode gate (§6.7) runs
+  // only on delivery — sweep rule 6 re-fetches stored events by id and lands
+  // here directly, bypassing it, so a mismatched-mode event must be refused
+  // here too. Same 'rejected: livemode mismatch' semantics as ingest: the
+  // route marks the row rejected (final, 200) via WebhookRejectError, and
+  // rule 6's rejected:% final filter retires its own attempt-tagged rows.
+  if (event.livemode !== (cfg.stripeMode === "live")) {
+    throw new WebhookRejectError("livemode mismatch");
+  }
   // SDK v23's event union predates/omits some transfer event names — the
   // spec names transfer.paid; Stripe's API emits transfer.created/updated
   // when funds land. All three map to #20; the transition is the arbiter.

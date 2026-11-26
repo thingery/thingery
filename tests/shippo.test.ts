@@ -115,9 +115,10 @@ describe("createShippoShipment", () => {
       name: "Seller", street1: "Weg 2", city: "Berlin", zip: "10115", country: "DE",
     });
     // mm → cm, grams as declared mass unit:
-    expect(body.parcel).toEqual({
-      weight: 500, mass_unit: "g", length: 30, width: 20, height: 10, distance_unit: "cm",
-    });
+    expect(body.parcels).toEqual([
+      { weight: 500, mass_unit: "g", length: 30, width: 20, height: 10, distance_unit: "cm" },
+    ]);
+    expect(body).not.toHaveProperty("parcel");
   });
 
   it("omits parcel dimensions when the input has none; phone rides only when present", async () => {
@@ -126,7 +127,7 @@ describe("createShippoShipment", () => {
     const input = { ...SHIPMENT_INPUT, dimensionsMm: undefined, toAddress: { ...SHIPMENT_INPUT.toAddress, phone: "+39 02 1234" } };
     await createShippoShipment(input, { fetchImpl: fetchMock as unknown as typeof fetch });
     const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string) as Record<string, unknown>;
-    expect(body.parcel).toEqual({ weight: 500, mass_unit: "g" });
+    expect(body.parcels).toEqual([{ weight: 500, mass_unit: "g" }]);
     expect(body.address_to).toMatchObject({ phone: "+39 02 1234" });
   });
 
@@ -175,14 +176,15 @@ const TRANSACTION_SUCCESS = {
   label_url: "https://shippo-deliveries.s3.amazonaws.com/label.pdf",
   tracking_number: "TRACK123DE",
   tracking_status: "TRANSIT",
-  rate: {
-    object_id: "rate_1",
-    provider: "DHL Germany",
-    servicelevel: { token: "dhl_paket", name: "Paket National" },
-    amount: "4.50",
-    currency: "EUR",
-  },
+  rate: "rate_1", // the wire echoes the rate id only
 };
+
+const RATE_RESPONSE = SHIPMENT_RESPONSE.rates[0];
+
+/** Answers the rate lookup, then the purchase. */
+function purchaseFetch(transaction: unknown, rate: unknown = RATE_RESPONSE) {
+  return vi.fn(async (url: string) => jsonRes(url.includes("/rates/") ? rate : transaction));
+}
 
 describe("buyShippoLabel", () => {
   it("returns null in degraded mode", async () => {
@@ -191,9 +193,12 @@ describe("buyShippoLabel", () => {
 
   it("POSTs {rate, async:false} to /transactions; maps the bought label incl. synthesized tracker id", async () => {
     setEnv("SHIPPO_API_KEY", "shippo_test_KEY");
-    const fetchMock = vi.fn().mockResolvedValue(jsonRes(TRANSACTION_SUCCESS));
+    const fetchMock = purchaseFetch(TRANSACTION_SUCCESS);
     const label = await buyShippoLabel("shp_abc", "rate_1", { fetchImpl: fetchMock as unknown as typeof fetch });
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [rateUrl, rateInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(rateUrl).toBe("https://api.goshippo.com/rates/rate_1");
+    expect(rateInit.method).toBe("GET");
+    const [url, init] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
     expect(url).toBe("https://api.goshippo.com/transactions");
     expect(JSON.parse(init.body as string)).toEqual({ rate: "rate_1", async: false });
     expect(label).toEqual({
@@ -211,18 +216,18 @@ describe("buyShippoLabel", () => {
 
   it("throws on non-SUCCESS transaction statuses (queued/error are exceptional, never swallowed)", async () => {
     setEnv("SHIPPO_API_KEY", "shippo_test_KEY");
-    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ ...TRANSACTION_SUCCESS, status: "QUEUED" }));
+    const fetchMock = purchaseFetch({ ...TRANSACTION_SUCCESS, status: "QUEUED" });
     await expect(buyShippoLabel("shp_abc", "rate_1", { fetchImpl: fetchMock as unknown as typeof fetch })).rejects.toThrow(
       /transaction status QUEUED/,
     );
   });
 
-  it("throws on an incomplete success payload (missing label_url / tracking_number / rate echo)", async () => {
+  it("throws on an incomplete success payload (missing label_url / tracking_number)", async () => {
     setEnv("SHIPPO_API_KEY", "shippo_test_KEY");
-    for (const omit of ["label_url", "tracking_number", "rate"] as const) {
+    for (const omit of ["label_url", "tracking_number"] as const) {
       const body = { ...TRANSACTION_SUCCESS } as Record<string, unknown>;
       delete body[omit];
-      const fetchMock = vi.fn().mockResolvedValue(jsonRes(body));
+      const fetchMock = purchaseFetch(body);
       await expect(buyShippoLabel("shp_abc", "rate_1", { fetchImpl: fetchMock as unknown as typeof fetch })).rejects.toThrow(
         /incomplete success payload/,
       );
@@ -231,17 +236,26 @@ describe("buyShippoLabel", () => {
 
   it("refuses a non-https label_url (F16 discipline)", async () => {
     setEnv("SHIPPO_API_KEY", "shippo_test_KEY");
-    const fetchMock = vi.fn().mockResolvedValue(
-      jsonRes({ ...TRANSACTION_SUCCESS, label_url: "http://shippo-deliveries.example/label.pdf" }),
-    );
+    const fetchMock = purchaseFetch({ ...TRANSACTION_SUCCESS, label_url: "http://shippo-deliveries.example/label.pdf" });
     await expect(buyShippoLabel("shp_abc", "rate_1", { fetchImpl: fetchMock as unknown as typeof fetch })).rejects.toThrow(
       /label_url is not https/,
     );
   });
 
+  it("never buys when the rate cannot be read first", async () => {
+    setEnv("SHIPPO_API_KEY", "shippo_test_KEY");
+    const fetchMock = purchaseFetch(TRANSACTION_SUCCESS, { object_id: "rate_1" });
+    await expect(buyShippoLabel("shp_abc", "rate_1", { fetchImpl: fetchMock as unknown as typeof fetch })).rejects.toThrow(
+      /nothing bought/,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("non-2xx → ShippoError with status + provider code", async () => {
     setEnv("SHIPPO_API_KEY", "shippo_test_KEY");
-    const fetchMock = vi.fn().mockResolvedValue(jsonRes({ code: "rate_error" }, 402));
+    const fetchMock = vi.fn(async (url: string) =>
+      url.includes("/rates/") ? jsonRes(RATE_RESPONSE) : jsonRes({ code: "rate_error" }, 402),
+    );
     try {
       await buyShippoLabel("shp_abc", "rate_1", { fetchImpl: fetchMock as unknown as typeof fetch });
       expect.unreachable();

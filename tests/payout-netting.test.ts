@@ -8,15 +8,15 @@ import type Stripe from "stripe";
 import { describe, expect, it } from "vitest";
 import { createTransferForOrder, sellerNetTransferCents } from "../src/stripe.js";
 
-/** An expanded PaymentIntent as sellerNetTransferCents expects it. */
-function piWith(fee: number, opts: { amount?: number; currency?: string; chargeStatus?: string; noBt?: boolean; chargeAsString?: boolean } = {}) {
+/** An expanded PaymentIntent as sellerNetTransfer expects it. */
+function piWith(fee: number, opts: { amount?: number; currency?: string; chargeStatus?: string; noBt?: boolean; chargeAsString?: boolean; btStatus?: string } = {}) {
   return {
     latest_charge: opts.chargeAsString
       ? "ch_1" // unexpanded string — must fail closed
       : {
           id: "ch_1",
           status: opts.chargeStatus ?? "succeeded",
-          balance_transaction: opts.noBt ? null : { amount: opts.amount ?? 10500, currency: opts.currency ?? "eur", fee },
+          balance_transaction: opts.noBt ? null : { id: "txn_1", amount: opts.amount ?? 10500, currency: opts.currency ?? "eur", fee, status: opts.btStatus ?? "available" },
         },
   };
 }
@@ -96,12 +96,12 @@ describe("sellerNetTransferCents (THI-374)", () => {
 });
 
 describe("createTransferForOrder (THI-374)", () => {
-  it("transfers the net amount under the payout:{order_id} idempotency key", async () => {
-    const calls: Array<{ amount: number; currency: string; destination: string; key: string }> = [];
+  it("transfers the net amount under the payout:{order_id} idempotency key, tied to the buyer's charge (A5)", async () => {
+    const calls: Array<{ amount: number; currency: string; destination: string; source_transaction?: string; key: string }> = [];
     const stripe = {
       paymentIntents: { retrieve: async () => piWith(182) },
       transfers: {
-        create: async (a: { amount: number; currency: string; destination: string }, o: { idempotencyKey: string }) => {
+        create: async (a: { amount: number; currency: string; destination: string; source_transaction?: string }, o: { idempotencyKey: string }) => {
           calls.push({ ...a, key: o.idempotencyKey });
           return { id: "tr_net" };
         },
@@ -109,7 +109,30 @@ describe("createTransferForOrder (THI-374)", () => {
     } as unknown as Stripe;
     const transfer = await createTransferForOrder(order, "acct_seller", stripe);
     expect(transfer.id).toBe("tr_net");
-    expect(calls).toEqual([{ amount: 10318, currency: "eur", destination: "acct_seller", key: "payout:o1" }]);
+    expect(calls).toEqual([{ amount: 10318, currency: "eur", destination: "acct_seller", source_transaction: "ch_1", key: "payout:o1" }]);
+  });
+
+  it("A5 (THI-1611): transfer still lands while the charge's funds are pending — source_transaction carries the availability", async () => {
+    // Charge succeeded but its balance transaction is not yet available
+    // (card funds pending, payout schedule): exactly the state that failed
+    // with balance_insufficient before A5. With source_transaction the
+    // transfer is created immediately; the seller's payout simply follows
+    // the source charge's availability (Stripe-documented behaviour, SDK
+    // TransferCreateParams.source_transaction). Unit-level proof of (a);
+    // the full test-mode trade rides the THI-571 rehearsal.
+    let params: { source_transaction?: string; amount?: number } | undefined;
+    const stripe = {
+      paymentIntents: { retrieve: async () => piWith(182, { btStatus: "pending" }) },
+      transfers: {
+        create: async (a: { source_transaction?: string; amount?: number }) => {
+          params = a;
+          return { id: "tr_pending" };
+        },
+      },
+    } as unknown as Stripe;
+    const transfer = await createTransferForOrder(order, "acct_seller", stripe);
+    expect(transfer.id).toBe("tr_pending");
+    expect(params).toMatchObject({ amount: 10318, source_transaction: "ch_1" });
   });
 
   it("propagates the fail-closed error — no transfer is attempted when the fee is unknown", async () => {

@@ -28,9 +28,9 @@ this spec removes the class of risk rather than accepting it.
     `transfer.paid` alias) — all carry **no** top-level `account` field;
   - Connected-accounts endpoint → `account.updated` (the only writer of
     `sellers.stripe_onboarded_at`) and `payout.failed` (stuck-seller-payout
-    alert, THI-1624 A6) — both arrive **with** a top-level `acct_…` `account`
+    alert, PR #405) — both arrive **with** a top-level `acct_…` `account`
     field. Stripe delivers connected-account events only to this endpoint.
-    (Event list synced with the corrected runbook §5.3, THI-1624 A6.)
+    (Event list synced with the corrected runbook §5.3, PR #405.)
 - Stripe marks connected-account events with a top-level `account` field (the
   connected `acct_…` id); platform-account events carry none. The payload itself
   therefore names its class — usable **after** signature verification, which is the

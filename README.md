@@ -14,6 +14,8 @@ proposes the best one. Thingery is the shared database and the MCP tools underne
 
 [![Thingery MCP server](https://mcprush.com/badge/thingery-mcp/card.svg)](https://mcprush.com/thingery/thingery-mcp)
 
+[![thingery/thingery MCP server](https://glama.ai/mcp/servers/thingery/thingery/badges/score.svg)](https://glama.ai/mcp/servers/thingery/thingery)
+
 - **Free** for everyone. No take rate, no platform lock-in.
 - **Open source** (Apache-2.0). Self-host the whole thing, or use the flagship instance.
 - **Agent-native**: every capability is an MCP tool; any LLM can drive it.

@@ -10,6 +10,7 @@ import { sellerFromSession } from "./auth.js";
 import { pool } from "./db.js";
 import { budgetRange, getWanted, wantedFreshness } from "./wanted-feed.js";
 import { orderFlowConfig } from "./config.js";
+import { getPayableCheckoutUrl } from "./order-flow.js";
 import { classifyVisitOrigin, logPageView } from "./analytics.js";
 
 /** Contextual HTML escaping for every interpolated value (text + attribute
@@ -157,6 +158,8 @@ export function page(title: string, description: string, body: string, og?: OgMe
     .upload .pick.primary { background: #019686; color: #fff; }
     .upload.drag { outline: 2px dashed #019686; outline-offset: 4px; }
     .upload.at-cap .pick { opacity: .5; cursor: not-allowed; }
+    .pay-cta { display: inline-block; padding: .7rem 1.6rem; margin: .9rem 0 .2rem; font: inherit; font-weight: 700;
+      border-radius: 10px; text-decoration: none; border: 1px solid #019686; background: #019686; color: #fff; }
     .banner-warn { border: 1px solid #b45309; background: rgba(180,83,9,.12); border-radius: 12px; padding: .6rem 1rem; margin: 1rem 0; }
     .thumb { position: relative; display: inline-block; margin: .35rem .4rem 0 0; }
     .thumb img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px;
@@ -432,16 +435,22 @@ export async function wantedDetailPage(req: Request, res: Response): Promise<voi
   res.send(page(title, description, body, { title, description, url: `${baseUrl}/wanted/${w.id}`, canonical: `${baseUrl}/wanted/${w.id}` }, expired));
 }
 
-/** Order payment-return page (spec THI-3 §4.3, finding F15).
+/** Order payment-return page (spec THI-3 §4.3, finding F15; pay step per
+ *  docs/specs/order-page-pay-step.md, THI-1605).
  *
- * Serves as the Stripe Checkout `success_url` and the manual order-status
- * landing page. It is a capability URL: anyone holding the order UUID may
- * learn the order's *status* and nothing else — no item title, price, party
- * names, or addresses. Without an authenticated party session that is the
- * entire surface (richer order pages are a follow-up). Hardened per F15:
- * `Cache-Control: no-store`, `Referrer-Policy: same-origin` (the UUID must
- * not leak via outbound referrers), and unknown/malformed ids render the
- * identical page shape so the page is not an order-existence oracle. */
+ * Serves as the Stripe Checkout `success_url`/`cancel_url` and the manual
+ * order-status landing page — including the one the approved order emails
+ * link ("Open the order"). It is a capability URL: anyone holding the order
+ * UUID may learn the order's *status* and, while the order awaits payment,
+ * open that order's existing Stripe Checkout session (THI-1605 pay step —
+ * the same session payment_url already hands to the buyer's assistant; no
+ * second payment path is minted). The data discipline is unchanged: no item
+ * title, price, party names, or addresses — the button adds an outbound
+ * link, never order data. Hardened per F15: `Cache-Control: no-store`,
+ * `Referrer-Policy: same-origin` (the UUID must not leak via outbound
+ * referrers — it also keeps the UUID off the wire to Stripe when the pay
+ * button is clicked), and unknown/malformed ids render the identical page
+ * shape so the page is not an order-existence oracle. */
 const ORDER_STATUS_LABELS: Record<string, string> = {
   pending: "Awaiting payment",
   sold: "Paid — awaiting shipment",
@@ -455,17 +464,29 @@ const ORDER_STATUS_LABELS: Record<string, string> = {
   refunded: "Refunded",
 };
 
-function orderReturnBody(status: string | null): string {
+function orderReturnBody(status: string | null, payUrl?: string | null, canceled?: boolean): string {
   const label = status ? (ORDER_STATUS_LABELS[status] ?? status) : "Order not found";
   const hint = status
     ? `<p class="meta">Your assistant can track this order, record tracking, confirm receipt,
     open a dispute, or release the seller's payout — ask it to check the order status.</p>`
     : `<p class="meta">This link is not a valid order. If you just paid, return to your assistant
     and ask it to check the order status.</p>`;
+  // THI-1605 pay step: only ever rendered for a pending stripe order with a
+  // retrievable live Checkout session (see the state table in the spec).
+  // Static copy only — the query flag maps to fixed text, nothing is reflected.
+  const canceledNote = canceled && status === "pending"
+    ? `\n  <p class="meta">Payment was canceled — you can still complete it${payUrl ? " below" : "; ask your assistant to resume checkout"}.</p>`
+    : "";
+  // Button copy in the approved email voice (article-led imperative: "Open
+  // the order", "View the item"). Back-link is true by construction: the
+  // session's success_url IS this page.
+  const payButton = payUrl
+    ? `\n  <a class="pay-cta" href="${escapeHtml(payUrl)}">Pay for this order</a>\n  <p class="meta">You'll come back here after paying.</p>`
+    : "";
   return `
   <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents</p>
   <h1>Order status</h1>
-  <p class="price">${escapeHtml(label)}</p>
+  <p class="price">${escapeHtml(label)}</p>${canceledNote}${payButton}
   ${hint}
   <p class="meta">Thingery is the open item database and MCP server for AI agents to list,
   find, and trade second-hand goods.</p>`;
@@ -479,15 +500,29 @@ export async function orderReturnPage(req: Request, res: Response): Promise<void
   res.set("Referrer-Policy", "same-origin");
 
   const id = String(req.params.id ?? "");
+  const canceled = req.query.canceled === "1";
   let status: string | null = null;
+  let payUrl: string | null = null;
   if (UUID_RE.test(id)) {
+    // Same single-row read as before, widened for the pay gate. Unknown and
+    // malformed ids still fall through to the identical not-found body.
     const { rows } = await pool
-      .query<{ status: string }>("SELECT status FROM orders WHERE id = $1", [id])
-      .catch(() => ({ rows: [] as Array<{ status: string }> }));
-    status = rows[0]?.status ?? null;
+      .query<{ status: string; payment_mode: string; checkout_session_id: string | null }>(
+        "SELECT status, payment_mode, checkout_session_id FROM orders WHERE id = $1",
+        [id],
+      )
+      .catch(() => ({ rows: [] as Array<{ status: string; payment_mode: string; checkout_session_id: string | null }> }));
+    const row = rows[0];
+    status = row?.status ?? null;
+    // Pay step (THI-1605): only when payment is actually due — a pending
+    // stripe order. Read-only session retrieval (getPayableCheckoutUrl);
+    // every non-payable shape renders today's status-only body.
+    if (row && row.status === "pending" && row.payment_mode === "stripe") {
+      payUrl = await getPayableCheckoutUrl(row.checkout_session_id);
+    }
   }
   // Same template and 200 for known and unknown ids alike — no existence oracle.
-  res.send(page("Order status — Thingery", "Order status", orderReturnBody(status)));
+  res.send(page("Order status — Thingery", "Order status", orderReturnBody(status, payUrl, canceled)));
 }
 
 /** Seller return page from Stripe Express payout onboarding (the Checkout

@@ -1374,6 +1374,17 @@ sudo touch /var/log/thingery-daily-metrics.log && sudo chown deploy:deploy /var/
 (`deploy` owns `/opt/thingery` and is in the `docker` group — same posture as
 the deploy flow in §5.)
 
+Since THI-1730 the app-log source is the host journal (§7), which is
+`systemd-journal`-group-readable only — grant the cron user read access.
+(Observed missing on the VPS 2026-11-26: the script silently returned zero
+app-line metrics while running fine as `deploy` — verify this step or the
+snapshot is counts-of-zero.)
+
+```bash
+sudo usermod -aG systemd-journal deploy   # applied on the VPS 2026-11-26
+sudo -u deploy journalctl -t thingery-app --since -30m | tail -2   # verify: app lines appear
+```
+
 **Verify:** `scripts/daily-metrics.sh` from `/opt/thingery` (expect a summary
 block + a file under `metrics/`), then `tail -1 /var/log/thingery-daily-metrics.log`
 the next day. Read any snapshot with
@@ -1461,8 +1472,10 @@ method, path, status, and User-Agent as one JSON line.
   does `journalctl CONTAINER_NAME=... -f`.) `db`/`caddy` keep the THI-312 caveat:
   same-container restarts preserve their `json-file` logs; a recreate starts a
   fresh log file — nightly DB backups remain the durable record of state.
-- **Bounded disk (app):** app stdout is small in practice (~0.4 MB/day observed),
-  and the journal is capped by the installed drop-in
+- **Bounded disk (app):** app stdout is small in practice (~0.4 MB/day observed;
+  0.63 MB/day re-measured 2026-11-26 — ~6 MB/day is the whole-journal intake,
+  so the 200M cap is roughly a month of headroom), and the journal is capped by
+  the installed drop-in
   `/etc/systemd/journald.conf.d/thingery.conf` (`SystemMaxUse=200M`; install
   step in the platform deploy docs) — without it the default is ≤10% of the
   filesystem, stopping at 15% free. `journalctl --disk-usage` shows the total,
@@ -1470,6 +1483,9 @@ method, path, status, and User-Agent as one JSON line.
   shrinks it on demand. Note journald applies rate limiting (~10k messages/30s);
   a pathological app burst would be sampled, not dropped silently — look for
   "Suppressed" lines. `json-file` services stay bounded at 3 × 10 MB each.
+  Coverage boundary: app entries begin at the THI-1330 driver deploy
+  (2026-11-24 07:19 UTC on the VPS) — trailing-7d app-log metrics reach back
+  only that far, not to the vacuum cap.
 - **Confidentiality:** access lines contain client IPs and user agents — operator
   data, not public data. The journal is root/`systemd-journal`-group-readable only.
   Do not paste raw access logs into public issues; strip IPs first.

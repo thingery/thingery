@@ -50,15 +50,31 @@ a signature failure (400, nothing written, distinct log line):
   `connectFamily = name.startsWith("STRIPE_CONNECT_")`. On mismatch: do **not**
   accept the candidate, log `[webhooks:stripe] class violation: <secret-name>
   verified a <connect|platform>-scoped event <event.type>` and abort with 400
-  (no store, no `onEventId`), matching F12. Continue-the-loop is wrong here: HMAC
-  verification under one key cannot also verify under another, so a first success
-  plus mismatch means the event is policy-invalid, not "awaiting its real secret".
+  (no store, no `onEventId`), matching F12.
+- Decision (Security review, resolved): rejection is FINAL — never
+  continue-the-loop. HMAC under one key cannot verify under another (probability
+  ~2^-256 otherwise), so a first success plus mismatch is policy-invalid, full
+  stop; continuing would only matter when the secrets coincide, and there it
+  would silently mask a secrets-management failure and re-widen acceptance to
+  the union of both families — the exact surface this control removes.
+- Decision (Security review, resolved): the connect-class discriminator is the
+  strict form — `typeof event.account === "string" &&
+  event.account.startsWith("acct_")`. Bare non-empty was proposed and
+  **rejected**: format allowlisting is fail-closed (a future Stripe format
+  change 400s loudly instead of silently classifying junk as connect-class) and
+  constrains what a compromised connect secret can reach. Platform class is the
+  exact negation (unset/null/empty ⇒ platform — Stripe never emits those on
+  connected-account events).
+- Decision (Security review, resolved): forged events are never stored — the
+  binding rejection sits between `constructEvent` and the store, so
+  class-violating deliveries cannot pre-burn `(source, external_id)` dedupe
+  keys. No replay-vector change.
 - Rotation keeps working: twins inherit their family's binding; the accept order is
   unchanged.
-- Misrouting fails loud: if Connect-scoped deliveries were pointed at the platform
-  endpoint, signatures still verify (same secret family? no — different endpoint,
-  different secret) — actually a misroute fails signature verification as today;
-  the new rejection only fires for **forged** payloads, which is the point.
+- Misrouting fails loud: a misrouted delivery fails signature verification as
+  today (different endpoint ⇒ different secret), so the new rejection fires only
+  for forged payloads. Same-value misconfiguration (both secrets set equal) turns
+  connect-class deliveries into immediate loud 400s — desired fail-closed.
 - Redacted ingest payload (F6) gains one additive field `account_scope:
   "connect" | "platform"` for observability of what was accepted.
 - Unchanged: livemode gate, dedupe by `external_id`, transition machinery, 503
@@ -89,13 +105,23 @@ None (expand-contract n/a: no schema or config change; deploy = code only).
    `webhook_events` row, no order change, log line present.
 4. **The fix, mirrored:** connect-class event signed with platform secret → 400,
    nothing written.
-5. **Rotation:** platform-class signed with `…_PREVIOUS` twin → accepted (warning
-   logged); connect-class signed with connect `_PREVIOUS` → accepted; platform-class
-   signed with connect `_PREVIOUS` → 400.
-6. **Single-secret deployment:** Connect secret unset → platform behavior identical
+5. **Rotation (symmetric 2×2 class × twin matrix):** platform-class signed with
+   platform `_PREVIOUS` → accepted (warning logged); connect-class signed with
+   connect `_PREVIOUS` → accepted; platform-class signed with connect `_PREVIOUS`
+   → 400; connect-class signed with platform `_PREVIOUS` → 400.
+6. **Prefix pinning:** connect secret verifying a payload whose `account` is a
+   non-`acct_` string → 400 (locks the strict discriminator against silent
+   loosening).
+7. **Single-secret deployment:** Connect secret unset → platform behavior identical
    to pre-#402.
-7. **Redaction:** accepted connect event stores `account_scope: "connect"` and no
+8. **Redaction:** accepted connect event stores `account_scope: "connect"` and no
    PII beyond the existing F6 keys.
+
+**Fixture fidelity (not an acceptance change):** the existing connect-path tests
+("connect-scoped account.updated…", "accepts the Connect PREVIOUS secret…") build
+events WITHOUT the top-level `account` field; real Stripe connect deliveries carry
+it. Under the binding those fixtures would 400 — the fixtures must add
+`account: "acct_…"` to stay faithful to real deliveries.
 
 ## Rollout + rollback
 
@@ -108,16 +134,16 @@ None (expand-contract n/a: no schema or config change; deploy = code only).
   live**; assert a tampered payload (flip `account` off a connect event) 400s.
 - Rollback: revert the commit; no data or config residue.
 
-## Open questions
+## Resolved decisions (recorded from the Security review of this spec)
 
-1. Should a class violation ALSO invalidate the event id against future deliveries
-   (attacker could replay a forged id that matches a future real event)? Current
-   dedupe keys on `(source, external_id)`; forged events are never stored, so they
-   cannot pre-burn ids. No action needed; noted for the reviewer.
-2. Accept `acct_` prefix check or bare non-empty `account`? Bare non-empty is more
-   permissive across SDK versions; prefix check is stricter. Proposed: bare
-   non-empty (Stripe owns the field), prefix as the log detail only. Security to
-   pick.
+1. Reject-on-mismatch is final (never continue the candidate loop) — see Design.
+2. Connect-class discriminator is the strict `acct_` prefix form; bare non-empty
+   rejected — see Design.
+3. Forged events are never stored; no dedupe pre-burn vector — see Design.
+4. The rehearsal-step addition (Rollout section) lands in **thingery/platform**
+   (`docs/stripe-live-rehearsal.md` lives in that repo, referenced by deploy-vps.md
+   §5.3). This spec PR creates no company-side docs in the public repo
+   (repo-boundary rule); the public-repo rehearsal section above only POINTS there.
 
 ## PR-sized implementation steps
 

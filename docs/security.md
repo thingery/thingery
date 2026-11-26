@@ -431,8 +431,11 @@ phishing concerns — threat-model them before building, not after.
   per review issue, and an approval whose review issue carries no verdict at or before the
   approval's submission time is suspect — investigate, never auto-trusted. A racing
   duplicate review run's approval (observed on PR #401, benign outcome) is flagged by this
-  rule and mechanically by the gate-integrity detector, which checks the citation pattern
-  and its ordering for approvals submitted after 2026-11-27T00:00:00Z. The "never push to
+  rule and mechanically by the gate-integrity detector, which checks the citation
+  pattern and its ordering (a citation whose timestamp is regex-valid but unparsable is
+  flagged `malformed`, not crashed on — THI-1646 F1) for approvals submitted at or after
+  2026-11-27T00:00:00Z. Post-effective mechanical re-approvals (THI-836 sweep,
+  update-merge carve-out) cite the existing predating verdict (Decision 7). The "never push to
   main" convention is enforced by GitHub, not just discipline. R1 in §9 is struck (gate live).
   `deploy` is intentionally not a required check (it runs push-to-main only and never on
   PRs).

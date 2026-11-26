@@ -20,11 +20,14 @@
  *      and per drift fingerprint so repeated runs never double-report.
  *   5. Since ADR 0007 Decision 7 (THI-1641, effective 2026-11-27T00:00:00Z):
  *      a counted `thingery-review-bot` approval must cite the verdict on the
- *      review issue (`Verdict: THI-<n> @ <ISO-8601 UTC>`) and the cited
- *      timestamp must not postdate the approval. Violations are reported on
- *      the same tracking issue with their own dedup marker. GitHub-side only:
- *      whether the cited verdict actually exists on the review tracker is an
- *      agent-audit control (Decision 7), not a check this script can make.
+ *      review issue (`Verdict: THI-<n> @ <ISO-8601 UTC>`), the cited
+ *      timestamp must not postdate the approval, and every citation in the
+ *      body must be parsable (kind `malformed` otherwise — THI-1646 F1: a
+ *      regex-valid but unparsable timestamp must never crash the scan).
+ *      Violations are reported on the same tracking issue with their own
+ *      dedup marker. GitHub-side only: whether the cited verdict actually
+ *      exists on the review tracker is an agent-audit control (Decision 7),
+ *      not a check this script can make.
  *
  * Uses only the workflow's built-in GITHUB_TOKEN — no secrets, no PATs.
  *
@@ -50,13 +53,14 @@ const FALLBACK_WINDOW_H = 24; // used when no prior successful run exists
 const MAX_PAGES = 20;
 const BOT_LOGINS = new Set(["github-actions[bot]"]);
 
-// ADR 0007, Decision 7 (THI-1641): bot approvals submitted after this time must
-// cite the verdict on the review issue; the cited timestamp must not postdate
-// the approval. Earlier approvals are grandfathered. Keep in sync with the
-// effective time written in docs/adr/0007-merge-gate-review-bot.md (Decision 7).
+// ADR 0007, Decision 7 (THI-1641): bot approvals submitted at or after this
+// time must cite the verdict on the review issue; the cited timestamp must
+// not postdate the approval. Earlier approvals are grandfathered. Keep in
+// sync with the effective time written in docs/adr/0007-merge-gate-review-bot.md
+// (Decision 7).
 const VERDICT_CITATION_EFFECTIVE_MS = Date.parse("2026-11-27T00:00:00Z");
 const BOT_REVIEWER_LOGINS = new Set(["thingery-review-bot", "thingery-review-bot[bot]"]);
-const VERDICT_CITATION_RE = /verdict\s*:\s*THI-(\d+)\s*@\s*(\d{4}-\d{2}-\d{2}T[0-9:.]+Z)/i;
+const VERDICT_CITATION_RE = /verdict\s*:\s*THI-(\d+)\s*@\s*(\d{4}-\d{2}-\d{2}T[0-9:.]+Z)/gi;
 
 // ADR 0007, Decision 2 + unchanged strict settings.
 const BASELINE = {
@@ -198,21 +202,36 @@ async function countValidApprovals(pr, mergedMs) {
  * cites the verdict on the review issue and the cited verdict timestamp does
  * not postdate the approval. Returns null when the check does not apply (not a
  * bot review, not APPROVED, submitted before the Decision-7 effective time) or
- * when the citation is present and correctly ordered; otherwise returns a
- * finding descriptor. GitHub-side only: whether the cited verdict actually
- * exists on the review tracker is an agent-audit control, not checkable here. */
+ * when at least one citation is parsable and correctly ordered; otherwise
+ * returns a finding descriptor with kind `missing` (no citation in the body),
+ * `malformed` (citation matches the pattern but its timestamp is unparsable —
+ * reported with the raw captured string; never normalized, never a crash:
+ * THI-1646 F1), or `postdates` (parsable citation newer than the approval).
+ * Every citation in the body is scanned: one bad line does not defeat a
+ * well-formed citation elsewhere. GitHub-side only: whether the cited verdict
+ * actually exists on the review tracker is an agent-audit control, not
+ * checkable here. */
 export function verdictCitationViolation(review) {
   if (!review || review.state !== "APPROVED") return null;
   if (!BOT_REVIEWER_LOGINS.has(review.user?.login ?? "")) return null;
   const submittedMs = Date.parse(review.submitted_at ?? "");
   if (Number.isNaN(submittedMs) || submittedMs < VERDICT_CITATION_EFFECTIVE_MS) return null;
-  const match = (review.body ?? "").match(VERDICT_CITATION_RE);
-  if (!match) return { kind: "missing", submitted: review.submitted_at };
-  const citedMs = Date.parse(match[2]);
-  if (Number.isNaN(citedMs) || citedMs > submittedMs) {
-    return { kind: "postdates", submitted: review.submitted_at, cited: new Date(citedMs).toISOString(), issue: `THI-${match[1]}` };
+  const matches = [...(review.body ?? "").matchAll(VERDICT_CITATION_RE)];
+  if (!matches.length) return { kind: "missing", submitted: review.submitted_at };
+  const malformed = [];
+  const postdating = [];
+  let hasValid = false;
+  for (const m of matches) {
+    const citedMs = Date.parse(m[2]);
+    if (Number.isNaN(citedMs)) malformed.push({ issue: `THI-${m[1]}`, cited: m[2] });
+    else if (citedMs > submittedMs) postdating.push({ issue: `THI-${m[1]}`, cited: new Date(citedMs).toISOString() });
+    else hasValid = true;
   }
-  return null;
+  if (hasValid) return null;
+  if (malformed.length) {
+    return { kind: "malformed", submitted: review.submitted_at, cited: malformed[0].cited, issue: malformed[0].issue };
+  }
+  return { kind: "postdates", submitted: review.submitted_at, cited: postdating[0].cited, issue: postdating[0].issue };
 }
 
 /** The PR list endpoint returns merged_by: null for merged PRs; the single
@@ -362,7 +381,9 @@ function alertBody(window_, prs, violations, details, protection, drift, fp, cit
         .map((f) =>
           f.kind === "missing"
             ? "no `Verdict: THI-<n> @ <UTC>` citation in the approval body"
-            : `cites ${f.issue} @ ${f.cited}, which postdates the approval`,
+            : f.kind === "malformed"
+              ? `cites ${f.issue} @ ${f.cited} — not a parsable timestamp`
+              : `cites ${f.issue} @ ${f.cited}, which postdates the approval`,
         )
         .join("; ");
       out.push(
@@ -379,7 +400,9 @@ function alertBody(window_, prs, violations, details, protection, drift, fp, cit
         "Distinguish a racing duplicate (both records exist, ordering inverted) from a fabricated approval (no verdict " +
         "record anywhere); re-anchor the approval by an explicit investigation record naming both timestamps and the " +
         "verifying agent. Found after merge, the THI-1065 remediation applies: retroactive review of the merged diff and " +
-        "an incident record. The detector reads GitHub only — authenticity of the cited verdict on the review tracker is " +
+        "an incident record. Alerts deduplicate per PR marker (`gate-verdict-citation pr=<n>`): a remediation that " +
+        "changes the violation kind on the same PR will not raise a second alert — re-check a reported PR directly " +
+        "when auditing. The detector reads GitHub only — authenticity of the cited verdict on the review tracker is " +
         "an agent-audit control (Decision 7).",
     );
   }
@@ -506,6 +529,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
     details.sort((a, b) => a.number - b.number);
     violations.sort((a, b) => a - b);
+    citations.sort((a, b) => a.number - b.number);
 
     const protection = await readProtection();
     const drift = driftEntries(protection);

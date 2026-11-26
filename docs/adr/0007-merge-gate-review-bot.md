@@ -120,7 +120,8 @@ merge without waiting for a human).
       and `git rev-list H2 ^H1 ^M` = {`H2`} — no commit enters `H2` except through `H1` or
       `M`;
    4. required CI checks green and the bot approval present at `H2` (re-queued by the
-      THI-836 sweep if the push dismissed it).
+      THI-836 sweep if the push dismissed it; since Decision 7 the re-approval cites the
+      existing verdict — see Decision 7's re-approval rule).
 
    Check 3 deliberately excludes commits reachable from `M`: when `main` advanced via a
    merge commit, the naive `H1..H2` form also lists the commits that merge brought in (they
@@ -163,13 +164,27 @@ merge without waiting for a human).
    review record at all. Root cause: checkout claims do not serialize across runs of the
    same review task.
 
-   *Rule, effective for bot approvals submitted after 2026-11-27T00:00:00Z (earlier
-   approvals grandfathered):*
+   *Rule, effective for bot approvals submitted at or after
+   2026-11-27T00:00:00.000Z — the boundary is inclusive, matching the detector
+   (THI-1646 F3); earlier approvals grandfathered:*
 
    - **Verdict-first ordering.** The reviewer posts the verdict on the review issue first;
      the bot approval is submitted only after, and its review body must cite the verdict —
      the review-issue id and the verdict-comment timestamp in the form
      `Verdict: THI-<n> @ <ISO-8601 UTC>` — alongside the pinned head SHA (THI-957).
+     The cited timestamp must be written in **Z-form UTC**; offset forms
+     (`+01:00`) do not match the detector's citation pattern and are flagged
+     `missing` — fail-closed, but the SOP is Z-form.
+  - **Re-approvals cite the existing verdict (added 2026-11-26, security review
+    THI-1646 F2).** A post-effective mechanical re-approval — the THI-836 heal
+    sweep re-queue after a dismissal, or a Decision 6 check-4 bot re-approval at
+    a proven-pure update-merge head — cites the verdict that already predates
+    it, in the same `Verdict: THI-<n> @ <original verdict UTC>` form (the
+    original verdict comment's timestamp, not the re-approval's). No new verdict
+    comment is required: the patch is unchanged by definition of those paths,
+    and the citation keeps the re-approval inside the evidence chain instead of
+    flagging it `missing`. Any content change still requires full re-review and
+    a fresh verdict.
    - **Validity.** A bot approval on a gated PR is valid only if the review issue carries a
      verdict comment submitted **at or before** the approval's `submitted_at`. An approval
      with no corresponding verdict — none cited, cited verdict postdating the approval, or
@@ -190,9 +205,14 @@ merge without waiting for a human).
      head is the clean audit record (the practice the THI-1634 primary run followed).
    - **Mechanical detection.** The gate-integrity detector (THI-1065 control, below) flags
      merged PRs whose counted bot approval postdates the effective time and either lacks the
-     citation pattern or cites a verdict timestamp later than the approval's own
-     `submitted_at` (dedup marker `gate-verdict-citation pr=<n>`). Limits, stated plainly:
-     the detector reads GitHub only — it cannot see the review tracker, so citation
+     citation pattern, cites a verdict timestamp later than the approval's own
+     `submitted_at`, or carries a citation whose timestamp is regex-valid but unparsable —
+     reported as `malformed`, never a crash (THI-1646 F1); a body passes when any of its
+     citations is parsable and correctly ordered (dedup marker `gate-verdict-citation pr=<n>`).
+     Limits, stated plainly: the detector reads GitHub only; it inspects only each reviewer's
+     latest counted approval, so an approval superseded by a later one is invisible to it
+     (THI-1646 F4 — the validity rule above, backed by agent audit, governs superseded
+     approvals); and it cannot see the review tracker, so citation
      *authenticity* (the cited verdict existing on the cited issue at or before the
      approval) remains an agent-audit control (Security sweep, incident review, any post-hoc
      verification); and GitHub review bodies are editable after submission, so a body read
@@ -244,7 +264,11 @@ merge without waiting for a human).
   never merges. Approval still happens only through the reviewer-role task flow (Decision 3), and
   merging stays with the author. The sweep's equivalence predicate is authorship-agnostic: it
   checks patch byte-identity only, never who executed an update-merge (THI-1375), so it already
-  covers reviewer-executed proven-pure update-merges without modification.
+  covers reviewer-executed proven-pure update-merges without modification. Since Decision 7
+  (2026-11-26, THI-1646 F2), sweep-queued re-approvals cite the verdict that predates them
+  (`Verdict: THI-<n> @ <original verdict UTC>`); an uncited post-effective re-approval would
+  be flagged `missing` by the detector, which is the false-positive stream this annotation
+  prevents.
 - **Update-merge churn (2026-11-24, THI-1375):** strict up-to-date protection plus
   dismiss-on-push means every unrelated `main` advance voids open named reviews even on
   byte-identical patches (twice in one day on PR #375). The Decision-6 carve-out keeps the

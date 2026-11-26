@@ -15,11 +15,19 @@ name: no-private-paths
 #      any main push whose full tree contains one (catches direct pushes and
 #      admin merges that bypass the PR gate). Symlink targets are additionally
 #      scanned for internal-topology leaks (defense in depth).
+#   3. committed merge-conflict markers (THI-1659) — a botched resolution
+#      landed a literal marker on main-bound docs and passed every gate
+#      (THI-1649 A6). Fails any PR that adds a marker line, and any main
+#      push (plus a weekly full-tree pass, same cadence as the weekly
+#      content-marker scan) whose tracked files contain one. Allowlist for
+#      legitimate markers lives in check-tracked-tree.sh (CONFLICT_ALLOWLIST).
 on:
   pull_request:
     branches: [main]
   push:
     branches: [main]
+  schedule:
+    - cron: "47 4 * * 1" # Mondays 04:47 UTC — weekly full-tree pass (THI-1659)
 
 permissions:
   contents: read
@@ -55,15 +63,15 @@ jobs:
           exit $rc
 
   tracked-tree-guard:
-    name: Tracked-tree guard (symlink blobs / node_modules / topology leaks)
+    name: Tracked-tree guard (symlinks / node_modules / topology / conflict markers)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # merge-base diff on PRs; full tree on main pushes
-      - name: Scan PR diff for tracked symlink blobs and node_modules paths
+          fetch-depth: 0 # merge-base diff on PRs; full tree on pushes + weekly pass
+      - name: Scan PR diff for symlinks, node_modules, and added conflict markers
         if: github.event_name == 'pull_request'
         run: bash .github/scripts/check-tracked-tree.sh pr origin/main
-      - name: Full-tree scan for tracked symlink blobs and node_modules paths
-        if: github.event_name == 'push'
+      - name: Full-tree scan for symlinks, node_modules, and conflict markers
+        if: github.event_name != 'pull_request' # push to main + weekly pass
         run: bash .github/scripts/check-tracked-tree.sh tree

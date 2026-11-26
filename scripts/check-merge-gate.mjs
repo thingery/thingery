@@ -18,6 +18,16 @@
  *   4. Reports zero-valid-approval merges and baseline drift on a dedicated
  *      tracking issue ("Merge-gate integrity alerts"), deduplicated per PR
  *      and per drift fingerprint so repeated runs never double-report.
+ *   5. Since ADR 0007 Decision 7 (THI-1641, effective 2026-11-27T00:00:00Z):
+ *      a counted `thingery-review-bot` approval must cite the verdict on the
+ *      review issue (`Verdict: THI-<n> @ <ISO-8601 UTC>`), the cited
+ *      timestamp must not postdate the approval, and every citation in the
+ *      body must be parsable (kind `malformed` otherwise — THI-1646 F1: a
+ *      regex-valid but unparsable timestamp must never crash the scan).
+ *      Violations are reported on the same tracking issue with their own
+ *      dedup marker. GitHub-side only: whether the cited verdict actually
+ *      exists on the review tracker is an agent-audit control (Decision 7),
+ *      not a check this script can make.
  *
  * Uses only the workflow's built-in GITHUB_TOKEN — no secrets, no PATs.
  *
@@ -42,6 +52,15 @@ const OVERLAP_MS = 10 * 60 * 1000; // re-scan margin between consecutive runs
 const FALLBACK_WINDOW_H = 24; // used when no prior successful run exists
 const MAX_PAGES = 20;
 const BOT_LOGINS = new Set(["github-actions[bot]"]);
+
+// ADR 0007, Decision 7 (THI-1641): bot approvals submitted at or after this
+// time must cite the verdict on the review issue; the cited timestamp must
+// not postdate the approval. Earlier approvals are grandfathered. Keep in
+// sync with the effective time written in docs/adr/0007-merge-gate-review-bot.md
+// (Decision 7).
+const VERDICT_CITATION_EFFECTIVE_MS = Date.parse("2026-11-27T00:00:00Z");
+const BOT_REVIEWER_LOGINS = new Set(["thingery-review-bot", "thingery-review-bot[bot]"]);
+const VERDICT_CITATION_RE = /verdict\s*:\s*THI-(\d+)\s*@\s*(\d{4}-\d{2}-\d{2}T[0-9:.]+Z)/gi;
 
 // ADR 0007, Decision 2 + unchanged strict settings.
 const BASELINE = {
@@ -179,6 +198,42 @@ async function countValidApprovals(pr, mergedMs) {
   );
 }
 
+/** ADR 0007, Decision 7 (THI-1641): a counted bot approval is valid only if it
+ * cites the verdict on the review issue and the cited verdict timestamp does
+ * not postdate the approval. Returns null when the check does not apply (not a
+ * bot review, not APPROVED, submitted before the Decision-7 effective time) or
+ * when at least one citation is parsable and correctly ordered; otherwise
+ * returns a finding descriptor with kind `missing` (no citation in the body),
+ * `malformed` (citation matches the pattern but its timestamp is unparsable —
+ * reported with the raw captured string; never normalized, never a crash:
+ * THI-1646 F1), or `postdates` (parsable citation newer than the approval).
+ * Every citation in the body is scanned: one bad line does not defeat a
+ * well-formed citation elsewhere. GitHub-side only: whether the cited verdict
+ * actually exists on the review tracker is an agent-audit control, not
+ * checkable here. */
+export function verdictCitationViolation(review) {
+  if (!review || review.state !== "APPROVED") return null;
+  if (!BOT_REVIEWER_LOGINS.has(review.user?.login ?? "")) return null;
+  const submittedMs = Date.parse(review.submitted_at ?? "");
+  if (Number.isNaN(submittedMs) || submittedMs < VERDICT_CITATION_EFFECTIVE_MS) return null;
+  const matches = [...(review.body ?? "").matchAll(VERDICT_CITATION_RE)];
+  if (!matches.length) return { kind: "missing", submitted: review.submitted_at };
+  const malformed = [];
+  const postdating = [];
+  let hasValid = false;
+  for (const m of matches) {
+    const citedMs = Date.parse(m[2]);
+    if (Number.isNaN(citedMs)) malformed.push({ issue: `THI-${m[1]}`, cited: m[2] });
+    else if (citedMs > submittedMs) postdating.push({ issue: `THI-${m[1]}`, cited: new Date(citedMs).toISOString() });
+    else hasValid = true;
+  }
+  if (hasValid) return null;
+  if (malformed.length) {
+    return { kind: "malformed", submitted: review.submitted_at, cited: malformed[0].cited, issue: malformed[0].issue };
+  }
+  return { kind: "postdates", submitted: review.submitted_at, cited: postdating[0].cited, issue: postdating[0].issue };
+}
+
 /** The PR list endpoint returns merged_by: null for merged PRs; the single
  * PR fetch has it. Called only for flagged PRs so windows stay cheap. */
 async function enrichMergedBy(number, details) {
@@ -230,7 +285,7 @@ const fingerprint = (drift) =>
 
 // ---------------------------------------------------------------- reporting
 
-function printReport(window_, prs, violations, details, protection, drift, args) {
+function printReport(window_, prs, violations, details, protection, drift, args, citations) {
   const lines = [];
   lines.push(`gate-integrity: window ${window_.from} → ${window_.to} (${window_.source})`);
   lines.push(`gate-integrity: scanned ${prs.length} merged PRs on ${BASE_BRANCH}`);
@@ -246,6 +301,11 @@ function printReport(window_, prs, violations, details, protection, drift, args)
     violations.length
       ? `gate-integrity: FLAGGED ${violations.length} merge(s) with zero valid approvals: ${violations.map((n) => `#${n}`).join(", ")}`
       : "gate-integrity: no zero-valid-approval merges",
+  );
+  lines.push(
+    citations.length
+      ? `gate-integrity: FLAGGED ${citations.length} bot approval(s) without valid verdict citation (ADR 0007 Decision 7): ${citations.map((c) => `#${c.number}`).join(", ")}`
+      : "gate-integrity: no verdict-citation violations",
   );
   if (protection.state === "read") {
     lines.push(drift.length ? `gate-integrity: branch protection DRIFTED from ADR 0007 baseline` : "gate-integrity: branch protection matches ADR 0007 baseline");
@@ -266,7 +326,7 @@ function printReport(window_, prs, violations, details, protection, drift, args)
   }
 }
 
-function alertBody(window_, prs, violations, details, protection, drift, fp) {
+function alertBody(window_, prs, violations, details, protection, drift, fp, citations) {
   const runLink =
     process.env.GITHUB_SERVER_URL && process.env.GITHUB_RUN_ID
       ? `${process.env.GITHUB_SERVER_URL}/${REPO}/actions/runs/${process.env.GITHUB_RUN_ID}`
@@ -309,6 +369,43 @@ function alertBody(window_, prs, violations, details, protection, drift, fp) {
         " incident record of the flip window (who, why, exact times, PRs merged under it).",
     );
   }
+  if (citations.length) {
+    out.push("");
+    out.push("### Bot approvals without a valid verdict citation (ADR 0007, Decision 7)");
+    out.push("");
+    out.push("| PR | Approval submitted (UTC) | Cited verdict | Problem |",
+    );
+    out.push("|---|---|---|---|");
+    for (const c of citations) {
+      const problem = c.findings
+        .map((f) =>
+          f.kind === "missing"
+            ? "no `Verdict: THI-<n> @ <UTC>` citation in the approval body"
+            : f.kind === "malformed"
+              ? `cites ${f.issue} @ ${f.cited} — not a parsable timestamp`
+              : `cites ${f.issue} @ ${f.cited}, which postdates the approval`,
+        )
+        .join("; ");
+      out.push(
+        `| #${c.number} | ${c.findings.map((f) => f.submitted).join(", ")} | ${c.findings.map((f) => f.cited ?? "—").join(", ")} | ${problem} |`,
+      );
+      out.push(`<!-- gate-verdict-citation pr=${c.number} -->`);
+    }
+    out.push("");
+    out.push(
+      "A **valid bot approval** (ADR 0007, Decision 7) cites the verdict on its review issue — " +
+        "`Verdict: THI-<n> @ <ISO-8601 UTC>` — with the cited timestamp at or before the approval's `submitted_at`. " +
+        "These violations are the signature of a racing duplicate review run (approving before any verdict existed) or, " +
+        "worse, an approval with no review behind it. **Treat the approval as suspect: investigate, never auto-trusted.** " +
+        "Distinguish a racing duplicate (both records exist, ordering inverted) from a fabricated approval (no verdict " +
+        "record anywhere); re-anchor the approval by an explicit investigation record naming both timestamps and the " +
+        "verifying agent. Found after merge, the THI-1065 remediation applies: retroactive review of the merged diff and " +
+        "an incident record. Alerts deduplicate per PR marker (`gate-verdict-citation pr=<n>`): a remediation that " +
+        "changes the violation kind on the same PR will not raise a second alert — re-check a reported PR directly " +
+        "when auditing. The detector reads GitHub only — authenticity of the cited verdict on the review tracker is " +
+        "an agent-audit control (Decision 7).",
+    );
+  }
   if (drift.length) {
     out.push("");
     out.push("### Branch protection drift on `main` vs ADR 0007 baseline");
@@ -343,27 +440,30 @@ async function reportedMarkers(issue) {
   const comments = await paged(`/repos/${REPO}/issues/${issue.number}/comments`, (j) => j);
   const prs = new Set();
   const fingerprints = new Set();
+  const citations = new Set();
   for (const text of [issue.body ?? "", ...comments.map((c) => c.body ?? "")]) {
     for (const m of text.matchAll(/gate-violation pr=(\d+)/g)) prs.add(Number(m[1]));
     for (const m of text.matchAll(/gate-config-drift fingerprint=([0-9a-f]+)/g)) fingerprints.add(m[1]);
+    for (const m of text.matchAll(/gate-verdict-citation pr=(\d+)/g)) citations.add(Number(m[1]));
   }
-  return { prs, fingerprints };
+  return { prs, fingerprints, citations };
 }
 
-async function deliver(window_, prs, violations, details, protection, drift, fp, dryRun) {
+async function deliver(window_, prs, violations, details, protection, drift, fp, citations, dryRun) {
   if (dryRun) {
     console.log("gate-integrity: dry run — no issue writes");
     return { reported: false };
   }
   const issue = await findTrackingIssue();
-  const markers = issue ? await reportedMarkers(issue) : { prs: new Set(), fingerprints: new Set() };
+  const markers = issue ? await reportedMarkers(issue) : { prs: new Set(), fingerprints: new Set(), citations: new Set() };
   const newViolations = violations.filter((n) => !markers.prs.has(n));
+  const newCitations = citations.filter((c) => !markers.citations.has(c.number));
   const newDrift = drift.length && !markers.fingerprints.has(fp) ? drift : [];
-  if (!newViolations.length && !newDrift.length) {
+  if (!newViolations.length && !newDrift.length && !newCitations.length) {
     console.log(issue ? `gate-integrity: findings already reported on #${issue.number} — nothing to do` : "gate-integrity: nothing to report");
     return { reported: false };
   }
-  const body = alertBody(window_, prs, newViolations, details, protection, newDrift, fp);
+  const body = alertBody(window_, prs, newViolations, details, protection, newDrift, fp, newCitations);
   if (!issue) {
     const res = await fetch(`${API}/repos/${REPO}/issues`, {
       method: "POST",
@@ -406,10 +506,13 @@ export async function main(argv = process.argv.slice(2)) {
 
     const prs = await listMergedPRs(fromMs, toMs);
     const violations = [];
+    const citations = [];
     const details = [];
     for (const pr of prs) {
       const mergedMs = Date.parse(pr.merged_at);
       const valid = await countValidApprovals(pr, mergedMs);
+      const citeFindings = valid.map((r) => verdictCitationViolation(r)).filter(Boolean);
+      if (citeFindings.length) citations.push({ number: pr.number, findings: citeFindings });
       details.push({
         number: pr.number,
         merged_at: pr.merged_at,
@@ -426,16 +529,17 @@ export async function main(argv = process.argv.slice(2)) {
     }
     details.sort((a, b) => a.number - b.number);
     violations.sort((a, b) => a - b);
+    citations.sort((a, b) => a.number - b.number);
 
     const protection = await readProtection();
     const drift = driftEntries(protection);
     const fp = drift.length ? fingerprint(drift) : "";
 
-    printReport(window_, prs, violations, details, protection, drift, args);
+    printReport(window_, prs, violations, details, protection, drift, args, citations);
 
-    await deliver(window_, prs, violations, details, protection, drift, fp, args.dryRun);
+    await deliver(window_, prs, violations, details, protection, drift, fp, citations, args.dryRun);
 
-    if (args.failOnFindings && (violations.length || drift.length || protection.state !== "read")) return 1;
+    if (args.failOnFindings && (violations.length || drift.length || citations.length || protection.state !== "read")) return 1;
     return 0;
   } catch (err) {
     console.error(`gate-integrity: operational error: ${err.message}`);

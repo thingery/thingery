@@ -10,11 +10,20 @@ from the original scope, and adds an order positive and an order negative
 because OpenAI's review exercises a purchase flow on commerce apps.
 
 Tool baseline: the full-profile MCP server at `https://thingery.dev/mcp`
-registers **45 tools** — 35 OAuth-protected (`src/tools.ts` `PROTECTED_TOOLS`)
-plus 10 public/session reads — and grows with the product; the 5 positive and
-3 negative cases below reference only 6 of them (`describe_category`,
-`search_items`, `get_item`, `create_listing`, `my_listings`, `create_order`),
-all re-verified to exist on main (2026-11-24, THI-1191).
+shows a connector **43 tools** — 36 OAuth-protected (`src/tools.ts`
+`PROTECTED_TOOLS`) plus 7 public reads. (The server registers 46 tools in
+total; the extra 3 are session-only account-settings tools, never listed for
+OAuth/API credentials.) The surface grows with the product; the 5 positive and
+3 negative cases below reference only 6 of the 43 (`describe_category`,
+`search_items`, `get_item`, `create_listing`, `my_listings`, `create_order`).
+
+Re-verified 2026-11-26 (THI-1581): all 6 exist on main; the 4 verifiable
+without accounts were run live against prod (`search_items` public read with
+count/has_more/results, `get_item` full object with
+`content_provenance: "user_generated"` + note, unknown-id `not_found` error,
+expired-token 401 + `Bearer error="invalid_token"` challenge); the 4
+account-dependent cases are grounded in code (self-order guard, payment-url
+order flow, owner-scoped listings) and pinned by repo tests.
 
 ## Reviewer account setup (entered in the portal, never in the ZIP)
 

@@ -80,6 +80,15 @@ export interface OrderFlowConfig {
   // working; connect-shaped deliveries then 400 exactly as before).
   stripeConnectWebhookSecret: string | undefined;
   stripeConnectWebhookSecretPrevious: string | undefined; // rotation twin (F13)
+  // THI-1681: Accounts v2 events (capability_status_updated — the payout-ready
+  // flip for v2 recipient accounts) do NOT arrive on the v1 webhook endpoints
+  // at all; Stripe delivers them only through an event destination
+  // (Workbench or /v2/core/event_destinations) with its OWN signing secret.
+  // Unset ⇒ the v2 endpoint mounts as a 503 stub and sellers.stripe_onboarded_at
+  // is driven by the v1 account.updated path only (legacy sellers). Self-hosters
+  // on v1 accounts keep working without it.
+  stripeEventDestinationSecret: string | undefined;
+  stripeEventDestinationSecretPrevious: string | undefined; // rotation twin (F13)
   // Shipping provider (THI-1246): exactly ONE carrier provider per
   // deployment — id/scoped rate + tracker ids make runtime mixing a non-issue
   // by construction. easypostEnabled's old role ("a provider is configured")
@@ -146,6 +155,8 @@ export function orderFlowConfig(): OrderFlowConfig {
   const stripeWebhookSecretPrevious = envValue("STRIPE_WEBHOOK_SECRET_PREVIOUS");
   const stripeConnectWebhookSecret = envValue("STRIPE_CONNECT_WEBHOOK_SECRET");
   const stripeConnectWebhookSecretPrevious = envValue("STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS");
+  const stripeEventDestinationSecret = envValue("STRIPE_EVENT_DESTINATION_SECRET");
+  const stripeEventDestinationSecretPrevious = envValue("STRIPE_EVENT_DESTINATION_SECRET_PREVIOUS");
 
   // --- Shipping provider selection (THI-1246) ----------------------------
   // Exactly one provider per deployment. Case-insensitive id; unset → the
@@ -209,6 +220,9 @@ export function orderFlowConfig(): OrderFlowConfig {
     // never gets a previous-secret bypass.
     stripeConnectWebhookSecretPrevious:
       stripeConnectWebhookSecret !== undefined ? stripeConnectWebhookSecretPrevious : undefined,
+    stripeEventDestinationSecret,
+    stripeEventDestinationSecretPrevious:
+      stripeEventDestinationSecret !== undefined ? stripeEventDestinationSecretPrevious : undefined,
     shippingProvider,
     shippingEnabled: shippingSelectionValid && shippingApiKey !== undefined,
     carrierWebhookReady: shippingSelectionValid && carrierWebhookSecret !== undefined,
@@ -365,6 +379,14 @@ export function logConfigBootReport(cfg: OrderFlowConfig = orderFlowConfig()): O
         "(account.updated: seller onboarding → payout-ready) will fail signature " +
         "verification. Register the 'Connected accounts'-scoped webhook endpoint " +
         "and set its secret (docs/deploy-vps.md §5.3).",
+    );
+  }
+  if (cfg.stripePaymentsEnabled && !cfg.stripeEventDestinationSecret) {
+    console.error(
+      "[config] STRIPE_EVENT_DESTINATION_SECRET is unset — Accounts v2 capability events " +
+        "(v2 seller onboarding → payout-ready, THI-1681) are not accepted; create an event " +
+        "destination and set its secret (docs/deploy-vps.md §5.3). Legacy v1 sellers " +
+        "are unaffected.",
     );
   }
   if (cfg.shippingEnabled && !cfg.carrierWebhookReady) {

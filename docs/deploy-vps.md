@@ -741,7 +741,7 @@ feature = revert the PR; PR-A/B modules are inert without the routes wiring.
 The order flow (ADR 0003) ships with a **kill switch**: with `STRIPE_SECRET_KEY`
 empty/unset the app answers `payments_not_configured`, listings stay buyable as
 off-platform orders, and the Stripe webhook endpoint mounts as a 503 stub.
-`docker-compose.prod.yml` passes the five `STRIPE_*` vars through from the VPS
+`docker-compose.prod.yml` passes the seven `STRIPE_*` vars through from the VPS
 `.env` (merged 2026-10-27, PR #142); before that the container never saw them.
 Mode (test vs live) is derived **only** from the key prefix (`sk_test_` / `sk_live_`)
 and is logged at boot:
@@ -762,12 +762,19 @@ profile, bank details, platform + Connect terms accepted in the Stripe dashboard
 1. Account owner (or operator acting on owner-provided values) appends to
    `/opt/thingery/.env` — `STRIPE_SECRET_KEY=sk_live_…`,
    `STRIPE_WEBHOOK_SECRET=whsec_…` (the signing secret of the **live-mode**
-   platform webhook endpoint from step 2a below) and
+   platform webhook endpoint from step 2a below),
    `STRIPE_CONNECT_WEBHOOK_SECRET=whsec_…` (the signing secret of the
    **live-mode** 'Connected accounts'-scoped endpoint from step 2b below — a
-   second endpoint with its own secret; THI-1611 A1). Leave
-   `STRIPE_WEBHOOK_SECRET_PREVIOUS` / `STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS`
-   unset unless rotating.
+   second endpoint with its own secret; THI-1611 A1) and
+   `STRIPE_EVENT_DESTINATION_SECRET=whsec_…` (the signing secret of the
+   **live-mode** Accounts v2 **event destination** from step 2c below —
+   THI-1681). Leave every `_PREVIOUS` twin unset unless rotating.
+   **Key format (THI-1681):** Accounts v2 API calls (recipient account
+   creation, v2 account links, event-destination delivery verification)
+   require the **new-format secret key — 107 characters**, `sk_live_…`/
+   `sk_test_…` followed by a long suffix. Legacy 40-character keys are
+   rejected by v2 endpoints with `401 invalid_v2_key`; if the dashboard only
+   offers the old format, reveal/create a new key and use that.
 2. In the Stripe dashboard (live mode) register TWO webhook endpoints, both
    pointing at `https://thingery.dev/api/webhooks/stripe`:
    - **2a — platform endpoint** ("Account"-scoped, the dashboard default),
@@ -783,6 +790,20 @@ profile, bank details, platform + Connect terms accepted in the Stripe dashboard
      receives them, so seller-onboarding detection (`account.updated`) and
      stuck-seller-payout alerts (`payout.failed`) depend on this second
      endpoint existing (THI-1611 A1; payout.failed handling THI-1624 A6).
+   - **2c — Accounts v2 event destination** (THI-1681): v2 capability
+     notifications
+     (`v2.core.account[configuration.recipient].capability_status_updated`)
+     NEVER arrive on the v1 webhook endpoints above — Stripe delivers them
+     only through an **event destination**. Create it in the dashboard
+     (Workbench → Event destinations) or via
+     `stripe v2 core event_destinations create` with `type: "webhook"`,
+     URL `https://thingery.dev/api/webhooks/stripe-v2`, subscribed to the
+     recipient capability event, then copy its **signing secret** (a
+     separate `whsec_…` value) into `STRIPE_EVENT_DESTINATION_SECRET`.
+     This is the payout-ready path for v2 recipient accounts: without it,
+     a v2 seller who finishes onboarding never gets
+     `sellers.stripe_onboarded_at` set. (Accounts v1 sellers keep flipping
+     via 2b; both paths share one flip routine — an account is badged once.)
    Event-list notes (A6, THI-1624):
    - `transfer.paid` is deliberately NOT in either list: verified against
      Stripe's own OpenAPI spec at the pinned API version
@@ -798,10 +819,14 @@ profile, bank details, platform + Connect terms accepted in the Stripe dashboard
    - `payout.failed` (stuck seller payout → durable operator alert) is a
      **connected-account** event: it only ever arrives on 2b. An unhandled
      `payout.failed` is invisible money; keep it in the Connect list.
-   The app verifies each delivery against the configured secrets in a fixed
+   The app verifies each v1 delivery against the configured secrets in a fixed
    order — `STRIPE_WEBHOOK_SECRET`, then `STRIPE_CONNECT_WEBHOOK_SECRET`,
    then the two `_PREVIOUS` rotation twins — timing-safe per attempt, `400`
-   when all fail, and nothing is ever written on a bad signature.
+   when all fail, and nothing is ever written on a bad signature. The v2
+   endpoint verifies the same way against
+   `STRIPE_EVENT_DESTINATION_SECRET` (+ `_PREVIOUS`) using the SDK's v2
+   `parseEventNotification`; unset destination secret ⇒ the v2 endpoint
+   mounts as a fail-closed 503 stub.
 3. Recreate the app container (env changes need recreation, not rebuild):
    `cd /opt/thingery && docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d`
 4. Verify: boot log shows `(live mode)`; `curl -s https://thingery.dev/healthz`
@@ -821,11 +846,13 @@ test-mode rehearsal before deploy.
 **Seller onboarding.** Sellers complete Stripe Connect onboarding via the app's
 payout-setup flow once the platform account is live-enabled; `account.updated`
 deliveries on the **Connected accounts endpoint** (step 2b) flip
-`sellers.stripe_onboarded_at` when the `transfers` capability is active — without
-that endpoint registered, a seller who finishes onboarding never becomes
-payout-ready. Confirm one seller onboarding (flag flips in `sellers`) before
-declaring live mode operational; the test-mode rehearsal step with its evidence
-checklist is `stripe-live-rehearsal.md` in thingery/platform (THI-571).
+`sellers.stripe_onboarded_at` for v1 accounts, and recipient-capability
+notifications on the **v2 event destination** (step 2c) flip it for Accounts v2
+recipient accounts (THI-1681) when `stripe_balance.stripe_transfers` is active —
+without the respective registration, a seller who finishes onboarding never
+becomes payout-ready. Confirm one seller onboarding (flag flips in `sellers`)
+before declaring live mode operational; the test-mode rehearsal step with its
+evidence checklist is `stripe-live-rehearsal.md` in thingery/platform (THI-571).
 
 **Payout verification (seller-borne fees).** Sellers bear the Stripe processing
 fee (ADR 0003 amendment): the seller transfer is **gross − fee**

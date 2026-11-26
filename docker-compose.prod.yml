@@ -173,6 +173,10 @@ services:
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}
+      # Admin dispute surface (JSON endpoint + /admin UI). Fail-closed at boot:
+      # unset or shorter than 32 chars ⇒ both admin surfaces 404 (routes.ts,
+      # config.ts adminRouteEnabled/adminUiEnabled).
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
       # OAuth kill switch (spec THI-11 §4.4): "1"/"true" mounts no /oauth route at
       # all (404) and thgo_ tokens 401. Empty → OAuth enabled. Restart to toggle.
       OAUTH_DISABLED: ${OAUTH_DISABLED:-}

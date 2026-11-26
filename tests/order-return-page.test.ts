@@ -6,13 +6,13 @@
 // - /order/payout-setup is a distinct page not captured by the :id route.
 // Requires Postgres; skips otherwise.
 
-import { beforeAll, afterAll, describe, expect, it } from "vitest";
+import { beforeAll, afterAll, beforeEach, describe, expect, it } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
 import type Stripe from "stripe";
 import net from "node:net";
 import pg from "pg";
-import { orderReturnPage, payoutSetupReturnPage } from "../src/web-pages.js";
+import { orderPageLimiter, orderPageRateLimit, orderReturnPage, payoutSetupReturnPage } from "../src/web-pages.js";
 import { getPayableCheckoutUrl } from "../src/order-flow.js";
 import { setStripeForTests } from "../src/stripe.js";
 import { pool } from "../src/db.js";
@@ -66,10 +66,11 @@ describe.skipIf(!available)("/order payment-return pages (F15)", () => {
   let orderId: string;
 
   beforeAll(async () => {
-    // Route order mirrors src/index.ts: literal payout-setup before :id.
+    // Route order mirrors src/index.ts: literal payout-setup before :id,
+    // per-IP limiter in front of the :id handler (THI-1616).
     const app = express();
     app.get("/order/payout-setup", payoutSetupReturnPage);
-    app.get("/order/:id", orderReturnPage);
+    app.get("/order/:id", orderPageRateLimit, orderReturnPage);
     server = app.listen(0);
     const address = server.address();
     if (typeof address === "object" && address) baseUrl = `http://127.0.0.1:${address.port}`;
@@ -108,6 +109,12 @@ describe.skipIf(!available)("/order payment-return pages (F15)", () => {
     server.close();
     await client.end().catch(() => {});
     await pool.end().catch(() => {});
+  });
+
+  // THI-1616: the order-page bucket is in-process and shared across tests —
+  // reset it so each test starts with a fresh 30-request allowance.
+  beforeEach(() => {
+    orderPageLimiter.reset();
   });
 
   it("renders status only for a valid order — never title, price, or parties", async () => {
@@ -265,6 +272,73 @@ describe.skipIf(!available)("/order payment-return pages (F15)", () => {
       expect(fake.state.retrieveCalls).toBe(0);
     } finally {
       setStripeForTests(null);
+    }
+  });
+
+  // --- THI-1616 rate limit (spec docs/specs/order-page-rate-limit.md) -----
+  // F1 from the THI-1610 review of PR #400: without a limiter, a UUID holder
+  // can loop GET /order/:id and burn the account-level Stripe read bucket
+  // (OWASP API #4). Regression bar: this test fails against pre-change code
+  // (no limiter → every request reaches the handler and the retrieve).
+
+  it("rate-limits /order/:id per IP: capped Stripe retrieves, 429 beyond the bucket", async () => {
+    await client.query("UPDATE orders SET checkout_session_id = $1 WHERE id = $2", ["cs_thi1616", orderId]);
+    const fake = fakeStripeWithSession({ url: "https://pay.stripe.com/session/thi1616" });
+    setStripeForTests(fake.client);
+    try {
+      const statuses: number[] = [];
+      for (let i = 0; i < 35; i += 1) {
+        const res = await fetch(`${baseUrl}/order/${orderId}`);
+        statuses.push(res.status);
+        await res.text(); // drain the body so the connection is reusable
+      }
+      // First orderPageLimiter.max requests pass through; the rest 429.
+      const allowed = statuses.filter((s) => s === 200).length;
+      const limited = statuses.filter((s) => s === 429).length;
+      expect(allowed).toBe(30);
+      expect(limited).toBe(5);
+      // The amplification is capped: exactly the allowed requests reach the
+      // retrieve (pre-change this would be 35).
+      expect(fake.state.retrieveCalls).toBe(30);
+    } finally {
+      setStripeForTests(null);
+      await client.query("UPDATE orders SET checkout_session_id = NULL WHERE id = $1", [orderId]);
+    }
+  });
+
+  it("429 body is uniform and id-independent — no oracle, no data, F15 headers kept", async () => {
+    await client.query("UPDATE orders SET checkout_session_id = $1 WHERE id = $2", ["cs_thi1616b", orderId]);
+    setStripeForTests(fakeStripeWithSession({ url: "https://pay.stripe.com/session/thi1616b" }).client);
+    try {
+      // Exhaust the bucket with a valid pending order, then compare the
+      // limit path for the KNOWN id vs an unknown id — byte-identical.
+      for (let i = 0; i < 30; i += 1) {
+        await (await fetch(`${baseUrl}/order/${orderId}`)).text();
+      }
+      const known = await fetch(`${baseUrl}/order/${orderId}`);
+      const unknown = await fetch(`${baseUrl}/order/00000000-0000-4000-8000-000000000000`);
+      expect(known.status).toBe(429);
+      expect(unknown.status).toBe(429);
+      // F15 properties hold on the limit path too.
+      for (const res of [known, unknown]) {
+        expect(res.headers.get("cache-control")).toBe("no-store");
+        expect(res.headers.get("referrer-policy")).toBe("same-origin");
+        expect(res.headers.get("retry-after")).toBe("60");
+      }
+      const knownBody = await known.text();
+      const unknownBody = await unknown.text();
+      expect(knownBody).toBe(unknownBody); // no known/unknown fork on 429
+      expect(knownBody).toContain("Too many requests");
+      // Neither the status label (would confirm the order exists) nor the
+      // not-found line (would deny it) — and never any order data.
+      expect(knownBody).not.toContain("Awaiting payment");
+      expect(knownBody).not.toContain("Order not found");
+      expect(knownBody).not.toContain("Pay for this order");
+      expect(knownBody).not.toContain("Secret Title");
+      expect(knownBody).not.toContain("stripe.com");
+    } finally {
+      setStripeForTests(null);
+      await client.query("UPDATE orders SET checkout_session_id = NULL WHERE id = $1", [orderId]);
     }
   });
 });

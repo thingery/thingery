@@ -29,6 +29,7 @@ import { statsHandler } from "./stats.js";
 import { homeSearchHandler } from "./home-search.js";
 import {
   itemPage,
+  orderPageRateLimit,
   orderReturnPage,
   payoutSetupReturnPage,
   rootRedirect,
@@ -179,7 +180,9 @@ function runHttp(): void {
   // Order return pages (spec THI-3 §4.3 F15). The literal payout-setup route
   // must be registered before the :id pattern to not be captured as an id.
   app.get("/order/payout-setup", asyncHandler(payoutSetupReturnPage));
-  app.get("/order/:id", asyncHandler(orderReturnPage));
+  // THI-1616: per-IP limiter in front of the page (spec docs/specs/order-page-rate-limit.md)
+  // — caps the DB read + Stripe retrieve each pending-stripe hit costs.
+  app.get("/order/:id", orderPageRateLimit, asyncHandler(orderReturnPage));
 
   // Uploaded item images (files under UPLOADS_DIR, served at /img/...)
   app.use("/img", express.static(uploadsDir(), { maxAge: "30d", immutable: true }));

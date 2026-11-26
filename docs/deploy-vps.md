@@ -737,7 +737,6 @@ profile, bank details, platform + Connect terms accepted in the Stripe dashboard
 1. Account owner (or operator acting on owner-provided values) appends to
    `/opt/thingery/.env` — `STRIPE_SECRET_KEY=sk_live_…`,
    `STRIPE_WEBHOOK_SECRET=whsec_…` (the signing secret of the **live-mode**
-<<<<<<< HEAD
    platform webhook endpoint from step 2a below) and
    `STRIPE_CONNECT_WEBHOOK_SECRET=whsec_…` (the signing secret of the
    **live-mode** 'Connected accounts'-scoped endpoint from step 2b below — a

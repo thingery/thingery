@@ -14,7 +14,7 @@ import StripeCtor from "stripe";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { setStripeForTests } from "../src/stripe.js";
 import { pool } from "../src/db.js";
-import { stripeWebhookRouter, stripeV2WebhookRouter } from "../src/webhooks-stripe.js";
+import { processStripeEvent, stripeWebhookRouter, stripeV2WebhookRouter, WebhookRejectError } from "../src/webhooks-stripe.js";
 import { createOrder } from "../src/order-flow.js";
 import { applyTransition, type OrderRow } from "../src/orders.js";
 import type { OrderFlowConfig } from "../src/config.js";
@@ -669,6 +669,29 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     const we = await db.query("SELECT payload->>'id' AS id, process_error FROM webhook_events WHERE external_id = $1", [ev.id]);
     expect(we.rows[0].id).toBe(ev.id);
     expect(we.rows[0].process_error).toContain("livemode");
+  });
+
+  it("processStripeEvent livemode gate (THI-1694 R2): mismatched-mode event rejected, order untouched", async () => {
+    // Direct-call contract for the sweep rule-6 path: rule 6 re-fetches stored
+    // events and calls processStripeEvent without the ingest gate, so the
+    // function itself must refuse a mode-mismatched event (F5/§6.7).
+    const order = await seedOrder();
+    const ev = event("checkout.session.completed", {
+      id: order.checkout_session_id, object: "checkout_session", payment_status: "paid",
+      payment_intent: `pi_gate_${n}`, amount_total: 10500, currency: "eur",
+    });
+    const live = { ...ev, livemode: true } as Stripe.Event; // configured mode is "test"
+    const cfg = { stripePaymentsEnabled: true, stripeMode: "test" } as unknown as OrderFlowConfig;
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await expect(processStripeEvent(live, client, cfg)).rejects.toBeInstanceOf(WebhookRejectError);
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+    const o = await db.query("SELECT status FROM orders WHERE id = $1", [order.id]);
+    expect(o.rows[0].status).toBe("pending"); // no state change
   });
 
   it("redaction at ingest (F6): no customer_details or free text is stored", async () => {

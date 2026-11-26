@@ -158,11 +158,12 @@ webhook payloads carry `"test": true`.
 
 ### Label purchase + rates
 
-`POST /shipments` (addresses + parcel) returns the shipment with quoted rates; each rate has
+`POST /shipments` (addresses + `parcels` list) returns the shipment with quoted rates; each rate has
 `object_id`, `servicelevel {token, name}`, `amount` (decimal string), `currency`,
 `amount_local`. `POST /transactions {rate}` buys the label → `label_url` (https, **signed and
 expiring** — stored as data at purchase, same discipline as today), `tracking_number`,
-`tracking_status`, `tracking_url_provider`. Shipments/rates are retrievable up to 390 days.
+`tracking_status`, `tracking_url_provider`. The transaction's `rate` is the rate id only, so
+carrier, service and cost are read with `GET /rates/{id}` before the purchase. Shipments/rates are retrievable up to 390 days.
 Auth: `Authorization: ShippoToken <key>`.
 
 ### Normalized status mapping (Shippo → existing `NormalizedStatus`)
@@ -250,7 +251,7 @@ carrier substring preference) is provider-independent and becomes a shared pure 
   - `createShipment` → `POST /shipments`; maps rates (`object_id`, `servicelevel.name`,
     `amount` → cents, `currency`). Reuses the metric→parcel conversion already in
     `src/easypost.ts` (shared helper).
-  - `buyLabel` → `POST /transactions {rate}`; https-only label_url check; tracker id
+  - `buyLabel` → `GET /rates/{id}`, then `POST /transactions {rate}`; https-only label_url check; tracker id
     **synthesized deterministically**: `shippo:` + first 32 hex chars of
     `sha256(carrier + "|" + tracking_number)` — identical at registration and at webhook
     ingest, so `orders.tracker_id` resolution (F4) keeps working without EasyPost-style

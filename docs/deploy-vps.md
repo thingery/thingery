@@ -458,7 +458,17 @@ SSH session — the deploy steps execute server-side via the forced-command wrap
 migrations are additive, so the running containers ignore them while the new code may
 require the new columns; applying first avoids a window where authenticated traffic hits
 `column ... does not exist` errors. It also exports `GIT_COMMIT`/`BUILD_TIME` before
-building, so `/healthz` reports the deployed commit. Manual equivalent (run as the
+building, so `/healthz` reports the deployed commit.
+
+One-time upgrade note (THI-1706): since the compose network went IPv6-enabled
+(see the `networks:` block in `docker-compose.prod.yml`), the first
+`docker compose up -d` after pulling this change recreates the network and
+restarts every service on it — expect roughly a minute of downtime, same blast
+radius as a normal deploy. This is what makes inbound IPv6 connections DNAT
+directly to Caddy with the real client source IP preserved; on a v4-only
+network every IPv6 visitor shares one rate-limit bucket behind the bridge
+gateway address. Self-hosters upgrading see this restart exactly once; volumes
+are untouched. Manual equivalent (run as the
 `deploy` user — it owns `/opt/thingery` — e.g. `sudo -u deploy bash -c '…'` over the
 operator SSH session):
 

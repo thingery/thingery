@@ -10,6 +10,20 @@ may change without a major version bump.
 
 ## [Unreleased]
 
+### Fixed
+
+- **IPv6 clients no longer share one rate-limit bucket (THI-1706).** The
+  production/self-host compose network is now IPv6-enabled. Previously every
+  inbound IPv6 connection was bridged through Docker's userland proxy, which
+  erased the client IP — all IPv6 visitors appeared as one address
+  (the bridge gateway), so the 10-attempts/hour auth limiter (and every other
+  IP-keyed limiter) bucketed them together and 429'd the whole IPv6 internet
+  after ten signups/logins per hour. With `enable_ipv6` + a ULA subnet on the
+  compose network, Docker 27+ DNATs inbound v6 straight to the container and
+  preserves the real client source IP. Ops-only: no app behavior change apart
+  from correct per-IP limiting; first `up -d` after upgrading restarts all
+  services once (network recreation — see `docs/deploy-vps.md` §5).
+
 ### Changed
 
 - **Order email text fixes (THI-1585).** Order emails no longer show raw

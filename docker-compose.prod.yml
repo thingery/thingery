@@ -114,10 +114,14 @@ services:
       # .env, never in this repo. RESEND_WEBHOOK_SECRET unset →
       # /api/webhooks/resend stays a fail-closed 503 stub
       # (src/webhooks-resend.ts); set it to the exact secret configured
-      # on the Resend dashboard webhook endpoint. OPERATOR_ALERT_EMAIL
-      # unset ⇒ dead-letter/sweep anomaly alerts stay log-only
-      # (src/notify/operator.ts plans nothing without an address).
+      # on the Resend dashboard webhook endpoint. RESEND_WEBHOOK_SECRET_PREVIOUS
+      # (optional, THI-1537) accepts the prior secret during a rotation
+      # window — zero-downtime rotation, same pattern as
+      # STRIPE_WEBHOOK_SECRET_PREVIOUS; unset ⇒ single-secret behavior.
+      # OPERATOR_ALERT_EMAIL unset ⇒ dead-letter/sweep anomaly alerts stay
+      # log-only (src/notify/operator.ts plans nothing without an address).
       RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
+      RESEND_WEBHOOK_SECRET_PREVIOUS: ${RESEND_WEBHOOK_SECRET_PREVIOUS:-}
       OPERATOR_ALERT_EMAIL: ${OPERATOR_ALERT_EMAIL:-}
       # Item-report alias email (THI-1451, THI-1479 plan Phase C).
       # Passthrough only: value lives in the VPS .env, never in this repo.

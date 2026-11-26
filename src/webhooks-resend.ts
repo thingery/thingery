@@ -10,6 +10,8 @@
 //   2. Verify the HMAC-SHA256 signature with crypto.timingSafeEqual on the
 //      digests (never === on strings); reject stale timestamps (> 5 min) so
 //      a captured payload cannot be replayed forever.
+//      THI-1537: during a rotation window RESEND_WEBHOOK_SECRET_PREVIOUS is
+//      accepted as a fallback (zero-downtime rotation, F13 pattern).
 //   3. JSON is parsed only AFTER verification (§5.3 discipline).
 //   4. `email.bounced` and `email.complained` (THI-1486) → suppress: set
 //      sellers.email_bounced_at (once — idempotent UPDATE … WHERE NULL)
@@ -79,10 +81,13 @@ export function verifyResendSignature(
 }
 
 async function handleResendWebhook(req: Request, res: Response): Promise<void> {
-  const secret = notifyConfig().resendWebhookSecret;
+  const cfg = notifyConfig();
+  const secret = cfg.resendWebhookSecret;
   if (!secret) {
     // Fail-closed stub: an unconfigured deployment has no live webhook to
     // trust — indistinguishable from absent (F1, admin-route pattern).
+    // RESEND_WEBHOOK_SECRET_PREVIOUS never bypasses this (config gates it
+    // on the current secret; the check order makes it unreachable anyway).
     res.status(503).json({ error: "resend webhook not configured" });
     return;
   }
@@ -92,8 +97,16 @@ async function handleResendWebhook(req: Request, res: Response): Promise<void> {
     return;
   }
   if (!verifyResendSignature(req.body, req.headers["resend-signature"] as string | undefined, secret)) {
-    res.status(400).json({ error: "signature verification failed" });
-    return;
+    // THI-1537: zero-downtime rotation tolerance — accept the previous
+    // secret during a rotation window (mirrors STRIPE_WEBHOOK_SECRET_PREVIOUS
+    // / F13 in webhooks-stripe.ts). Current secret stays authoritative:
+    // unset previous ⇒ exactly today's single-secret 400 path.
+    const previous = cfg.resendWebhookSecretPrevious;
+    if (!previous || !verifyResendSignature(req.body, req.headers["resend-signature"] as string | undefined, previous)) {
+      res.status(400).json({ error: "signature verification failed" });
+      return;
+    }
+    console.warn("[webhooks:resend] verified with RESEND_WEBHOOK_SECRET_PREVIOUS — finish the rotation");
   }
 
   let event: { type?: string; data?: { email?: string } };

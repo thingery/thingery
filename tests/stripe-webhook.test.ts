@@ -44,8 +44,13 @@ const stripe = new StripeCtor("sk_test_k1");
 
 const n0 = Math.random().toString(36).slice(2, 8);
 
-/** Fake Stripe client: real constructEvent (crypto), fake money calls. */
-function fakeStripe(refundImpl?: () => unknown): Stripe {
+/** Fake Stripe client: real constructEvent (crypto), fake money calls.
+ *  `transfersImpl` (A3 tests) overrides the transfer recovery calls — default
+ *  retrieve reports an unreversed transfer, createReversal succeeds. */
+function fakeStripe(
+  refundImpl?: () => unknown,
+  transfersImpl?: { retrieve?: (id: string) => unknown; createReversal?: (id: string) => unknown },
+): Stripe {
   return {
     webhooks: stripe.webhooks, // real verification
     checkout: {
@@ -60,6 +65,12 @@ function fakeStripe(refundImpl?: () => unknown): Stripe {
         if (refundImpl) await refundImpl();
         return { id: `re_${n0}` };
       },
+    },
+    transfers: {
+      retrieve: async (id: string) =>
+        transfersImpl?.retrieve ? transfersImpl.retrieve(id) : { id, amount_reversed: false },
+      createReversal: async (id: string) =>
+        transfersImpl?.createReversal ? transfersImpl.createReversal(id) : { id: `trr_${id}` },
     },
   } as unknown as Stripe;
 }
@@ -416,5 +427,111 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     const we = await db.query("SELECT payload::text AS p FROM webhook_events WHERE external_id = $1", [ev.id]);
     expect(we.rows[0].p).not.toContain("buyer@example.com");
     expect(we.rows[0].p).not.toContain("Privy");
+  });
+
+  // --- A3 (THI-1611 §A3): disputes on terminal orders — never a silent drop.
+
+  /** Seed a paid_out stripe order with a transfer on record. */
+  async function seedPaidOut(pi: string, transfer: string): Promise<OrderRow> {
+    const order = await seedOrder();
+    await db.query(
+      "UPDATE orders SET status = 'paid_out', payment_intent_id = $2, transfer_id = $3 WHERE id = $1",
+      [order.id, pi, transfer],
+    );
+    return order as OrderRow;
+  }
+
+  it("A3: charge.dispute.created on paid_out — durable alert + automatic transfer reversal, order stays paid_out", async () => {
+    const order = await seedPaidOut("pi_a3c", "tr_a3c");
+    process.env.OPERATOR_ALERT_EMAIL = "ops@t.dev";
+    const reversals: string[] = [];
+    setStripeForTests(fakeStripe(undefined, { createReversal: async (id) => { reversals.push(id); return { id: `trr_${id}` }; } }));
+    try {
+      const ev = event("charge.dispute.created", { id: "dp_a3c", object: "dispute", payment_intent: "pi_a3c", reason: "product_not_received", status: "under_review" });
+      const r = await post(app, JSON.stringify(ev));
+      expect(r.status).toBe(200);
+      // Terminal order untouched, event processed (not stale-marked)
+      expect((await db.query("SELECT status FROM orders WHERE id = $1", [order.id])).rows[0].status).toBe("paid_out");
+      const we = await db.query("SELECT process_error FROM webhook_events WHERE external_id = $1", [ev.id]);
+      expect(we.rows[0].process_error).toBeNull();
+      // Durable record + recorded reversal outcome
+      const evs = await db.query(
+        "SELECT event_type, payload->>'outcome' AS outcome, payload->>'reversal_id' AS rid FROM order_events WHERE order_id = $1 AND event_type IN ('terminal_dispute','transfer_reversal')",
+        [order.id],
+      );
+      expect(evs.rows.map((x) => x.event_type).sort()).toEqual(["terminal_dispute", "transfer_reversal"]);
+      const rev = evs.rows.find((x) => x.event_type === "transfer_reversal");
+      expect(rev.outcome).toBe("succeeded");
+      expect(rev.rid).toBe("trr_tr_a3c");
+      expect(reversals).toEqual(["tr_a3c"]); // §6.6 idempotency key — one call
+      // Operator alert mirrored to the outbox
+      const alert = await db.query("SELECT template FROM email_outbox WHERE dedupe_key = $1", [`opalert:post_payout_chargeback:${ev.id}`]);
+      expect(alert.rows.length).toBe(1);
+      expect(alert.rows[0].template).toBe("operator.post_payout_chargeback.v1");
+    } finally {
+      delete process.env.OPERATOR_ALERT_EMAIL;
+    }
+  });
+
+  it("A3: charge.dispute.closed (lost) on paid_out with already-reversed transfer — recorded, no duplicate reversal", async () => {
+    const order = await seedPaidOut("pi_a3l", "tr_a3l");
+    process.env.OPERATOR_ALERT_EMAIL = "ops@t.dev";
+    let reversalCalls = 0;
+    setStripeForTests(fakeStripe(undefined, {
+      retrieve: async (id) => ({ id, amount_reversed: true }),
+      createReversal: async () => { reversalCalls += 1; return { id: "trr_never" }; },
+    }));
+    try {
+      const ev = event("charge.dispute.closed", { id: "dp_a3l", object: "dispute", payment_intent: "pi_a3l", status: "lost" });
+      const r = await post(app, JSON.stringify(ev));
+      expect(r.status).toBe(200);
+      const rev = await db.query(
+        "SELECT payload->>'outcome' AS outcome FROM order_events WHERE order_id = $1 AND event_type = 'transfer_reversal'",
+        [order.id],
+      );
+      expect(rev.rows[0].outcome).toBe("already_reversed");
+      expect(reversalCalls).toBe(0);
+      const escalate = await db.query("SELECT 1 FROM email_outbox WHERE dedupe_key = $1", [`opalert:reversal_failed:${order.id}`]);
+      expect(escalate.rows.length).toBe(0); // benign outcome — no escalation
+    } finally {
+      delete process.env.OPERATOR_ALERT_EMAIL;
+    }
+  });
+
+  it("A3: failed reversal escalates — durable failed outcome + reversal_failed alert", async () => {
+    const order = await seedPaidOut("pi_a3f", "tr_a3f");
+    process.env.OPERATOR_ALERT_EMAIL = "ops@t.dev";
+    setStripeForTests(fakeStripe(undefined, { createReversal: async () => { throw new Error("insufficient funds"); } }));
+    try {
+      const ev = event("charge.dispute.created", { id: "dp_a3f", object: "dispute", payment_intent: "pi_a3f", reason: "fraudulent", status: "under_review" });
+      const r = await post(app, JSON.stringify(ev));
+      expect(r.status).toBe(200);
+      const rev = await db.query(
+        "SELECT payload->>'outcome' AS outcome, payload->>'error' AS err FROM order_events WHERE order_id = $1 AND event_type = 'transfer_reversal'",
+        [order.id],
+      );
+      expect(rev.rows[0].outcome).toBe("failed");
+      expect(rev.rows[0].err).toContain("insufficient funds");
+      const escalate = await db.query("SELECT template FROM email_outbox WHERE dedupe_key = $1", [`opalert:reversal_failed:${order.id}`]);
+      expect(escalate.rows.length).toBe(1);
+      expect(escalate.rows[0].template).toBe("operator.reversal_failed.v1");
+    } finally {
+      delete process.env.OPERATOR_ALERT_EMAIL;
+    }
+  });
+
+  it("A3: charge.dispute.closed (won) on paid_out — alert only, no clawback", async () => {
+    const order = await seedPaidOut("pi_a3w", "tr_a3w");
+    let reversalCalls = 0;
+    setStripeForTests(fakeStripe(undefined, { createReversal: async () => { reversalCalls += 1; return { id: "trr_never" }; } }));
+    const ev = event("charge.dispute.closed", { id: "dp_a3w", object: "dispute", payment_intent: "pi_a3w", status: "won" });
+    const r = await post(app, JSON.stringify(ev));
+    expect(r.status).toBe(200);
+    expect((await db.query("SELECT status FROM orders WHERE id = $1", [order.id])).rows[0].status).toBe("paid_out");
+    const dispute = await db.query("SELECT 1 FROM order_events WHERE order_id = $1 AND event_type = 'terminal_dispute'", [order.id]);
+    expect(dispute.rows.length).toBe(1); // recorded + alerted even though nothing reverses
+    const rev = await db.query("SELECT 1 FROM order_events WHERE order_id = $1 AND event_type = 'transfer_reversal'", [order.id]);
+    expect(rev.rows.length).toBe(0); // won representment — payout stands
+    expect(reversalCalls).toBe(0);
   });
 });

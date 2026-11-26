@@ -28,7 +28,11 @@ export type OperatorAlertKind =
   | "label_refund_stack"
   | "label_line_refund_stuck"
   | "suppression_self"
-  | "suppression_volume";
+  | "suppression_volume"
+  // THI-1611 §A3: dispute on a terminal order (never a silent drop) and its
+  // escalation twin when the automatic transfer reversal fails.
+  | "post_payout_chargeback"
+  | "reversal_failed";
 
 /** Shared account-less outbox writer: one row (notification_id NULL) with
  *  ON CONFLICT (dedupe_key) DO NOTHING, ride-or-own transaction. Riding

@@ -41,6 +41,16 @@ import { RateLimiter } from "./rate-limit.js";
  *  renders, and log a `rate_limit` security event ("/mcp", THI-112 H4.2). */
 export const payoutSetupLimiter = new RateLimiter(10, 60 * 60_000);
 
+/** A6 (THI-1624): explicit API-version pin — the SDK's typed version, written
+ *  as a literal `satisfies Stripe.LatestApiVersion`. A literal (NOT the SDK's
+ *  silent default or the API_VERSION static) is the point: bumping the stripe
+ *  npm package moves the typed version, so this line FAILS THE BUILD until
+ *  the pin is re-confirmed deliberately (§5.3: an SDK upgrade is a deliberate
+ *  act — bump the pin, re-check the §5.3 webhook event list against the new
+ *  spec version, re-run the test-mode rehearsal). Exported for the CI guard
+ *  test asserting pin == installed SDK version. */
+export const STRIPE_API_VERSION = "2026-09-30.endive" satisfies Stripe.LatestApiVersion;
+
 let client: Stripe | null | undefined;
 
 /** Singleton Stripe client; null when STRIPE_SECRET_KEY is unset (kill switch). */
@@ -51,7 +61,7 @@ export function getStripe(): Stripe | null {
     client = null;
     return client;
   }
-  client = new Stripe(key); // apiVersion pinned by the SDK default
+  client = new Stripe(key, { apiVersion: STRIPE_API_VERSION });
   return client;
 }
 

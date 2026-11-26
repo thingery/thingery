@@ -996,6 +996,7 @@ export function renderOrderEmail(
     case "operator.stuck_money":
     case "operator.stale_dispute":
     case "operator.dead_letter":
+    case "operator.payout_failed":
     case "operator.suppression_self":
     case "operator.suppression_volume": {
       const lines = Array.isArray(payload.lines)

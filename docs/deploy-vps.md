@@ -938,6 +938,123 @@ docker compose -f docker-compose.prod.yml up -d app   # env changes recreate
 failed` (a 503 means the secret is still unset). Real bounces/complaints log
 `[webhooks:resend] bounce|complaint suppressed: …` in the app container.
 
+**Rotating `RESEND_WEBHOOK_SECRET` (sub-runbook, THI-1420 — first executed
+2026-11-26).** Every future rotation of the webhook signing secret follows
+this runbook. Secret values live only in on-box shell variables — never
+echoed into chat, issues, logs, or docs; the runbook references variables,
+not literals.
+
+**Dashboard action only if the endpoint is registered.** Registering the
+endpoint in the Resend dashboard (URL + `email.bounced`/`email.complained`
+events + the signing secret — wiring above) is optional functional wiring
+(THI-1048 Phase-2). While the endpoint is unregistered, a rotation is pure
+on-box `.env` work — no dashboard action at all. If it **is** registered,
+rotate the dashboard's signing secret in the same sitting (per Resend's
+UI/docs there is no rotate button: delete + re-create the endpoint with the
+same URL and events, which issues a fresh secret). A short window where
+Resend signs new but the app still verifies old only costs retried webhook
+deliveries — bounce suppression is idempotent, zero data risk.
+
+**1. Backup first (THI-1363 / docs/security.md §5 — never a tree-local
+`.env.bak`):** timestamped copies of every stack's `.env` (prod, plus staging
+when it exists) into the dedicated backups directory outside the app tree
+(dir deploy-owned 0700, files 0600, keep the last ~10):
+
+```bash
+sudo mkdir -p -m 700 /opt/thingery-env-backups
+sudo chown deploy:deploy /opt/thingery-env-backups
+ts=$(date -u +%Y%m%dT%H%M%SZ)
+sudo install -o deploy -g deploy -m 600 /opt/thingery/.env \
+  /opt/thingery-env-backups/env-pre-webhook-rotate-$ts
+[ -f /opt/thingery-staging/.env ] && \
+  sudo install -o deploy -g deploy -m 600 /opt/thingery-staging/.env \
+  /opt/thingery-env-backups/env-staging-pre-webhook-rotate-$ts
+```
+
+**2. Fresh value per stack:** `openssl rand -hex 32` (separate values for
+prod and staging), piped via **stdin** into an atomic line replacer so the
+value never appears in argv, stdout, or any transcript:
+
+```bash
+new=$(openssl rand -hex 32)            # lives only in this shell var
+printf '%s\n' "$new" | sudo sh -c '
+  IFS= read -r v                       # value arrives via stdin, never argv
+  cd /opt/thingery
+  tmp=$(mktemp .env.XXXXXX)            # same dir: the rename is atomic
+  v="$v" awk "/^RESEND_WEBHOOK_SECRET=/ { print \"RESEND_WEBHOOK_SECRET=\" ENVIRON[\"v\"]; next }
+              { print }" .env > "$tmp" &&
+  chown --reference=.env "$tmp" && chmod --reference=.env "$tmp" && mv "$tmp" .env ||
+  { rm -f "$tmp"; exit 1; }'
+unset new
+```
+
+The `RESEND_WEBHOOK_SECRET=` line must already exist (initial wiring above);
+the replacer swaps the value byte-exactly while preserving owner and mode,
+and any failure (awk, chown, chmod, or mv) exits non-zero with the temp
+removed and `.env` untouched — the step-4 NEW→200 probe remains the
+decisive check.
+For a **down** staging stack, replace its file value the same way — never
+force the stack up just for a rotation.
+
+**3. Recreate prod** (env change → recreate, not rebuild):
+
+```bash
+cd /opt/thingery && sudo docker compose -f docker-compose.prod.yml up -d
+```
+
+Over non-TTY SSH the client can time out while compose still finishes
+server-side — verify the recreate by container start time, never by client
+exit code:
+
+```bash
+sudo docker inspect $(docker ps -qf name=thingery-app) \
+  --format '{{.State.StartedAt}}'
+```
+
+**4. Verify (zero-DB-write probe battery — `email.sent` is deliberately not a
+bounce → 200 with no DB writes; behavior pinned by `tests/webhooks-resend.test.ts`).**
+Run on the box, where both values live; print HTTP codes only:
+
+```bash
+body='{"type":"email.sent"}'; t=$(date +%s)
+sig(){ printf '%s.%s' "$t" "$body" | openssl dgst -sha256 -hmac "$1" -binary | base64; }
+OLD=$(sudo awk -F= '$1=="RESEND_WEBHOOK_SECRET"{print $2}' \
+      /opt/thingery-env-backups/env-pre-webhook-rotate-<ts> | tr -d '\r')
+NEW=$(sudo awk -F= '$1=="RESEND_WEBHOOK_SECRET"{print $2}' /opt/thingery/.env | tr -d '\r')
+
+curl -s -o /dev/null -w 'unsigned -> %{http_code}\n' -X POST \
+  https://thingery.dev/api/webhooks/resend \
+  -H 'content-type: application/json' -d "$body"
+curl -s -o /dev/null -w 'OLD     -> %{http_code}\n' -X POST \
+  https://thingery.dev/api/webhooks/resend -H 'content-type: application/json' \
+  -H "resend-signature: t=$t,v1=$(sig "$OLD")" -d "$body"
+curl -s -o /dev/null -w 'NEW     -> %{http_code}\n' -X POST \
+  https://thingery.dev/api/webhooks/resend -H 'content-type: application/json' \
+  -H "resend-signature: t=$t,v1=$(sig "$NEW")" -d "$body"
+curl -s -o /dev/null -w 'healthz -> %{http_code}\n' https://thingery.dev/healthz
+```
+
+Expected: unsigned → **400** (a 503 means the secret is unset — rollback);
+OLD → **400** `signature verification failed` — the retired value no longer
+authenticates anything, the actual point of the exercise; NEW → **200**
+`{"ok":true,"ignored":"email.sent"}`; `/healthz` → **200**. Then confirm a
+clean boot (no fail-closed mailer errors in `docker logs` since the recreate)
+and abuse counts still zero — proof that no forged bounce slipped through
+before or during the rotation:
+
+```bash
+docker exec $(docker ps -qf name=thingery-db) psql -U thingery -d thingery -tAc \
+  "SELECT count(*) FROM sellers WHERE email_bounced_at IS NOT NULL"
+docker exec $(docker ps -qf name=thingery-db) psql -U thingery -d thingery -tAc \
+  "SELECT count(*) FROM email_outbox WHERE last_error IN ('skipped:bounced','skipped:complained')"
+```
+
+**Rollback:** restore the old line from the timestamped backup via the same
+atomic replace (read the old value into a shell var from the backup file),
+then recreate the app. Blast radius: the app container (a full `up -d` pass
+may also recreate caddy on a config-hash change); no schema, no ports, no db
+changes.
+
 **2. `OPERATOR_ALERT_EMAIL` — operator alert mailbox.** While unset,
 dead-letter and sweep anomaly alerts (stuck money, stale disputes, dead
 letters) only hit container logs. When set, `src/notify/operator.ts` plans

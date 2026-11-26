@@ -743,13 +743,38 @@ profile, bank details, platform + Connect terms accepted in the Stripe dashboard
    `https://thingery.dev/api/webhooks/stripe` with events:
    `checkout.session.completed`, `payment_intent.succeeded`, `charge.refunded`,
    `charge.dispute.created`, `charge.dispute.closed`, `transfer.created`,
-   `transfer.updated`, `transfer.paid`, `account.updated`. Copy its signing
+   `transfer.updated`, `transfer.reversed`, `account.updated`. Copy its signing
    secret into `STRIPE_WEBHOOK_SECRET`.
+   - `transfer.paid` is deliberately NOT in this list (A6, THI-1624): verified
+     against Stripe's own OpenAPI spec at the pinned API version
+     (2026-09-30.endive), it is no longer a subscribable event type — the
+     `enabled_events` enum for `POST /v1/webhook_endpoints` omits it. The old
+     runbook list named it in error; `transfer.created`/`transfer.updated`
+     carry the payout-landed signal. The handler keeps a defensive
+     `transfer.paid` alias so a legacy-subscribed delivery is never dropped.
+   - `transfer.reversed` is platform-scoped (the platform creates the
+     transfer): it arrives on this endpoint and closes A3/A4's tracked
+     reversal debt (`order_events.transfer_reversed`).
+   - `payout.failed` (stuck seller payout → durable operator alert) is a
+     **connected-account** event: it only arrives via the Connect-scoped
+     endpoint — register it THERE (A1, THI-1619's second endpoint), not on
+     this one. An unhandled `payout.failed` is invisible money; keep it in
+     the Connect endpoint's list.
 3. Recreate the app container (env changes need recreation, not rebuild):
    `cd /opt/thingery && docker compose -f docker-compose.prod.yml up -d`
 4. Verify: boot log shows `(live mode)`; `curl -s https://thingery.dev/healthz`
    still `200`; a listing shows `payment_available: true` via the MCP order tools;
    the Stripe dashboard's webhook page shows signature-verified deliveries.
+
+**Stripe API version pin (A6, THI-1624).** `src/stripe.ts` constructs the
+Stripe client with an explicit `apiVersion` literal — `STRIPE_API_VERSION`
+(`"2026-09-30.endive"`, typed against the installed SDK v23's
+`Stripe.LatestApiVersion`), never the SDK's silent default. Upgrading the
+`stripe` npm package is a **deliberate act**: the build (and a CI guard test
+asserting pin == installed SDK version) fails until `STRIPE_API_VERSION` is
+re-confirmed against the new SDK. On any such upgrade: bump the pin, re-check
+the event list above against the new OpenAPI spec version, and re-run the
+test-mode rehearsal before deploy.
 
 **Seller onboarding.** Sellers complete Stripe Connect onboarding via the app's
 payout-setup flow once the platform account is live-enabled; `account.updated`

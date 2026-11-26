@@ -124,6 +124,80 @@ export function formatMoney(cents: number, currency: string): string {
   return symbol ? `${symbol}${amount}` : `${currency.toUpperCase()} ${amount}`;
 }
 
+// ---------------------------------------------------------------------------
+// THI-1585 PR (a): plain-English text fixes. Raw internal values — reason
+// codes, dispute outcomes, order statuses, ISO deadlines — must never reach
+// an inbox: each renders through the maps below in plain English, and an
+// unknown code falls back to neutral copy, never the raw code. The maps
+// cover exactly what the fan-out emits (src/notify/fanout.ts) plus the 12
+// statuses CHECK-constrained in db/schema.sql. Moderator reasons are free
+// text and stay untouched (seller.item_taken_down, buyer.review_hidden).
+// Formatting is deterministic — no Intl/ICU (same standard as formatMoney);
+// deadlines render in UTC with an explicit suffix so snapshots never drift.
+
+/** The 12 order statuses of db/schema.sql → user-facing English. */
+const ORDER_STATUS_TEXT: Record<string, string> = {
+  pending: "Awaiting payment",
+  sold: "Paid — awaiting shipment",
+  label_issued: "Label issued — awaiting carrier pickup",
+  in_transit: "In transit",
+  delivered: "Delivered — dispute window open",
+  disputed: "Under dispute review",
+  refunding: "Refund in progress",
+  refunded: "Refunded",
+  payout_pending: "Seller payout scheduled",
+  paid_out: "Seller paid",
+  cancelled: "Cancelled",
+  completed: "Completed",
+};
+
+/** Fan-out cancel/refund reason codes → user-facing English. */
+const ORDER_REASON_TEXT: Record<string, string> = {
+  payment_deadline_passed: "The payment deadline passed",
+  you_cancelled: "You cancelled the order",
+  buyer_cancelled: "The buyer cancelled the order",
+  seller_cancelled: "The seller cancelled the order",
+  dispute_refund: "The dispute was resolved with a refund",
+  buyer_requested_refund: "The buyer requested a refund",
+  you_requested_refund: "You requested a refund",
+  seller_initiated_refund: "The seller initiated a refund",
+  not_shipped_or_transit_issue:
+    "The item was not shipped in time, or the shipment stalled in transit",
+  dispute_released: "The dispute was resolved with the funds released to the seller",
+};
+
+/** Fan-out dispute outcome codes → user-facing English. */
+const DISPUTE_OUTCOME_TEXT: Record<string, string> = {
+  cancelled: "Refund to the buyer — order cancelled",
+  refunded: "Refund to the buyer",
+  released_to_seller: "Funds released to the seller",
+};
+
+export function orderStatusText(status: string): string {
+  return ORDER_STATUS_TEXT[status] ?? "In progress";
+}
+
+export function orderReasonText(reason: string): string {
+  return ORDER_REASON_TEXT[reason] ?? "Not specified";
+}
+
+export function disputeOutcomeText(outcome: string): string {
+  return DISPUTE_OUTCOME_TEXT[outcome] ?? "Resolved";
+}
+
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Deadline formatting: fixed UTC calendar format with an explicit time-zone
+ *  suffix, no Intl/ICU (same determinism standard as formatMoney). Returns
+ *  "" for an unparseable value so callers fall back to date-free copy — a
+ *  raw timestamp never reaches the body. */
+export function formatDeadlineUtc(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getUTCDate()} ${MONTHS_SHORT[d.getUTCMonth()]} ${d.getUTCFullYear()}, ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+}
+
 /** Shared facts every order email states (plan §6: title, amount, status). */
 interface OrderFacts {
   itemTitle: string;
@@ -159,7 +233,7 @@ function orderEmail(o: {
   const lines = [
     `Item: ${facts.itemTitle}`,
     `Amount: ${formatMoney(facts.amountCents, facts.currency)}`,
-    `Order status: ${facts.orderStatus}`,
+    `Order status: ${orderStatusText(facts.orderStatus)}`,
     ...details,
   ];
   const linkLines = [facts.orderUrl, ...(facts.itemUrl ? [facts.itemUrl] : []), browseUrl];
@@ -204,23 +278,32 @@ export function templateKeyFor(eventType: OrderEmailEvent | string): string {
   return `${eventType}.v1`;
 }
 
-export function renderBuyerOrderPlaced(p: OrderFacts & { payUrl?: string; paymentDeadline?: string }): RenderedEmail {
+/** Payment-deadline outro: a readable UTC deadline when the payload carries
+ *  one; date-free copy when it is missing/unparseable. A raw ISO timestamp
+ *  never reaches the body. (THI-1585) */
+function paymentOutro(paymentDeadline?: string): string | undefined {
+  if (paymentDeadline === undefined) return undefined;
+  const fmt = paymentDeadline ? formatDeadlineUtc(paymentDeadline) : "";
+  return fmt
+    ? `Complete payment by ${fmt} or the order is cancelled automatically.`
+    : "Complete payment before the deadline or the order is cancelled automatically.";
+}
+
+export function renderBuyerOrderPlaced(p: OrderFacts & { paymentDeadline?: string }): RenderedEmail {
   return orderEmail({
     subject: `Order placed: ${p.itemTitle} — Thingery`,
     intro: "You placed an order on Thingery. Here are the details:",
     facts: p,
-    details: p.payUrl ? [`Pay here: ${p.payUrl}`] : [],
-    outro: p.paymentDeadline ? `Complete payment by ${p.paymentDeadline} or the order is cancelled automatically.` : undefined,
+    outro: paymentOutro(p.paymentDeadline),
   });
 }
 
-export function renderBuyerPaymentDeadlineReminder(p: OrderFacts & { payUrl?: string; paymentDeadline: string }): RenderedEmail {
+export function renderBuyerPaymentDeadlineReminder(p: OrderFacts & { paymentDeadline: string }): RenderedEmail {
   return orderEmail({
     subject: `Payment deadline soon: ${p.itemTitle} — Thingery`,
     intro: "Your order is still awaiting payment. The deadline is approaching:",
     facts: p,
-    details: p.payUrl ? [`Pay here: ${p.payUrl}`] : [],
-    outro: `Complete payment by ${p.paymentDeadline} or the order is cancelled automatically.`,
+    outro: paymentOutro(p.paymentDeadline),
   });
 }
 
@@ -229,7 +312,9 @@ export function renderBuyerOrderCancelled(p: OrderFacts & { reason: string }): R
     subject: `Order cancelled: ${p.itemTitle} — Thingery`,
     intro: "An order you are part of has been cancelled:",
     facts: p,
-    details: [`Reason: ${p.reason}`],
+    details: [`Reason: ${orderReasonText(p.reason)}`],
+    // Refund follow-up decided on the RAW reason code (the fan-out contract),
+    // never on the translated display text. (THI-1585)
     outro: p.reason.toLowerCase().includes("refund")
       ? "A refund to your original payment method will follow; no action is needed."
       : undefined,
@@ -272,7 +357,7 @@ export function renderBuyerRefundInitiated(p: OrderFacts & { reason: string }): 
     subject: `Refund initiated: ${p.itemTitle} — Thingery`,
     intro: "A refund has been initiated for your order:",
     facts: p,
-    details: [`Reason: ${p.reason}`],
+    details: [`Reason: ${orderReasonText(p.reason)}`],
     outro: "The refund is processing; no action is needed.",
   });
 }
@@ -290,7 +375,7 @@ export function renderBuyerDisputeOutcome(p: OrderFacts & { outcome: string }): 
     subject: `Dispute resolved: ${p.itemTitle} — Thingery`,
     intro: "Your dispute has been resolved:",
     facts: p,
-    details: [`Outcome: ${p.outcome}`],
+    details: [`Outcome: ${disputeOutcomeText(p.outcome)}`],
     outro: "The order page shows the final state of the order.",
   });
 }
@@ -317,7 +402,9 @@ export function renderSellerOrderCancelledByBuyer(p: OrderFacts & { reason: stri
     subject: `Order cancelled by buyer: ${p.itemTitle} — Thingery`,
     intro: "A buyer cancelled an order for your item:",
     facts: p,
-    details: [`Reason: ${p.reason}`],
+    details: [`Reason: ${orderReasonText(p.reason)}`],
+    // Refund follow-up decided on the RAW reason code, never the translated
+    // display text. (THI-1585)
     outro: p.reason.toLowerCase().includes("refund")
       ? "A refund to the buyer will follow automatically; no action is needed."
       : undefined,
@@ -347,7 +434,7 @@ export function renderSellerDisputeResolved(p: OrderFacts & { outcome: string })
     subject: `Dispute resolved: ${p.itemTitle} — Thingery`,
     intro: "The dispute on this order has been resolved:",
     facts: p,
-    details: [`Outcome: ${p.outcome}`],
+    details: [`Outcome: ${disputeOutcomeText(p.outcome)}`],
   });
 }
 

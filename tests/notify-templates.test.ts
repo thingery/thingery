@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   ORDER_EMAIL_KEYS,
   formatMoney,
+  formatDeadlineUtc,
   templateKeyFor,
   renderBuyerOrderPlaced,
   renderBuyerPaymentDeadlineReminder,
@@ -42,21 +43,21 @@ const CANONICAL =
 describe("order email templates (THI-763 PR 2)", () => {
   it("every event key renders with subject, facts, all three deep links, footer", () => {
     const cases = [
-      renderBuyerOrderPlaced({ ...facts, payUrl: `${BASE}/order/x#pay`, paymentDeadline: "2026-11-20 12:00 UTC" }),
-      renderBuyerPaymentDeadlineReminder({ ...facts, payUrl: `${BASE}/order/x#pay`, paymentDeadline: "2026-11-20 12:00 UTC" }),
-      renderBuyerOrderCancelled({ ...facts, reason: "payment_expired" }),
+      renderBuyerOrderPlaced({ ...facts, paymentDeadline: "2026-11-20T12:00:00.000Z" }),
+      renderBuyerPaymentDeadlineReminder({ ...facts, paymentDeadline: "2026-11-20T12:00:00.000Z" }),
+      renderBuyerOrderCancelled({ ...facts, reason: "payment_deadline_passed" }),
       renderBuyerPaymentReceived(facts),
       renderBuyerItemShipped({ ...facts, carrier: "DHL", trackingCode: "9400111899223197428490" }),
       renderBuyerOrderDelivered({ ...facts, disputeWindowHours: 48 }),
-      renderBuyerRefundInitiated({ ...facts, reason: "carrier_failure" }),
+      renderBuyerRefundInitiated({ ...facts, reason: "not_shipped_or_transit_issue" }),
       renderBuyerRefundConfirmed(facts),
       renderBuyerDisputeOutcome({ ...facts, outcome: "refunded" }),
       renderSellerOffPlatformOrder(facts),
       renderSellerItemSold(facts),
-      renderSellerOrderCancelledByBuyer({ ...facts, reason: "buyer_cancelled_refund" }),
+      renderSellerOrderCancelledByBuyer({ ...facts, reason: "buyer_requested_refund" }),
       renderSellerDisputeOpened(facts),
       renderSellerChargeback(facts),
-      renderSellerDisputeResolved({ ...facts, outcome: "released" }),
+      renderSellerDisputeResolved({ ...facts, outcome: "released_to_seller" }),
       renderSellerPayoutPaid(facts),
     ];
     expect(cases).toHaveLength(ORDER_EMAIL_KEYS.length);
@@ -65,7 +66,7 @@ describe("order email templates (THI-763 PR 2)", () => {
       for (const body of [email.text, email.html]) {
         expect(body).toContain("Vintage denim jacket");
         expect(body).toContain("€12.34");
-        expect(body).toContain("sold");
+        expect(body).toContain("Paid — awaiting shipment");
         expect(body).toContain(`${BASE}/order/00000000-0000-0000-0000-000000000001`);
         expect(body).toContain(`${BASE}/item/00000000-0000-0000-0000-000000000002`);
         expect(body).toContain(`${BASE}/browse`);
@@ -79,14 +80,62 @@ describe("order email templates (THI-763 PR 2)", () => {
     expect(sold.subject).toBe("Sold: Vintage denim jacket — Thingery");
     expect(sold.text).toContain("Your item sold. Payment was received — time to ship:");
     expect(sold.text).toContain("Amount: €12.34");
-    const placed = renderBuyerOrderPlaced({ ...facts, payUrl: "https://thingery.dev/pay/cs_test", paymentDeadline: "2026-11-20 12:00 UTC" });
+    const placed = renderBuyerOrderPlaced({ ...facts, paymentDeadline: "2026-11-20T12:00:00.000Z" });
     expect(placed.subject).toBe("Order placed: Vintage denim jacket — Thingery");
-    expect(placed.text).toContain("Pay here: https://thingery.dev/pay/cs_test");
-    expect(placed.text).toContain("Complete payment by 2026-11-20 12:00 UTC");
+    expect(placed.text).toContain("Complete payment by 20 Nov 2026, 12:00 UTC");
+    expect(placed.text).not.toContain("Pay here");
+    expect(placed.text).not.toContain("2026-11-20T");
     const delivered = renderBuyerOrderDelivered({ ...facts, disputeWindowHours: 48 });
     expect(delivered.text).toContain("open a dispute within 48 hours");
     const shipped = renderBuyerItemShipped({ ...facts, carrier: "DHL", trackingCode: "TRACK123" });
     expect(shipped.text).toContain("Tracking code: TRACK123");
+  });
+
+  it("raw codes never reach the body: reasons, outcomes and statuses translate (THI-1585)", () => {
+    const cancelled = renderBuyerOrderCancelled({ ...facts, reason: "payment_deadline_passed" });
+    expect(cancelled.text).toContain("Reason: The payment deadline passed");
+    expect(cancelled.text).not.toContain("payment_deadline_passed");
+    // The refund-outro decision stays on the RAW code; the display text is
+    // the translation.
+    const buyerRefund = renderBuyerOrderCancelled({ ...facts, orderStatus: "refunding", reason: "you_requested_refund" });
+    expect(buyerRefund.text).toContain("Reason: You requested a refund");
+    expect(buyerRefund.text).toContain("A refund to your original payment method will follow");
+    expect(buyerRefund.text).not.toContain("you_requested_refund");
+    const sellerRefund = renderSellerOrderCancelledByBuyer({ ...facts, reason: "buyer_requested_refund" });
+    expect(sellerRefund.text).toContain("Reason: The buyer requested a refund");
+    expect(sellerRefund.text).toContain("A refund to the buyer will follow automatically");
+    // Unknown codes fall back to neutral copy — never the raw code — and do
+    // not trip the raw-code refund heuristic.
+    const unknown = renderBuyerOrderCancelled({ ...facts, reason: "mystery_code_42" });
+    expect(unknown.text).toContain("Reason: Not specified");
+    expect(unknown.text).not.toContain("mystery_code_42");
+    expect(unknown.text).not.toContain("A refund");
+    // Statuses translate; label_issued never renders as a shipping claim.
+    const shipped = renderBuyerItemShipped({ ...facts, orderStatus: "label_issued" });
+    expect(shipped.text).toContain("Order status: Label issued — awaiting carrier pickup");
+    expect(shipped.text).not.toContain("label_issued");
+    const unknownStatus = renderSellerItemSold({ ...facts, orderStatus: "status_from_the_future" });
+    expect(unknownStatus.text).toContain("Order status: In progress");
+    expect(unknownStatus.text).not.toContain("status_from_the_future");
+    // Dispute outcomes translate.
+    const outcome = renderBuyerDisputeOutcome({ ...facts, outcome: "released_to_seller" });
+    expect(outcome.text).toContain("Outcome: Funds released to the seller");
+    expect(outcome.text).not.toContain("released_to_seller");
+    const sellerOutcome = renderSellerDisputeResolved({ ...facts, outcome: "cancelled" });
+    expect(sellerOutcome.text).toContain("Outcome: Refund to the buyer — order cancelled");
+  });
+
+  it("deadline renders as readable UTC, deterministic, never raw (THI-1585)", () => {
+    const reminder = renderBuyerPaymentDeadlineReminder({ ...facts, paymentDeadline: "2026-11-20T12:00:00.000Z" });
+    expect(reminder.text).toContain("Complete payment by 20 Nov 2026, 12:00 UTC");
+    expect(reminder.text).not.toContain("2026-11-20T");
+    // Unparseable values degrade to date-free copy, never raw output.
+    const bad = renderBuyerPaymentDeadlineReminder({ ...facts, paymentDeadline: "not-a-date" });
+    expect(bad.text).toContain("Complete payment before the deadline or the order is cancelled automatically.");
+    expect(bad.text).not.toContain("not-a-date");
+    // Deterministic — no Intl/ICU drift (same standard as formatMoney).
+    expect(formatDeadlineUtc("2026-03-05T07:05:00Z")).toBe("5 Mar 2026, 07:05 UTC");
+    expect(formatDeadlineUtc("not-a-date")).toBe("");
   });
 
   it("F6 no-PII: no address or contact fields exist in any rendered body", () => {

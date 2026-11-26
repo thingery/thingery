@@ -227,7 +227,9 @@ describe("mailer seam + templates (THI-762, no DB required)", () => {
     expect(rendered.text).toContain("https://thingery.dev/api/verify-email?token=thge_ABC");
     expect(rendered.text).toContain("expires in 48 hours");
     expect(rendered.html).not.toContain("href=&quot;"); // attribute quoting normal — URL not double-escaped
-    expect(rendered.html).toContain('<a href="https://thingery.dev/api/verify-email?token=thge_ABC">');
+    // THI-1586 layout: the CTA is a bulletproof button; href stays exact.
+    expect(rendered.html).toContain('href="https://thingery.dev/api/verify-email?token=thge_ABC"');
+    expect(rendered.html).toContain(">Verify your email</a>");
     // No order data or contact PII in the body — the link is the only payload
     // ("address" the word is fine; postal/address/contact data is not).
     expect(rendered.text).not.toMatch(/order|invoice|tracking|\+?\d[\d -]{6,}/i);

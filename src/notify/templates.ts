@@ -1,13 +1,14 @@
 // Email templates (THI-760 plan §6): pure TypeScript functions — subject +
-// text + minimal HTML, no framework (YAGNI), English-only in Phase 1 with the
+// text + HTML, no framework (YAGNI), English-only in Phase 1 with the
 // `locale` field reserved for later phases. Keys follow the plan's
 // `{role}.{event}.v1` convention (account-level mail uses the `account`
 // role namespace): renaming content later means issuing a new key, never
 // mutating meaning — the API-evolution rule applied to humans' inboxes.
 //
-// F6 applies to every template: PII-free bodies. The verification email
-// carries the verify link only — no order data, no addresses, no counterparty
-// information — and the canonical sentence footer.
+// THI-1586 PR (b): HTML renders through the board-approved layout
+// (layoutHtml below — THI-1584, canvas wins on anything visual). Plain-text
+// versions keep their THI-1585 wording; every email keeps the canonical
+// footer and all escaping. Operator and ops alerts stay plain by design.
 
 /** Rendered template — exactly what a Mailer receives. */
 export interface RenderedEmail {
@@ -57,13 +58,20 @@ export function renderDigest(p: {
     [...lines, ...more].join("\n") +
     `\n\nManage or turn off digests: ${p.unsubscribeUrl}\n` +
     `\n— ${CANONICAL_SENTENCE}\n`;
-  const html =
-    `<p>Here is what happened on Thingery since your last digest:</p>\n<ul>\n` +
-    p.items.map((it) => `  <li>${it.url ? `<a href="${escapeHtml(it.url)}">${escapeHtml(it.itemTitle ?? it.eventType)}</a>` : escapeHtml(it.itemTitle ?? it.eventType)}</li>`).join("\n") +
-    (p.count > p.items.length ? `\n  <li>… and ${p.count - p.items.length} more</li>` : "") +
-    `\n</ul>\n` +
-    `<p><a href="${escapeHtml(p.unsubscribeUrl)}">Turn off ${label} digests</a></p>\n` +
-    `<p style="color:#666;font-size:12px">— ${CANONICAL_SENTENCE}</p>\n`;
+  const origin = safeOrigin(p.unsubscribeUrl);
+  const html = layoutHtml({
+    tag: p.frequency === "daily" ? "Daily digest" : "Weekly digest",
+    tone: "info",
+    heading: "Since your last digest.",
+    paragraph: "Here is what happened on Thingery since your last digest.",
+    origin,
+    digestRows: [
+      ...p.items.map((it) => ({ title: it.itemTitle ?? it.eventType, url: it.url })),
+      ...(p.count > p.items.length ? [{ moreCount: p.count - p.items.length } as DigestRow] : []),
+    ],
+    button: origin ? { label: "Browse Thingery", url: `${origin}/browse` } : undefined,
+    footerLinks: [{ label: `Turn off ${label} digests`, url: p.unsubscribeUrl }],
+  });
   return { subject, text, html };
 }
 
@@ -78,6 +86,220 @@ function escapeHtml(s: string): string {
 /** Canonical footer sentence (AGENTS.md — verbatim, never paraphrased). */
 const CANONICAL_SENTENCE =
   "Thingery is the open item database and MCP server for AI agents to list, find, and trade second-hand goods.";
+
+// ---------------------------------------------------------------------------
+// THI-1586 PR (b): the board-approved email layout (THI-1584, approved
+// 2026-11-26; the brand canvas wins on anything visual). One column, 600px
+// max (fluid on phone), table-based with inline styles only — no flexbox,
+// no SVG, no web fonts loaded by the mail itself (the font stacks name the
+// brand faces first and fall back to system faces). One hosted image per
+// email: the Thread mark PNG, served from the deployment's own base URL so
+// self-hosters never reference thingery.dev. Every email keeps its
+// plain-text twin and all escaping; layout changes HTML only.
+
+const COLORS = {
+  page: "#F6F6F3",
+  ink: "#14151A",
+  muted: "#565A63",
+  panel: "#FFFFFF",
+  divider: "#D9DAD6",
+  yellow: "#FFCE1F",
+  blue: "#2438D6",
+  problem: "#A84A00",
+} as const;
+
+const FONTS = {
+  display: `"Bricolage Grotesque","Arial Black",Arial,sans-serif`,
+  body: `"Schibsted Grotesk",Helvetica,Arial,sans-serif`,
+  mono: `"Martian Mono",Menlo,Consolas,monospace`,
+} as const;
+
+/** Hosted Thread-mark PNG (public/assets/email-logo.png), 128×128, ink,
+ *  displayed at the 30px lockup size (retina-sharp, one image per email). */
+const LOGO_PATH = "/assets/email-logo.png";
+
+function safeOrigin(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
+  }
+}
+
+/** Status-tag tones (board spec): yellow/ink normal, blue/white info,
+ *  burnt-orange/white problem (cancelled, dispute, chargeback, removal). */
+type TagTone = "normal" | "info" | "problem";
+
+const TAG_TONES: Record<TagTone, { bg: string; fg: string }> = {
+  normal: { bg: COLORS.yellow, fg: COLORS.ink },
+  info: { bg: COLORS.blue, fg: "#FFFFFF" },
+  problem: { bg: COLORS.problem, fg: "#FFFFFF" },
+};
+
+interface PanelRow {
+  label: string;
+  value: string;
+}
+
+/** Digest list rows: a linked item title, or a muted "… and N more" row. */
+type DigestRow = { title: string; url?: string } | { moreCount: number };
+
+/** Everything one rendered email needs: approved layout, one column. */
+interface EmailLayout {
+  tag: string;
+  tone: TagTone;
+  heading: string;
+  paragraph: string;
+  /** Deployment base (absolute URL) — logo, and relative links when no
+   *  deep link exists. Empty = no logo/CTA can be built. */
+  origin: string;
+  panelTitle?: string;
+  panelAmount?: string;
+  panelRows?: PanelRow[];
+  digestRows?: DigestRow[];
+  button?: { label: string; url: string };
+  secondary?: Array<{ label: string; url: string }>;
+  /** Verify-email extras: mono link box + expiry/safety note under the CTA. */
+  linkFallback?: { lead: string; url: string; note?: string };
+  /** Footer links (digest unsubscribe). Label must stay stable — tests and
+   *  one-click unsubscribe flows pin it. */
+  footerLinks?: Array<{ label: string; url: string }>;
+}
+
+/** Renders the approved layout. Table-based, inline styles, phone tweaks via
+ *  one small media query (Gmail/Apple Mail honor it; Outlook desktop keeps
+ *  the desktop sizes — the graceful default). */
+function layoutHtml(l: EmailLayout): string {
+  const pad = `class="th-pad" style="padding-left:32px;padding-right:32px"`;
+  const rows: string[] = [];
+
+  // 1. Header: Thread mark + wordmark (30px lockup, gap 8).
+  const logo = l.origin
+    ? `<img src="${escapeHtml(`${l.origin}${LOGO_PATH}`)}" width="30" height="30" alt="Thingery" style="display:block;border:0;width:30px;height:30px">`
+    : `<span style="display:inline-block;width:30px;height:30px">&nbsp;</span>`;
+  rows.push(
+    `<tr><td ${pad} style="padding-top:0;padding-bottom:24px"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>` +
+      `<td style="padding:0 8px 0 0;vertical-align:middle">${logo}</td>` +
+      `<td style="padding:0;vertical-align:middle;font-family:${FONTS.display};font-size:26px;font-weight:800;letter-spacing:-0.5px;color:${COLORS.ink}">thingery</td>` +
+      `</tr></table></td></tr>`,
+  );
+
+  // 2. Status tag: flat rectangle, mono 12px bold.
+  const tone = TAG_TONES[l.tone];
+  rows.push(
+    `<tr><td ${pad} style="padding-bottom:16px"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>` +
+      `<td bgcolor="${tone.bg}" style="background-color:${tone.bg};padding:7px 12px;font-family:${FONTS.mono};font-size:12px;font-weight:700;line-height:1;color:${tone.fg}">${escapeHtml(l.tag)}</td>` +
+      `</tr></table></td></tr>`,
+  );
+
+  // 3. H1: display 800, 44px desktop / 34px phone (media query).
+  rows.push(
+    `<tr><td ${pad} style="padding-bottom:12px"><h1 class="th-h1" style="margin:0;font-family:${FONTS.display};font-weight:800;font-size:44px;line-height:1.05;color:${COLORS.ink}">${escapeHtml(l.heading)}</h1></td></tr>`,
+  );
+
+  // 4. One short paragraph.
+  rows.push(
+    `<tr><td ${pad} style="padding-bottom:20px"><p style="margin:0;font-family:${FONTS.body};font-size:15px;line-height:1.55;color:${COLORS.muted}">${escapeHtml(l.paragraph)}</p></td></tr>`,
+  );
+
+  // 5. White panel (radius 0): title, mono amount, label/value rows over #D9DAD6.
+  const panelRows = [
+    ...(l.panelTitle !== undefined
+      ? [`<tr><td style="padding:20px 24px 4px;font-family:${FONTS.body};font-size:18px;font-weight:700;line-height:1.3;color:${COLORS.ink}">${escapeHtml(l.panelTitle)}</td></tr>`]
+      : []),
+    ...(l.panelAmount !== undefined
+      ? [`<tr><td style="padding:2px 24px 16px;font-family:${FONTS.mono};font-size:20px;font-weight:700;color:${COLORS.ink}">${escapeHtml(l.panelAmount)}</td></tr>`]
+      : []),
+    ...(l.panelRows ?? []).map(
+      (r) =>
+        `<tr><td style="border-top:1px solid ${COLORS.divider};padding:12px 24px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>` +
+        `<td style="font-family:${FONTS.body};font-size:13px;color:${COLORS.muted}">${escapeHtml(r.label)}</td>` +
+        `<td align="right" style="font-family:${FONTS.body};font-size:14px;color:${COLORS.ink}">${escapeHtml(r.value)}</td>` +
+        `</tr></table></td></tr>`,
+    ),
+    ...(l.digestRows ?? []).map((r, i) => {
+      const border = i === 0 ? "" : `border-top:1px solid ${COLORS.divider};`;
+      if ("moreCount" in r) {
+        return `<tr><td style="${border}padding:14px 24px;font-family:${FONTS.body};font-size:14px;color:${COLORS.muted}">… and ${r.moreCount} more</td></tr>`;
+      }
+      const title = escapeHtml(r.title);
+      return r.url
+        ? `<tr><td style="${border}padding:14px 24px"><a href="${escapeHtml(r.url)}" style="font-family:${FONTS.body};font-size:15px;font-weight:600;color:${COLORS.ink};text-decoration:none">${title}</a></td></tr>`
+        : `<tr><td style="${border}padding:14px 24px;font-family:${FONTS.body};font-size:15px;font-weight:600;color:${COLORS.ink}">${title}</td></tr>`;
+    }),
+  ];
+  if (panelRows.length > 0) {
+    rows.push(
+      `<tr><td ${pad} style="padding-bottom:0"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${COLORS.panel}" style="background-color:${COLORS.panel}">${panelRows.join("")}</table></td></tr>`,
+    );
+  }
+
+  // 6. ONE primary button: yellow, ink text, radius 6, full width
+  //  (bulletproof table button).
+  if (l.button) {
+    rows.push(
+      `<tr><td ${pad} style="padding-top:24px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>` +
+        `<td bgcolor="${COLORS.yellow}" align="center" style="background-color:${COLORS.yellow};border-radius:6px">` +
+        `<a href="${escapeHtml(l.button.url)}" style="display:block;padding:14px 24px;border-radius:6px;font-family:${FONTS.body};font-size:16px;font-weight:700;color:${COLORS.ink};text-decoration:none;text-align:center">${escapeHtml(l.button.label)}</a>` +
+        `</td></tr></table></td></tr>`,
+    );
+  }
+
+  // Verify email: paste-link mono box + expiry/safety note.
+  if (l.linkFallback) {
+    rows.push(
+      `<tr><td ${pad} style="padding-top:20px"><p style="margin:0 0 10px;font-family:${FONTS.body};font-size:13px;line-height:1.6;color:${COLORS.muted}">${escapeHtml(l.linkFallback.lead)}</p>` +
+        `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="${COLORS.panel}" style="background-color:${COLORS.panel};border:1px solid ${COLORS.divider};padding:12px 14px;font-family:${FONTS.mono};font-size:12px;line-height:1.6;color:${COLORS.ink};word-break:break-all">${escapeHtml(l.linkFallback.url)}</td></tr></table>` +
+        (l.linkFallback.note
+          ? `<p style="margin:12px 0 0;font-family:${FONTS.body};font-size:13px;line-height:1.6;color:${COLORS.muted}">${escapeHtml(l.linkFallback.note)}</p>`
+          : "") +
+        `</td></tr>`,
+    );
+  }
+
+  // 7. Secondary links, clearly separated.
+  if (l.secondary && l.secondary.length > 0) {
+    const links = l.secondary
+      .map(
+        (s) =>
+          `<a href="${escapeHtml(s.url)}" style="color:${COLORS.muted};text-decoration:underline">${escapeHtml(s.label)}</a>`,
+      )
+      .join(`<span style="color:${COLORS.divider}"> &nbsp;·&nbsp; </span>`);
+    rows.push(
+      `<tr><td ${pad} align="center" style="padding-top:16px"><p style="margin:0;font-family:${FONTS.body};font-size:14px;line-height:1.6;color:${COLORS.muted}">${links}</p></td></tr>`,
+    );
+  }
+
+  // 8. Footer under a 2px ink rule: support line, unsubscribe where it
+  //  applies, canonical sentence verbatim.
+  const footerLines = [
+    `<p style="margin:0 0 12px">Questions? Reply to this email and it reaches support.</p>`,
+    ...(l.footerLinks ?? []).map(
+      (f) =>
+        `<p style="margin:0 0 12px"><a href="${escapeHtml(f.url)}" style="color:${COLORS.muted};text-decoration:underline">${escapeHtml(f.label)}</a></p>`,
+    ),
+    `<p style="margin:0">${CANONICAL_SENTENCE}</p>`,
+  ];
+  rows.push(
+    `<tr><td ${pad} style="padding-top:28px;padding-bottom:28px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="border-top:2px solid ${COLORS.ink};padding-top:16px;font-family:${FONTS.body};font-size:13px;line-height:1.6;color:${COLORS.muted}">${footerLines.join("")}</td></tr></table></td></tr>`,
+  );
+
+  return (
+    `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">\n` +
+    `<html xmlns="http://www.w3.org/1999/xhtml" lang="en">\n<head>\n` +
+    `<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />\n` +
+    `<meta name="viewport" content="width=device-width, initial-scale=1" />\n` +
+    `<title>${escapeHtml(l.heading)}</title>\n` +
+    `<style type="text/css">\n` +
+    `body{margin:0;padding:0;background-color:${COLORS.page}}\n` +
+    `@media only screen and (max-width:600px){.th-pad{padding-left:20px !important;padding-right:20px !important}.th-h1{font-size:34px !important}}\n` +
+    `</style>\n</head>\n` +
+    `<body style="margin:0;padding:0;background-color:${COLORS.page}">\n` +
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${COLORS.page}" style="background-color:${COLORS.page}"><tr><td align="center" style="padding:24px 0">\n` +
+    `<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px">\n${rows.join("\n")}\n</table>\n` +
+    `</td></tr></table>\n</body>\n</html>\n`
+  );
+}
 
 /** `account.email_verification.v1` — sent at signup and on resend while the
  * address is unverified. `verifyUrl` is server-built (token is the only
@@ -95,14 +317,20 @@ export function renderEmailVerification(params: {
     `This link expires in ${ttlHours} hours and can be used once. If you did not create a ` +
     `Thingery account, you can ignore this email.\n\n` +
     `— ${CANONICAL_SENTENCE}\n`;
-  const html =
-    `<p>Welcome to Thingery!</p>\n` +
-    `<p>Confirm your email address to make sure marketplace notifications reach you:</p>\n` +
-    `<p><a href="${escapeHtml(verifyUrl)}">Verify your email</a> ` +
-    `(<code>${escapeHtml(verifyUrl)}</code>)</p>\n` +
-    `<p>This link expires in ${ttlHours} hours and can be used once. If you did not create a ` +
-    `Thingery account, you can ignore this email.</p>\n` +
-    `<p style="color:#666;font-size:12px">— ${CANONICAL_SENTENCE}</p>\n`;
+  const html = layoutHtml({
+    tag: "One step left",
+    tone: "normal",
+    heading: "Confirm your email.",
+    paragraph:
+      "Welcome to Thingery! Confirm your email address to make sure marketplace notifications reach you.",
+    origin: safeOrigin(verifyUrl),
+    button: { label: "Verify your email", url: verifyUrl },
+    linkFallback: {
+      lead: "Button not working? Paste this link into your browser:",
+      url: verifyUrl,
+      note: `The link expires in ${ttlHours} hours and works once. If you didn't create an account, ignore this email.`,
+    },
+  });
   return { subject, text, html };
 }
 
@@ -218,23 +446,27 @@ export function subjectSafe(s: string): string {
 
 function orderEmail(o: {
   subject: string;
+  /** Text-version opener (unchanged by the layout work). */
   intro: string;
+  /** Approved-layout parts (THI-1586): status tag + heading + one paragraph. */
+  layout: { tag: string; tone: TagTone; heading: string; paragraph: string };
   facts: OrderFacts;
-  /** Extra context lines after the facts (e.g. tracking code). */
-  details?: string[];
-  /** Closing note (e.g. dispute-window explanation, pay deadline). */
+  /** Extra context rows after the facts (carrier, tracking, reason, outcome). */
+  details?: Array<[string, string]>;
+  /** Closing note (text version; the layout paragraph carries the same info). */
   outro?: string;
 }): RenderedEmail {
   const { intro, facts, details = [], outro } = o;
   const subject = subjectSafe(o.subject);
   // Browse link derives from the (always absolute, server-built) order URL's
   // origin — templates receive trusted input and stay pure functions.
-  const browseUrl = `${new URL(facts.orderUrl).origin}/browse`;
+  const origin = new URL(facts.orderUrl).origin;
+  const browseUrl = `${origin}/browse`;
   const lines = [
     `Item: ${facts.itemTitle}`,
     `Amount: ${formatMoney(facts.amountCents, facts.currency)}`,
     `Order status: ${orderStatusText(facts.orderStatus)}`,
-    ...details,
+    ...details.map(([label, value]) => `${label}: ${value}`),
   ];
   const linkLines = [facts.orderUrl, ...(facts.itemUrl ? [facts.itemUrl] : []), browseUrl];
   const text =
@@ -243,14 +475,21 @@ function orderEmail(o: {
     `\n\n${linkLines.join("\n")}\n` +
     (outro ? `\n${outro}\n` : "\n") +
     `\n— ${CANONICAL_SENTENCE}\n`;
-  const html =
-    `<p>${escapeHtml(intro)}</p>\n` +
-    `<ul>\n${lines.map((l) => `  <li>${escapeHtml(l)}</li>`).join("\n")}\n</ul>\n` +
-    `<p><a href="${escapeHtml(facts.orderUrl)}">Open the order</a> ` +
-    (facts.itemUrl ? `<a href="${escapeHtml(facts.itemUrl)}">View the item</a> ` : "") +
-    `<a href="${escapeHtml(browseUrl)}">Browse</a></p>\n` +
-    (outro ? `<p>${escapeHtml(outro)}</p>\n` : "") +
-    `<p style="color:#666;font-size:12px">— ${CANONICAL_SENTENCE}</p>\n`;
+  const html = layoutHtml({
+    ...o.layout,
+    origin,
+    panelTitle: facts.itemTitle,
+    panelAmount: formatMoney(facts.amountCents, facts.currency),
+    panelRows: [
+      { label: "Order status", value: orderStatusText(facts.orderStatus) },
+      ...details.map(([label, value]) => ({ label, value })),
+    ],
+    button: { label: "Open the order", url: facts.orderUrl },
+    secondary: [
+      ...(facts.itemUrl ? [{ label: "View the item", url: facts.itemUrl }] : []),
+      { label: "Browse", url: browseUrl },
+    ],
+  });
   return { subject, text, html };
 }
 
@@ -290,9 +529,16 @@ function paymentOutro(paymentDeadline?: string): string | undefined {
 }
 
 export function renderBuyerOrderPlaced(p: OrderFacts & { paymentDeadline?: string }): RenderedEmail {
+  const deadline = paymentOutro(p.paymentDeadline);
   return orderEmail({
     subject: `Order placed: ${p.itemTitle} — Thingery`,
     intro: "You placed an order on Thingery. Here are the details:",
+    layout: {
+      tag: "Order placed",
+      tone: "normal",
+      heading: "Your order is placed.",
+      paragraph: deadline ? `Here are the details of your order. ${deadline}` : "Here are the details of your order.",
+    },
     facts: p,
     outro: paymentOutro(p.paymentDeadline),
   });
@@ -302,20 +548,35 @@ export function renderBuyerPaymentDeadlineReminder(p: OrderFacts & { paymentDead
   return orderEmail({
     subject: `Payment deadline soon: ${p.itemTitle} — Thingery`,
     intro: "Your order is still awaiting payment. The deadline is approaching:",
+    layout: {
+      tag: "Payment due",
+      tone: "normal",
+      heading: "Your order awaits payment.",
+      paragraph: paymentOutro(p.paymentDeadline) ?? "Your order is still awaiting payment.",
+    },
     facts: p,
     outro: paymentOutro(p.paymentDeadline),
   });
 }
 
 export function renderBuyerOrderCancelled(p: OrderFacts & { reason: string }): RenderedEmail {
+  // Refund follow-up decided on the RAW reason code (the fan-out contract),
+  // never on the translated display text. (THI-1585)
+  const refundFollows = p.reason.toLowerCase().includes("refund");
   return orderEmail({
     subject: `Order cancelled: ${p.itemTitle} — Thingery`,
     intro: "An order you are part of has been cancelled:",
+    layout: {
+      tag: "Cancelled",
+      tone: "problem",
+      heading: "This order was cancelled.",
+      paragraph:
+        orderReasonText(p.reason) +
+        (refundFollows ? " A refund to your original payment method will follow; no action is needed." : ""),
+    },
     facts: p,
-    details: [`Reason: ${orderReasonText(p.reason)}`],
-    // Refund follow-up decided on the RAW reason code (the fan-out contract),
-    // never on the translated display text. (THI-1585)
-    outro: p.reason.toLowerCase().includes("refund")
+    details: [["Reason", orderReasonText(p.reason)]],
+    outro: refundFollows
       ? "A refund to your original payment method will follow; no action is needed."
       : undefined,
   });
@@ -325,30 +586,54 @@ export function renderBuyerPaymentReceived(p: OrderFacts): RenderedEmail {
   return orderEmail({
     subject: `Payment received: ${p.itemTitle} — Thingery`,
     intro: "Your payment was received. The seller has been notified and will ship the item:",
+    layout: {
+      tag: "Paid",
+      tone: "normal",
+      heading: "Payment received.",
+      paragraph: "The seller has been notified and will ship your item.",
+    },
     facts: p,
   });
 }
 
 export function renderBuyerItemShipped(p: OrderFacts & { carrier?: string; trackingCode?: string }): RenderedEmail {
+  // The shipped paragraph mentions the tracking code only when there is one
+  // (approved shipped design, THI-1584).
+  const tracking = p.trackingCode
+    ? `Tracking code ${p.trackingCode}${p.carrier ? ` via ${p.carrier}` : ""}. `
+    : "";
   return orderEmail({
     subject: `Your item shipped: ${p.itemTitle} — Thingery`,
     intro: "The seller shipped your order:",
+    layout: {
+      tag: "On its way",
+      tone: "normal",
+      heading: "Your order shipped.",
+      paragraph: `${tracking}You can follow the shipment on the order page.`,
+    },
     facts: p,
     details: [
-      ...(p.carrier ? [`Carrier: ${p.carrier}`] : []),
-      ...(p.trackingCode ? [`Tracking code: ${p.trackingCode}`] : []),
+      ...(p.carrier ? ([["Carrier", p.carrier]] as Array<[string, string]>): []),
+      ...(p.trackingCode ? ([["Tracking code", p.trackingCode]] as Array<[string, string]>): []),
     ],
   });
 }
 
 export function renderBuyerOrderDelivered(p: OrderFacts & { disputeWindowHours: number }): RenderedEmail {
+  const disputeNote =
+    `If something is wrong, open a dispute within ${p.disputeWindowHours} hours of delivery ` +
+    `from the order page — after that the sale is final.`;
   return orderEmail({
     subject: `Delivered: ${p.itemTitle} — Thingery`,
     intro: "Your order was marked delivered:",
+    layout: {
+      tag: "Delivered",
+      tone: "normal",
+      heading: "Your order was delivered.",
+      paragraph: disputeNote,
+    },
     facts: p,
-    outro:
-      `If something is wrong, open a dispute within ${p.disputeWindowHours} hours of delivery ` +
-      `from the order page — after that the sale is final.`,
+    outro: disputeNote,
   });
 }
 
@@ -356,8 +641,14 @@ export function renderBuyerRefundInitiated(p: OrderFacts & { reason: string }): 
   return orderEmail({
     subject: `Refund initiated: ${p.itemTitle} — Thingery`,
     intro: "A refund has been initiated for your order:",
+    layout: {
+      tag: "Refund in progress",
+      tone: "info",
+      heading: "A refund is on its way.",
+      paragraph: "The refund is processing; no action is needed.",
+    },
     facts: p,
-    details: [`Reason: ${orderReasonText(p.reason)}`],
+    details: [["Reason", orderReasonText(p.reason)]],
     outro: "The refund is processing; no action is needed.",
   });
 }
@@ -366,6 +657,12 @@ export function renderBuyerRefundConfirmed(p: OrderFacts): RenderedEmail {
   return orderEmail({
     subject: `Refund completed: ${p.itemTitle} — Thingery`,
     intro: "Your refund has completed. The amount returns to your original payment method:",
+    layout: {
+      tag: "Refunded",
+      tone: "info",
+      heading: "Your refund is complete.",
+      paragraph: "The amount returns to your original payment method.",
+    },
     facts: p,
   });
 }
@@ -374,8 +671,14 @@ export function renderBuyerDisputeOutcome(p: OrderFacts & { outcome: string }): 
   return orderEmail({
     subject: `Dispute resolved: ${p.itemTitle} — Thingery`,
     intro: "Your dispute has been resolved:",
+    layout: {
+      tag: "Dispute resolved",
+      tone: "info",
+      heading: "Your dispute has been resolved.",
+      paragraph: "The order page shows the final state of the order.",
+    },
     facts: p,
-    details: [`Outcome: ${disputeOutcomeText(p.outcome)}`],
+    details: [["Outcome", disputeOutcomeText(p.outcome)]],
     outro: "The order page shows the final state of the order.",
   });
 }
@@ -384,6 +687,12 @@ export function renderSellerOffPlatformOrder(p: OrderFacts): RenderedEmail {
   return orderEmail({
     subject: `New order awaiting confirmation: ${p.itemTitle} — Thingery`,
     intro: "A buyer placed an off-platform order for your item and it awaits your confirmation:",
+    layout: {
+      tag: "New order",
+      tone: "normal",
+      heading: "A buyer placed an order.",
+      paragraph: "An off-platform order for your item awaits your confirmation.",
+    },
     facts: p,
   });
 }
@@ -392,20 +701,36 @@ export function renderSellerItemSold(p: OrderFacts): RenderedEmail {
   return orderEmail({
     subject: `Sold: ${p.itemTitle} — Thingery`,
     intro: "Your item sold. Payment was received — time to ship:",
+    layout: {
+      tag: "Sold",
+      tone: "normal",
+      heading: "Your item sold.",
+      paragraph:
+        "Payment was received — time to ship. Record tracking on the order page so the buyer can follow the shipment.",
+    },
     facts: p,
     outro: "Record tracking on the order page so the buyer can follow the shipment.",
   });
 }
 
 export function renderSellerOrderCancelledByBuyer(p: OrderFacts & { reason: string }): RenderedEmail {
+  // Refund follow-up decided on the RAW reason code, never the translated
+  // display text. (THI-1585)
+  const refundFollows = p.reason.toLowerCase().includes("refund");
   return orderEmail({
     subject: `Order cancelled by buyer: ${p.itemTitle} — Thingery`,
     intro: "A buyer cancelled an order for your item:",
+    layout: {
+      tag: "Cancelled",
+      tone: "problem",
+      heading: "This order was cancelled.",
+      paragraph:
+        orderReasonText(p.reason) +
+        (refundFollows ? " A refund to the buyer will follow automatically; no action is needed." : ""),
+    },
     facts: p,
-    details: [`Reason: ${orderReasonText(p.reason)}`],
-    // Refund follow-up decided on the RAW reason code, never the translated
-    // display text. (THI-1585)
-    outro: p.reason.toLowerCase().includes("refund")
+    details: [["Reason", orderReasonText(p.reason)]],
+    outro: refundFollows
       ? "A refund to the buyer will follow automatically; no action is needed."
       : undefined,
   });
@@ -415,6 +740,12 @@ export function renderSellerDisputeOpened(p: OrderFacts): RenderedEmail {
   return orderEmail({
     subject: `Dispute opened: ${p.itemTitle} — Thingery`,
     intro: "The buyer opened a dispute on this order:",
+    layout: {
+      tag: "Dispute opened",
+      tone: "problem",
+      heading: "A dispute was opened.",
+      paragraph: "Open the order page to review the case. Disputes are resolved by Thingery admins.",
+    },
     facts: p,
     outro: "Open the order page to review the case. Disputes are resolved by Thingery admins.",
   });
@@ -424,6 +755,13 @@ export function renderSellerChargeback(p: OrderFacts): RenderedEmail {
   return orderEmail({
     subject: `Chargeback filed: ${p.itemTitle} — Thingery`,
     intro: "A chargeback was filed on this order:",
+    layout: {
+      tag: "Chargeback",
+      tone: "problem",
+      heading: "A chargeback was filed.",
+      paragraph:
+        "Thingery will represent the case with the recorded evidence. No action is needed unless we contact you.",
+    },
     facts: p,
     outro: "Thingery will represent the case with the recorded evidence. No action is needed unless we contact you.",
   });
@@ -433,8 +771,14 @@ export function renderSellerDisputeResolved(p: OrderFacts & { outcome: string })
   return orderEmail({
     subject: `Dispute resolved: ${p.itemTitle} — Thingery`,
     intro: "The dispute on this order has been resolved:",
+    layout: {
+      tag: "Dispute resolved",
+      tone: "info",
+      heading: "The dispute has been resolved.",
+      paragraph: "The order page shows the final state of the order.",
+    },
     facts: p,
-    details: [`Outcome: ${disputeOutcomeText(p.outcome)}`],
+    details: [["Outcome", disputeOutcomeText(p.outcome)]],
   });
 }
 
@@ -442,6 +786,12 @@ export function renderSellerPayoutPaid(p: OrderFacts): RenderedEmail {
   return orderEmail({
     subject: `Payout sent: ${p.itemTitle} — Thingery`,
     intro: "Your payout for this sale was sent to your connected account:",
+    layout: {
+      tag: "Payout sent",
+      tone: "normal",
+      heading: "Your payout was sent.",
+      paragraph: "The payout for this sale was sent to your connected account.",
+    },
     facts: p,
   });
 }
@@ -449,15 +799,22 @@ export function renderSellerPayoutPaid(p: OrderFacts): RenderedEmail {
 // THI-780 PR 3: item/account-level events (plan §6). All orders-class
 // (prefs-gated transactional), PII-free bodies.
 
-/** `seller.payouts_enabled.v1` — account.updated flipped transfers on. */
-export function renderSellerPayoutsEnabled(): RenderedEmail {
+/** `seller.payouts_enabled.v1` — account.updated flipped transfers on.
+ *  `baseUrl` (from the deployment base URL) adds the logo + CTA; without it
+ *  the layout degrades to header + copy (no absolute link can be built). */
+export function renderSellerPayoutsEnabled(baseUrl?: string): RenderedEmail {
   const subject = "Payouts enabled — Thingery";
   const text =
     "Your payout account is set up. Money from your sales can now reach you automatically.\n\n" +
     `— ${CANONICAL_SENTENCE}\n`;
-  const html =
-    "<p>Your payout account is set up. Money from your sales can now reach you automatically.</p>\n" +
-    `<p style="color:#666;font-size:12px">— ${CANONICAL_SENTENCE}</p>\n`;
+  const html = layoutHtml({
+    tag: "Payouts ready",
+    tone: "normal",
+    heading: "Payouts are set up.",
+    paragraph: "Money from your sales can now reach you automatically.",
+    origin: baseUrl ?? "",
+    button: baseUrl ? { label: "Open Thingery", url: baseUrl } : undefined,
+  });
   return { subject, text, html };
 }
 
@@ -474,6 +831,12 @@ export function renderSellerDeadlineWarning(p: OrderFacts & { kind: "stale_sale"
         ? `Action needed: ship your sale — ${p.itemTitle} — Thingery`
         : `Shipping stalled: ${p.itemTitle} — Thingery`,
     intro,
+    layout: {
+      tag: "Action needed",
+      tone: "problem",
+      heading: p.kind === "stale_sale" ? "Ship your sale." : "Your shipment has stalled.",
+      paragraph: intro,
+    },
     facts: p,
   });
 }
@@ -481,19 +844,23 @@ export function renderSellerDeadlineWarning(p: OrderFacts & { kind: "stale_sale"
 /** `seller.item_taken_down.v1` — moderation removed a listing. */
 export function renderSellerItemTakenDown(p: { itemTitle: string; itemUrl: string; reason: string }): RenderedEmail {
   const subject = subjectSafe(`Listing removed: ${p.itemTitle} — Thingery`);
-  const lines = [`Item: ${p.itemTitle}`, `Reason: ${p.reason}`];
   const text =
     "A moderator removed your listing from Thingery:\n\n" +
-    lines.join("\n") +
-    `\n\n${p.itemUrl}\n\n` +
+    `Item: ${p.itemTitle}\nReason: ${p.reason}\n` +
+    `\n${p.itemUrl}\n\n` +
     `If you believe this was a mistake, contact the marketplace operators.\n\n` +
     `— ${CANONICAL_SENTENCE}\n`;
-  const html =
-    "<p>A moderator removed your listing from Thingery:</p>\n" +
-    `<ul>\n${lines.map((l) => `  <li>${escapeHtml(l)}</li>`).join("\n")}\n</ul>\n` +
-    `<p><a href="${escapeHtml(p.itemUrl)}">View the item</a></p>\n` +
-    `<p>If you believe this was a mistake, contact the marketplace operators.</p>\n` +
-    `<p style="color:#666;font-size:12px">— ${CANONICAL_SENTENCE}</p>\n`;
+  const html = layoutHtml({
+    tag: "Listing removed",
+    tone: "problem",
+    heading: "Your listing was removed.",
+    paragraph:
+      "A moderator removed your listing from Thingery. If you believe this was a mistake, contact the marketplace operators.",
+    origin: safeOrigin(p.itemUrl),
+    panelTitle: p.itemTitle,
+    panelRows: [{ label: "Reason", value: p.reason }],
+    button: { label: "View the item", url: p.itemUrl },
+  });
   return { subject, text, html };
 }
 
@@ -501,19 +868,23 @@ export function renderSellerItemTakenDown(p: { itemTitle: string; itemUrl: strin
  *  (order-reviews spec PR 3). */
 export function renderBuyerReviewHidden(p: { itemTitle: string; sellerUrl: string; reason: string }): RenderedEmail {
   const subject = subjectSafe(`Review removed: ${p.itemTitle} — Thingery`);
-  const lines = [`Item: ${p.itemTitle}`, `Reason: ${p.reason}`];
   const text =
     "A moderator removed your review from Thingery:\n\n" +
-    lines.join("\n") +
-    `\n\n${p.sellerUrl}\n\n` +
+    `Item: ${p.itemTitle}\nReason: ${p.reason}\n` +
+    `\n${p.sellerUrl}\n\n` +
     `If you believe this was a mistake, contact the marketplace operators.\n\n` +
     `— ${CANONICAL_SENTENCE}\n`;
-  const html =
-    "<p>A moderator removed your review from Thingery:</p>\n" +
-    `<ul>\n${lines.map((l) => `  <li>${escapeHtml(l)}</li>`).join("\n")}\n</ul>\n` +
-    `<p><a href="${escapeHtml(p.sellerUrl)}">View the seller page</a></p>\n` +
-    "<p>If you believe this was a mistake, contact the marketplace operators.</p>\n" +
-    `<p style="color:#666;font-size:12px">— ${CANONICAL_SENTENCE}</p>\n`;
+  const html = layoutHtml({
+    tag: "Review removed",
+    tone: "problem",
+    heading: "Your review was removed.",
+    paragraph:
+      "A moderator removed your review from Thingery. If you believe this was a mistake, contact the marketplace operators.",
+    origin: safeOrigin(p.sellerUrl),
+    panelTitle: p.itemTitle,
+    panelRows: [{ label: "Reason", value: p.reason }],
+    button: { label: "View the seller page", url: p.sellerUrl },
+  });
   return { subject, text, html };
 }
 
@@ -600,7 +971,7 @@ export function renderOrderEmail(
       return renderSellerPayoutPaid(facts);
     // THI-780 PR 3: item/account-level events.
     case "seller.payouts_enabled":
-      return renderSellerPayoutsEnabled();
+      return renderSellerPayoutsEnabled(baseUrl);
     case "seller.stale_sale_warning":
       return renderSellerDeadlineWarning({ ...facts, kind: "stale_sale" });
     case "seller.stuck_transit_warning":

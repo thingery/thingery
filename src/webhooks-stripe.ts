@@ -52,6 +52,25 @@ export function stripeWebhookRouter(cfg: OrderFlowConfig = orderFlowConfig()): R
   return router;
 }
 
+/** THI-1681: Accounts v2 event-destination endpoint. v2 thin notifications
+ *  (capability_status_updated — the payout-ready flip for v2 recipient
+ *  accounts) arrive ONLY through an event destination; they never hit the
+ *  v1 endpoints above. Same raw-body + verify→store→process→mark protocol,
+ *  with the SDK's v2 parseEventNotification (its own destination secret)
+ *  and the full account fetched via fetchRelatedObject (thin payloads
+ *  carry ids only, F6-friendly: we store ids and statuses, never PII). */
+export function stripeV2WebhookRouter(cfg: OrderFlowConfig = orderFlowConfig()): Router {
+  const router = express.Router();
+  router.post(
+    "/api/webhooks/stripe-v2",
+    express.raw({ type: "application/json", limit: "512kb" }),
+    (req, res) => {
+      void handleStripeV2Webhook(req, res, cfg);
+    },
+  );
+  return router;
+}
+
 async function handleStripeWebhook(req: Request, res: Response, cfg: OrderFlowConfig): Promise<void> {
   // THI-64 V1 fix: this handler is void-mounted, so a rejection escaping the
   // body would be an unhandled rejection — Node >= 15 crashes the whole
@@ -212,6 +231,212 @@ async function ingestStripeWebhook(
   } finally {
     db.release();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Accounts v2 event destination (THI-1681)
+
+/** Shared onboarding-flip writer for BOTH account generations: the v1
+ *  account.updated handler and the v2 capability_status_updated handler.
+ *  Active → NULL→set flip (one badge per Stripe account, idempotent under
+ *  redelivery, THI-780 PR 3); not-active → reset (re-off). F5 known-account
+ *  guard is inherent: unknown ids match no rows. */
+async function flipSellerOnboarding(db: PoolClient, accountId: string, active: boolean): Promise<void> {
+  const flipped = await db.query<{ id: string; email: string | null }>(
+    `UPDATE sellers SET stripe_onboarded_at = $2
+      WHERE stripe_account_id = $1 AND $2::timestamptz IS NOT NULL AND stripe_onboarded_at IS NULL
+      RETURNING id, email`,
+    [accountId, active ? new Date() : null],
+  );
+  if (!active) {
+    await db.query(
+      "UPDATE sellers SET stripe_onboarded_at = NULL WHERE stripe_account_id = $1",
+      [accountId],
+    );
+    return;
+  }
+  if (flipped.rows[0]) {
+    await planAccountNotification({
+      recipientId: flipped.rows[0].id,
+      toEmail: flipped.rows[0].email,
+      eventType: "seller.payouts_enabled",
+      role: "seller",
+      subject: "Payouts enabled — Thingery",
+      payload: {},
+      dedupeKey: `payouts_enabled:${accountId}`,
+      client: db,
+    });
+  }
+}
+
+async function handleStripeV2Webhook(req: Request, res: Response, cfg: OrderFlowConfig): Promise<void> {
+  // Same void-mount barrier as the v1 handler (THI-64): log, best-effort
+  // mark, 500 — Stripe redelivers.
+  let eventId: string | null = null;
+  try {
+    await ingestStripeV2Webhook(req, res, cfg, (id) => (eventId = id));
+  } catch (err) {
+    console.error("[webhooks:stripe-v2] ingest failed:", (err as Error).message);
+    if (eventId) {
+      await pool
+        .query(
+          "UPDATE webhook_events SET process_error = $2 WHERE source = 'stripe' AND external_id = $1 AND processed_at IS NULL",
+          [eventId, `ingest failed: ${(err as Error).message}`.slice(0, 500)],
+        )
+        .catch(() => undefined);
+    }
+    if (!res.headersSent) res.status(500).json({ error: "processing failed" });
+  }
+}
+
+async function ingestStripeV2Webhook(
+  req: Request,
+  res: Response,
+  cfg: OrderFlowConfig,
+  onEventId: (id: string) => void,
+): Promise<void> {
+  if (!cfg.stripePaymentsEnabled || !cfg.stripeEventDestinationSecret) {
+    // Fail-closed 503 stub (F1 posture): key or destination secret unset.
+    res.status(503).json({ error: "stripe v2 webhook not configured" });
+    return;
+  }
+
+  // F12: non-JSON content-type, empty body → 400 before anything is written.
+  const contentType = String(req.headers["content-type"] ?? "");
+  if (!contentType.includes("application/json") || !Buffer.isBuffer(req.body) || req.body.length === 0) {
+    res.status(400).json({ error: "expected application/json body" });
+    return;
+  }
+
+  const stripe = getStripe();
+  const signature = req.headers["stripe-signature"];
+  if (!stripe || typeof signature !== "string") {
+    res.status(400).json({ error: "missing or invalid signature header" });
+    return;
+  }
+
+  // F13 pattern: the destination's current secret, then the rotation twin —
+  // every attempt is the SDK's timing-safe v2 parseEventNotification; the
+  // first success wins; all-fail → 400 and nothing is written (F12).
+  const candidateSecrets = (
+    [
+      ["STRIPE_EVENT_DESTINATION_SECRET", cfg.stripeEventDestinationSecret],
+      ["STRIPE_EVENT_DESTINATION_SECRET_PREVIOUS", cfg.stripeEventDestinationSecretPrevious],
+    ] as Array<[name: string, secret: string | undefined]>
+  ).filter((entry): entry is [string, string] => entry[1] !== undefined);
+
+  let notif: Stripe.V2.Core.EventNotification | null = null;
+  for (const [name, secret] of candidateSecrets) {
+    try {
+      notif = stripe.parseEventNotification(req.body, signature, secret);
+      if (name.endsWith("_PREVIOUS")) {
+        console.warn(`[webhooks:stripe-v2] verified with ${name} — finish the rotation`);
+      }
+      break;
+    } catch {
+      /* try the next configured secret; all-fail → 400 below */
+    }
+  }
+
+  if (!notif) {
+    res.status(400).json({ error: "signature verification failed" });
+    return;
+  }
+
+  // F6 REDACT at ingest: ids, type, mode only. Thin v2 notifications carry
+  // no PII to begin with; we never store more than ids and statuses.
+  const externalId = `v2:${notif.id}`; // distinct namespace from v1 evt_ ids
+  onEventId(externalId);
+  // related_object sits on the notification payload for v2 events; some v1
+  // variants of the union omit it — read it defensively.
+  const relatedObject = (
+    notif as { related_object?: { id?: string; type?: string } | null }
+  ).related_object;
+  const payload = {
+    id: notif.id,
+    type: notif.type,
+    livemode: notif.livemode,
+    object_id: relatedObject?.id ?? null,
+    object_type: relatedObject?.type ?? null,
+  };
+
+  // F5 acceptance: a test-mode event must never touch live rows (§6.7).
+  if (notif.livemode !== (cfg.stripeMode === "live")) {
+    await pool.query(
+      `INSERT INTO webhook_events (source, external_id, payload, process_error)
+       VALUES ('stripe', $1, $2::jsonb, $3) ON CONFLICT (source, external_id) DO NOTHING`,
+      [externalId, JSON.stringify(payload), "rejected: livemode mismatch"],
+    );
+    res.status(200).json({ received: true, rejected: "livemode mismatch" });
+    return;
+  }
+
+  // Verify → store: UNIQUE conflict means already seen → 200, no reprocessing.
+  const stored = await pool.query<{ id: string }>(
+    `INSERT INTO webhook_events (source, external_id, payload)
+     VALUES ('stripe', $1, $2::jsonb) ON CONFLICT (source, external_id) DO NOTHING RETURNING id`,
+    [externalId, JSON.stringify(payload)],
+  );
+  const storedId = stored.rows[0]?.id;
+  if (!storedId) {
+    res.status(200).json({ received: true, duplicate: true });
+    return;
+  }
+
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    try {
+      await processStripeV2Notification(notif, db);
+      await db.query("UPDATE webhook_events SET processed_at = now() WHERE id = $1", [storedId]);
+      await db.query("COMMIT");
+      res.status(200).json({ received: true });
+    } catch (err) {
+      if (err instanceof WebhookRejectError) {
+        await db.query("UPDATE webhook_events SET processed_at = now(), process_error = $2 WHERE id = $1", [
+          storedId,
+          `rejected: ${err.message}`.slice(0, 500),
+        ]);
+        await db.query("COMMIT");
+        res.status(200).json({ received: true, rejected: err.message });
+        return;
+      }
+      throw err;
+    }
+  } catch (err) {
+    await db.query("ROLLBACK").catch(() => undefined);
+    // Retry-safe: record the failure so sweep rule 6 can reprocess; 500
+    // tells Stripe to redeliver.
+    await pool
+      .query("UPDATE webhook_events SET process_error = $2 WHERE id = $1", [storedId, (err as Error).message.slice(0, 500)])
+      .catch(() => undefined);
+    res.status(500).json({ error: "processing failed" });
+  } finally {
+    db.release();
+  }
+}
+
+/** v2 thin notifications: the delivery proves the event happened; the
+ *  fetchRelatedObject round-trip is the source of truth. Only the recipient
+ *  capability event matters here — stripe_balance.stripe_transfers reaching
+ *  `active` is exactly "the seller can receive payouts" (mirror of the v1
+ *  capabilities.transfers check). */
+async function processStripeV2Notification(notif: Stripe.V2.Core.EventNotification, db: PoolClient): Promise<void> {
+  if (notif.type !== "v2.core.account[configuration.recipient].capability_status_updated") return;
+  const account = (await notif.fetchRelatedObject()) as
+    | {
+        id?: string;
+        configuration?: {
+          recipient?: {
+            capabilities?: { stripe_balance?: { stripe_transfers?: { status?: string } } };
+          };
+        };
+      }
+    | null;
+  if (!account?.id) throw new WebhookRejectError("capability event without a related account");
+  const active =
+    account.configuration?.recipient?.capabilities?.stripe_balance?.stripe_transfers?.status === "active";
+  await flipSellerOnboarding(db, account.id, active);
 }
 
 // ---------------------------------------------------------------------------
@@ -444,36 +669,11 @@ export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cf
     }
     case "account.updated": {
       const account = object as unknown as Stripe.Account & { capabilities?: { transfers?: string } };
-      const transfers = account.capabilities?.transfers === "active";
       // F5: known connected accounts only — unknown ids change nothing.
       // THI-780 PR 3: badge the seller exactly once per Stripe account on the
       // NULL→set flip (plan §5): re-off cycles never re-badge, and the
       // notification is idempotent under webhook redelivery.
-      const flipped = await db.query<{ id: string; email: string | null }>(
-        `UPDATE sellers SET stripe_onboarded_at = $2
-          WHERE stripe_account_id = $1 AND $2::timestamptz IS NOT NULL AND stripe_onboarded_at IS NULL
-          RETURNING id, email`,
-        [account.id, transfers ? new Date() : null],
-      );
-      if (!transfers) {
-        await db.query(
-          "UPDATE sellers SET stripe_onboarded_at = NULL WHERE stripe_account_id = $1",
-          [account.id],
-        );
-        return;
-      }
-      if (flipped.rows[0]) {
-        await planAccountNotification({
-          recipientId: flipped.rows[0].id,
-          toEmail: flipped.rows[0].email,
-          eventType: "seller.payouts_enabled",
-          role: "seller",
-          subject: "Payouts enabled — Thingery",
-          payload: {},
-          dedupeKey: `payouts_enabled:${account.id}`,
-          client: db,
-        });
-      }
+      await flipSellerOnboarding(db, account.id, account.capabilities?.transfers === "active");
       return;
     }
     case "charge.dispute.created": {

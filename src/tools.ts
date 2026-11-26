@@ -30,7 +30,7 @@ import {
   type AccountAddressRow,
 } from "./addresses.js";
 import { CountryCodeError, isIsoCountryCode, normalizeCountryCode } from "./countries.js";
-import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, payoutSetupLimiter, stripeConfigured } from "./stripe.js";
+import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, payoutSetupLimiter, PayoutSetupEmailRequiredError, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
 import { cancelOrder, createOrder, getOrderView, listOrdersForAccount, MAX_ORDER_LIST_LIMIT, ORDER_ROLES, OrderFlowError, shareShippingAddress, shippingAddressConsent, shippingAddressForSeller, shippingVerificationFor, type OrderRole } from "./order-flow.js";
 import { ORDER_STATUSES, type OrderStatus } from "./orders.js";
@@ -1604,6 +1604,16 @@ export function registerTools(
                 "The link is single-use; call get_payout_setup again for a fresh one.",
         });
       } catch (e) {
+        // THI-1681: v2 recipient accounts require a Stripe contact_email — a
+        // recoverable seller-side gap, surfaced as its own code (add an email,
+        // then retry) rather than a generic failure.
+        if (e instanceof PayoutSetupEmailRequiredError) {
+          return err(
+            "Your account has no email address — payout setup needs one (Stripe requires a contact email on payout accounts). " +
+              "Set your email (signup/settings) and call get_payout_setup again.",
+            "email_required",
+          );
+        }
         return err(`get_payout_setup failed: ${describeError(e)}`);
       }
     },

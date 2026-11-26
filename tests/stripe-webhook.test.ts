@@ -11,10 +11,10 @@ import net from "node:net";
 import pg from "pg";
 import type Stripe from "stripe";
 import StripeCtor from "stripe";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { setStripeForTests } from "../src/stripe.js";
 import { pool } from "../src/db.js";
-import { stripeWebhookRouter } from "../src/webhooks-stripe.js";
+import { stripeWebhookRouter, stripeV2WebhookRouter } from "../src/webhooks-stripe.js";
 import { createOrder } from "../src/order-flow.js";
 import { applyTransition, type OrderRow } from "../src/orders.js";
 import type { OrderFlowConfig } from "../src/config.js";
@@ -682,5 +682,276 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     const we = await db.query("SELECT payload::text AS p FROM webhook_events WHERE external_id = $1", [ev.id]);
     expect(we.rows[0].p).not.toContain("buyer@example.com");
     expect(we.rows[0].p).not.toContain("Privy");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THI-1681: Accounts v2 event-destination endpoint (/api/webhooks/stripe-v2).
+// v2 capability notifications never arrive on the v1 endpoints — this is the
+// payout-ready path for v2 recipient accounts. The SDK's parseEventNotification
+// is faked at the client boundary (real signature crypto is Stripe SDK
+// territory); everything OUR code owns — secret order + rotation twins, F5
+// livemode, F6 redaction, dedupe/replay safety, the flip itself — is exercised
+// for real against Postgres.
+describe.skipIf(!available)("Stripe v2 event-destination webhook (HTTP, THI-1681)", () => {
+  const DEST_SECRET = "whsec_dest_secret";
+  const DEST_PREVIOUS = "whsec_dest_old_secret";
+  let db: pg.Client;
+  let server: Server;
+  let port = 0;
+  let n = 0;
+
+  /** Notification the way the SDK's parse returns it: thin, ids only, plus a
+   *  fetchRelatedObject that returns the account's CURRENT state. */
+  function notification(
+    acctId: string,
+    transfersStatus: string,
+    id = `evt_v2_${Math.random().toString(36).slice(2, 10)}`,
+    livemode = false,
+    type = "v2.core.account[configuration.recipient].capability_status_updated",
+  ) {
+    return {
+      id,
+      type,
+      livemode,
+      created: "2026-11-26T00:00:00Z",
+      related_object: { id: acctId, type: "v2.core.account", url: `https://api.test/${acctId}` },
+      fetchRelatedObject: async () => ({
+        id: acctId,
+        object: "v2.core.account",
+        configuration: { recipient: { capabilities: { stripe_balance: { stripe_transfers: { status: transfersStatus } } } } },
+      }),
+    };
+  }
+
+  function fakeV2Stripe(acceptSecret: string, notif: ReturnType<typeof notification>): Stripe {
+    return {
+      parseEventNotification: ((_payload: unknown, _sig: unknown, secret: string) => {
+        if (secret !== acceptSecret) throw new Error("signature verification failed");
+        return notif;
+      }) as unknown as Stripe["parseEventNotification"],
+    } as unknown as Stripe;
+  }
+
+  function buildV2App(opts: { acceptSecret?: string; withSecret?: boolean; notif?: ReturnType<typeof notification> } = {}): express.Express {
+    const app = express();
+    const withSecret = opts.withSecret ?? true;
+    const cfg = {
+      stripePaymentsEnabled: true, stripeMode: "test",
+      stripeEventDestinationSecret: withSecret ? DEST_SECRET : undefined,
+      stripeEventDestinationSecretPrevious: withSecret ? DEST_PREVIOUS : undefined,
+    } as unknown as OrderFlowConfig;
+    setStripeForTests(fakeV2Stripe(opts.acceptSecret ?? DEST_SECRET, opts.notif ?? notification("acct_none", "inactive")));
+    app.use(stripeV2WebhookRouter(cfg));
+    return app;
+  }
+
+  async function postV2(app: express.Express, body: string): Promise<{ status: number; json: Record<string, unknown> }> {
+    const res = await fetch(`http://127.0.0.1:${port}/api/webhooks/stripe-v2`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Stripe-Signature": "t=1,v1=fake" },
+      body: Buffer.from(body, "utf8"),
+    });
+    return { status: res.status, json: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+  }
+
+  async function seedSellerWithAccount(acctId: string, onboarded = false): Promise<string> {
+    n += 1;
+    const s = `v2s${n}`;
+    await db.query("INSERT INTO sellers (api_key_hash, display_name, email, stripe_account_id, stripe_onboarded_at) VALUES ($1,$2,$3,$4,$5)", [
+      `thg_${s}`, s, `${s}@t.dev`, acctId, onboarded ? new Date() : null,
+    ]);
+    return (await db.query<{ id: string }>("SELECT id FROM sellers WHERE api_key_hash = $1", [`thg_${s}`])).rows[0].id;
+  }
+
+  beforeAll(async () => {
+    db = new pg.Client({ connectionString });
+    await db.connect();
+    await db.query(readFileSync(schemaPath, "utf8"));
+  });
+  afterAll(async () => {
+    await db.end();
+  });
+  beforeEach(async () => {
+    await db.query("TRUNCATE order_events, webhook_events, orders, items, sellers, email_outbox, notifications RESTART IDENTITY CASCADE");
+    delete process.env.STRIPE_SECRET_KEY;
+    const app = buildV2App();
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+  });
+  afterEach(async () => {
+    server.close();
+    setStripeForTests(null);
+  });
+
+  it("happy path: capability_status_updated active flips stripe_onboarded_at and badges the seller exactly once", async () => {
+    const acct = `acct_v2_happy_${n0}`;
+    const sellerPk = await seedSellerWithAccount(acct);
+    const notif = notification(acct, "active");
+    const app = buildV2App({ notif });
+    await new Promise<void>((resolve) => {
+      server.close();
+      server = app.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+    const r = await postV2(app, JSON.stringify({ id: notif.id, type: notif.type }));
+    expect(r.status).toBe(200);
+    expect(r.json).toEqual({ received: true });
+    const set = await db.query("SELECT stripe_onboarded_at IS NOT NULL AS ok FROM sellers WHERE id = $1", [sellerPk]);
+    expect(set.rows[0].ok).toBe(true);
+    const notified = await db.query("SELECT count(*)::int AS c FROM notifications WHERE event_type = 'seller.payouts_enabled'");
+    expect(notified.rows[0].c).toBe(1);
+    const we = await db.query("SELECT processed_at, payload FROM webhook_events WHERE external_id = $1", [`v2:${notif.id}`]);
+    expect(we.rows[0].processed_at).not.toBeNull();
+    expect(we.rows[0].payload).toMatchObject({ type: notif.type, object_id: acct, object_type: "v2.core.account" });
+  });
+
+  it("replay-safe: a redelivered notification is a dedupe 200 with no second badge", async () => {
+    const acct = `acct_v2_replay_${n0}`;
+    const sellerPk = await seedSellerWithAccount(acct);
+    const notif = notification(acct, "active");
+    const app = buildV2App({ notif });
+    await new Promise<void>((resolve) => {
+      server.close();
+      server = app.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+    await postV2(app, JSON.stringify({ id: notif.id }));
+    const r2 = await postV2(app, JSON.stringify({ id: notif.id }));
+    expect(r2.status).toBe(200);
+    expect(r2.json).toEqual({ received: true, duplicate: true });
+    const badges = await db.query("SELECT count(*)::int AS c FROM notifications WHERE event_type = 'seller.payouts_enabled'");
+    expect(badges.rows[0].c).toBe(1);
+    const seller = await db.query("SELECT stripe_onboarded_at IS NOT NULL AS ok FROM sellers WHERE id = $1", [sellerPk]);
+    expect(seller.rows[0].ok).toBe(true);
+  });
+
+  it("not-active status clears stripe_onboarded_at (re-off mirror of the v1 path); unknown accounts change nothing (F5)", async () => {
+    const acct = `acct_v2_reoff_${n0}`;
+    const sellerPk = await seedSellerWithAccount(acct, true); // pre-onboarded
+    const notif = notification(acct, "restricted");
+    const app = buildV2App({ notif });
+    await new Promise<void>((resolve) => {
+      server.close();
+      server = app.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+    const r = await postV2(app, JSON.stringify({ id: notif.id }));
+    expect(r.status).toBe(200);
+    const cleared = await db.query("SELECT stripe_onboarded_at IS NULL AS ok FROM sellers WHERE id = $1", [sellerPk]);
+    expect(cleared.rows[0].ok).toBe(true);
+
+    const stranger = notification("acct_v2_stranger", "active");
+    const app2 = buildV2App({ notif: stranger });
+    await new Promise<void>((resolve) => {
+      server.close();
+      server = app2.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+    const r2 = await postV2(app2, JSON.stringify({ id: stranger.id }));
+    expect(r2.status).toBe(200);
+    const unchanged = await db.query("SELECT count(*)::int AS c FROM sellers WHERE stripe_onboarded_at IS NOT NULL");
+    expect(unchanged.rows[0].c).toBe(0);
+  });
+
+  it("wrong destination secret → 400, nothing written (F12)", async () => {
+    const acct = `acct_v2_badsig_${n0}`;
+    await seedSellerWithAccount(acct);
+    const notif = notification(acct, "active");
+    const app = buildV2App({ acceptSecret: "whsec_totally_different", notif });
+    await new Promise<void>((resolve) => {
+      server.close();
+      server = app.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+    const r = await postV2(app, JSON.stringify({ id: notif.id }));
+    expect(r.status).toBe(400);
+    expect(r.json).toEqual({ error: "signature verification failed" });
+    const rows = await db.query("SELECT count(*)::int AS c FROM webhook_events");
+    expect(rows.rows[0].c).toBe(0);
+  });
+
+  it("accepts the destination PREVIOUS secret during rotation (F13)", async () => {
+    const acct = `acct_v2_rot_${n0}`;
+    const sellerPk = await seedSellerWithAccount(acct);
+    const notif = notification(acct, "active");
+    const app = buildV2App({ acceptSecret: DEST_PREVIOUS, notif });
+    await new Promise<void>((resolve) => {
+      server.close();
+      server = app.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+    const r = await postV2(app, JSON.stringify({ id: notif.id }));
+    expect(r.status).toBe(200);
+    const set = await db.query("SELECT stripe_onboarded_at IS NOT NULL AS ok FROM sellers WHERE id = $1", [sellerPk]);
+    expect(set.rows[0].ok).toBe(true);
+  });
+
+  it("livemode mismatch → rejected 200, never touches test rows (F5)", async () => {
+    const acct = `acct_v2_live_${n0}`;
+    await seedSellerWithAccount(acct);
+    const notif = notification(acct, "active", `evt_v2_live_${n0}`, true);
+    const app = buildV2App({ notif });
+    await new Promise<void>((resolve) => {
+      server.close();
+      server = app.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+    const r = await postV2(app, JSON.stringify({ id: notif.id }));
+    expect(r.status).toBe(200);
+    expect(r.json).toEqual({ received: true, rejected: "livemode mismatch" });
+    const rows = await db.query("SELECT count(*)::int AS c FROM sellers WHERE stripe_onboarded_at IS NOT NULL");
+    expect(rows.rows[0].c).toBe(0);
+  });
+
+  it("unset destination secret → fail-closed 503 stub (F1 posture)", async () => {
+    const app = buildV2App({ withSecret: false });
+    await new Promise<void>((resolve) => {
+      server.close();
+      server = app.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+    const r = await postV2(app, JSON.stringify({ id: "evt_v2_any" }));
+    expect(r.status).toBe(503);
+    expect(r.json).toEqual({ error: "stripe v2 webhook not configured" });
+  });
+
+  it("unrelated v2 notification types are stored + acked, no state change", async () => {
+    const notif = notification("acct_v2_other", "active", `evt_v2_ping_${n0}`, false, "v2.core.event_destination.ping");
+    const app = buildV2App({ notif });
+    await new Promise<void>((resolve) => {
+      server.close();
+      server = app.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+    const r = await postV2(app, JSON.stringify({ id: notif.id, type: notif.type }));
+    expect(r.status).toBe(200);
+    expect(r.json).toEqual({ received: true });
+    const rows = await db.query("SELECT count(*)::int AS c FROM sellers WHERE stripe_onboarded_at IS NOT NULL");
+    expect(rows.rows[0].c).toBe(0);
+    const we = await db.query("SELECT count(*)::int AS c FROM webhook_events WHERE external_id = $1", [`v2:${notif.id}`]);
+    expect(we.rows[0].c).toBe(1);
   });
 });

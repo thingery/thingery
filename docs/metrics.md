@@ -98,11 +98,17 @@ substring list. **Never collected for views:** full referrer URLs, arbitrary
 query strings beyond the five utm params, viewer identity or IPs — not even
 the owner flag resolves to a logged seller UUID.
 
-Storage: container stdout → Docker `json-file` driver, rotation `max-size:
-10m`, `max-file: 3` per service (docker-compose.prod.yml, THI-312) — raw lines
-are transient and are not part of offsite backups. The daily snapshot files
-store aggregate counts only (no identifiers). Retention of snapshots:
-manual/undefined — they are a handful of KB per day; clean up when stale.
+Storage (THI-312, THI-1330, THI-1730): the app writes stdout to the **host
+journal** — compose `logging: driver: journald`, `tag: thingery-app` — because
+json-file is per-container and every deploy recreate starts an empty file
+(wiping log-based metrics and forensics). Read it with `journalctl -t
+thingery-app`; entries survive recreations and the journal vacuums itself at
+`SystemMaxUse=200M` (/etc/systemd/journald.conf.d, docs/deploy-vps.md §7).
+`db` and `caddy` keep the Docker `json-file` driver, rotation `max-size: 10m`,
+`max-file: 3`. Raw lines are transient and are not part of offsite backups.
+The daily snapshot files store aggregate counts only (no identifiers).
+Retention of snapshots: manual/undefined — they are a handful of KB per day;
+clean up when stale.
 
 ## Definitions (the weekly report)
 
@@ -111,10 +117,10 @@ Reported per ISO week (UTC), produced by the weekly metrics routine:
 | Metric | Definition | Source |
 |---|---|---|
 | `installs_7d` / `installs_total` | OAuth grants created in the window / live grants ever (user × connected app) | `oauth_grants` |
-| `activated_users_7d` | Distinct `sellerId`s (and/or anon IPs absent) with ≥ 1 `tool_call` line in the window | docker logs |
-| `repeat_users_7d` | Distinct `sellerId`s with `tool_call` lines on ≥ 2 distinct UTC days in the window | docker logs |
-| `anon_calls_7d` | `tool_call` lines with `credential: "none"` (public reads — search-driven interest) | docker logs |
-| `calls_by_tool_7d` | `tool_call` count grouped by `tool` (which tools do agents actually reach for) | docker logs |
+| `activated_users_7d` | Distinct `sellerId`s (and/or anon IPs absent) with ≥ 1 `tool_call` line in the window | app journal (`journalctl -t thingery-app`) |
+| `repeat_users_7d` | Distinct `sellerId`s with `tool_call` lines on ≥ 2 distinct UTC days in the window | app journal |
+| `anon_calls_7d` | `tool_call` lines with `credential: "none"` (public reads — search-driven interest) | app journal |
+| `calls_by_tool_7d` | `tool_call` count grouped by `tool` (which tools do agents actually reach for) | app journal |
 | `first_call_latency` | Median hours from a seller's earliest `oauth_grants.created_at` to their first `tool_call` line | logs + SQL |
 | `first_listing_within_7d` | Sellers whose first item was created ≤ 7d after their first `tool_call` | logs + SQL |
 | `npm_downloads_7d` | `thingery` npm package downloads | public npm API |
@@ -122,7 +128,17 @@ Reported per ISO week (UTC), produced by the weekly metrics routine:
 
 ## Collecting the numbers
 
-**1. Tool-call lines from the app container** (Caddy/Docker capture, 7-day window):
+**1. Tool-call lines from the app** (host journal — survives deploy recreates,
+7-day window; THI-1330/THI-1730). Note journalctl's relative `--since` needs
+the leading dash (`-168h`; plain `168h` fails to parse), unlike docker's:
+
+```bash
+journalctl -t thingery-app -o cat --since "-168h" 2>/dev/null \
+  | grep '"type":"tool_call"' > /tmp/tool_calls.jsonl
+```
+
+Deployments still on the json-file driver (no journald override yet) read the
+per-container log instead — history resets on every recreate:
 
 ```bash
 docker compose logs --since 168h app 2>/dev/null \

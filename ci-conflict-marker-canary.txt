@@ -1,0 +1,8 @@
+THI-1659 verified-negative canary: this file MUST fail the tracked-tree-guard CI job.
+Delete with the PR; never merge.
+
+<<<<<<< HEAD
+intended-side-a
+=======
+intended-side-b
+>>>>>>> test-canary

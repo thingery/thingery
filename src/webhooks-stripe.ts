@@ -7,9 +7,12 @@
 //
 // Protocol (§5.4, webhook idempotency lens):
 //   verify → store → process → mark, in that order:
-//   1. constructEvent (timing-safe, 5-min tolerance) — current secret, then
-//      STRIPE_WEBHOOK_SECRET_PREVIOUS during rotation (F13). Bad signature,
-//      non-JSON body, empty body → 400, never a crash, never a write (F12).
+//   1. constructEvent (timing-safe, 5-min tolerance) — tried against each
+//      configured secret in a fixed order (THI-1611 A1): platform endpoint
+//      secret STRIPE_WEBHOOK_SECRET, then the 'Connected accounts'-scoped
+//      STRIPE_CONNECT_WEBHOOK_SECRET, then the STRIPE_*_PREVIOUS rotation
+//      twins (F13). Bad signature, non-JSON body, empty body → 400, never a
+//      crash, never a write (F12).
 //   2. Insert into webhook_events (source='stripe', external_id UNIQUE,
 //      REDACTED payload, F6) — UNIQUE conflict = already seen → 200, no
 //      reprocessing (replay-safe).
@@ -99,20 +102,36 @@ async function ingestStripeWebhook(
     return;
   }
 
-  // F13: accept the previous secret during rotation.
+  // F13 + THI-1611 A1: connected-account events (account.updated — the only
+  // writer of sellers.stripe_onboarded_at) arrive from the 'Connected
+  // accounts'-scoped endpoint and carry its signing secret. Try each
+  // configured secret in a fixed order — platform current, Connect current,
+  // then the two _PREVIOUS rotation twins — every attempt is the SDK's
+  // timing-safe constructEvent; the first success wins; all-fail → 400 and
+  // nothing is written (F12). An unset Connect secret yields exactly the
+  // old single-secret behavior (platform current, then platform previous).
+  const candidateSecrets = (
+    [
+      ["STRIPE_WEBHOOK_SECRET", cfg.stripeWebhookSecret],
+      ["STRIPE_CONNECT_WEBHOOK_SECRET", cfg.stripeConnectWebhookSecret],
+      ["STRIPE_WEBHOOK_SECRET_PREVIOUS", cfg.stripeWebhookSecretPrevious],
+      ["STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS", cfg.stripeConnectWebhookSecretPrevious],
+    ] as Array<[name: string, secret: string | undefined]>
+  ).filter((entry): entry is [string, string] => entry[1] !== undefined);
+
   let event: Stripe.Event | null = null;
-  try {
-    event = stripe.webhooks.constructEvent(req.body, signature, cfg.stripeWebhookSecret!);
-  } catch {
-    if (cfg.stripeWebhookSecretPrevious) {
-      try {
-        event = stripe.webhooks.constructEvent(req.body, signature, cfg.stripeWebhookSecretPrevious);
-        console.warn("[webhooks:stripe] verified with STRIPE_WEBHOOK_SECRET_PREVIOUS — finish the rotation");
-      } catch {
-        /* fall through to 400 */
+  for (const [name, secret] of candidateSecrets) {
+    try {
+      event = stripe.webhooks.constructEvent(req.body, signature, secret);
+      if (name.endsWith("_PREVIOUS")) {
+        console.warn(`[webhooks:stripe] verified with ${name} — finish the rotation`);
       }
+      break;
+    } catch {
+      /* try the next configured secret; all-fail → 400 below */
     }
   }
+
   if (!event) {
     res.status(400).json({ error: "signature verification failed" });
     return;

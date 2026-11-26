@@ -61,7 +61,7 @@ to run while validation is not clean.
 
 | Input                     | Resolution |
 | ------------------------- | ---------- |
-| Directory copy, tagline, brand colors, icons | The Thread / Sticker yellow (#FFCE1F) / Carbon (#14151A) brand system (THI-1191, `platform` `apps/web/src/tokens`); `longDescription` used verbatim |
+| Directory copy, tagline, brand colors, icons | The Thread / Sticker yellow (#FFCE1F) / Carbon (#14151A) brand system (THI-1191); `longDescription` used verbatim |
 | Privacy policy | THI-216 board-approved, live at `https://thingery.dev/privacy` (verified 200) |
 | Terms of service | THI-216 scope extension, board-approved, live at `https://thingery.dev/terms` (verified 200) |
 | Support URL | `https://github.com/thingery/thingery/issues` — matches the board-approved ToS contact section, which designates `github.com/thingery/thingery` for questions; swap for a dedicated page later if the board prefers |

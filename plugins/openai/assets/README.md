@@ -1,10 +1,9 @@
 # assets/
 
 Icon set referenced by `../plugin.json`: the Thread mark glyph on a Sticker
-yellow tile (light) / carbon tile (dark), generated from the brand system —
-`platform` repo `apps/web/src/tokens/brand-art.ts` icon variant + `colors.ts`,
-rendered like the site favicon/og icon (THI-1191, 2026-11-24; replaces the
-THI-217 Set A green drafts).
+yellow tile (light) / carbon tile (dark), generated from the brand system — the brand-token icon variant + colors
+(Thread mark on Sticker yellow, THI-1191, 2026-11-24; replaces the THI-217
+Set A green drafts).
 
 | File            | Manifest field                          | Rules                              |
 | --------------- | --------------------------------------- | ---------------------------------- |

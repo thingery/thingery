@@ -69,6 +69,16 @@ describe("NOTIFY_MAX_AGE_HOURS config (THI-1043 — pure)", () => {
   });
 });
 
+describe("RESEND_WEBHOOK_SECRET_PREVIOUS config (THI-1537 — pure)", () => {
+  it("parses only while the current secret is set; blank counts as unset (F1)", () => {
+    // Secure default: previous alone must never arm a webhook.
+    expect(notifyConfig({ RESEND_WEBHOOK_SECRET_PREVIOUS: "old" }).resendWebhookSecretPrevious).toBeUndefined();
+    expect(notifyConfig({ RESEND_WEBHOOK_SECRET: " " }).resendWebhookSecretPrevious).toBeUndefined();
+    expect(notifyConfig({ RESEND_WEBHOOK_SECRET: "cur", RESEND_WEBHOOK_SECRET_PREVIOUS: " " }).resendWebhookSecretPrevious).toBeUndefined();
+    expect(notifyConfig({ RESEND_WEBHOOK_SECRET: "cur", RESEND_WEBHOOK_SECRET_PREVIOUS: "old" }).resendWebhookSecretPrevious).toBe("old");
+  });
+});
+
 describe("sender identities (THI-1280 — pure)", () => {
   it("notifyConfig defaults: noreply@ transactional, notifications@ digests, support@ Reply-To", () => {
     const cfg = notifyConfig({});

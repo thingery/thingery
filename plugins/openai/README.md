@@ -1,9 +1,12 @@
 # OpenAI plugin package — Thingery ([THI-218](https://github.com/thingery/thingery))
 
 Submission package for the ChatGPT connector directory: Thingery's MCP server
-`https://thingery.dev/mcp` (parent THI-212). Tool surface refreshed 2026-11-24
-(THI-1191): the full-profile server registers 45 tools — 35 OAuth-protected
-plus 10 public/session reads (`src/tools.ts`); this package exercises 6 of them.
+`https://thingery.dev/mcp` (parent THI-212). Tool surface re-synced 2026-11-26
+(THI-1581): the server registers 46 tools (`src/tools.ts`) — a connector's
+`tools/list` shows **43 of them** (36 OAuth-protected + 7 public reads); the
+other 3 are session-only account-settings tools (`SESSION_ONLY_TOOLS`), never
+listed for OAuth/API credentials. The Claude directory profile serves a
+separate 18-tool subset. This package exercises 6 of the 43.
 
 ## Contents
 
@@ -11,7 +14,7 @@ plus 10 public/session reads (`src/tools.ts`); this package exercises 6 of them.
 | ----------------- | -------------------------------------------------------- | ----- |
 | `plugin.json`     | Agent Plugins 1.0.0 root manifest (OpenAI extension: listing, review, publication) | **final** |
 | `mcp.json`        | MCP server declaration (streamable-http)                 | **final** |
-| `assets/`         | Icons (Set A, board-approved via THI-217)                 | **final** |
+| `assets/`         | Icons (Thread mark on Sticker yellow/Carbon, THI-1191 brand set) | **final** |
 | `docs/test-cases.md` | 5 positive / 3 negative review cases (detailed, grounded in `src/`) | **final** (mirrored in `plugin.json`) |
 | `validate.mjs`    | Local validation dry run (schemas + submission rules)    | final |
 | `build-zip.sh`    | Builds the submission ZIP (refuses while validation is not clean) | final |
@@ -58,7 +61,7 @@ to run while validation is not clean.
 
 | Input                     | Resolution |
 | ------------------------- | ---------- |
-| Directory copy, tagline, brand colors, icons | THI-217 approved Set A + recommended copy (board sign-off 2026-10-16); `longDescription` used verbatim |
+| Directory copy, tagline, brand colors, icons | The Thread / Sticker yellow (#FFCE1F) / Carbon (#14151A) brand system (THI-1191); `longDescription` used verbatim |
 | Privacy policy | THI-216 board-approved, live at `https://thingery.dev/privacy` (verified 200) |
 | Terms of service | THI-216 scope extension, board-approved, live at `https://thingery.dev/terms` (verified 200) |
 | Support URL | `https://github.com/thingery/thingery/issues` — matches the board-approved ToS contact section, which designates `github.com/thingery/thingery` for questions; swap for a dedicated page later if the board prefers |

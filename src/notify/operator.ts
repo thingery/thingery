@@ -28,6 +28,7 @@ export type OperatorAlertKind =
   | "dead_letter"
   | "label_refund_stack"
   | "label_line_refund_stuck"
+  | "payout_failed"
   | "suppression_self"
   | "suppression_volume";
 

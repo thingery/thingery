@@ -997,6 +997,7 @@ export function renderOrderEmail(
     case "operator.stale_dispute":
     case "operator.dispute_lost": // THI-1611 A2: lost chargeback — order refunded terminal, release refused
     case "operator.dead_letter":
+    case "operator.payout_failed":
     case "operator.suppression_self":
     case "operator.suppression_volume": {
       const lines = Array.isArray(payload.lines)

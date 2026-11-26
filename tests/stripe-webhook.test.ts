@@ -169,7 +169,7 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     await db.end();
   });
   beforeEach(async () => {
-    await db.query("TRUNCATE order_events, webhook_events, orders, items, sellers RESTART IDENTITY CASCADE");
+    await db.query("TRUNCATE order_events, webhook_events, orders, items, sellers, email_outbox RESTART IDENTITY CASCADE");
     delete process.env.STRIPE_SECRET_KEY;
     setStripeForTests(fakeStripe());
   });
@@ -358,6 +358,88 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     expect(r.status).toBe(200);
     const row = await db.query("SELECT status FROM orders WHERE id = $1", [order.id]);
     expect(row.rows[0].status).toBe("paid_out");
+  });
+
+  it("transfer.reversed: durable order_events.transfer_reversed marker, no transition (A6/THI-1624)", async () => {
+    const order = await seedOrder();
+    await db.query("UPDATE orders SET status = 'paid_out', transfer_id = 'tr_9', payment_intent_id = 'pi_9' WHERE id = $1", [order.id]);
+    const ev = event("transfer.reversed", {
+      id: "tr_9", object: "transfer", amount: 7300, amount_reversed: 7300, currency: "eur",
+    });
+    const r = await post(app, JSON.stringify(ev));
+    expect(r.status).toBe(200);
+    const rows = await db.query(
+      "SELECT event_type, actor_type, actor_id, payload FROM order_events WHERE order_id = $1 AND event_type = 'transfer_reversed'",
+      [order.id],
+    );
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].actor_id).toBe(ev.id);
+    const payload = rows.rows[0].payload as Record<string, unknown>;
+    expect(payload.transfer_id).toBe("tr_9");
+    expect(payload.amount_reversed).toBe(7300);
+    // No order transition: the refund/dispute path already settled the state.
+    const ord = await db.query("SELECT status FROM orders WHERE id = $1", [order.id]);
+    expect(ord.rows[0].status).toBe("paid_out");
+    // Replay-safe: a duplicate event id adds no second marker.
+    await post(app, JSON.stringify(ev));
+    const again = await db.query(
+      "SELECT count(*)::int AS n FROM order_events WHERE order_id = $1 AND event_type = 'transfer_reversed'",
+      [order.id],
+    );
+    expect(again.rows[0].n).toBe(1);
+    // Unknown transfer: stored, 200, no marker.
+    const stranger = event("transfer.reversed", { id: "tr_stranger", object: "transfer", amount_reversed: 100 });
+    const r2 = await post(app, JSON.stringify(stranger));
+    expect(r2.status).toBe(200);
+    const none = await db.query("SELECT count(*)::int AS n FROM order_events WHERE event_type = 'transfer_reversed' AND payload->>'transfer_id' = 'tr_stranger'");
+    expect(none.rows[0].n).toBe(0);
+  });
+
+  it("payout.failed: deduped operator alert row; replay and re-delivery never duplicate (A6/THI-1624)", async () => {
+    const order = await seedOrder(); // seeds the seller with stripe_account_id acct_<n>
+    const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [order.seller_id])).rows[0].stripe_account_id;
+    process.env.OPERATOR_ALERT_EMAIL = "ops@t.dev";
+    try {
+      const ev = event("payout.failed", {
+          id: "po_1", object: "payout", amount: 7300, currency: "eur",
+          failure_code: "account_closed", failure_message: "The bank account has been closed.",
+        });
+      const withAccount = { ...ev, account: acct } as Stripe.Event;
+      const r = await post(app, JSON.stringify(withAccount));
+      expect(r.status).toBe(200);
+      const outbox = await db.query(
+        "SELECT to_email, subject, template, dedupe_key, payload FROM email_outbox WHERE dedupe_key = $1",
+        ["opalert:payout_failed:po_1"],
+      );
+      expect(outbox.rows).toHaveLength(1);
+      expect(outbox.rows[0].template).toBe("operator.payout_failed.v1");
+      expect(outbox.rows[0].to_email).toBe("ops@t.dev");
+      const payload = outbox.rows[0].payload as Record<string, unknown>;
+      expect(payload.kind).toBe("payout_failed");
+      expect(JSON.stringify(payload)).toContain(acct);
+      expect(JSON.stringify(payload)).toContain(order.seller_id);
+      // Same payout, DIFFERENT event id (Stripe retry semantics vary): the
+      // outbox dedupe key keeps it at-most-once per payout.
+      const secondDelivery = event(
+        "payout.failed",
+        { id: "po_1", object: "payout", amount: 7300, currency: "eur", failure_code: "account_closed" },
+      );
+      await post(app, JSON.stringify({ ...secondDelivery, account: acct } as Stripe.Event));
+      const still = await db.query("SELECT count(*)::int AS n FROM email_outbox WHERE dedupe_key = $1", ["opalert:payout_failed:po_1"]);
+      expect(still.rows[0].n).toBe(1);
+    } finally {
+      delete process.env.OPERATOR_ALERT_EMAIL;
+    }
+  });
+
+  it("payout.failed with no OPERATOR_ALERT_EMAIL stays log-only — no outbox row, still 200 (A6)", async () => {
+    await seedOrder();
+    delete process.env.OPERATOR_ALERT_EMAIL;
+    const ev = event("payout.failed", { id: "po_2", object: "payout", amount: 500, currency: "eur", failure_code: "account_closed" });
+    const r = await post(app, JSON.stringify({ ...ev, account: (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = (SELECT seller_id FROM orders ORDER BY created_at DESC LIMIT 1)")).rows[0].stripe_account_id } as Stripe.Event));
+    expect(r.status).toBe(200);
+    const outbox = await db.query("SELECT count(*)::int AS n FROM email_outbox WHERE template = 'operator.payout_failed.v1'");
+    expect(outbox.rows[0].n).toBe(0);
   });
 
   it("charge.refunded: refunding → refunded", async () => {

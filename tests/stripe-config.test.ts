@@ -4,6 +4,8 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { envValue, envInt, orderFlowConfig } from "../src/config.js";
+import { STRIPE_API_VERSION } from "../src/stripe.js";
+import StripeCtor from "stripe";
 
 const NAMES = [
   "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET_PREVIOUS",
@@ -130,5 +132,17 @@ describe("orderFlowConfig — fail-closed degradation", () => {
     setEnv("EASYPOST_WEBHOOK_SECRET", "easy_sec");
     expect(orderFlowConfig().carrierWebhookReady).toBe(true);
     expect(orderFlowConfig().carrierWebhookSecret).toBe("easy_sec");
+  });
+});
+
+describe("Stripe API version pin (A6, THI-1624)", () => {
+  // CI guard for the deliberate-act rule: the client pin in src/stripe.ts is a
+  // literal typed against Stripe.LatestApiVersion (build fails on drift), and
+  // this test additionally fails when the INSTALLED SDK moves away from the
+  // pin — bumping the stripe npm package without re-confirming the pin
+  // (§5.3: re-check the webhook event list + rehearsal) is impossible to
+  // merge silently.
+  it("pin matches the installed SDK's typed/default API version", () => {
+    expect(STRIPE_API_VERSION).toBe(StripeCtor.API_VERSION);
   });
 });

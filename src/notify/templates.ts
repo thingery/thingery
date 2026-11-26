@@ -533,9 +533,13 @@ export function renderOrderEmail(
       });
     // THI-780 PR 4: operator alerts — account-less rows, bypass account
     // gates (an operator address is not a marketplace account).
+    // THI-1537 adds the bounce-suppression observability pair
+    // (suppression_self / suppression_volume — src/webhooks-resend.ts).
     case "operator.stuck_money":
     case "operator.stale_dispute":
-    case "operator.dead_letter": {
+    case "operator.dead_letter":
+    case "operator.suppression_self":
+    case "operator.suppression_volume": {
       const lines = Array.isArray(payload.lines)
         ? (payload.lines as unknown[]).map(String)
         : [];

@@ -26,7 +26,9 @@ export type OperatorAlertKind =
   | "stale_dispute"
   | "dead_letter"
   | "label_refund_stack"
-  | "label_line_refund_stuck";
+  | "label_line_refund_stuck"
+  | "suppression_self"
+  | "suppression_volume";
 
 /** Shared account-less outbox writer: one row (notification_id NULL) with
  *  ON CONFLICT (dedupe_key) DO NOTHING, ride-or-own transaction. Riding

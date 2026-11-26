@@ -219,7 +219,15 @@ export interface RefundOrder {
  * a gross fallback would silently reinstate the board-rejected cost model
  * (Security review THI-375: fail-securely).
  */
-export async function sellerNetTransferCents(order: PayoutOrder, stripe: Stripe): Promise<number> {
+export interface SellerNetTransfer {
+  amountCents: number;
+  /** The PaymentIntent's latest succeeded charge (A5) — passed as the
+   *  transfer's source_transaction so the payout is tied to that charge's
+   *  funds rather than the platform's available balance. */
+  sourceChargeId: string;
+}
+
+export async function sellerNetTransfer(order: PayoutOrder, stripe: Stripe): Promise<SellerNetTransfer> {
   if (!order.payment_intent_id) throw new Error("inconsistent_state: paid order missing payment intent");
   const pi = await stripe.paymentIntents.retrieve(order.payment_intent_id, {
     expand: ["latest_charge.balance_transaction"],
@@ -253,7 +261,14 @@ export async function sellerNetTransferCents(order: PayoutOrder, stripe: Stripe)
   const sellerFeeShareCents = Math.ceil((bt.fee * gross) / chargeTotal);
   const net = Math.min(gross - sellerFeeShareCents, gross); // clamp pathological fees (negative); never overpay
   if (net < 1) throw new Error(`payout_netting_unavailable: net ${net}c after fee share ${sellerFeeShareCents}c of ${bt.fee}c (payout base ${gross}c)`);
-  return net;
+  return { amountCents: net, sourceChargeId: charge.id };
+}
+
+/** The net amount alone — retained for callers/tests that only need the
+ *  figure; createTransferForOrder uses sellerNetTransfer (charge id + net)
+ *  so one Stripe read feeds both the netting and the source_transaction. */
+export async function sellerNetTransferCents(order: PayoutOrder, stripe: Stripe): Promise<number> {
+  return (await sellerNetTransfer(order, stripe)).amountCents;
 }
 
 /** B1-sibling (Security review THI-1013): a legal zero payout base — a
@@ -284,12 +299,21 @@ export async function createTransferForOrder(
   // application_fee_amount is omitted → 0: the platform takes no cut (§6.1).
   // The seller bears the Stripe processing fee by netting (THI-374) — a
   // pass-through of Stripe's own processing cost, not platform revenue.
-  const amount = await sellerNetTransferCents(order, stripe);
+  const { amountCents, sourceChargeId } = await sellerNetTransfer(order, stripe);
   return stripe.transfers.create(
     {
-      amount,
+      amount: amountCents,
       currency: order.currency.toLowerCase(),
       destination,
+      // A5 (spec docs/specs/thi1611-payments-card-only.md §A5): tie the
+      // transfer to the buyer's charge instead of the platform's available
+      // balance. Per Stripe (SDK v23 TransferCreateParams.source_transaction):
+      // funds transfer before they are added to the available balance — the
+      // transfer lands immediately and its funds become spendable by the
+      // seller when the source charge settles, instead of failing with
+      // balance_insufficient while card funds are still pending. The amount
+      // is bounded by netting: amount ≤ gross − fee share ≤ charge net.
+      source_transaction: sourceChargeId,
     },
     { idempotencyKey: `payout:${order.id}` },
   );

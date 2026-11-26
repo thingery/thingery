@@ -371,6 +371,11 @@ async function rule5(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
 // `skipped:` rows (ambiguous carrier resolution) need an operator data fix
 // first and are deliberately excluded — re-running them would alert-loop
 // (Security THI-66 advisory A4).
+// `rejected:` rows are FINAL (THI-1694 R2): the ingest livemode gate (F5/§6.7)
+// settles them with process_error = 'rejected: livemode mismatch' and 200 —
+// retrying would re-run processStripeEvent on a settled rejection forever.
+// (The spec's defensive `process_error IS NULL` arm is redundant under the
+// existing `IS NOT NULL` precondition; kept verbatim from THI-1697.)
 const RETRY_RULE6 = "6-reprocess";
 const ATTEMPT_RE = /\[attempt (\d+) @ ([^\]]+)\]$/;
 
@@ -385,6 +390,7 @@ async function rule6(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   const { rows } = await pool.query<{ id: string; source: "stripe" | "carrier"; external_id: string; payload: unknown; process_error: string }>(
     `SELECT id, source, external_id, payload, process_error FROM webhook_events
      WHERE processed_at IS NULL AND process_error IS NOT NULL AND process_error NOT LIKE 'skipped:%'
+       AND (process_error IS NULL OR process_error NOT LIKE 'rejected:%')
      ORDER BY received_at LIMIT 100`,
   );
   const stripe = getStripe();

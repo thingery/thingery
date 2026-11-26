@@ -338,6 +338,7 @@ describe.skipIf(!available)("deadline sweeps (DB)", () => {
     const evt = {
       id: `evt_${n}`,
       type: "checkout.session.completed",
+      livemode: false, // real Stripe events always carry it; the gate (THI-1694 R2) checks it
       data: { object: { id: o.checkout_session_id, payment_status: "paid", payment_intent: `pi_r${n}`, amount_total: chargeTotalCents(o), currency: "eur", metadata: { order_id: o.id } } },
     } as unknown as Stripe.Event;
     const { client, calls } = fakeStripe({ retrieveEvent: evt });
@@ -399,6 +400,78 @@ describe.skipIf(!available)("deadline sweeps (DB)", () => {
     expect(again["6-reprocess"].skipped).toBe(1);
     const row2 = (await db.query("SELECT process_error FROM webhook_events WHERE external_id = 'evt_bump'")).rows[0];
     expect(row2.process_error).toBe(row.process_error);
+  });
+
+  it("rule 6: rejected: livemode mismatch is final — never re-fetched; transient errors still reprocess (THI-1694 R2)", async () => {
+    // Transient row (the real recovery path): re-applies a paid checkout to a pending order.
+    const seed1 = await seed("stripe");
+    await db.query("UPDATE orders SET payment_deadline = now() + interval '1 day' WHERE id = $1", [seed1.orderId]);
+    const o = await order(seed1.orderId);
+    const evt = {
+      id: `evt_r6t${n}`,
+      type: "checkout.session.completed",
+      livemode: false,
+      data: { object: { id: o.checkout_session_id, payment_status: "paid", payment_intent: `pi_r6t${n}`, amount_total: chargeTotalCents(o), currency: "eur" } },
+    } as unknown as Stripe.Event;
+    const { client, calls } = fakeStripe({ retrieveEvent: evt });
+    setStripeForTests(client);
+    await db.query(
+      `INSERT INTO webhook_events (source, external_id, payload, process_error) VALUES ('stripe', $1, '{}'::jsonb, 'ingest failed: db fault')`,
+      [evt.id],
+    );
+    // Final rejection (ingest livemode gate, F5/§6.7): stored unprocessed, 200 —
+    // rule 6 used to select it forever (THI-1694 R2).
+    const rejectedId = `evt_r6rej${n}`;
+    await db.query(
+      `INSERT INTO webhook_events (source, external_id, payload, process_error) VALUES ('stripe', $1, '{}'::jsonb, 'rejected: livemode mismatch')`,
+      [rejectedId],
+    );
+
+    const report = await runSweeps(cfg);
+    expect(report["6-reprocess"].acted).toBe(1); // exactly the transient row
+    expect(calls).toContain(`events.retrieve:${evt.id}`);
+    expect(calls).not.toContain(`events.retrieve:${rejectedId}`); // never even fetched
+    expect((await order(seed1.orderId)).status).toBe("sold");
+    const done = (await db.query("SELECT processed_at, process_error FROM webhook_events WHERE external_id = $1", [evt.id])).rows[0];
+    expect(done.processed_at).toBeTruthy();
+    expect(done.process_error).toBeNull();
+    const rej = (await db.query("SELECT processed_at, process_error FROM webhook_events WHERE external_id = $1", [rejectedId])).rows[0];
+    expect(rej.processed_at).toBeNull();
+    expect(rej.process_error).toBe("rejected: livemode mismatch"); // untouched: no retry, no attempt tag
+
+    // A later sweep still ignores it (final, not retryable).
+    await runSweeps(cfg);
+    const rej2 = (await db.query("SELECT processed_at, process_error FROM webhook_events WHERE external_id = $1", [rejectedId])).rows[0];
+    expect(rej2.processed_at).toBeNull();
+    expect(rej2.process_error).toBe("rejected: livemode mismatch");
+  });
+
+  it("rule 6: a rejection whose re-fetch would succeed same-mode is still NOT processed (THI-1694 R2)", async () => {
+    // The rejection is final even when events.retrieve would return a
+    // matching-mode event (e.g. the configured key mode flipped after the
+    // rejection) — a settled rejection is never re-litigated by the sweep.
+    const seed1 = await seed("stripe");
+    await db.query("UPDATE orders SET payment_deadline = now() + interval '1 day' WHERE id = $1", [seed1.orderId]);
+    const o = await order(seed1.orderId);
+    const evt = {
+      id: `evt_r6s${n}`,
+      type: "checkout.session.completed",
+      livemode: false, // matches the configured (test) mode — fetch would succeed
+      data: { object: { id: o.checkout_session_id, payment_status: "paid", payment_intent: `pi_r6s${n}`, amount_total: chargeTotalCents(o), currency: "eur" } },
+    } as unknown as Stripe.Event;
+    const { client, calls } = fakeStripe({ retrieveEvent: evt });
+    setStripeForTests(client);
+    await db.query(
+      `INSERT INTO webhook_events (source, external_id, payload, process_error) VALUES ('stripe', $1, '{}'::jsonb, 'rejected: livemode mismatch')`,
+      [evt.id],
+    );
+    const report = await runSweeps(cfg);
+    expect(report["6-reprocess"].acted).toBe(0);
+    expect(calls).not.toContain(`events.retrieve:${evt.id}`);
+    expect((await order(seed1.orderId)).status).toBe("pending"); // untouched
+    const rej = (await db.query("SELECT processed_at, process_error FROM webhook_events WHERE external_id = $1", [evt.id])).rows[0];
+    expect(rej.processed_at).toBeNull();
+    expect(rej.process_error).toBe("rejected: livemode mismatch");
   });
 
   it("rule 7: stuck refunding past the alert window raises an operator alert", async () => {

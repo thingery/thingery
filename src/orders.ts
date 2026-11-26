@@ -58,6 +58,7 @@ export type TransitionTrigger =
   | "open_dispute" // #15
   | "chargeback" // #22 — stripe only
   | "dispute_won" // #22r — chargeback representment won, restore
+  | "dispute_lost" // #22l — chargeback lost / closed by refund, terminal (THI-1611 A2)
   | "dispute_window_elapsed" // #16/#16b
   | "release_funds" // #17/#17b
   | "admin_refund" // #18/#18b
@@ -177,6 +178,16 @@ export const TRANSITIONS: readonly TransitionSpec[] = [
   { id: "22", from: NON_TERMINAL_EXCEPT_REFUNDING, to: "disputed", trigger: "chargeback", actors: ["stripe"], mode: "stripe" },
   // #22r: representment won (§6.5) — restore the recorded pre-dispute state.
   { id: "22r", from: ["disputed"], to: "pre_dispute", trigger: "dispute_won", actors: ["stripe"], mode: "stripe" },
+  // #22l (THI-1611 A2): the verdict went to the buyer (dispute `lost`, or
+  // closed `charge_refunded`) — Stripe returns the money, so the webhook
+  // terminalizes the order itself instead of waiting for a refund transition
+  // that would never fire. `refunded` is terminal: from the moment the
+  // verdict lands, admin_release (#19), the payout sweep, and any further
+  // transfer are impossible on the order, and the item frees for relist
+  // (same rationale as #18). From `payout_pending` the webhook handler
+  // reverses the in-flight transfer right after the transition lands —
+  // never a payout on a charge the buyer won back.
+  { id: "22l", from: ["disputed", "payout_pending"], to: "refunded", trigger: "dispute_lost", actors: ["stripe"], mode: "stripe", itemStatus: "active" },
   // #23 (tracking correction while still pre-transit) is not a state change;
   // PR-5 records it as an order_events row without calling applyTransition.
 ];

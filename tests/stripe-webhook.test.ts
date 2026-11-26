@@ -404,8 +404,10 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
           id: "po_1", object: "payout", amount: 7300, currency: "eur",
           failure_code: "account_closed", failure_message: "The bank account has been closed.",
         });
+      // THI-1711 fixture fidelity: payout.failed is a connect-class event —
+      // signed with the Connect secret, with the top-level `account` field.
       const withAccount = { ...ev, account: acct } as Stripe.Event;
-      const r = await post(app, JSON.stringify(withAccount));
+      const r = await post(app, JSON.stringify(withAccount), { secret: CONNECT_SECRET });
       expect(r.status).toBe(200);
       const outbox = await db.query(
         "SELECT to_email, subject, template, dedupe_key, payload FROM email_outbox WHERE dedupe_key = $1",
@@ -424,7 +426,7 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
         "payout.failed",
         { id: "po_1", object: "payout", amount: 7300, currency: "eur", failure_code: "account_closed" },
       );
-      await post(app, JSON.stringify({ ...secondDelivery, account: acct } as Stripe.Event));
+      await post(app, JSON.stringify({ ...secondDelivery, account: acct } as Stripe.Event), { secret: CONNECT_SECRET });
       const still = await db.query("SELECT count(*)::int AS n FROM email_outbox WHERE dedupe_key = $1", ["opalert:payout_failed:po_1"]);
       expect(still.rows[0].n).toBe(1);
     } finally {
@@ -435,8 +437,9 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
   it("payout.failed with no OPERATOR_ALERT_EMAIL stays log-only — no outbox row, still 200 (A6)", async () => {
     await seedOrder();
     delete process.env.OPERATOR_ALERT_EMAIL;
+    const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = (SELECT seller_id FROM orders ORDER BY created_at DESC LIMIT 1)")).rows[0].stripe_account_id;
     const ev = event("payout.failed", { id: "po_2", object: "payout", amount: 500, currency: "eur", failure_code: "account_closed" });
-    const r = await post(app, JSON.stringify({ ...ev, account: (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = (SELECT seller_id FROM orders ORDER BY created_at DESC LIMIT 1)")).rows[0].stripe_account_id } as Stripe.Event));
+    const r = await post(app, JSON.stringify({ ...ev, account: acct } as Stripe.Event), { secret: CONNECT_SECRET });
     expect(r.status).toBe(200);
     const outbox = await db.query("SELECT count(*)::int AS n FROM email_outbox WHERE template = 'operator.payout_failed.v1'");
     expect(outbox.rows[0].n).toBe(0);
@@ -595,7 +598,9 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     // seedOrder() pre-boards; reset to the un-onboarded state under test.
     await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
     const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
-    const on = event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } });
+    // THI-1711 fixture fidelity: real connect deliveries carry the top-level
+    // `account` field — without it the binding would (correctly) 400.
+    const on = { ...event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } }), account: acct } as Stripe.Event;
     const r = await post(app, JSON.stringify(on), { secret: CONNECT_SECRET });
     expect(r.status).toBe(200);
     expect(r.json).toEqual({ received: true });
@@ -612,7 +617,7 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     await seedOrder();
     await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
     const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
-    const on = event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } });
+    const on = { ...event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } }), account: acct } as Stripe.Event;
     const r = await post(app, JSON.stringify(on), { secret: "whsec_wrong_connect_secret" });
     expect(r.status).toBe(400);
     expect(r.json).toEqual({ error: "signature verification failed" });
@@ -626,7 +631,7 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     await seedOrder();
     await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
     const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
-    const on = event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } });
+    const on = { ...event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } }), account: acct } as Stripe.Event;
     const r = await post(app, JSON.stringify(on), { secret: CONNECT_PREVIOUS });
     expect(r.status).toBe(200);
     const set = await db.query("SELECT stripe_onboarded_at IS NOT NULL AS ok FROM sellers WHERE id = $1", [sellerId]);
@@ -637,7 +642,7 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     await seedOrder();
     await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
     const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
-    const on = event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } });
+    const on = { ...event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } }), account: acct } as Stripe.Event;
     const bare = buildApp(false);
     let closeBare = () => {};
     await new Promise<void>((resolve) => {
@@ -655,6 +660,209 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     } finally {
       closeBare();
     }
+  });
+
+  // --- THI-1711: webhook secret↔event-class binding -----------------------
+  // Spec test plan (docs/specs/webhook-secret-class-binding.md): each secret
+  // family verifies only its own event class — platform family ↔ events with
+  // no top-level acct_… `account`, Connect family ↔ connect-class events.
+  // Mismatch is a FINAL 400 (no store, no dedupe pre-burn, F12); rotation
+  // twins inherit their family's binding; strict `acct_` discriminator.
+
+  it("binding 1 (THI-1711): platform-class event signed with the platform secret processes as today; account_scope=platform stored", async () => {
+    const order = await seedOrder();
+    const ev = event("checkout.session.completed", {
+      id: order.checkout_session_id, object: "checkout_session",
+      payment_status: "paid", payment_intent: `pi_b1_${n}`, amount_total: 10500, currency: "eur",
+    });
+    const r = await post(app, JSON.stringify(ev), { secret: SECRET });
+    expect(r.status).toBe(200);
+    expect((await db.query("SELECT status FROM orders WHERE id = $1", [order.id])).rows[0].status).toBe("sold");
+    const we = await db.query("SELECT payload->>'account_scope' AS scope FROM webhook_events WHERE external_id = $1", [ev.id]);
+    expect(we.rows[0].scope).toBe("platform");
+  });
+
+  it("binding 2 (THI-1711): connect-class account.updated (top-level account) signed with the Connect secret flips stripe_onboarded_at", async () => {
+    await seedOrder();
+    await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
+    const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
+    const on = { ...event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } }), account: acct } as Stripe.Event;
+    const r = await post(app, JSON.stringify(on), { secret: CONNECT_SECRET });
+    expect(r.status).toBe(200);
+    const set = await db.query("SELECT stripe_onboarded_at IS NOT NULL AS ok FROM sellers WHERE id = $1", [sellerId]);
+    expect(set.rows[0].ok).toBe(true);
+    const we = await db.query("SELECT payload->>'account_scope' AS scope FROM webhook_events WHERE external_id = $1", [on.id]);
+    expect(we.rows[0].scope).toBe("connect");
+  });
+
+  it("binding 3 (THI-1711): platform-class event signed with the Connect secret → FINAL 400, no store, no order change, distinct log line", async () => {
+    const order = await seedOrder();
+    const ev = event("checkout.session.completed", {
+      id: order.checkout_session_id, object: "checkout_session",
+      payment_status: "paid", payment_intent: `pi_b3_${n}`, amount_total: 10500, currency: "eur",
+    });
+    const errLines: string[] = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errLines.push(args.map(String).join(" "));
+    });
+    try {
+      const r = await post(app, JSON.stringify(ev), { secret: CONNECT_SECRET });
+      expect(r.status).toBe(400);
+      expect(r.json).toEqual({ error: "signature verification failed" });
+    } finally {
+      errSpy.mockRestore();
+    }
+    // Nothing written: no webhook_events row (no dedupe pre-burn), order untouched.
+    const count = await db.query("SELECT count(*)::int AS c FROM webhook_events");
+    expect(count.rows[0].c).toBe(0);
+    const row = await db.query("SELECT status, payment_intent_id FROM orders WHERE id = $1", [order.id]);
+    expect(row.rows[0].status).toBe("pending");
+    expect(row.rows[0].payment_intent_id).toBeNull();
+    // Distinct log line per spec Design.
+    expect(errLines.some((l) => l.includes("class violation: STRIPE_CONNECT_WEBHOOK_SECRET verified a platform-scoped event checkout.session.completed"))).toBe(true);
+  });
+
+  it("binding 4 (THI-1711): connect-class event signed with the platform secret → FINAL 400, nothing written", async () => {
+    await seedOrder();
+    await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
+    const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
+    const on = { ...event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } }), account: acct } as Stripe.Event;
+    const r = await post(app, JSON.stringify(on), { secret: SECRET });
+    expect(r.status).toBe(400);
+    expect(r.json).toEqual({ error: "signature verification failed" });
+    const count = await db.query("SELECT count(*)::int AS c FROM webhook_events");
+    expect(count.rows[0].c).toBe(0);
+    const flag = await db.query("SELECT stripe_onboarded_at IS NULL AS ok FROM sellers WHERE id = $1", [sellerId]);
+    expect(flag.rows[0].ok).toBe(true);
+  });
+
+  it("binding 5 (THI-1711): symmetric 2×2 rotation matrix — twins inherit their family's binding (F13)", async () => {
+    await seedOrder();
+    // platform _PREVIOUS × platform-class → accepted, rotation warning logged.
+    const plat = event("transfer.updated", { id: `tr_b5_${n}`, object: "transfer" });
+    const warnLines: string[] = [];
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnLines.push(args.map(String).join(" "));
+    });
+    let r1: { status: number; json: Record<string, unknown> };
+    try {
+      r1 = await post(app, JSON.stringify(plat), { secret: PREVIOUS });
+    } finally {
+      warnSpy.mockRestore();
+    }
+    expect(r1.status).toBe(200);
+    expect(warnLines.some((l) => l.includes("verified with STRIPE_WEBHOOK_SECRET_PREVIOUS"))).toBe(true);
+
+    // connect _PREVIOUS × connect-class → accepted (flag flips).
+    await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
+    const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
+    const on = { ...event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } }), account: acct } as Stripe.Event;
+    const r2 = await post(app, JSON.stringify(on), { secret: CONNECT_PREVIOUS });
+    expect(r2.status).toBe(200);
+    expect((await db.query("SELECT stripe_onboarded_at IS NOT NULL AS ok FROM sellers WHERE id = $1", [sellerId])).rows[0].ok).toBe(true);
+
+    // connect _PREVIOUS × platform-class → FINAL 400, nothing written.
+    const platViolator = event("checkout.session.completed", { id: `cs_b5_${n}`, object: "checkout_session", payment_status: "paid" });
+    const r3 = await post(app, JSON.stringify(platViolator), { secret: CONNECT_PREVIOUS });
+    expect(r3.status).toBe(400);
+
+    // platform _PREVIOUS × connect-class → FINAL 400, nothing written.
+    const onViolator = { ...event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } }), account: acct } as Stripe.Event;
+    const r4 = await post(app, JSON.stringify(onViolator), { secret: PREVIOUS });
+    expect(r4.status).toBe(400);
+
+    const violators = await db.query(
+      "SELECT count(*)::int AS c FROM webhook_events WHERE external_id = ANY($1)",
+      [[platViolator.id, onViolator.id]],
+    );
+    expect(violators.rows[0].c).toBe(0);
+  });
+
+  it("binding 6 (THI-1711): prefix pinning — a non-acct_ account string is NOT connect-class → 400 under the Connect secret", async () => {
+    await seedOrder();
+    const on = {
+      ...event("account.updated", { id: "acct_x", object: "account", capabilities: { transfers: "active" } }),
+      account: "user_12345", // non-empty but not acct_-prefixed: fail-closed platform-class
+    } as Stripe.Event;
+    const errLines: string[] = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errLines.push(args.map(String).join(" "));
+    });
+    try {
+      const r = await post(app, JSON.stringify(on), { secret: CONNECT_SECRET });
+      expect(r.status).toBe(400);
+    } finally {
+      errSpy.mockRestore();
+    }
+    const count = await db.query("SELECT count(*)::int AS c FROM webhook_events");
+    expect(count.rows[0].c).toBe(0);
+    expect(errLines.some((l) => l.includes("class violation: STRIPE_CONNECT_WEBHOOK_SECRET verified a platform-scoped event account.updated"))).toBe(true);
+  });
+
+  it("binding 7 (THI-1711): single-secret deployment — platform family behaves exactly as pre-#402", async () => {
+    await seedOrder();
+    await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
+    const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
+    const bare = buildApp(false); // Connect secrets unset
+    let closeBare = () => {};
+    await new Promise<void>((resolve) => {
+      const s = bare.listen(0, "127.0.0.1", () => {
+        (bare as unknown as { _port: number })._port = (s.address() as net.AddressInfo).port;
+        closeBare = () => s.close();
+        resolve();
+      });
+    });
+    try {
+      // Platform-class delivery accepted by the platform secret, as before.
+      const plat = event("account.updated", { id: "acct_unknown_b7", object: "account", capabilities: { transfers: "active" } });
+      const r1 = await post(bare, JSON.stringify(plat), { secret: SECRET });
+      expect(r1.status).toBe(200);
+      // Connect-class delivery (connect-signed, with account) 400s exactly as before.
+      const on = { ...event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } }), account: acct } as Stripe.Event;
+      const r2 = await post(bare, JSON.stringify(on), { secret: CONNECT_SECRET });
+      expect(r2.status).toBe(400);
+      const count = await db.query("SELECT count(*)::int AS c FROM webhook_events");
+      expect(count.rows[0].c).toBe(1); // only the accepted platform-class event
+    } finally {
+      closeBare();
+    }
+  });
+
+  it("binding 8 (THI-1711): accepted connect event stores account_scope=connect and only the F6 keys (redaction intact)", async () => {
+    await seedOrder();
+    const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
+    const on = {
+      ...event("account.updated", {
+        id: acct, object: "account", capabilities: { transfers: "active" },
+        email: "seller@example.com", business_profile: { name: "Sensitive GmbH" },
+      }),
+      account: acct,
+    } as Stripe.Event;
+    const r = await post(app, JSON.stringify(on), { secret: CONNECT_SECRET });
+    expect(r.status).toBe(200);
+    const we = await db.query("SELECT payload::text AS p, payload FROM webhook_events WHERE external_id = $1", [on.id]);
+    expect(Object.keys(we.rows[0].payload).sort()).toEqual(["account_scope", "id", "livemode", "object_id", "object_type", "type"]);
+    expect(we.rows[0].payload).toMatchObject({ account_scope: "connect", object_id: acct, object_type: "account" });
+    expect(we.rows[0].p).not.toContain("seller@example.com");
+    expect(we.rows[0].p).not.toContain("Sensitive");
+  });
+
+  it("drift pin a (THI-1711 reconciliation): a v1-shaped body signed with the v2 destination-family secret is a 400 — the v1 candidate list is static and never offers STRIPE_EVENT_DESTINATION_SECRET", async () => {
+    await seedOrder();
+    const ev = event("checkout.session.completed", {
+      id: "cs_pin", object: "checkout_session", payment_status: "paid",
+      payment_intent: "pi_pin", amount_total: 10500, currency: "eur",
+    });
+    // Distinct secret value belonging to the v2 event-destination family only.
+    // Real crypto: an HMAC under this key cannot verify under any v1 candidate,
+    // so 400 is guaranteed today; the PIN is that the v1 loop never offers the
+    // destination key material — if a future change drifts the v1 candidate
+    // list to include STRIPE_EVENT_DESTINATION_SECRET, this body verifies and
+    // (platform-class, so binding-clean) would process — this test fails first.
+    const r = await post(app, JSON.stringify(ev), { secret: "whsec_destination_family_secret" });
+    expect(r.status).toBe(400);
+    const we = await db.query("SELECT count(*)::int AS c FROM webhook_events WHERE external_id = $1", [ev.id]);
+    expect(we.rows[0].c).toBe(0);
   });
 
   it("livemode mismatch is stored redacted and never processed (F5/§6.7)", async () => {
@@ -924,6 +1132,32 @@ describe.skipIf(!available)("Stripe v2 event-destination webhook (HTTP, THI-1681
     expect(r.status).toBe(200);
     const set = await db.query("SELECT stripe_onboarded_at IS NOT NULL AS ok FROM sellers WHERE id = $1", [sellerPk]);
     expect(set.rows[0].ok).toBe(true);
+  });
+
+  it("drift pin b (THI-1711 reconciliation): a signature only valid under a v1-family secret never verifies on the v2 endpoint — the v2 candidate list offers only destination-family key material", async () => {
+    const acct = `acct_v2_xfamily_${n0}`;
+    await seedSellerWithAccount(acct);
+    const notif = notification(acct, "active");
+    // The fake parseEventNotification accepts ONLY this v1-family value —
+    // modeling real crypto (an HMAC under a v1 key never verifies under a
+    // destination key). Today the v2 loop tries just the two destination
+    // secrets ⇒ 400. If the v2 candidate list ever drifts to offer v1 family
+    // secrets, this body verifies and processes — this test fails first.
+    const app = buildV2App({ acceptSecret: "whsec_v1_platform_family_secret", notif });
+    await new Promise<void>((resolve) => {
+      server.close();
+      server = app.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+    const r = await postV2(app, JSON.stringify({ id: notif.id }));
+    expect(r.status).toBe(400);
+    expect(r.json).toEqual({ error: "signature verification failed" });
+    const rows = await db.query("SELECT count(*)::int AS c FROM webhook_events");
+    expect(rows.rows[0].c).toBe(0);
+    const flipped = await db.query("SELECT count(*)::int AS c FROM sellers WHERE stripe_onboarded_at IS NOT NULL");
+    expect(flipped.rows[0].c).toBe(0);
   });
 
   it("livemode mismatch → rejected 200, never touches test rows (F5)", async () => {

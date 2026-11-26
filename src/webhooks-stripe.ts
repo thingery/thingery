@@ -129,6 +129,16 @@ async function ingestStripeWebhook(
   // timing-safe constructEvent; the first success wins; all-fail → 400 and
   // nothing is written (F12). An unset Connect secret yields exactly the
   // old single-secret behavior (platform current, then platform previous).
+  //
+  // THI-1711 secret↔event-class binding (spec
+  // docs/specs/webhook-secret-class-binding.md, Security-approved): each
+  // secret family may only verify its own event class — platform family ↔
+  // platform-class events (top-level `account` unset), Connect family ↔
+  // connect-class events (`account` set to a non-empty `acct_…` string).
+  // A verified-but-mismatched delivery is a forgery (an HMAC under one key
+  // cannot verify under another), so rejection is FINAL: 400, nothing
+  // written, never continue-the-loop (same-value misconfigurations fail
+  // loud instead of re-widening acceptance to the union of both families).
   const candidateSecrets = (
     [
       ["STRIPE_WEBHOOK_SECRET", cfg.stripeWebhookSecret],
@@ -141,7 +151,23 @@ async function ingestStripeWebhook(
   let event: Stripe.Event | null = null;
   for (const [name, secret] of candidateSecrets) {
     try {
-      event = stripe.webhooks.constructEvent(req.body, signature, secret);
+      const candidate = stripe.webhooks.constructEvent(req.body, signature, secret);
+      // THI-1711 binding check (spec Design): the payload itself names its
+      // class, and only after signature verification is that trustworthy.
+      // Strict `acct_` discriminator — non-`acct_` strings are NOT
+      // connect-class (fail-closed format allowlisting; Security decision).
+      const connectScoped = typeof candidate.account === "string" && candidate.account.startsWith("acct_");
+      const connectFamily = name.startsWith("STRIPE_CONNECT_");
+      if (connectScoped !== connectFamily) {
+        // Final reject: no store, no onEventId (F12 ordering preserved) —
+        // class-violating deliveries cannot pre-burn dedupe keys.
+        console.error(
+          `[webhooks:stripe] class violation: ${name} verified a ${connectScoped ? "connect" : "platform"}-scoped event ${candidate.type}`,
+        );
+        res.status(400).json({ error: "signature verification failed" });
+        return;
+      }
+      event = candidate;
       if (name.endsWith("_PREVIOUS")) {
         console.warn(`[webhooks:stripe] verified with ${name} — finish the rotation`);
       }
@@ -158,6 +184,8 @@ async function ingestStripeWebhook(
 
   // F6: REDACT at ingest — event id, type, mode, and the object ids handlers
   // need. customer_details, addresses, names never touch the store.
+  // THI-1711: account_scope records the accepted class (additive key, no
+  // schema change) — observability of what the binding let through.
   onEventId(event.id);
   const payload = {
     id: event.id,
@@ -165,6 +193,8 @@ async function ingestStripeWebhook(
     livemode: event.livemode,
     object_id: (event.data.object as { id?: string }).id ?? null,
     object_type: event.data.object.object,
+    account_scope:
+      typeof event.account === "string" && event.account.startsWith("acct_") ? "connect" : "platform",
   };
 
   // F5 acceptance: a test-mode event must never touch live orders (§6.7).

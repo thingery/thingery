@@ -863,7 +863,19 @@ profile, bank details, platform + Connect terms accepted in the Stripe dashboard
    The app verifies each v1 delivery against the configured secrets in a fixed
    order — `STRIPE_WEBHOOK_SECRET`, then `STRIPE_CONNECT_WEBHOOK_SECRET`,
    then the two `_PREVIOUS` rotation twins — timing-safe per attempt, `400`
-   when all fail, and nothing is ever written on a bad signature. The v2
+   when all fail, and nothing is ever written on a bad signature. The two v1
+   secret families are also **class-bound** (THI-1711, spec
+   `docs/specs/webhook-secret-class-binding.md`): the platform family
+   (`STRIPE_WEBHOOK_SECRET(+_PREVIOUS)`) verifies only platform-class
+   deliveries (no top-level `account`), the Connect family
+   (`STRIPE_CONNECT_WEBHOOK_SECRET(+_PREVIOUS)`) only connect-class
+   deliveries (`account` set to `acct_…`). A signature that verifies but
+   violates the class is a forgery: final `400`, nothing written, a distinct
+   `class violation:` log line. Rotation twins inherit the binding, so each
+   family rotates independently; never configure the two families with the
+   same value — same-value misconfiguration turns connect-class deliveries
+   into loud `400`s (desired fail-closed). The rehearsal step covering the
+   binding is `stripe-live-rehearsal.md` in thingery/platform. The v2
    endpoint verifies the same way against
    `STRIPE_EVENT_DESTINATION_SECRET` (+ `_PREVIOUS`) using the SDK's v2
    `parseEventNotification`; unset destination secret ⇒ the v2 endpoint

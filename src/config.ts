@@ -262,6 +262,13 @@ export interface NotifyConfig {
   // webhook answers fail-closed 503 (Phase 2 / THI-780) — same posture as
   // STRIPE_WEBHOOK_SECRET / EASYPOST_WEBHOOK_SECRET.
   resendWebhookSecret: string | undefined;
+  /** Previous inbound bounce-webhook secret (RESEND_WEBHOOK_SECRET_PREVIOUS,
+  * THI-1537): accepted during a rotation window so rotating the Resend
+  * webhook secret drops zero deliveries — same pattern as
+  * STRIPE_WEBHOOK_SECRET_PREVIOUS (F13). Only honored while the current
+  * RESEND_WEBHOOK_SECRET is set; unset ⇒ exactly the single-secret
+  * behavior (no bypass of the fail-closed 503 stub). */
+  resendWebhookSecretPrevious: string | undefined;
   /** Digest scan cadence in minutes (THI-780 PR 2). Sends are still at
    * most once per period per recipient by dedupe key. */
   digestIntervalMinutes: number;                // 60
@@ -311,6 +318,12 @@ export function notifyConfig(env: NodeJS.ProcessEnv = process.env): NotifyConfig
     maxSendsPerSweep: int("NOTIFY_MAX_SENDS_PER_SWEEP", 50),
     maxAgeHours: int("NOTIFY_MAX_AGE_HOURS", 48),
     resendWebhookSecret: value("RESEND_WEBHOOK_SECRET"),
+    // THI-1537: gated on the current secret exactly like Stripe's previous
+    // secret — an unset current secret never gets a previous-secret bypass.
+    resendWebhookSecretPrevious:
+      value("RESEND_WEBHOOK_SECRET") !== undefined
+        ? value("RESEND_WEBHOOK_SECRET_PREVIOUS")
+        : undefined,
     digestIntervalMinutes: int("NOTIFY_DIGEST_INTERVAL_MINUTES", 60),
     operatorAlertEmail: value("OPERATOR_ALERT_EMAIL") ?? undefined,
     reportAlertEmail: value("REPORT_ALERT_EMAIL") ?? undefined,

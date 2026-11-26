@@ -949,24 +949,25 @@ endpoint in the Resend dashboard (URL + `email.bounced`/`email.complained`
 events + the signing secret — wiring above) is optional functional wiring
 (THI-1048 Phase-2). While the endpoint is unregistered, a rotation is pure
 on-box `.env` work — no dashboard action at all. If it **is** registered,
-rotate the dashboard's signing secret in the same sitting (no rotate button:
-delete + re-create the endpoint with the same URL and events, which issues a
-fresh secret). A short window where Resend signs new but the app still
-verifies old only costs retried webhook deliveries — bounce suppression is
-idempotent, zero data risk.
+rotate the dashboard's signing secret in the same sitting (per Resend's
+UI/docs there is no rotate button: delete + re-create the endpoint with the
+same URL and events, which issues a fresh secret). A short window where
+Resend signs new but the app still verifies old only costs retried webhook
+deliveries — bounce suppression is idempotent, zero data risk.
 
 **1. Backup first (THI-1363 / docs/security.md §5 — never a tree-local
 `.env.bak`):** timestamped copies of every stack's `.env` (prod, plus staging
 when it exists) into the dedicated backups directory outside the app tree
-(dir 0700, files 0600, keep the last ~10):
+(dir deploy-owned 0700, files 0600, keep the last ~10):
 
 ```bash
 sudo mkdir -p -m 700 /opt/thingery-env-backups
+sudo chown deploy:deploy /opt/thingery-env-backups
 ts=$(date -u +%Y%m%dT%H%M%SZ)
-sudo install -m 600 /opt/thingery/.env \
+sudo install -o deploy -g deploy -m 600 /opt/thingery/.env \
   /opt/thingery-env-backups/env-pre-webhook-rotate-$ts
 [ -f /opt/thingery-staging/.env ] && \
-  sudo install -m 600 /opt/thingery-staging/.env \
+  sudo install -o deploy -g deploy -m 600 /opt/thingery-staging/.env \
   /opt/thingery-env-backups/env-staging-pre-webhook-rotate-$ts
 ```
 
@@ -980,15 +981,18 @@ printf '%s\n' "$new" | sudo sh -c '
   IFS= read -r v                       # value arrives via stdin, never argv
   cd /opt/thingery
   tmp=$(mktemp .env.XXXXXX)            # same dir: the rename is atomic
-  awk -v v="$v" "/^RESEND_WEBHOOK_SECRET=/ { print \"RESEND_WEBHOOK_SECRET=\" v; next }
-                 { print }" .env > "$tmp" &&
+  v="$v" awk "/^RESEND_WEBHOOK_SECRET=/ { print \"RESEND_WEBHOOK_SECRET=\" ENVIRON[\"v\"]; next }
+              { print }" .env > "$tmp" &&
   chown --reference=.env "$tmp" && chmod --reference=.env "$tmp" && mv "$tmp" .env ||
   { rm -f "$tmp"; exit 1; }'
 unset new
 ```
 
 The `RESEND_WEBHOOK_SECRET=` line must already exist (initial wiring above);
-the replacer swaps the value byte-exactly while preserving owner and mode.
+the replacer swaps the value byte-exactly while preserving owner and mode,
+and any failure (awk, chown, chmod, or mv) exits non-zero with the temp
+removed and `.env` untouched — the step-4 NEW→200 probe remains the
+decisive check.
 For a **down** staging stack, replace its file value the same way — never
 force the stack up just for a rotation.
 

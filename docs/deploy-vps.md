@@ -480,6 +480,37 @@ cd /opt/thingery && git pull && \
   docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d --build
 ```
 
+Known failure mode on that first recreation (seen on Docker 29.10.1,
+2026-11-26): recreating the network can drop the compose service-name DNS
+aliases of some services (`db`, `web`, `caddy`, `goatcounter` lost theirs;
+only `app` kept its) even though every container still shows `running`. The
+app then cannot resolve the database and `/healthz` goes red.
+
+- **Symptom:** right after the first `up -d`, app logs show
+  `getaddrinfo ENOTFOUND db` and `/healthz` returns
+  `{"ok":false,"db":"unreachable"}` while all containers are `running`.
+- **Diagnose:** compare each container's DNS names on the compose network —
+  a healthy service lists its compose service name (e.g.
+  `["thingery-db-1","db","<container-id>"]`); a hit container is missing its
+  short service-name alias:
+
+  ```bash
+  docker inspect thingery-db-1 \
+    --format '{{json .NetworkSettings.Networks.thingery_default.DNSNames}}'
+  ```
+
+- **Do not** just `docker compose restart` the affected services — aliases
+  are not re-registered on restart and the failure persists.
+- **Recover:** recreate all services once (idempotent, ~1 min, volumes
+  untouched, same blast radius as a normal deploy), then re-check `DNSNames`
+  and `/healthz` over both IPv4 and IPv6:
+
+  ```bash
+  docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml \
+    up -d --force-recreate
+  curl -4fsS https://thingery.dev/healthz && curl -6fsS https://thingery.dev/healthz
+  ```
+
 Verify the deployed build info (must match `git rev-parse HEAD` in `/opt/thingery`):
 
 ```bash

@@ -26,6 +26,7 @@ import {
   renderSellerChargeback,
   renderSellerDisputeResolved,
   renderSellerPayoutPaid,
+  renderOrderEmail,
 } from "../src/notify/templates.js";
 
 const BASE = "https://thingery.dev";
@@ -193,5 +194,43 @@ describe("order email templates (THI-763 PR 2)", () => {
       expect(key).toMatch(/^(buyer|seller)\.[a-z_]+$/);
       expect(templateKeyFor(key)).toBe(`${key}.v1`);
     }
+  });
+
+  it("approved layout: table-based, one hosted logo from the base URL, escaped panel (THI-1586)", () => {
+    const sold = renderSellerItemSold(facts);
+    // Table-based, inline styles: no flexbox/SVG/web-font loading anywhere.
+    expect(sold.html).toContain("<table");
+    expect(sold.html).not.toMatch(/display:\s*flex|<svg|@font-face|<link/i);
+    // One image: the Thread mark, hosted from the deployment's own base URL
+    // (self-hosters never reference thingery.dev) with alt text.
+    expect(sold.html.match(/<img /g)).toHaveLength(1);
+    expect(sold.html).toContain('src="https://thingery.dev/assets/email-logo.png"');
+    expect(sold.html).toContain('alt="Thingery"');
+    // White panel carries the facts; mono amount; divider color from the spec.
+    expect(sold.html).toContain("Paid — awaiting shipment");
+    expect(sold.html).toContain("Martian Mono");
+    expect(sold.html).toContain("#D9DAD6");
+    // One primary button (yellow, ink text) + secondary links.
+    expect(sold.html.match(/border-radius:6px/g)).toHaveLength(2);
+    expect(sold.html).toContain(">Open the order</a>");
+    expect(sold.html).toContain(">View the item</a>");
+    expect(sold.html).toContain(">Browse</a>");
+    // Footer: support line + canonical sentence under the 2px ink rule.
+    expect(sold.html).toContain("Questions? Reply to this email and it reaches support.");
+    expect(sold.html).toContain("border-top:2px solid #14151A");
+    // renderOrderEmail passes the deployment base URL through to the logo.
+    const viaRegistry = renderOrderEmail(
+      "seller.item_sold",
+      {
+        item_title: facts.itemTitle,
+        amount_cents: facts.amountCents,
+        currency: facts.currency,
+        order_status: facts.orderStatus,
+        order_id: "o1",
+        item_id: "i1",
+      },
+      BASE,
+    );
+    expect(viaRegistry.html).toContain(`src="${BASE}/assets/email-logo.png"`);
   });
 });

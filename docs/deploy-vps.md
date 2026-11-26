@@ -716,7 +716,7 @@ feature = revert the PR; PR-A/B modules are inert without the routes wiring.
 The order flow (ADR 0003) ships with a **kill switch**: with `STRIPE_SECRET_KEY`
 empty/unset the app answers `payments_not_configured`, listings stay buyable as
 off-platform orders, and the Stripe webhook endpoint mounts as a 503 stub.
-`docker-compose.prod.yml` passes the three `STRIPE_*` vars through from the VPS
+`docker-compose.prod.yml` passes the five `STRIPE_*` vars through from the VPS
 `.env` (merged 2026-10-27, PR #142); before that the container never saw them.
 Mode (test vs live) is derived **only** from the key prefix (`sk_test_` / `sk_live_`)
 and is logged at boot:
@@ -735,16 +735,32 @@ profile, bank details, platform + Connect terms accepted in the Stripe dashboard
 **Flip (all on the VPS, secrets never leave the box or this file):**
 
 1. Account owner (or operator acting on owner-provided values) appends to
-   `/opt/thingery/.env` — `STRIPE_SECRET_KEY=sk_live_…` and
+   `/opt/thingery/.env` — `STRIPE_SECRET_KEY=sk_live_…`,
    `STRIPE_WEBHOOK_SECRET=whsec_…` (the signing secret of the **live-mode**
-   webhook endpoint below). Leave `STRIPE_WEBHOOK_SECRET_PREVIOUS` unset unless
-   rotating.
-2. In the Stripe dashboard (live mode) register the webhook endpoint
-   `https://thingery.dev/api/webhooks/stripe` with events:
-   `checkout.session.completed`, `payment_intent.succeeded`, `charge.refunded`,
-   `charge.dispute.created`, `charge.dispute.closed`, `transfer.created`,
-   `transfer.updated`, `transfer.paid`, `account.updated`. Copy its signing
-   secret into `STRIPE_WEBHOOK_SECRET`.
+   platform webhook endpoint from step 2a below) and
+   `STRIPE_CONNECT_WEBHOOK_SECRET=whsec_…` (the signing secret of the
+   **live-mode** 'Connected accounts'-scoped endpoint from step 2b below — a
+   second endpoint with its own secret; THI-1611 A1). Leave
+   `STRIPE_WEBHOOK_SECRET_PREVIOUS` / `STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS`
+   unset unless rotating.
+2. In the Stripe dashboard (live mode) register TWO webhook endpoints, both
+   pointing at `https://thingery.dev/api/webhooks/stripe`:
+   - **2a — platform endpoint** ("Account"-scoped, the dashboard default),
+     events: `checkout.session.completed`, `payment_intent.succeeded`,
+     `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed`,
+     `transfer.created`, `transfer.updated`, `transfer.paid`. Copy its
+     signing secret into `STRIPE_WEBHOOK_SECRET`. These are all
+     platform-account events — orders, refunds, disputes, transfers.
+   - **2b — Connected accounts endpoint** (scope "Connected accounts"),
+     event: `account.updated` only. Copy its signing secret into
+     `STRIPE_CONNECT_WEBHOOK_SECRET`. Stripe delivers connected-account
+     events ONLY to a Connect-scoped endpoint — the platform endpoint never
+     receives them, so seller-onboarding detection depends on this second
+     endpoint existing (THI-1611 A1).
+   The app verifies each delivery against the configured secrets in a fixed
+   order — `STRIPE_WEBHOOK_SECRET`, then `STRIPE_CONNECT_WEBHOOK_SECRET`,
+   then the two `_PREVIOUS` rotation twins — timing-safe per attempt, `400`
+   when all fail, and nothing is ever written on a bad signature.
 3. Recreate the app container (env changes need recreation, not rebuild):
    `cd /opt/thingery && docker compose -f docker-compose.prod.yml up -d`
 4. Verify: boot log shows `(live mode)`; `curl -s https://thingery.dev/healthz`
@@ -753,8 +769,12 @@ profile, bank details, platform + Connect terms accepted in the Stripe dashboard
 
 **Seller onboarding.** Sellers complete Stripe Connect onboarding via the app's
 payout-setup flow once the platform account is live-enabled; `account.updated`
-webhook events flip `sellers.stripe_onboarded_at` when `transfers` capability is
-active. Confirm one seller onboarding before declaring live mode operational.
+deliveries on the **Connected accounts endpoint** (step 2b) flip
+`sellers.stripe_onboarded_at` when the `transfers` capability is active — without
+that endpoint registered, a seller who finishes onboarding never becomes
+payout-ready. Confirm one seller onboarding (flag flips in `sellers`) before
+declaring live mode operational; the test-mode rehearsal step with its evidence
+checklist is `stripe-live-rehearsal.md` in thingery/platform (THI-571).
 
 **Payout verification (seller-borne fees).** Sellers bear the Stripe processing
 fee (ADR 0003 amendment): the seller transfer is **gross − fee**
@@ -803,9 +823,11 @@ returns to `payments_not_configured` (new orders are off-platform), the webhook
 endpoint returns to its 503 stub, and live-mode events stop verifying. Orders,
 payment intents, and payouts already created in Stripe **remain real** — a
 rollback stops new payments; it does not erase history or pending Connect
-payouts. Rolling forward again = restore the same three lines (or rotate keys and
-keep the old webhook secret in `STRIPE_WEBHOOK_SECRET_PREVIOUS` for zero-downtime
-verification).
+payouts. Rolling forward again = restore the same lines (or rotate secrets and
+keep the old values in `STRIPE_WEBHOOK_SECRET_PREVIOUS` /
+`STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS` for zero-downtime verification — set
+the `_PREVIOUS` twin before swapping the current value, so deliveries signed
+with the old secret keep verifying during the switch).
 
 **Known gap.** No carrier keys are configured on this deployment, so
 `in_transit` orders cannot advance via carrier webhooks. Orders reach `delivered`

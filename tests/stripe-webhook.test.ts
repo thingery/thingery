@@ -40,6 +40,10 @@ const available = await dbAvailable();
 
 const SECRET = "whsec_test_secret";
 const PREVIOUS = "whsec_old_secret";
+// THI-1611 A1: the 'Connected accounts'-scoped endpoint has its own signing
+// secret (and a rotation twin) — distinct values from the platform endpoint's.
+const CONNECT_SECRET = "whsec_connect_secret";
+const CONNECT_PREVIOUS = "whsec_connect_old_secret";
 const stripe = new StripeCtor("sk_test_k1");
 
 const n0 = Math.random().toString(36).slice(2, 8);
@@ -84,11 +88,12 @@ function event(type: string, object: Record<string, unknown>, id = `evt_${Math.r
 }
 
 /** express strips nothing here — mount exactly like index.ts does. */
-function buildApp(): express.Express {
+function buildApp(withConnectSecret = true): express.Express {
   const app = express();
   const cfg = {
     stripePaymentsEnabled: true, stripeMode: "test",
     stripeWebhookReady: true, stripeWebhookSecret: SECRET, stripeWebhookSecretPrevious: PREVIOUS,
+    ...(withConnectSecret ? { stripeConnectWebhookSecret: CONNECT_SECRET, stripeConnectWebhookSecretPrevious: CONNECT_PREVIOUS } : {}),
   } as unknown as OrderFlowConfig;
   app.use(stripeWebhookRouter(cfg));
   return app;
@@ -400,6 +405,75 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     await post(app, JSON.stringify(unknown));
     const unchanged = await db.query("SELECT count(*)::int AS c FROM sellers WHERE stripe_account_id IS NOT NULL AND stripe_onboarded_at IS NOT NULL");
     expect(unchanged.rows[0].c).toBe(0);
+  });
+
+  // --- THI-1611 A1: Connect-scoped endpoint secret -------------------------
+
+  it("connect-scoped account.updated (signed with STRIPE_CONNECT_WEBHOOK_SECRET) flips stripe_onboarded_at — the payout-ready path (THI-1611 A1)", async () => {
+    const order = await seedOrder();
+    // seedOrder() pre-boards; reset to the un-onboarded state under test.
+    await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
+    const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
+    const on = event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } });
+    const r = await post(app, JSON.stringify(on), { secret: CONNECT_SECRET });
+    expect(r.status).toBe(200);
+    expect(r.json).toEqual({ received: true });
+    const set = await db.query("SELECT stripe_onboarded_at IS NOT NULL AS ok FROM sellers WHERE id = $1", [sellerId]);
+    expect(set.rows[0].ok).toBe(true);
+    // The flip (NULL→set) is also the seller notification trigger — exercised,
+    // not just the column write.
+    const notified = await db.query("SELECT count(*)::int AS c FROM notifications WHERE event_type = 'seller.payouts_enabled'");
+    expect(notified.rows[0].c).toBe(1);
+    expect(order.status).toBe("pending"); // untouched by onboarding
+  });
+
+  it("a bad Connect secret is a 400 and never writes (THI-1611 A1: 400-on-all-fail, F12)", async () => {
+    await seedOrder();
+    await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
+    const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
+    const on = event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } });
+    const r = await post(app, JSON.stringify(on), { secret: "whsec_wrong_connect_secret" });
+    expect(r.status).toBe(400);
+    expect(r.json).toEqual({ error: "signature verification failed" });
+    const rows = await db.query("SELECT count(*)::int AS c FROM webhook_events");
+    expect(rows.rows[0].c).toBe(0); // no ingest on a bad signature
+    const flag = await db.query("SELECT stripe_onboarded_at IS NULL AS ok FROM sellers WHERE id = $1", [sellerId]);
+    expect(flag.rows[0].ok).toBe(true); // no state change either
+  });
+
+  it("accepts the Connect PREVIOUS secret during rotation (F13, THI-1611 A1)", async () => {
+    await seedOrder();
+    await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
+    const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
+    const on = event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } });
+    const r = await post(app, JSON.stringify(on), { secret: CONNECT_PREVIOUS });
+    expect(r.status).toBe(200);
+    const set = await db.query("SELECT stripe_onboarded_at IS NOT NULL AS ok FROM sellers WHERE id = $1", [sellerId]);
+    expect(set.rows[0].ok).toBe(true);
+  });
+
+  it("without STRIPE_CONNECT_WEBHOOK_SECRET configured, a Connect-signed delivery 400s exactly as before (self-hosters unchanged)", async () => {
+    await seedOrder();
+    await db.query("UPDATE sellers SET stripe_onboarded_at = NULL WHERE id = $1", [sellerId]);
+    const acct = (await db.query<{ stripe_account_id: string }>("SELECT stripe_account_id FROM sellers WHERE id = $1", [sellerId])).rows[0].stripe_account_id;
+    const on = event("account.updated", { id: acct, object: "account", capabilities: { transfers: "active" } });
+    const bare = buildApp(false);
+    let closeBare = () => {};
+    await new Promise<void>((resolve) => {
+      const s = bare.listen(0, "127.0.0.1", () => {
+        (bare as unknown as { _port: number })._port = (s.address() as net.AddressInfo).port;
+        closeBare = () => s.close();
+        resolve();
+      });
+    });
+    try {
+      const r = await post(bare, JSON.stringify(on), { secret: CONNECT_SECRET });
+      expect(r.status).toBe(400);
+      const rows = await db.query("SELECT count(*)::int AS c FROM webhook_events");
+      expect(rows.rows[0].c).toBe(0);
+    } finally {
+      closeBare();
+    }
   });
 
   it("livemode mismatch is stored redacted and never processed (F5/§6.7)", async () => {

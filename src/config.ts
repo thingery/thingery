@@ -72,6 +72,14 @@ export interface OrderFlowConfig {
   stripeWebhookReady: boolean;
   stripeWebhookSecret: string | undefined;
   stripeWebhookSecretPrevious: string | undefined; // rotation (F13)
+  // THI-1611 A1: Stripe delivers connected-account events (`account.updated`,
+  // the seller-onboarding flip) to the 'Connected accounts'-scoped webhook
+  // endpoint, which has its OWN signing secret — a different value from the
+  // platform endpoint's STRIPE_WEBHOOK_SECRET. Unset ⇒ exactly the old
+  // single-secret behavior (self-hosters without Connect onboarding keep
+  // working; connect-shaped deliveries then 400 exactly as before).
+  stripeConnectWebhookSecret: string | undefined;
+  stripeConnectWebhookSecretPrevious: string | undefined; // rotation twin (F13)
   // Shipping provider (THI-1246): exactly ONE carrier provider per
   // deployment — id/scoped rate + tracker ids make runtime mixing a non-issue
   // by construction. easypostEnabled's old role ("a provider is configured")
@@ -136,6 +144,8 @@ export function orderFlowConfig(): OrderFlowConfig {
 
   const stripeWebhookSecret = envValue("STRIPE_WEBHOOK_SECRET");
   const stripeWebhookSecretPrevious = envValue("STRIPE_WEBHOOK_SECRET_PREVIOUS");
+  const stripeConnectWebhookSecret = envValue("STRIPE_CONNECT_WEBHOOK_SECRET");
+  const stripeConnectWebhookSecretPrevious = envValue("STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS");
 
   // --- Shipping provider selection (THI-1246) ----------------------------
   // Exactly one provider per deployment. Case-insensitive id; unset → the
@@ -194,6 +204,11 @@ export function orderFlowConfig(): OrderFlowConfig {
     stripeWebhookReady: stripeKey !== undefined && stripeWebhookSecret !== undefined,
     stripeWebhookSecret,
     stripeWebhookSecretPrevious: stripeWebhookSecret !== undefined ? stripeWebhookSecretPrevious : undefined,
+    stripeConnectWebhookSecret,
+    // Same rotation gating as the platform twin: an unset current secret
+    // never gets a previous-secret bypass.
+    stripeConnectWebhookSecretPrevious:
+      stripeConnectWebhookSecret !== undefined ? stripeConnectWebhookSecretPrevious : undefined,
     shippingProvider,
     shippingEnabled: shippingSelectionValid && shippingApiKey !== undefined,
     carrierWebhookReady: shippingSelectionValid && carrierWebhookSecret !== undefined,
@@ -343,6 +358,14 @@ export function logConfigBootReport(cfg: OrderFlowConfig = orderFlowConfig()): O
     }
   } else {
     console.log("[config] Stripe payments not configured — order tools answer payments_not_configured (kill switch)");
+  }
+  if (cfg.stripeWebhookReady && !cfg.stripeConnectWebhookSecret) {
+    console.error(
+      "[config] STRIPE_CONNECT_WEBHOOK_SECRET is unset — connected-account events " +
+        "(account.updated: seller onboarding → payout-ready) will fail signature " +
+        "verification. Register the 'Connected accounts'-scoped webhook endpoint " +
+        "and set its secret (docs/deploy-vps.md §5.3).",
+    );
   }
   if (cfg.shippingEnabled && !cfg.carrierWebhookReady) {
     console.error(

@@ -9,9 +9,12 @@
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
+import type Stripe from "stripe";
 import net from "node:net";
 import pg from "pg";
 import { orderReturnPage, payoutSetupReturnPage } from "../src/web-pages.js";
+import { getPayableCheckoutUrl } from "../src/order-flow.js";
+import { setStripeForTests } from "../src/stripe.js";
 import { pool } from "../src/db.js";
 
 const connectionString =
@@ -30,6 +33,31 @@ async function dbAvailable(): Promise<boolean> {
 }
 
 const available = await dbAvailable();
+
+// --- THI-1605 pay step (spec docs/specs/order-page-pay-step.md) -------------
+// The page renders a pay button ONLY for a pending stripe order whose live
+// Checkout session it can retrieve (read-only reuse of the get_order
+// payment_url path — no second payment path). Every other shape is exactly
+// the status-only F15 render. Stripe is faked via setStripeForTests.
+
+type FakeSession = { url: string | null } | { fail: true } | { spyOnly: true };
+
+function fakeStripeWithSession(session: FakeSession): { client: Stripe; state: { retrieveCalls: number } } {
+  const state = { retrieveCalls: 0 };
+  const client = {
+    checkout: {
+      sessions: {
+        retrieve: async (id: string) => {
+          state.retrieveCalls += 1;
+          if ("fail" in session && session.fail) throw new Error("stripe down");
+          if ("spyOnly" in session && session.spyOnly) return { id };
+          return { id, url: (session as { url: string | null }).url };
+        },
+      },
+    },
+  } as unknown as Stripe;
+  return { client, state };
+}
 
 describe.skipIf(!available)("/order payment-return pages (F15)", () => {
   let server: Server;
@@ -116,6 +144,128 @@ describe.skipIf(!available)("/order payment-return pages (F15)", () => {
     const body = await res.text();
     expect(body).toContain("Payout setup");
     expect(body).not.toContain("Order not found");
+  });
+
+  // --- THI-1605 pay step (spec docs/specs/order-page-pay-step.md) ---------
+  // The page renders a pay button ONLY for a pending stripe order whose live
+  // Checkout session it can retrieve (read-only reuse of the get_order
+  // payment_url path — no second payment path). Every other shape is exactly
+  // the status-only F15 render. Stripe is faked via setStripeForTests.
+
+  it("renders no pay step while the order has no checkout session", async () => {
+    const res = await fetch(`${baseUrl}/order/${orderId}`);
+    const body = await res.text();
+    expect(res.status).toBe(200);
+    expect(body).toContain("Awaiting payment");
+    expect(body).not.toContain("Pay for this order");
+    expect(body).not.toContain("stripe.com");
+  });
+
+  it("renders the pay step for a pending stripe order with a live session — and nothing else new", async () => {
+    const url = "https://pay.stripe.com/session/thi1605";
+    await client.query("UPDATE orders SET checkout_session_id = $1 WHERE id = $2", ["cs_thi1605", orderId]);
+    setStripeForTests(fakeStripeWithSession({ url }).client);
+    try {
+      const res = await fetch(`${baseUrl}/order/${orderId}`);
+      const body = await res.text();
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("referrer-policy")).toBe("same-origin");
+      expect(body).toContain("Awaiting payment");
+      expect(body).toContain("Pay for this order");
+      expect(body).toContain(`href="${url}"`);
+      expect(body).toContain("You'll come back here after paying.");
+      // F15 data discipline unchanged: the button adds a link, never data.
+      expect(body).not.toContain("Quiet Title");
+      expect(body).not.toContain("100.00");
+    } finally {
+      setStripeForTests(null);
+      await client.query("UPDATE orders SET checkout_session_id = NULL WHERE id = $1", [orderId]);
+    }
+  });
+
+  it("renders status-only when the session is expired (url null) or retrieval fails", async () => {
+    await client.query("UPDATE orders SET checkout_session_id = $1 WHERE id = $2", ["cs_thi1605b", orderId]);
+    try {
+      setStripeForTests(fakeStripeWithSession({ url: null }).client);
+      let res = await fetch(`${baseUrl}/order/${orderId}`);
+      let body = await res.text();
+      expect(body).toContain("Awaiting payment");
+      expect(body).not.toContain("Pay for this order");
+      expect(body).toContain("ask it to check the order status");
+
+      setStripeForTests(fakeStripeWithSession({ fail: true }).client);
+      res = await fetch(`${baseUrl}/order/${orderId}`);
+      body = await res.text();
+      expect(res.status).toBe(200);
+      expect(body).not.toContain("Pay for this order");
+    } finally {
+      setStripeForTests(null);
+      await client.query("UPDATE orders SET checkout_session_id = NULL WHERE id = $1", [orderId]);
+    }
+  });
+
+  it("renders status-only when Stripe is unconfigured (kill switch)", async () => {
+    await client.query("UPDATE orders SET checkout_session_id = $1 WHERE id = $2", ["cs_thi1605c", orderId]);
+    try {
+      // No setStripeForTests call — the client stays null (test default).
+      const res = await fetch(`${baseUrl}/order/${orderId}`);
+      const body = await res.text();
+      expect(res.status).toBe(200);
+      expect(body).toContain("Awaiting payment");
+      expect(body).not.toContain("Pay for this order");
+    } finally {
+      await client.query("UPDATE orders SET checkout_session_id = NULL WHERE id = $1", [orderId]);
+    }
+  });
+
+  it("never renders the pay step once the order is no longer pending", async () => {
+    await client.query("UPDATE orders SET checkout_session_id = $1, status = 'sold' WHERE id = $2", ["cs_thi1605d", orderId]);
+    setStripeForTests(fakeStripeWithSession({ url: "https://pay.stripe.com/session/sold" }).client);
+    try {
+      const res = await fetch(`${baseUrl}/order/${orderId}`);
+      const body = await res.text();
+      expect(body).toContain("Paid — awaiting shipment");
+      expect(body).not.toContain("Pay for this order");
+    } finally {
+      setStripeForTests(null);
+      await client.query("UPDATE orders SET checkout_session_id = NULL, status = 'pending' WHERE id = $1", [orderId]);
+    }
+  });
+
+  it("maps ?canceled=1 to fixed copy — reflects nothing, button only when payable", async () => {
+    // Not payable: fixed copy, no button, no echo of arbitrary query values.
+    let res = await fetch(`${baseUrl}/order/${orderId}?canceled=1&x=%3Cscript%3E`);
+    let body = await res.text();
+    expect(res.status).toBe(200);
+    expect(body).toContain("Payment was canceled — you can still complete it; ask your assistant to resume checkout.");
+    expect(body).not.toContain("Pay for this order");
+    expect(body).not.toContain("<script>");
+
+    // Payable: the note points at the button below it.
+    await client.query("UPDATE orders SET checkout_session_id = $1 WHERE id = $2", ["cs_thi1605e", orderId]);
+    setStripeForTests(fakeStripeWithSession({ url: "https://pay.stripe.com/session/canceled" }).client);
+    try {
+      res = await fetch(`${baseUrl}/order/${orderId}?canceled=1`);
+      body = await res.text();
+      expect(body).toContain("Payment was canceled — you can still complete it below.");
+      expect(body).toContain("Pay for this order");
+    } finally {
+      setStripeForTests(null);
+      await client.query("UPDATE orders SET checkout_session_id = NULL WHERE id = $1", [orderId]);
+    }
+  });
+
+  it("getPayableCheckoutUrl(null) makes no Stripe call at all", async () => {
+    const fake = fakeStripeWithSession({ spyOnly: true });
+    setStripeForTests(fake.client);
+    try {
+      expect(await getPayableCheckoutUrl(null)).toBeNull();
+      expect(await getPayableCheckoutUrl("")).toBeNull();
+      expect(fake.state.retrieveCalls).toBe(0);
+    } finally {
+      setStripeForTests(null);
+    }
   });
 });
 

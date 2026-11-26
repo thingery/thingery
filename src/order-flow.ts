@@ -309,6 +309,24 @@ export async function getOrderView(orderId: string, viewerId: string): Promise<O
   return { ...order, payment_url: paymentUrl };
 }
 
+/** Checkout-session URL lookup for the order capability page (spec
+ *  docs/specs/order-page-pay-step.md, THI-1605). READ-ONLY reuse of the exact
+ *  retrieval getOrderView performs for get_order's payment_url — no minting,
+ *  no transitions, no rails change: the session pays the order once and
+ *  Stripe itself enforces that. The caller (orderReturnPage) has already
+ *  resolved the order by its UUID capability, the same trust that grants
+ *  status visibility, so no viewer check happens here. Null for anything not
+ *  a retrievable live session: null/empty id, Stripe kill switch, retrieve
+ *  error, or an expired session (url is null past expiry) — the page renders
+ *  today's status-only body in every one of those cases. */
+export async function getPayableCheckoutUrl(sessionId: string | null): Promise<string | null> {
+  if (!sessionId) return null;
+  const stripe = getStripe();
+  if (!stripe) return null;
+  const session = await stripe.checkout.sessions.retrieve(sessionId).catch(() => null);
+  return session?.url ?? null;
+}
+
 export const ORDER_ROLES = ["buyer", "seller", "both"] as const;
 export type OrderRole = (typeof ORDER_ROLES)[number];
 

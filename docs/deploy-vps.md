@@ -6,6 +6,24 @@ with automatic HTTPS and encrypted nightly backups (§4).
 
 Total time: ~15 minutes.
 
+> **⚠️ Flagship VPS (thingery.dev): never run the plain form.** On the company
+> VPS the production stack runs behind the platform web overlay, so every
+> production-stack `docker compose` command MUST be:
+>
+> ```bash
+> docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml …
+> ```
+>
+> Plain `docker compose -f docker-compose.prod.yml up -d` recreates `caddy`
+> with the self-hoster Caddyfile (no `web:3000` routes): every platform route
+> falls through to the legacy `app` container and the website goes down
+> (2026-11-26 outages THI-1536 and its same-day recurrence, identical
+> signature, both triggered by a documented rotation step following this
+> plain form). The overlay file and its runbook live in the private platform
+> repo: `deploy/deploy-web.md` in `thingery/platform` (path reference only —
+> do not copy platform material here). Self-hosters without the platform web
+> layer: the plain form in the fresh-install section below is correct for you.
+
 ## 1. VPS initialization
 
 ```bash
@@ -61,6 +79,13 @@ docker compose -f docker-compose.prod.yml up -d --build
 # apply the schema (idempotent — safe to re-run)
 docker compose -f docker-compose.prod.yml exec -T db psql -U thingery -d thingery < db/schema.sql
 ```
+
+**Flagship VPS note:** the section above is the fresh self-host install. On
+thingery.dev the stack runs behind the platform web overlay — on that machine
+append `-f /opt/thingery-web/docker-compose.web.yml` to every command above
+(see the warning at the top; runbook: `deploy/deploy-web.md` in the private
+`thingery/platform` repo). The plain form here is only for installs without
+the platform web layer.
 
 Verify:
 
@@ -439,10 +464,10 @@ operator SSH session):
 
 ```bash
 cd /opt/thingery && git pull && \
-  docker compose -f docker-compose.prod.yml exec -T db \\
+  docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml exec -T db \\
     psql -U thingery -d thingery -v ON_ERROR_STOP=1 < db/schema.sql && \
   GIT_COMMIT=$(git rev-parse HEAD) BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \\
-  docker compose -f docker-compose.prod.yml up -d --build
+  docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d --build
 ```
 
 Verify the deployed build info (must match `git rev-parse HEAD` in `/opt/thingery`):
@@ -516,11 +541,11 @@ Setup:
    set -euo pipefail
    cd /opt/thingery
    git pull --ff-only
-   docker compose -f docker-compose.prod.yml exec -T db \
+   docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml exec -T db \
      psql -U thingery -d thingery -v ON_ERROR_STOP=1 < db/schema.sql
    export GIT_COMMIT=$(git rev-parse HEAD)
    export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   docker compose -f docker-compose.prod.yml up -d --build
+   docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d --build
    docker image prune -f
    echo "thingery-deploy: done at $GIT_COMMIT"
    ```
@@ -722,7 +747,7 @@ Mode (test vs live) is derived **only** from the key prefix (`sk_test_` / `sk_li
 and is logged at boot:
 
 ```bash
-docker compose -f docker-compose.prod.yml logs app 2>&1 | grep '\[config\] Stripe'
+docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml logs app 2>&1 | grep '\[config\] Stripe'
 # → "Stripe payments enabled (live mode)" | "Stripe payments not configured … (kill switch)"
 ```
 
@@ -748,24 +773,50 @@ profile, bank details, platform + Connect terms accepted in the Stripe dashboard
    - **2a — platform endpoint** ("Account"-scoped, the dashboard default),
      events: `checkout.session.completed`, `payment_intent.succeeded`,
      `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed`,
-     `transfer.created`, `transfer.updated`, `transfer.paid`. Copy its
+     `transfer.created`, `transfer.updated`, `transfer.reversed`. Copy its
      signing secret into `STRIPE_WEBHOOK_SECRET`. These are all
      platform-account events — orders, refunds, disputes, transfers.
    - **2b — Connected accounts endpoint** (scope "Connected accounts"),
-     event: `account.updated` only. Copy its signing secret into
-     `STRIPE_CONNECT_WEBHOOK_SECRET`. Stripe delivers connected-account
+     events: `account.updated`, `payout.failed`. Copy its signing secret
+     into `STRIPE_CONNECT_WEBHOOK_SECRET`. Stripe delivers connected-account
      events ONLY to a Connect-scoped endpoint — the platform endpoint never
-     receives them, so seller-onboarding detection depends on this second
-     endpoint existing (THI-1611 A1).
+     receives them, so seller-onboarding detection (`account.updated`) and
+     stuck-seller-payout alerts (`payout.failed`) depend on this second
+     endpoint existing (THI-1611 A1; payout.failed handling THI-1624 A6).
+   Event-list notes (A6, THI-1624):
+   - `transfer.paid` is deliberately NOT in either list: verified against
+     Stripe's own OpenAPI spec at the pinned API version
+     (2026-09-30.endive), it is no longer a subscribable event type — the
+     `enabled_events` enum for `POST /v1/webhook_endpoints` omits it. The
+     old runbook list named it in error;
+     `transfer.created`/`transfer.updated` carry the payout-landed signal.
+     The handler keeps a defensive `transfer.paid` alias so a
+     legacy-subscribed delivery is never dropped.
+   - `transfer.reversed` is platform-scoped (the platform creates the
+     transfer): it arrives on 2a and closes A3/A4's tracked reversal debt
+     (`order_events.transfer_reversed`).
+   - `payout.failed` (stuck seller payout → durable operator alert) is a
+     **connected-account** event: it only ever arrives on 2b. An unhandled
+     `payout.failed` is invisible money; keep it in the Connect list.
    The app verifies each delivery against the configured secrets in a fixed
    order — `STRIPE_WEBHOOK_SECRET`, then `STRIPE_CONNECT_WEBHOOK_SECRET`,
    then the two `_PREVIOUS` rotation twins — timing-safe per attempt, `400`
    when all fail, and nothing is ever written on a bad signature.
 3. Recreate the app container (env changes need recreation, not rebuild):
-   `cd /opt/thingery && docker compose -f docker-compose.prod.yml up -d`
+   `cd /opt/thingery && docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d`
 4. Verify: boot log shows `(live mode)`; `curl -s https://thingery.dev/healthz`
    still `200`; a listing shows `payment_available: true` via the MCP order tools;
    the Stripe dashboard's webhook page shows signature-verified deliveries.
+
+**Stripe API version pin (A6, THI-1624).** `src/stripe.ts` constructs the
+Stripe client with an explicit `apiVersion` literal — `STRIPE_API_VERSION`
+(`"2026-09-30.endive"`, typed against the installed SDK v23's
+`Stripe.LatestApiVersion`), never the SDK's silent default. Upgrading the
+`stripe` npm package is a **deliberate act**: the build (and a CI guard test
+asserting pin == installed SDK version) fails until `STRIPE_API_VERSION` is
+re-confirmed against the new SDK. On any such upgrade: bump the pin, re-check
+the event list above against the new OpenAPI spec version, and re-run the
+test-mode rehearsal before deploy.
 
 **Seller onboarding.** Sellers complete Stripe Connect onboarding via the app's
 payout-setup flow once the platform account is live-enabled; `account.updated`
@@ -796,7 +847,7 @@ platform's exposure per refunded order is bounded by that fee.
 
 **Rollback (documented path back to the kill switch).** Comment out or remove the
 `STRIPE_*` lines in `/opt/thingery/.env`, then
-`cd /opt/thingery && docker compose -f docker-compose.prod.yml up -d`. The app
+`cd /opt/thingery && docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d`. The app
 returns to `payments_not_configured` (new orders are off-platform), the webhook
 endpoint returns to its 503 stub, and live-mode events stop verifying. Orders,
 payment intents, and payouts already created in Stripe **remain real** — a
@@ -875,7 +926,7 @@ printf '%s\n' 'REPORT_REVIEW_CREATE_URL=<endpoint URL>' \
   'REPORT_REVIEW_ITEM_URL_TEMPLATE=https://thingery.dev/item/{id}' \
   'REPORT_REVIEW_TIMEOUT_MS=60000' >> .env
 # env changes need a container recreate, not a rebuild:
-docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d
 ```
 
 **Verification (smoke per ops-smoke-policy.md — disposable account, deleted
@@ -952,7 +1003,7 @@ grep -q '^RESEND_WEBHOOK_SECRET=' .env || \
   printf 'RESEND_WEBHOOK_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 # then register the webhook in the Resend dashboard with the same value
 # (view it on the VPS: grep '^RESEND_WEBHOOK_SECRET=' .env), and:
-docker compose -f docker-compose.prod.yml up -d app   # env changes recreate
+docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d app   # env changes recreate
 ```
 
 **Verification:** `curl -i -X POST https://thingery.dev/api/webhooks/resend \
@@ -1021,7 +1072,7 @@ force the stack up just for a rotation.
 **3. Recreate prod** (env change → recreate, not rebuild):
 
 ```bash
-cd /opt/thingery && sudo docker compose -f docker-compose.prod.yml up -d
+cd /opt/thingery && sudo docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d
 ```
 
 Over non-TTY SSH the client can time out while compose still finishes
@@ -1088,8 +1139,9 @@ that exists, or its first bounce will suppress it like any other address.
 **Wiring:** append `OPERATOR_ALERT_EMAIL=<mailbox>` to the VPS `.env`, recreate
 the app container (same command as above).
 
-**Verification:** presence-only — `docker compose -f docker-compose.prod.yml
-exec app printenv OPERATOR_ALERT_EMAIL >/dev/null && echo set`. First alert
+**Verification:** presence-only — `docker compose -f docker-compose.prod.yml -f
+/opt/thingery-web/docker-compose.web.yml exec app printenv OPERATOR_ALERT_EMAIL
+>/dev/null && echo set`. First alert
 lands as an `operator.*` row in `email_outbox` and sends with the sweep.
 
 **Rollback:** unset either variable in `.env` + recreate — webhook returns to
@@ -1313,7 +1365,7 @@ directive (`log` in the `thingery.dev` site block), so each request logs client 
 method, path, status, and User-Agent as one JSON line.
 
 - **Read them:**
-  `docker compose -f docker-compose.prod.yml logs caddy` (access log),
+  `docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml logs caddy` (access log),
   `... logs app` or `docker logs thingery-app-1` (app — running container only), and
   `sudo journalctl -t thingery-app` (app — full history). `-f` follows,
   `--since 1h` / `--since "2026-11-23 22:30" --until "2026-11-24 06:10"` limit.

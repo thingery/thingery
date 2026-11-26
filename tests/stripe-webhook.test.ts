@@ -847,6 +847,24 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     expect(we.rows[0].p).not.toContain("Sensitive");
   });
 
+  it("drift pin a (THI-1711 reconciliation): a v1-shaped body signed with the v2 destination-family secret is a 400 — the v1 candidate list is static and never offers STRIPE_EVENT_DESTINATION_SECRET", async () => {
+    await seedOrder();
+    const ev = event("checkout.session.completed", {
+      id: "cs_pin", object: "checkout_session", payment_status: "paid",
+      payment_intent: "pi_pin", amount_total: 10500, currency: "eur",
+    });
+    // Distinct secret value belonging to the v2 event-destination family only.
+    // Real crypto: an HMAC under this key cannot verify under any v1 candidate,
+    // so 400 is guaranteed today; the PIN is that the v1 loop never offers the
+    // destination key material — if a future change drifts the v1 candidate
+    // list to include STRIPE_EVENT_DESTINATION_SECRET, this body verifies and
+    // (platform-class, so binding-clean) would process — this test fails first.
+    const r = await post(app, JSON.stringify(ev), { secret: "whsec_destination_family_secret" });
+    expect(r.status).toBe(400);
+    const we = await db.query("SELECT count(*)::int AS c FROM webhook_events WHERE external_id = $1", [ev.id]);
+    expect(we.rows[0].c).toBe(0);
+  });
+
   it("livemode mismatch is stored redacted and never processed (F5/§6.7)", async () => {
     const ev = event("checkout.session.completed", {
       id: "cs_live_x", object: "checkout_session", payment_status: "paid",
@@ -1114,6 +1132,32 @@ describe.skipIf(!available)("Stripe v2 event-destination webhook (HTTP, THI-1681
     expect(r.status).toBe(200);
     const set = await db.query("SELECT stripe_onboarded_at IS NOT NULL AS ok FROM sellers WHERE id = $1", [sellerPk]);
     expect(set.rows[0].ok).toBe(true);
+  });
+
+  it("drift pin b (THI-1711 reconciliation): a signature only valid under a v1-family secret never verifies on the v2 endpoint — the v2 candidate list offers only destination-family key material", async () => {
+    const acct = `acct_v2_xfamily_${n0}`;
+    await seedSellerWithAccount(acct);
+    const notif = notification(acct, "active");
+    // The fake parseEventNotification accepts ONLY this v1-family value —
+    // modeling real crypto (an HMAC under a v1 key never verifies under a
+    // destination key). Today the v2 loop tries just the two destination
+    // secrets ⇒ 400. If the v2 candidate list ever drifts to offer v1 family
+    // secrets, this body verifies and processes — this test fails first.
+    const app = buildV2App({ acceptSecret: "whsec_v1_platform_family_secret", notif });
+    await new Promise<void>((resolve) => {
+      server.close();
+      server = app.listen(0, "127.0.0.1", () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+    const r = await postV2(app, JSON.stringify({ id: notif.id }));
+    expect(r.status).toBe(400);
+    expect(r.json).toEqual({ error: "signature verification failed" });
+    const rows = await db.query("SELECT count(*)::int AS c FROM webhook_events");
+    expect(rows.rows[0].c).toBe(0);
+    const flipped = await db.query("SELECT count(*)::int AS c FROM sellers WHERE stripe_onboarded_at IS NOT NULL");
+    expect(flipped.rows[0].c).toBe(0);
   });
 
   it("livemode mismatch → rejected 200, never touches test rows (F5)", async () => {

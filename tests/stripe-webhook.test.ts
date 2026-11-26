@@ -44,8 +44,9 @@ const stripe = new StripeCtor("sk_test_k1");
 
 const n0 = Math.random().toString(36).slice(2, 8);
 
-/** Fake Stripe client: real constructEvent (crypto), fake money calls. */
-function fakeStripe(refundImpl?: () => unknown): Stripe {
+/** Fake Stripe client: real constructEvent (crypto), fake money calls.
+ *  `reversalImpl` simulates transfer.createReversal failures (A2 race arm). */
+function fakeStripe(refundImpl?: () => unknown, reversalImpl?: () => unknown): Stripe {
   return {
     webhooks: stripe.webhooks, // real verification
     checkout: {
@@ -59,6 +60,16 @@ function fakeStripe(refundImpl?: () => unknown): Stripe {
       create: async () => {
         if (refundImpl) await refundImpl();
         return { id: `re_${n0}` };
+      },
+    },
+    charges: {
+      // A2: a lost dispute auto-refunds the charge — the id rides on the charge
+      retrieve: async () => ({ id: "ch_lost", refunds: { data: [{ id: `re_${n0}` }] } }),
+    },
+    transfers: {
+      createReversal: async () => {
+        if (reversalImpl) await reversalImpl();
+        return { id: "tr_reversal", amount: 10500 };
       },
     },
   } as unknown as Stripe;
@@ -370,6 +381,105 @@ describe.skipIf(!available)("Stripe webhook endpoint (HTTP)", () => {
     const r2 = await post(app, JSON.stringify(closed));
     expect(r2.status).toBe(200);
     expect((await db.query("SELECT status FROM orders WHERE id = $1", [order.id])).rows[0].status).toBe("delivered");
+  });
+
+  // --- A2 (THI-1611): lost chargebacks reach a terminal state; release refused
+
+  it("A2: dispute.closed lost → refunded terminal; item active; refund_id recorded; alert fired; admin_release refused", async () => {
+    const order = await seedOrder();
+    await db.query(
+      "UPDATE orders SET status = 'delivered', payment_intent_id = 'pi_a2', dispute_deadline = now() + interval '1 day' WHERE id = $1",
+      [order.id],
+    );
+    const created = event("charge.dispute.created", { id: "dp_a2", object: "dispute", payment_intent: "pi_a2", reason: "product_not_received" });
+    await post(app, JSON.stringify(created));
+    expect((await db.query("SELECT status FROM orders WHERE id = $1", [order.id])).rows[0].status).toBe("disputed");
+
+    process.env.OPERATOR_ALERT_EMAIL = "ops-a2@test.dev";
+    try {
+      const closed = event("charge.dispute.closed", { id: "dp_a2", object: "dispute", payment_intent: "pi_a2", status: "lost", charge: "ch_a2" });
+      const r = await post(app, JSON.stringify(closed));
+      expect(r.status).toBe(200);
+    } finally {
+      delete process.env.OPERATOR_ALERT_EMAIL;
+    }
+
+    const row = (await db.query<OrderRow>("SELECT * FROM orders WHERE id = $1", [order.id])).rows[0];
+    expect(row.status).toBe("refunded"); // terminal from the moment the verdict lands
+    expect(row.refund_id).toBe(`re_${n0}`); // Stripe-provided refund id recorded
+    const item = await db.query("SELECT status FROM items WHERE id = $1", [order.item_id]);
+    expect(item.rows[0].status).toBe("active"); // seller may relist
+    const transition = await db.query(
+      "SELECT count(*)::int AS c FROM order_events WHERE order_id = $1 AND event_type = 'transition' AND to_status = 'refunded' AND reason LIKE '%dp_a2 lost%'",
+      [order.id],
+    );
+    expect(transition.rows[0].c).toBe(1); // durable order_events entry
+    const alert = await db.query(
+      "SELECT count(*)::int AS c FROM email_outbox WHERE dedupe_key = $1 AND template = 'operator.dispute_lost.v1'",
+      [`opalert:${order.id}`],
+    );
+    expect(alert.rows[0].c).toBe(1); // operator alert fired
+
+    // Release attempt refused: refunded is terminal — #19 has no edge from it.
+    await expect(
+      applyTransition({ orderId: order.id, trigger: "admin_release", actor: { type: "admin", id: "op" } }),
+    ).rejects.toThrow(/invalid_transition/);
+  });
+
+  it("A2 race: lost verdict on payout_pending → refunded + in-flight transfer reversed (durable record)", async () => {
+    const order = await seedOrder();
+    await db.query(
+      "UPDATE orders SET status = 'payout_pending', payment_intent_id = 'pi_race', transfer_id = 'tr_race' WHERE id = $1",
+      [order.id],
+    );
+    const closed = event("charge.dispute.closed", { id: "dp_race", object: "dispute", payment_intent: "pi_race", status: "lost", charge: "ch_race" });
+    const r = await post(app, JSON.stringify(closed));
+    expect(r.status).toBe(200);
+    expect((await db.query("SELECT status FROM orders WHERE id = $1", [order.id])).rows[0].status).toBe("refunded");
+    const reversed = await db.query(
+      "SELECT payload FROM order_events WHERE order_id = $1 AND event_type = 'transfer_reversed' AND dedupe_key = $2",
+      [order.id, `dispute_lost_reversal:${order.id}`],
+    );
+    expect(reversed.rows.length).toBe(1);
+    expect(reversed.rows[0].payload).toMatchObject({ transfer_id: "tr_race" });
+  });
+
+  it("A2: charge_refunded closure (dispute settled by refund) → refunded terminal; refund id optional", async () => {
+    const order = await seedOrder();
+    await db.query("UPDATE orders SET status = 'disputed', payment_intent_id = 'pi_cr' WHERE id = $1", [order.id]);
+    const closed = event("charge.dispute.closed", { id: "dp_cr", object: "dispute", payment_intent: "pi_cr", status: "charge_refunded" });
+    const r = await post(app, JSON.stringify(closed));
+    expect(r.status).toBe(200);
+    expect((await db.query("SELECT status FROM orders WHERE id = $1", [order.id])).rows[0].status).toBe("refunded");
+  });
+
+  it("A2: failed in-flight reversal is recorded durably; the order still terminals (tracked debt, not a log line)", async () => {
+    setStripeForTests(fakeStripe(undefined, () => { throw new Error("reversal declined"); }));
+    const order = await seedOrder();
+    await db.query(
+      "UPDATE orders SET status = 'payout_pending', payment_intent_id = 'pi_revfail', transfer_id = 'tr_fail' WHERE id = $1",
+      [order.id],
+    );
+    const closed = event("charge.dispute.closed", { id: "dp_rf", object: "dispute", payment_intent: "pi_revfail", status: "lost", charge: "ch_rf" });
+    const r = await post(app, JSON.stringify(closed));
+    expect(r.status).toBe(200);
+    expect((await db.query("SELECT status FROM orders WHERE id = $1", [order.id])).rows[0].status).toBe("refunded");
+    const failed = await db.query(
+      "SELECT reason FROM order_events WHERE order_id = $1 AND event_type = 'transfer_reversal_failed'",
+      [order.id],
+    );
+    expect(failed.rows.length).toBe(1);
+    expect(failed.rows[0].reason).toContain("tr_fail");
+  });
+
+  it("A2: lost verdict on a refunding order is stale — the refund path owns it (§5.4 rule 4)", async () => {
+    const order = await seedOrder();
+    await db.query("UPDATE orders SET status = 'refunding', payment_intent_id = 'pi_stale', refund_id = 're_stale' WHERE id = $1", [order.id]);
+    const closed = event("charge.dispute.closed", { id: "dp_st", object: "dispute", payment_intent: "pi_stale", status: "lost", charge: "ch_st" });
+    const r = await post(app, JSON.stringify(closed));
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ stale: true });
+    expect((await db.query("SELECT status FROM orders WHERE id = $1", [order.id])).rows[0].status).toBe("refunding");
   });
 
   it("account.updated: known connected accounts set/clear stripe_onboarded_at; unknown ids change nothing (F5)", async () => {

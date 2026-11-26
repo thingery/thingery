@@ -11,6 +11,7 @@ import { pool } from "./db.js";
 import { budgetRange, getWanted, wantedFreshness } from "./wanted-feed.js";
 import { orderFlowConfig } from "./config.js";
 import { getPayableCheckoutUrl } from "./order-flow.js";
+import { RateLimiter } from "./rate-limit.js";
 import { classifyVisitOrigin, logPageView } from "./analytics.js";
 
 /** Contextual HTML escaping for every interpolated value (text + attribute
@@ -493,6 +494,43 @@ function orderReturnBody(status: string | null, payUrl?: string | null, canceled
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// THI-1616 (F1 from the THI-1610 review of PR #400): per-IP token bucket on
+// the order capability page. Since the pay step, one request against a
+// pending stripe order costs a DB read plus an outbound Stripe
+// checkout.sessions.retrieve — an unthrottled loop burns the account-level
+// Stripe read bucket (OWASP API #4, Unrestricted Resource Consumption). 30
+// req/min/IP matches the anonymous /mcp posture; the same bucket also caps
+// the page's pre-existing per-hit DB query. The limiter fires before the
+// order lookup, so the 429 body is fixed and id-independent — the F15
+// no-oracle property survives the limit path. Exported for tests (reset
+// convention).
+export const orderPageLimiter = new RateLimiter(30, 60_000);
+
+export function orderPageRateLimit(req: Request, res: Response, next: NextFunction): void {
+  if (orderPageLimiter.allow(req.ip ?? "unknown")) {
+    next();
+    return;
+  }
+  res.set("Cache-Control", "no-store");
+  res.set("Referrer-Policy", "same-origin");
+  res.set("Retry-After", "60");
+  res.status(429).send(page("Order status — Thingery", "Order status", orderRateLimitedBody()));
+}
+
+/** Fixed body for the rate-limited path: one shape for every id and every
+ *  requester (never a known/unknown fork — that would make the limit an
+ *  order-existence oracle), no reflected values. Same template markers as
+ *  the page itself. */
+function orderRateLimitedBody(): string {
+  return `
+  <p class="meta"><a href="/">Thingery</a> — the open item database for AI agents</p>
+  <h1>Order status</h1>
+  <p class="price">Too many requests</p>
+  <p class="meta">Please wait a minute and try again, or ask your assistant to check the order status.</p>
+  <p class="meta">Thingery is the open item database and MCP server for AI agents to list,
+  find, and trade second-hand goods.</p>`;
+}
 
 export async function orderReturnPage(req: Request, res: Response): Promise<void> {
   // F15: capability URL — never cached, never leaked via referrer.

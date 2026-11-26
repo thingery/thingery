@@ -1,8 +1,8 @@
 # ADR 0007: Second reviewer identity (`thingery-review-bot`) and the 1-review merge gate
 
-- **Status:** Accepted, amended 2026-10-31 (board ruling THI-225; security review THI-224; implementation THI-446). Reviewer identity amended from GitHub App to machine user after live drill evidence — see Decision. Amended 2026-11-17 (THI-957): Decision 3 credential-delivery wording aligned with the implemented runtime-scoped env mechanism; approve-last rule added to Consequences (review-attachment race observed on PR #316). Amended 2026-11-19 (THI-1074; CEO decision from the THI-1054 sweep review THI-1057): Decision 6 adds a **named second reviewer for Security-authored PRs**, and Decision 3's "Security never authors PRs" assumption is corrected — see the exception record for PR #339. Amended 2026-11-21 (THI-836): a Security-owned scheduled sweep re-queues mechanical re-approval for approvals dismissed by a push. Amended 2026-11-24 (THI-1375; security review THI-1377): Decision 6 gains the **proven-pure update-merge carve-out** — a named second review survives a pure update-merge of `origin/main` when the executor sha256-proves the PR patch byte-identical in the PR thread; approve-last and void-on-any-other-push are unchanged (motivating case: PR #375).
+- **Status:** Accepted, amended 2026-10-31 (board ruling THI-225; security review THI-224; implementation THI-446). Reviewer identity amended from GitHub App to machine user after live drill evidence — see Decision. Amended 2026-11-17 (THI-957): Decision 3 credential-delivery wording aligned with the implemented runtime-scoped env mechanism; approve-last rule added to Consequences (review-attachment race observed on PR #316). Amended 2026-11-19 (THI-1074; CEO decision from the THI-1054 sweep review THI-1057): Decision 6 adds a **named second reviewer for Security-authored PRs**, and Decision 3's "Security never authors PRs" assumption is corrected — see the exception record for PR #339. Amended 2026-11-21 (THI-836): a Security-owned scheduled sweep re-queues mechanical re-approval for approvals dismissed by a push. Amended 2026-11-24 (THI-1375; security review THI-1377): Decision 6 gains the **proven-pure update-merge carve-out** — a named second review survives a pure update-merge of `origin/main` when the executor sha256-proves the PR patch byte-identical in the PR thread; approve-last and void-on-any-other-push are unchanged (motivating case: PR #375). Amended 2026-11-26 (THI-1641; origin: THI-1634 verdict on PR #401): Decision 7 adds the **verdict-backed approval rule** — every bot approval must cite a verdict on the review issue submitted at or before the approval, review runs are single-flight per review issue, and an approval without a corresponding verdict is suspect — investigate, never auto-trusted.
 - **Date:** 2026-10
-- **Related:** THI-36 (agents merge, no human in the loop), THI-224 (deploy-credential security review), THI-225 (merge-gate ruling), THI-449 (drill: bot approval submitted, not counted), THI-957 (approve-last rule; Decision 3 delivery wording), THI-1054 (PR sweep), THI-1057 (post-hoc review that surfaced the SoD exception), THI-1074 (named second reviewer for Security-authored PRs), THI-836 (merge-gate heal sweep), THI-1363 / PR #375 (motivating case for the update-merge carve-out), THI-1372 + THI-1374 (the observed void cycle), THI-1375 (update-merge carve-out amendment; this amendment), THI-1377 (security review of the carve-out: APPROVE, F1–F3 applied)
+- **Related:** THI-36 (agents merge, no human in the loop), THI-224 (deploy-credential security review), THI-225 (merge-gate ruling), THI-449 (drill: bot approval submitted, not counted), THI-957 (approve-last rule; Decision 3 delivery wording), THI-1054 (PR sweep), THI-1057 (post-hoc review that surfaced the SoD exception), THI-1074 (named second reviewer for Security-authored PRs), THI-836 (merge-gate heal sweep), THI-1363 / PR #375 (motivating case for the update-merge carve-out), THI-1372 + THI-1374 (the observed void cycle), THI-1375 (update-merge carve-out amendment; this amendment), THI-1377 (security review of the carve-out: APPROVE, F1–F3 applied), THI-1634 (PR #401 review whose verdict surfaced the racing-duplicate anomaly), THI-1641 (verdict-backed approval rule; this amendment)
 
 ## Context
 
@@ -61,8 +61,9 @@ merge without waiting for a human).
    independence** — the author and the reviewer credential sit in the same role — so the
    bot approval degenerates into a mechanical gate on an already-documented review. The
    compensating control is Decision 6.
-4. Merge SOP: author agent opens PR → CI green → Security approves via the bot → author
-   merges. Security remains the mandatory reviewer for the protected paths
+4. Merge SOP: author agent opens PR → CI green → Security posts the verdict on the review
+   issue, then approves via the bot citing that verdict (Decision 7) → author merges.
+   Security remains the mandatory reviewer for the protected paths
    (`db/schema.sql`, `src/tools.ts`, `src/auth.ts`, `src/routes.ts`) and any
    security-sensitive change (THI-36 sign-off rule unchanged).
 5. The gate is flipped only after a live drill passes *end to end*: a PR authored by
@@ -149,6 +150,56 @@ merge without waiting for a human).
    reviewer-only credential reach is unchanged. Proof obligations are identical for either executor;
    any push failing proof is a merge-gate violation (incident, reported to the THI-1065
    detection control).
+7. **Verdict-backed approvals; single-flight review runs (added 2026-11-26, THI-1641;
+   origin: the THI-1634 verdict on PR #401).**
+
+   *Motivating anomaly (benign outcome, 2026-11-26):* on PR #401 the `thingery-review-bot`
+   approval (review id 6077039430) landed at 15:49:49Z — **before any verdict comment
+   existed on review issue THI-1634** (first verdict 15:52:49Z, and it noted the anomaly).
+   The evidence (SOP-shaped review body, correct head pinning, reviewer identity ≠ PR
+   author) pointed to a duplicate parallel run of the same review task racing the gate, not
+   self-approval, and every finding was independently verified — but a flow that lets two
+   racing runs hold the review gate also lets a woken duplicate complete and approve with no
+   review record at all. Root cause: checkout claims do not serialize across runs of the
+   same review task.
+
+   *Rule, effective for bot approvals submitted after 2026-11-27T00:00:00Z (earlier
+   approvals grandfathered):*
+
+   - **Verdict-first ordering.** The reviewer posts the verdict on the review issue first;
+     the bot approval is submitted only after, and its review body must cite the verdict —
+     the review-issue id and the verdict-comment timestamp in the form
+     `Verdict: THI-<n> @ <ISO-8601 UTC>` — alongside the pinned head SHA (THI-957).
+   - **Validity.** A bot approval on a gated PR is valid only if the review issue carries a
+     verdict comment submitted **at or before** the approval's `submitted_at`. An approval
+     with no corresponding verdict — none cited, cited verdict postdating the approval, or
+     cited verdict not found on the cited issue — is **suspect: investigate, never
+     auto-trusted**. The investigation distinguishes a racing duplicate run (both records
+     exist, ordering inverted) from a fabricated approval (no verdict record anywhere); a
+     duplicate run's verdict does not retroactively legitimize an earlier approval — the
+     approval is re-anchored by an explicit investigation record naming both timestamps and
+     the verifying agent. Until then the approval does not count toward the gate: found
+     before merge, merge waits; found after merge (detector alert), the THI-1065 remediation
+     applies (retroactive review of the merged diff, incident record).
+   - **Single-flight per review issue.** One run holds a review issue at a time: the run
+     that posts the verdict is the gate holder. A woken duplicate run that observes an
+     in-flight review (a live checkout claim or an existing verdict comment on the issue)
+     exits without reviewing or approving. If a race produced multiple approvals anyway,
+     only the earliest approval backed by a predating verdict is valid; later duplicates are
+     re-verifications and must not stack additional approvals — one approval at the pinned
+     head is the clean audit record (the practice the THI-1634 primary run followed).
+   - **Mechanical detection.** The gate-integrity detector (THI-1065 control, below) flags
+     merged PRs whose counted bot approval postdates the effective time and either lacks the
+     citation pattern or cites a verdict timestamp later than the approval's own
+     `submitted_at` (dedup marker `gate-verdict-citation pr=<n>`). Limits, stated plainly:
+     the detector reads GitHub only — it cannot see the review tracker, so citation
+     *authenticity* (the cited verdict existing on the cited issue at or before the
+     approval) remains an agent-audit control (Security sweep, incident review, any post-hoc
+     verification); and GitHub review bodies are editable after submission, so a body read
+     at scan time is a claim, the same trust model as the THI-957 head pin. The mechanical
+     check is a necessary, not sufficient, condition. It is not a false-positive risk for
+     the observed race: the racing PR #401 approval body contained no review-issue reference
+     at all.
 
 ## Alternatives considered
 
@@ -210,6 +261,13 @@ merge without waiting for a human).
   requesting approval; never push between approval and merge; approvers pin and check
   the exact head SHA — a mismatch between a review body's verified SHA and the review's
   `commit_id` invalidates the approval (re-request review).
+- **Verdict-backed approvals (2026-11-26, THI-1641):** the review issue becomes part of the
+  merge-gate evidence chain — a PR whose review issue carries no verdict at or before the
+  approval time has, by rule, no valid approval. Cost: reviewers sequence verdict → approval
+  (two writes in a fixed order instead of either order); benefit: an approval can no longer
+  exist without a review record, a racing duplicate run's approval is flagged mechanically
+  (missing or inverted citation) and procedurally (validity rule), and every approval is
+  traceable to the human-readable verdict behind it.
 - Compromise of the PAT allows *approval* of PRs on this one repo only — no code write
   (fine-grained token carries only `pull_requests`). Response: revoke the token in the
   machine user's developer settings (instant), remove the collaborator if needed, generate a
@@ -283,4 +341,10 @@ onto a dedicated `Merge-gate integrity alerts` issue. The incremental window sta
 last successful workflow run (24h fallback): a `--dry-run` over the default window still
 completes successfully, so it advances that watermark without writing findings — anything
 found in it will not be re-reported. Use `--from/--to` for previews and backfills; those
-windows are non-persisting by definition.
+windows are non-persisting by definition. Since 2026-11-26 (Decision 7, THI-1641) the
+detector also checks verdict citations: a counted `thingery-review-bot` approval submitted
+after the Decision-7 effective time must carry `Verdict: THI-<n> @ <ISO-8601 UTC>` in its
+body with the cited timestamp not postdating the approval; violations are reported on the
+tracking issue alongside zero-valid-approval merges, deduplicated by their own marker. The
+tracker-side half of the check (the cited verdict existing, at or before the approval) is
+not automatable GitHub-side and stays an agent-audit control.

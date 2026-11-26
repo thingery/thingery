@@ -425,8 +425,15 @@ phishing concerns — threat-model them before building, not after.
   after approval) while the approval's verification record still names the older,
   actually-verified SHA, and `require_last_push_approval` checks submission time, not
   verification time — observed live on PR #316, where an approval verifying 0941cc2
-  silently covered c6c5b47. The "never push to main" convention is enforced by
-  GitHub, not just discipline. R1 in §9 is struck (gate live).
+  silently covered c6c5b47. **Verdict-backed approvals** (2026-11-26, THI-1641, ADR 0007
+  Decision 7): the reviewer posts the verdict on the review issue first, and the bot
+  approval cites it (`Verdict: THI-<n> @ <UTC timestamp>`); review runs are single-flight
+  per review issue, and an approval whose review issue carries no verdict at or before the
+  approval's submission time is suspect — investigate, never auto-trusted. A racing
+  duplicate review run's approval (observed on PR #401, benign outcome) is flagged by this
+  rule and mechanically by the gate-integrity detector, which checks the citation pattern
+  and its ordering for approvals submitted after 2026-11-27T00:00:00Z. The "never push to
+  main" convention is enforced by GitHub, not just discipline. R1 in §9 is struck (gate live).
   `deploy` is intentionally not a required check (it runs push-to-main only and never on
   PRs).
 - `npm audit --omit=dev` on the current lockfile: **0 production vulnerabilities**.

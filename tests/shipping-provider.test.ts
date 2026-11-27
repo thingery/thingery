@@ -171,6 +171,30 @@ describe("EasyPostShippingProvider — degraded contract (null iff not configure
       vi.unstubAllGlobals();
     }
   });
+
+  it("senderContact present → wire byte-identical: accepted-and-ignored, never sent (THI-1827)", async () => {
+    setEnv("EASYPOST_API_KEY", "EZABC");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({
+        id: "shp_123",
+        rates: [{ id: "rate_1", carrier: "DHLExpress", service: "ExpressWorldwide", rate: "10.45", currency: "EUR" }],
+      }),
+      { status: 200 },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const provider = new EasyPostShippingProvider();
+      const shipment = await provider.createShipment({ ...VALID_ADDRESS, senderContact: { email: "seller@x.dev", phone: "+49 30 111" } });
+      expect(shipment).not.toBeNull();
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(init.body as string) as { shipment: { to_address: Record<string, unknown>; from_address: Record<string, unknown> } };
+      expect(body.shipment.from_address).toEqual({ name: "Seller", street1: "Weg 2", city: "Berlin", zip: "10115", country: "DE" });
+      expect(body.shipment.to_address).toEqual({ name: "Buyer", street1: "Weg 1", city: "Berlin", zip: "10115", country: "DE" });
+      expect(JSON.stringify(body)).not.toContain("seller@x.dev");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("EasyPostShippingProvider — error mapping", () => {

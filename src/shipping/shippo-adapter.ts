@@ -15,10 +15,12 @@ import {
   buyShippoLabel,
   createShippoShipment,
   createShippoTracker,
+  isPickupPointOnlyRate,
   shippoTrackerId,
   SHIPPO_SIG_HEADER,
   validateShippoAddressRaw,
   verifyShippoSignature,
+  withSenderContact,
 } from "../shippo.js";
 import {
   providerApiKeyEnv,
@@ -97,8 +99,23 @@ export class ShippoShippingProvider implements ShippingProvider {
   }
 
   async createShipment(input: ProviderShipmentInput, signal?: AbortSignal): Promise<ProviderShipment | null> {
-    const shipment = await createShippoShipment(input, {}, signal);
-    return shipment ? { shipmentId: shipment.id, rates: shipment.rates } : null;
+    // Sender-of-record contact (THI-1827): USPS refuses the purchase
+    // (`sender_info_missing`) unless address_from carries the sender's email
+    // + phone, and the buyer-paid path buys against the quote-time rate — so
+    // the contact must ride on the shipment at creation. The EasyPost
+    // adapter ignores the same field, keeping its wire byte-identical.
+    const shipment = await createShippoShipment(
+      { ...input, fromAddress: withSenderContact(input.fromAddress, input.senderContact) },
+      {},
+      signal,
+    );
+    if (!shipment) return null;
+    // Quote-time filter (THI-1827): pickup-point-only services are quotable
+    // to a home address but unbuyable without a pickup-point selection this
+    // product does not offer — drop them so no offered rate can fail at
+    // purchase (see isPickupPointOnlyRate).
+    const rates = shipment.rates.filter((r) => !isPickupPointOnlyRate(r));
+    return { shipmentId: shipment.id, rates };
   }
 
   buyLabel(shipmentId: string, rateId: string): Promise<BoughtLabel | null> {

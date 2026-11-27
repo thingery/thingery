@@ -18,10 +18,12 @@ import {
   buyShippoLabel,
   createShippoShipment,
   createShippoTracker,
+  isPickupPointOnlyRate,
   shippoTrackerId,
   SHIPPO_SIG_HEADER,
   validateShippoAddressRaw,
   verifyShippoSignature,
+  withSenderContact,
   type ShippoOptions,
 } from "../src/shippo.js";
 import { ShippoShippingProvider } from "../src/shipping/shippo-adapter.js";
@@ -185,6 +187,126 @@ const RATE_RESPONSE = SHIPMENT_RESPONSE.rates[0];
 function purchaseFetch(transaction: unknown, rate: unknown = RATE_RESPONSE) {
   return vi.fn(async (url: string) => jsonRes(url.includes("/rates/") ? rate : transaction));
 }
+
+// ---------------------------------------------------------------------------
+// 1b. Sender-of-record contact + pickup-point rate filter (THI-1827)
+// ---------------------------------------------------------------------------
+
+describe("sender contact on address_from (THI-1827)", () => {
+  const BARE = { name: "Seller", line1: "Weg 2", city: "Berlin", postalCode: "10115", country: "DE" };
+
+  it("withSenderContact: email fills in, phone only when the address has none, undefined omitted", () => {
+    expect(withSenderContact(BARE, { email: "seller@x.dev", phone: "+49 30 111" })).toEqual({
+      ...BARE,
+      email: "seller@x.dev",
+      phone: "+49 30 111",
+    });
+    // a seller-supplied phone is more specific than the deployment default
+    expect(withSenderContact({ ...BARE, phone: "+49 30 222" }, { email: "seller@x.dev", phone: "+49 30 111" })).toEqual({
+      ...BARE,
+      phone: "+49 30 222",
+      email: "seller@x.dev",
+    });
+    // no contact → unchanged; empty-string contact values never sent
+    expect(withSenderContact(BARE, undefined)).toEqual(BARE);
+    expect(withSenderContact(BARE, { email: "", phone: "" })).toEqual(BARE);
+    expect(withSenderContact({ ...BARE, phone: "+49 30 222" }, { email: "seller@x.dev" })).toEqual({
+      ...BARE,
+      phone: "+49 30 222",
+      email: "seller@x.dev",
+    });
+  });
+
+  it("merged address → wire: from carries email + phone, to never does (adapter composes withSenderContact)", async () => {
+    setEnv("SHIPPO_API_KEY", "shippo_test_KEY");
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes(SHIPMENT_RESPONSE));
+    vi.stubGlobal("fetch", fetchMock);
+    const merged = withSenderContact(SHIPMENT_INPUT.fromAddress, { email: "seller@x.dev", phone: "+49 30 111" });
+    await createShippoShipment({ ...SHIPMENT_INPUT, fromAddress: merged }, { fetchImpl: fetchMock as unknown as typeof fetch });
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string) as Record<string, unknown>;
+    expect(body.address_from).toEqual({
+      name: "Seller", street1: "Weg 2", city: "Berlin", zip: "10115", country: "DE",
+      email: "seller@x.dev", phone: "+49 30 111",
+    });
+    expect(body.address_to).toEqual({
+      name: "Buyer", street1: "Via Roma 1", city: "Milano", zip: "20121", country: "IT",
+    });
+  });
+
+  it("no senderContact → no email/phone keys (wire unchanged)", async () => {
+    setEnv("SHIPPO_API_KEY", "shippo_test_KEY");
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes(SHIPMENT_RESPONSE));
+    vi.stubGlobal("fetch", fetchMock);
+    await createShippoShipment(SHIPMENT_INPUT, { fetchImpl: fetchMock as unknown as typeof fetch });
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string) as Record<string, unknown>;
+    expect(body.address_from).toEqual({ name: "Seller", street1: "Weg 2", city: "Berlin", zip: "10115", country: "DE" });
+  });
+
+  it("isPickupPointOnlyRate matches pickup-point-only service names, nothing else", () => {
+    const rate = (service: string) => ({ id: "r", carrier: "Colissimo", service, costCents: 500, currency: "EUR" });
+    expect(isPickupPointOnlyRate(rate("Colissimo Point Retrait"))).toBe(true);
+    expect(isPickupPointOnlyRate(rate("international pickup point"))).toBe(true);
+    expect(isPickupPointOnlyRate(rate("Paket National"))).toBe(false);
+    expect(isPickupPointOnlyRate(rate("Colissimo domicile"))).toBe(false);
+  });
+
+  it("adapter: senderContact rides onto address_from; pickup-point-only rates are filtered at quote time", async () => {
+    setEnv("SHIPPO_API_KEY", "shippo_test_KEY");
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({
+      object_id: "shp_abc",
+      status: "SUCCESS",
+      rates: [
+        {
+          object_id: "rate_home",
+          provider: "Colissimo",
+          servicelevel: { token: "colissimo_domicile", name: "Colissimo domicile" },
+          amount: "7.20",
+          currency: "EUR",
+        },
+        {
+          object_id: "rate_pickup",
+          provider: "Colissimo",
+          servicelevel: { token: "colissimo_retrait", name: "Colissimo Point Retrait" },
+          amount: "5.90", // cheaper — must NOT be offered (unbuyable without a pickup point)
+          currency: "EUR",
+        },
+      ],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new ShippoShippingProvider();
+    const shipment = await provider.createShipment({
+      ...SHIPMENT_INPUT,
+      senderContact: { email: "seller@x.dev", phone: "+49 30 111" },
+    });
+    expect(shipment!.rates).toEqual([
+      { id: "rate_home", carrier: "Colissimo", service: "Colissimo domicile", costCents: 720, currency: "EUR" },
+    ]);
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string) as Record<string, unknown>;
+    expect(body.address_from).toMatchObject({ email: "seller@x.dev", phone: "+49 30 111" });
+  });
+
+  it("adapter: all rates pickup-only → empty rates (callers answer no_eur_rate honestly)", async () => {
+    setEnv("SHIPPO_API_KEY", "shippo_test_KEY");
+    const fetchMock = vi.fn().mockResolvedValue(jsonRes({
+      object_id: "shp_abc",
+      status: "SUCCESS",
+      rates: [
+        {
+          object_id: "rate_pickup",
+          provider: "Colissimo",
+          servicelevel: { token: "colissimo_retrait", name: "Colissimo Point Retrait" },
+          amount: "5.90",
+          currency: "EUR",
+        },
+      ],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new ShippoShippingProvider();
+    const shipment = await provider.createShipment(SHIPMENT_INPUT);
+    expect(shipment!.shipmentId).toBe("shp_abc");
+    expect(shipment!.rates).toEqual([]);
+  });
+});
 
 describe("buyShippoLabel", () => {
   it("returns null in degraded mode", async () => {

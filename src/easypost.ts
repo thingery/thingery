@@ -122,6 +122,10 @@ export interface CreateEasyPostShipmentInput {
   fromAddress: EasyPostAddressInput; // seller-supplied, not persisted
   weightGrams: number; // listing estimate or seller override
   dimensionsMm?: { length: number; width: number; height: number };
+  /** Seam parity with ProviderShipmentInput (THI-1827). Accepted and
+   *  IGNORED: EasyPost does not require sender contact and its wire payload
+   *  must stay byte-identical — the field is never read below. */
+  senderContact?: { email?: string; phone?: string };
 }
 
 /** The bought label — exactly what PR-B persists on the order

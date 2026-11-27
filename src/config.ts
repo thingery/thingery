@@ -149,6 +149,12 @@ export interface OrderFlowConfig {
   // never a binding expiry.
   shippingQuoteTimeoutMs: number;        // 5000 — quote-call AbortSignal bound
   shippingQuoteEstimateTtlMinutes: number; // 15 — estimate display freshness
+  // Sender-of-record defaults (THI-1827): USPS label purchase fails
+  // `sender_info_missing` without a sender email + phone on address_from.
+  // They fill gaps only — the seller's VERIFIED account email always wins;
+  // unset fields mean "no fallback", never an empty string on the wire.
+  shippingSenderEmail: string | undefined;
+  shippingSenderPhone: string | undefined;
 }
 
 function stripeModeFor(key: string | undefined): StripeMode | null {
@@ -249,6 +255,18 @@ export function orderFlowConfig(): OrderFlowConfig {
   const shippingApiKey = envValue(providerApiKeyEnv(shippingProvider));
   const carrierWebhookSecret = envValue(providerWebhookSecretEnv(shippingProvider));
   const carrierWebhookSecretPrevious = envValue(`${providerWebhookSecretEnv(shippingProvider)}_PREVIOUS`);
+  // Ops affordance, not a gate (THI-1827): USPS purchases fail
+  // sender_info_missing unless address_from carries the sender's email AND
+  // phone. The seller's verified account email covers the email side where it
+  // exists; without the deployment defaults every USPS purchase is refused.
+  if (shippingProvider === "shippo" && (shippingSelectionValid) &&
+      (envValue("SHIPPING_SENDER_EMAIL") === undefined || envValue("SHIPPING_SENDER_PHONE") === undefined)) {
+    console.error(
+      "[config] SHIPPING_PROVIDER=shippo but SHIPPING_SENDER_EMAIL and/or SHIPPING_SENDER_PHONE is unset — " +
+        "USPS label purchases will fail (sender_info_missing) for sellers without a verified account email. " +
+        "Set both so sender info can always ride on address_from.",
+    );
+  }
 
   const adminKey = envValue("ADMIN_API_KEY");
   const sessionSecret = envValue("SESSION_SECRET");
@@ -303,6 +321,8 @@ export function orderFlowConfig(): OrderFlowConfig {
     labelAllowOperatorFunded: envValue("LABEL_ALLOW_OPERATOR_FUNDED") === "true",
     shippingQuoteTimeoutMs: envInt("SHIPPING_QUOTE_TIMEOUT_MS", 5000),
     shippingQuoteEstimateTtlMinutes: envInt("SHIPPING_QUOTE_ESTIMATE_TTL_MINUTES", 15),
+    shippingSenderEmail: envValue("SHIPPING_SENDER_EMAIL"),
+    shippingSenderPhone: envValue("SHIPPING_SENDER_PHONE"),
   };
 }
 

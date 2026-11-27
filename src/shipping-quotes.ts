@@ -35,7 +35,11 @@ export const SHIPPING_QUOTE_CURRENCY = "EUR";
  *  five fields a carrier needs, snake_case like orders.shipping_address.
  *  Phone is deliberately absent — the snapshot must fully determine the
  *  shipment (§5.3 re-quote), so the quote is computed from these fields
- *  alone and nothing else rides in from the order row. */
+ *  alone and nothing else rides in from the order row. `email` is the
+ *  origin-only sender-of-record email (THI-1827): the seller's VERIFIED
+ *  account email at quote time, snapshotted for the same §5.3 determinism
+ *  (USPS purchases fail `sender_info_missing` without it). It is never set
+ *  on a destination — the buyer's contact never rides to a carrier. */
 export interface QuoteAddress {
   name: string;
   line1: string;
@@ -43,6 +47,7 @@ export interface QuoteAddress {
   city: string;
   postal_code: string;
   country: string;
+  email?: string;
 }
 
 /** The persisted orders.label_quote snapshot (spec data model). line_refund_id
@@ -112,6 +117,20 @@ export interface ShippingQuoteDeps {
   createShipment?: typeof createEasyPostShipment;
   provider?: ShippingProvider;
   now?: () => Date;
+}
+
+/** Sender-of-record contact resolution (THI-1827): the verified seller email
+ *  wins; the deployment defaults (SHIPPING_SENDER_EMAIL / SHIPPING_SENDER_PHONE)
+ *  fill gaps; fields with no source at all are omitted (the adapter then
+ *  sends no key rather than an empty string). Pure. */
+export function resolveSenderContact(
+  sellerEmail: string | undefined,
+  defaults: { email?: string; phone?: string },
+): { email?: string; phone?: string } {
+  return {
+    ...(sellerEmail ? { email: sellerEmail } : defaults.email ? { email: defaults.email } : {}),
+    ...(defaults.phone ? { phone: defaults.phone } : {}),
+  };
 }
 
 /** Extracts the five snapshot fields from a stored address shape, or null if
@@ -205,7 +224,8 @@ export async function resolveShippingQuote(
   // Provider-selected at call time from the deployment config (THI-1246);
   // the provider id prefixes the not_configured reason, so default
   // deployments emit the exact strings they always have.
-  const provider = deps.provider ?? getShippingProvider(orderFlowConfig());
+  const cfg = orderFlowConfig();
+  const provider = deps.provider ?? getShippingProvider(cfg);
   const createShipment: typeof createEasyPostShipment =
     deps.createShipment ??
     (async (input, _opts, signal) => {
@@ -227,19 +247,28 @@ export async function resolveShippingQuote(
   const dimensionsMm = normalizedDimensionsMm(inputs.dimensionsMm);
   const weightGrams = inputs.weightGrams;
 
+  // Sender-of-record contact (THI-1827): the snapshotted origin may carry the
+  // seller's verified account email; the deployment defaults (env) fill gaps.
+  // Resolved once, here, so the exact same contact rides into the provider
+  // call regardless of which createShipment seam runs below.
+  const senderContact = resolveSenderContact(inputs.sellerOrigin?.email, { email: cfg.shippingSenderEmail, phone: cfg.shippingSenderPhone });
+
   let shipmentId: string;
   let rates: readonly EasyPostRate[];
   try {
     const shipment = await createShipment(
       {
         // Built from exactly the snapshotted fields (spec §2): origin and
-        // destination as stored, the listing's parcel. Nothing else rides in
-        // from the order row — a §5 re-quote from the snapshot reproduces
-        // this call byte-for-byte.
+        // destination as stored, the listing's parcel, and the resolved
+        // sender contact (THI-1827 — quote-time address_from carries it so
+        // the later /transactions against this rate passes USPS's
+        // sender_info_missing check). Nothing else rides in from the order
+        // row — a §5 re-quote from the snapshot reproduces this call.
         toAddress: toProviderAddress(destination),
         fromAddress: toProviderAddress(inputs.sellerOrigin),
         weightGrams,
         ...(dimensionsMm ? { dimensionsMm: dimensionsToMm(dimensionsMm) } : {}),
+        ...(senderContact.email || senderContact.phone ? { senderContact } : {}),
       },
       {},
       AbortSignal.timeout(inputs.quoteTimeoutMs), // C3: bounded, rides into the fetch
@@ -278,16 +307,47 @@ export async function resolveShippingQuote(
 
 /** The quote origin (spec §1): the seller's default saved address
  *  (account_addresses.is_default — the saved-addresses store anticipated this
- *  reuse; no new address storage). Returns null when the seller has no
- *  default or it fails the completeness check labels use — the caller
- *  resolves flat mode. Owner-scoped read: `sellerAccountId` is the item
- *  seller's account, read server-side at create_order. */
+ *  reuse; no new address storage), plus the seller's VERIFIED account email
+ *  as the origin-only sender-of-record field (THI-1827). Returns null when
+ *  the seller has no default or it fails the completeness check labels use —
+ *  the caller resolves flat mode. Owner-scoped read: `sellerAccountId` is the
+ *  item seller's account, read server-side at create_order. */
 export async function getSellerDefaultOrigin(sellerAccountId: string): Promise<QuoteAddress | null> {
   const { rows } = await pool.query<Record<string, unknown>>(
-    `SELECT name, line1, line2, city, postal_code, country
-       FROM account_addresses
-      WHERE account_id = $1 AND is_default`,
+    `SELECT a.name, a.line1, a.line2, a.city, a.postal_code, a.country,
+            s.email AS sender_email
+       FROM account_addresses a
+       JOIN sellers s ON s.id = a.account_id
+      WHERE a.account_id = $1 AND a.is_default
+        AND s.email IS NOT NULL AND s.email_verified_at IS NOT NULL`,
     [sellerAccountId],
   );
-  return rows.length > 0 ? toQuoteAddress(rows[0]) : null;
+  if (rows.length === 0) {
+    // No verified-email default row — fall back to the address alone so a
+    // seller without a verified email still gets a quote (the deployment
+    // default sender fills the contact gap at resolveSenderContact).
+    const { rows: addrRows } = await pool.query<Record<string, unknown>>(
+      `SELECT name, line1, line2, city, postal_code, country
+         FROM account_addresses
+        WHERE account_id = $1 AND is_default`,
+      [sellerAccountId],
+    );
+    return addrRows.length > 0 ? toQuoteAddress(addrRows[0]) : null;
+  }
+  const origin = toQuoteAddress(rows[0]);
+  const email = typeof rows[0].sender_email === "string" && rows[0].sender_email ? (rows[0].sender_email as string) : undefined;
+  return origin ? { ...origin, ...(email ? { email } : {}) } : null;
+}
+
+/** The seller's VERIFIED account email, or undefined (THI-1827): the legacy
+ *  (non-quote) label path resolves it per call — the tool-supplied
+ *  from_address carries no email (schema frozen; protected path). Unverified
+ *  emails never leave the platform. */
+export async function getVerifiedSellerEmail(sellerAccountId: string): Promise<string | undefined> {
+  const { rows } = await pool.query<{ email: string }>(
+    `SELECT email FROM sellers
+      WHERE id = $1 AND email IS NOT NULL AND email_verified_at IS NOT NULL`,
+    [sellerAccountId],
+  );
+  return rows[0]?.email;
 }

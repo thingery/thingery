@@ -429,6 +429,39 @@ export async function emitReviewPairAnomalyIfCrossing(buyerId: string, sellerId:
  *  snapshot + item-title snapshot — never buyer ids, emails or order ids;
  *  the review's own unguessable `id` is exposed because that is the value
  *  the report route accepts, closing the moderation loop). */
+/** The public summary shape: average (one decimal, null when there are no
+ *  published reviews) + count over the per-pair capped set. */
+export interface SellerReviewSummary {
+  average: number | null;
+  count: number;
+}
+
+/** The public summary — average (one decimal) + count over the per-pair
+ *  capped published set (K = REVIEW_AGGREGATE_PAIR_CAP newest per distinct
+ *  buyer, spec §farming defense a). Hidden rows are invisible here. One home
+ *  for the aggregate: listSellerReviews (below) and getSellerSummary's
+ *  seller card (src/sellers.ts, THI-1755 seam wiring) both consume it, so
+ *  the two public surfaces cannot drift. Caller must pass a well-formed
+ *  seller id (listSellerReviews validates; getSellerSummary has already
+ *  resolved the seller row). */
+export async function sellerReviewSummary(sellerId: string): Promise<SellerReviewSummary> {
+  const summary = await pool.query<{ n: number; avg: string | null }>(
+    `WITH capped AS (
+       SELECT rating FROM (
+         SELECT rating, ROW_NUMBER() OVER (
+                  PARTITION BY buyer_id ORDER BY created_at DESC, id DESC) AS rn
+           FROM order_reviews
+          WHERE seller_id = $1 AND status = 'published'
+       ) t WHERE rn <= $2
+     )
+     SELECT COUNT(*)::int AS n, AVG(rating) AS avg FROM capped`,
+    [sellerId, REVIEW_AGGREGATE_PAIR_CAP],
+  );
+  const count = summary.rows[0]?.n ?? 0;
+  const average = count > 0 && summary.rows[0]?.avg != null ? Math.round(Number(summary.rows[0].avg) * 10) / 10 : null;
+  return { average, count };
+}
+
 export interface PublicSellerReviews {
   seller_id: string;
   summary: { average: number | null; count: number };
@@ -491,23 +524,10 @@ export async function listSellerReviews(input: ListSellerReviewsInput): Promise<
     throw new ReviewError("not_found", "Seller not found.");
   }
 
-  // Summary over the per-pair capped set (spec §farming defense a): at
-  // most the K newest published reviews per distinct buyer count toward
-  // average and count. Hidden rows are invisible (partial index served).
-  const summary = await pool.query<{ n: number; avg: string | null }>(
-    `WITH capped AS (
-       SELECT rating FROM (
-         SELECT rating, ROW_NUMBER() OVER (
-                  PARTITION BY buyer_id ORDER BY created_at DESC, id DESC) AS rn
-           FROM order_reviews
-          WHERE seller_id = $1 AND status = 'published'
-       ) t WHERE rn <= $2
-     )
-     SELECT COUNT(*)::int AS n, AVG(rating) AS avg FROM capped`,
-    [input.sellerId, REVIEW_AGGREGATE_PAIR_CAP],
-  );
-  const count = summary.rows[0]?.n ?? 0;
-  const average = count > 0 && summary.rows[0]?.avg != null ? Math.round(Number(summary.rows[0].avg) * 10) / 10 : null;
+  // Summary over the per-pair capped set — the shared aggregate above, so
+  // the reviews surface and the seller card (get_seller_summary) serve the
+  // exact same numbers (spec §farming defense a).
+  const { average, count } = await sellerReviewSummary(input.sellerId);
 
   // The list: uncapped, newest first, tie-break by id so same-second rows
   // are never skipped or repeated across pages. LIMIT n+1 detects has-more

@@ -19,8 +19,7 @@ import { AddressSuggestedError, verifyOrderAddress, type ShippingVerificationRec
 import {
   getSellerDefaultOrigin,
   resolveShippingQuote,
-  type ShippingQuoteOutcome,
-} from "./shipping-quotes.js";
+  type ShippingQuoteOutcome, listingParcel } from "./shipping-quotes.js";
 import {
   createCheckoutSession,
   createRefundForOrder,
@@ -221,8 +220,7 @@ export async function createOrder(input: CreateOrderInput): Promise<{ order: Ord
           paymentMode: mode,
           fulfillment,
           orderCurrency: row.currency,
-          weightGrams: row.weight_grams,
-          dimensionsMm: row.dimensions_mm,
+          ...listingParcel(row),
           buyerAddress: (input.shippingAddress ?? {}) as Record<string, unknown>,
           sellerOrigin,
           easypostEnabled: cfg.shippingEnabled,

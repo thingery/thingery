@@ -157,7 +157,7 @@ describe.skipIf(!available)("quote_shipping estimate tool (DB, spec §9)", () =>
   it("reasons pass through the quoting core verbatim: no_weight, no_seller_default_address, easypost unset, rate_above_cap, not_shippable", async () => {
     stubEasyPostOk();
     const tools = captureTools({ id: buyerId });
-    const noWeight = await call(tools, "quote_shipping", { item_id: await seedItem({ weightGrams: null }), shipping_address: BUYER_ADDRESS });
+    const noWeight = await call(tools, "quote_shipping", { item_id: await seedItem({ weightGrams: null, tier: "bulky" }), shipping_address: BUYER_ADDRESS });
     expect(noWeight.body).toEqual({ quotable: false, reason: "no_weight" });
     const noOrigin = await call(tools, "quote_shipping", { item_id: await seedItem({ withOrigin: false }), shipping_address: BUYER_ADDRESS });
     expect(noOrigin.body).toEqual({ quotable: false, reason: "no_seller_default_address" });

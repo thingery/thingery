@@ -3,7 +3,7 @@ import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/
 import type { ItemRow, SellerRow } from "./db.js";
 import { CONDITIONS, CREATE_ITEM_STATUSES, SHIPPING_TIERS, STATUSES } from "./db.js";
 import { pool } from "./db.js";
-import { resolveShippingQuote, getSellerDefaultOrigin } from "./shipping-quotes.js";
+import { resolveShippingQuote, getSellerDefaultOrigin, listingParcel } from "./shipping-quotes.js";
 import { resolveCategory } from "./categories.js";
 import { aliasResolutionNote, describeCategoryNote } from "./categories.js";
 import { buyerShippingCents, categoryChildren, getCategory, getItem, createItem, listCategories, ItemTransitionError, ListingLimitError, listingQuota, type ListingQuota, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, SEARCH_MAX_OFFSET, ShippingPriceError, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
@@ -1937,8 +1937,7 @@ export function registerTools(
           paymentMode: "stripe",
           fulfillment: row.shipping_tier === "local" ? "pickup" : "shipping",
           orderCurrency: row.currency,
-          weightGrams: row.weight_grams,
-          dimensionsMm: row.dimensions_mm,
+          ...listingParcel(row),
           buyerAddress: shippingAddress,
           sellerOrigin,
           easypostEnabled: cfg.shippingEnabled,

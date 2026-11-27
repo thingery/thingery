@@ -451,7 +451,10 @@ async function ingestStripeV2Webhook(
  *  capability event matters here — stripe_balance.stripe_transfers reaching
  *  `active` is exactly "the seller can receive payouts" (mirror of the v1
  *  capabilities.transfers check). */
-async function processStripeV2Notification(notif: Stripe.V2.Core.EventNotification, db: PoolClient): Promise<void> {
+/** Exported for sweep rule 6's v2-aware reprocessor (THI-1698): a stranded
+ *  notification is rebuilt from its stored REDACTED payload and re-run
+ *  through this exact handler so verify→dedupe semantics cannot drift. */
+export async function processStripeV2Notification(notif: Stripe.V2.Core.EventNotification, db: PoolClient): Promise<void> {
   if (notif.type !== "v2.core.account[configuration.recipient].capability_status_updated") return;
   const account = (await notif.fetchRelatedObject()) as
     | {

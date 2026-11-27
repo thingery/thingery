@@ -587,9 +587,28 @@ Setup:
    export GIT_COMMIT=$(git rev-parse HEAD)
    export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
    docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d --build
+   # THI-1671 tripwire: verify the deploy did not recreate caddy without the web
+   # overlay; if it did, run the documented restore immediately, then fail the run.
+   caddy_label=$(docker inspect thingery-caddy-1 \
+     --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' 2>/dev/null || true)
+   if printf '%s' "$caddy_label" | grep -qF '/opt/thingery-web/docker-compose.web.yml'; then
+     echo "thingery-deploy: caddy overlay label OK (THI-1671)"
+   else
+     echo "thingery-deploy: TRIPWIRE - caddy config_files label lost the web overlay (label=${caddy_label:-<empty>}); running the documented restore (THI-1671)" >&2
+     docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d caddy
+     echo "thingery-deploy: caddy recreated with the web overlay - EXITING NON-ZERO so this deploy is visibly failed and the drift cause gets investigated (THI-1671)" >&2
+     exit 1
+   fi
    docker image prune -f
    echo "thingery-deploy: done at $GIT_COMMIT"
    ```
+
+   After the `up`, the **tripwire** (THI-1671) re-reads the `com.docker.compose.project.config_files`
+   label the deploy just wrote; if the web overlay is missing it immediately re-runs the documented
+   restore (`up -d caddy` **with** the overlay, per the §5 note above) and exits non-zero, so the
+   Actions run fails visibly instead of silently depublishing the platform routes. The nightly
+   `thingery-web-drift-check` cron (04:17 UTC, VPS-side) is the standing watchdog for the same
+   signature between deploys.
 
 3. **Operator machine: dedicated keypair** (never a personal key). The private key
    goes straight into the `production` environment secret and the local copy is

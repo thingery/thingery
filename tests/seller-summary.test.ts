@@ -38,6 +38,7 @@ import {
   SellerNotFoundError,
   MASKED_DISPLAY_NAME,
 } from "../src/sellers.js";
+import { listSellerReviews } from "../src/reviews.js";
 import { ORDER_STATUSES, SOLD_COUNT_STATUSES, type OrderStatus } from "../src/orders.js";
 import { DIRECTORY_PROFILE_TOOLS, itemToPublic, PROTECTED_TOOLS, SESSION_ONLY_TOOLS, registerTools } from "../src/tools.js";
 
@@ -190,6 +191,43 @@ describe.skipIf(!available)("get_seller_summary (THI-923 spec v2)", () => {
     return rows[0].id;
   }
 
+  /** A distinct review author as a tracked seller row (afterAll removes it
+   *  with the rest of the fixture sellers). */
+  async function seedBuyer(name: string): Promise<string> {
+    return seedSeller({ displayName: name });
+  }
+
+  /** Seeds one published (or hidden) review on a fresh completed order for
+   *  `buyerId`, sold by `sellerId` — direct inserts with an explicit
+   *  created_at so the per-pair cap ordering is deterministic (the
+   *  order-reviews-read.test.ts fixture approach). Order/item/review rows
+   *  are removed by the existing afterAll passes (orders → reviews
+   *  cascade, then items/sellers). */
+  async function seedReview(
+    sellerId: string,
+    buyerId: string,
+    rating: number,
+    createdAt: string,
+    status: "published" | "hidden" = "published",
+  ): Promise<void> {
+    const item = await db.query<{ id: string }>(
+      `INSERT INTO items (seller_id, title, category, price_cents, currency, location, shipping_tier, images, status, photo_required)
+       VALUES ($1, 'Review fixture item', 'other', 1000, 'EUR', null, 'parcel', '{}', 'sold', false) RETURNING id`,
+      [sellerId],
+    );
+    const order = await db.query<{ id: string }>(
+      `INSERT INTO orders (item_id, seller_id, buyer_id, status, price_cents, currency, fulfillment)
+       VALUES ($1, $2, $3, 'completed', 1000, 'EUR', 'pickup') RETURNING id`,
+      [item.rows[0].id, sellerId, buyerId],
+    );
+    seeded.find((s) => s.sellerId === sellerId)?.orderIds.push(order.rows[0].id);
+    await db.query(
+      `INSERT INTO order_reviews (order_id, seller_id, buyer_id, item_id, rating, text, status, buyer_first_name, item_title, created_at)
+       VALUES ($1, $2, $3, $4, $5, null, $6, 'Luca', 'Review fixture item', $7)`,
+      [order.rows[0].id, sellerId, buyerId, item.rows[0].id, rating, status, createdAt],
+    );
+  }
+
   let buyerId: string | null = null;
   async function seedBuyerOnce(): Promise<string> {
     if (buyerId) return buyerId;
@@ -256,7 +294,9 @@ describe.skipIf(!available)("get_seller_summary (THI-923 spec v2)", () => {
       ].sort(),
     );
     expect(seller.display_name).toBe("Allowlist Annie");
-    // Reviews seam (THI-925): constant zeros until real reviews land.
+    // Reviews (THI-1755): live capped summary — this seller has none, so
+    // the zero case; group 10 pins the wired aggregate against the reviews
+    // read path.
     expect(seller.reviews).toEqual({ count: 0, average: null });
 
     // The serialized boundary must not carry any sensitive column or canary.
@@ -589,5 +629,45 @@ describe.skipIf(!available)("get_seller_summary (THI-923 spec v2)", () => {
     expect(body.count).toBe(1);
     expect(body.has_more).toBe(false);
     expect(typeof body.note).toBe("string");
+  });
+
+  // -- group 10: reviews wiring (THI-1755) -----------------------------------
+
+  it("seller.reviews is the live per-pair-capped summary, par with get_seller_reviews (hidden excluded)", async () => {
+    const tag = randomUUID();
+    const sellerId = await seedSeller({ displayName: "Reviewed Seller", email: `rev-${tag}@t.dev` });
+    await seedItem(sellerId, { title: "Reviewed probe item" });
+
+    const buyerA = await seedBuyer(`buyer-a-${tag}`);
+    const buyerB = await seedBuyer(`buyer-b-${tag}`);
+    // Buyer A: four published reviews — the pair cap (K=3) keeps the three
+    // newest (ratings 2,3,4; the oldest 5 falls out of the summary only).
+    await seedReview(sellerId, buyerA, 5, "2026-01-01T10:00:00Z");
+    await seedReview(sellerId, buyerA, 4, "2026-01-02T10:00:00Z");
+    await seedReview(sellerId, buyerA, 3, "2026-01-03T10:00:00Z");
+    await seedReview(sellerId, buyerA, 2, "2026-01-04T10:00:00Z");
+    // Buyer B: one published review.
+    await seedReview(sellerId, buyerB, 1, "2026-01-05T10:00:00Z");
+    // Buyer A again, hidden by moderation: invisible to every public surface.
+    await seedReview(sellerId, buyerA, 5, "2026-01-06T10:00:00Z", "hidden");
+
+    const seller = (await callTool({ seller_id: sellerId })).seller as Record<string, unknown>;
+    const expected = await listSellerReviews({ sellerId, limit: 0 });
+
+    // Capped set {2,3,4} + {1}: count 4, average (2+3+4+1)/4 = 2.5; the
+    // hidden 5 counts nowhere; the 4th-oldest published rating from buyer A
+    // falls out of the summary per the pair cap — exactly what the reviews
+    // read path serves.
+    expect(expected.summary).toEqual({ average: 2.5, count: 4 });
+    expect(seller.reviews).toEqual(expected.summary);
+
+    // Module-level path agrees with the handler path.
+    const direct = await getSellerSummary(sellerId, { limit: 8, offset: 0 });
+    expect(direct.seller.reviews).toEqual(expected.summary);
+
+    // A seller with no published reviews keeps the zero summary.
+    const zeroId = await seedSeller({ displayName: "Unreviewed Seller", email: `unrev-${tag}@t.dev` });
+    const zero = (await callTool({ seller_id: zeroId })).seller as Record<string, unknown>;
+    expect(zero.reviews).toEqual({ count: 0, average: null });
   });
 });

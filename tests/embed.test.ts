@@ -8,6 +8,7 @@ import {
   EXPECTED_EMBEDDING_DIMS,
   embedText,
   normalizeEmbeddingsUrl,
+  requestedDimensions,
 } from "../src/embed.js";
 
 afterEach(() => {
@@ -15,6 +16,7 @@ afterEach(() => {
   delete process.env.EMBED_API_KEY;
   delete process.env.EMBED_API_URL;
   delete process.env.EMBED_MODEL;
+  delete process.env.EMBED_DIMS;
 });
 
 describe("normalizeEmbeddingsUrl (THI-466 R1)", () => {
@@ -100,5 +102,74 @@ describe("embedText dimension guard (THI-466)", () => {
     vi.stubGlobal("fetch", fn);
     expect(await embedText("running shoes")).toBeNull();
     expect(fn).not.toHaveBeenCalled();
+  });
+});
+
+describe("EMBED_DIMS → dimensions parameter (THI-1743 z.ai route)", () => {
+  const stubFetch = (body: unknown, captures: string[] = []) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: { body?: string }) => {
+        if (init?.body) captures.push(init.body);
+        return { ok: true, status: 200, json: async () => body } as Response;
+      }),
+    );
+  };
+
+  it("requestedDimensions parses a positive integer and returns null when unset", () => {
+    expect(requestedDimensions()).toBeNull();
+    process.env.EMBED_DIMS = "1536";
+    expect(requestedDimensions()).toBe(1536);
+    process.env.EMBED_DIMS = " 2048 ";
+    expect(requestedDimensions()).toBe(2048);
+    process.env.EMBED_DIMS = "";
+    expect(requestedDimensions()).toBeNull();
+  });
+
+  it("warns once and ignores a non-integer EMBED_DIMS", () => {
+    process.env.EMBED_DIMS = "abc";
+    let warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(requestedDimensions()).toBeNull();
+    expect(requestedDimensions()).toBeNull(); // second call: still null, no second warn
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("abc"));
+    warn.mockRestore();
+    process.env.EMBED_DIMS = "0";
+    expect(requestedDimensions()).toBeNull();
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(requestedDimensions()).toBeNull();
+    warn.mockRestore();
+  });
+
+  it("omits the parameter when EMBED_DIMS is unset (zero behavior change)", async () => {
+    process.env.EMBED_API_KEY = "test-key";
+    const captures: string[] = [];
+    stubFetch({ data: [{ embedding: Array.from({ length: EXPECTED_EMBEDDING_DIMS }, () => 0.1) }] }, captures);
+    await embedText("running shoes");
+    const sent = JSON.parse(captures[0]);
+    expect(sent.dimensions).toBeUndefined();
+  });
+
+  it("sends dimensions: 1536 when EMBED_DIMS=1536 (z.ai embedding-3 needs this)", async () => {
+    process.env.EMBED_API_KEY = "test-key";
+    process.env.EMBED_API_URL = "https://api.z.ai/api/paas/v4/";
+    process.env.EMBED_DIMS = "1536";
+    const captures: string[] = [];
+    stubFetch({ data: [{ embedding: Array.from({ length: EXPECTED_EMBEDDING_DIMS }, () => 0.1) }] }, captures);
+    const out = await embedText("running shoes");
+    expect(out).toHaveLength(EXPECTED_EMBEDDING_DIMS);
+    const sent = JSON.parse(captures[0]);
+    expect(sent.dimensions).toBe(1536);
+    expect(sent.model).toBe("text-embedding-3-small"); // EMBED_MODEL unset → default model name only
+  });
+
+  it("still drops the vector when a provider ignores EMBED_DIMS and returns other dims", async () => {
+    process.env.EMBED_API_KEY = "test-key";
+    process.env.EMBED_DIMS = "1536";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    stubFetch({ data: [{ embedding: Array.from({ length: 2048 }, () => 0.1) }] });
+    expect(await embedText("running shoes")).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("2048"));
+    warn.mockRestore();
   });
 });

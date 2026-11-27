@@ -27,11 +27,37 @@ export function normalizeEmbeddingsUrl(input: string | undefined): string {
   }
 }
 
+let warnedBadEmbedDims = false;
+
+/** Optional EMBED_DIMS override: when set to a positive integer the request
+ *  carries `dimensions: N` (OpenAI embeddings API parameter; zhipu/z.ai
+ *  embedding-3 accepts 256–2048 and defaults to 2048, so providers at a
+ *  non-1536 default need this to satisfy the vector(1536) columns).
+ *  Providers that ignore the parameter still hit the EXPECTED_EMBEDDING_DIMS
+ *  guard in embedText — wrong-dim vectors are dropped, never written.
+ *  THI-1743: z.ai restoration route (buy zhipu embeddings package). */
+export function requestedDimensions(): number | null {
+  const raw = (process.env.EMBED_DIMS ?? "").trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    if (!warnedBadEmbedDims) {
+      warnedBadEmbedDims = true;
+      console.warn(
+        `[embed] EMBED_DIMS="${raw}" is not a positive integer — ignoring; request will omit the dimensions parameter`,
+      );
+    }
+    return null;
+  }
+  return n;
+}
+
 export async function embedText(text: string): Promise<number[] | null> {
   const apiKey = process.env.EMBED_API_KEY;
   if (!apiKey) return null;
   const url = normalizeEmbeddingsUrl(process.env.EMBED_API_URL);
   const model = process.env.EMBED_MODEL ?? "text-embedding-3-small";
+  const dimensions = requestedDimensions();
 
   try {
     const res = await fetch(url, {
@@ -40,7 +66,11 @@ export async function embedText(text: string): Promise<number[] | null> {
         "content-type": "application/json",
         authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model, input: text.slice(0, 8000) }),
+      body: JSON.stringify({
+        model,
+        input: text.slice(0, 8000),
+        ...(dimensions ? { dimensions } : {}),
+      }),
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return null;

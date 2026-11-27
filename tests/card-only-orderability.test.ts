@@ -301,8 +301,50 @@ describe.skipIf(!available)("card-only tool surfaces (DB): create_listing/update
     const zero = await callTool("update_listing", { id: body.item.id, price_cents: 0 });
     expect(zero.body.updated).toBe(true);
     expect(zero.body.warning).toMatch(/price-0/);
-    // (update_listing's item shape never joined seller payout data — the
-    // buyer-side flags+reason live on get_item/my_listings, covered above.)
+    // THI-1798 F3: the update echo joins the seller's payout gate, so the
+    // status-only orderable=true no longer sits beside a contradiction.
+    expect(zero.body.item.orderable).toBe(false);
+    expect(zero.body.item.payment_unavailable_reason).toBe("free_item_not_orderable");
+  });
+
+  it("flag ON: create echo pairs narrowed orderable flags with the warning (THI-1798 F3)", async () => {
+    process.env.CARD_ONLY_MODE = "true";
+    process.env.STRIPE_SECRET_KEY = "sk_test_k1";
+    const { body } = await callTool("create_listing", createArgs());
+    expect(body.warning).toMatch(/Card-only deployment/);
+    // Pre-F3 this echo carried status-only orderable=true beside the warning.
+    expect(body.item.orderable).toBe(false);
+    expect(body.item.payment_unavailable_reason).toBe("seller_not_payout_ready");
+    expect(body.item.card_only_mode).toBe(true);
+  });
+
+  it("flag ON: update_listing (stored→active) echo carries the same narrowed flags", async () => {
+    process.env.CARD_ONLY_MODE = "true";
+    process.env.STRIPE_SECRET_KEY = "sk_test_k1";
+    const { body } = await callTool("create_listing", createArgs(10000, "stored"));
+    const flip = await callTool("update_listing", { id: body.item.id, status: "active" });
+    expect(flip.body.warning).toMatch(/Card-only deployment/);
+    expect(flip.body.item.orderable).toBe(false);
+    expect(flip.body.item.payment_unavailable_reason).toBe("seller_not_payout_ready");
+    expect(flip.body.item.card_only_mode).toBe(true);
+  });
+
+  it("get_item: card_only_mode marker under the flag, absent flag-off", async () => {
+    process.env.CARD_ONLY_MODE = "true";
+    process.env.STRIPE_SECRET_KEY = "sk_test_k1";
+    await db.query(
+      "UPDATE sellers SET stripe_account_id = 'acct_x', stripe_onboarded_at = now(), stripe_account_country = 'NL' WHERE id = $1",
+      [sellerId],
+    );
+    const created = await callTool("create_listing", createArgs());
+    const on = await callTool("get_item", { id: created.body.item.id });
+    expect(on.body.item.card_only_mode).toBe(true);
+    expect(on.body.item.orderable).toBe(true);
+    expect(on.body.item).not.toHaveProperty("payment_unavailable_reason");
+    for (const k of KEYS) delete process.env[k];
+    const off = await callTool("get_item", { id: created.body.item.id });
+    expect(off.body.item).not.toHaveProperty("card_only_mode");
+    expect(off.body.item.orderable).toBe(true);
   });
 
   it("flag ON: get_payout_setup names the country block after onboarding (D4)", async () => {

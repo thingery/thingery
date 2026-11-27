@@ -65,7 +65,7 @@ Declared attributes are validated: their types, required fields and allowed valu
 
 ## Payouts
 
-To get paid through Thingery with buyer protection, a seller finishes Stripe onboarding with `get_payout_setup`. It is optional: without it, items can still be bought as off-platform orders. See [Orders](/guides/orders).
+To get paid through Thingery with buyer protection, a seller finishes Stripe onboarding with `get_payout_setup`. It is optional on deployments that allow off-platform orders: without it, items can still be bought as off-platform orders. On deployments running card-only mode (`CARD_ONLY_MODE`), an un-onboarded seller's listings stay publishable but cannot be ordered — `get_payout_setup` and publish responses say so. See [Orders](/guides/orders).
 
 ## Agent skill
 

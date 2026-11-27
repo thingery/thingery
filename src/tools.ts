@@ -309,6 +309,11 @@ export function itemToPublic(item: ItemRow & { score?: number }) {
       payment_available: gate.paymentAvailable,
       orderable: item.status === "active" && gate.orderable,
       ...(gate.reason ? { payment_unavailable_reason: gate.reason } : {}),
+      // THI-1625 B-4: explicit deployment marker so clients (web checkout)
+      // never infer card-only from field absence — on this deployment
+      // 'off_platform' is never a create_order fallback. Absent when the
+      // flag is off (byte-for-byte contract preserved).
+      card_only_mode: true,
       // THI-308 PR 2 (additive): derived pending-photo state — true only for
       // photo-gated listings with no images yet. Pending items are hidden
       // from feeds; the first photo publishes them (visibleInFeeds in
@@ -353,14 +358,17 @@ const CARD_ONLY_NOTICE: Record<CardOnlyOrderabilityReason, string> = {
 async function cardOnlyPublishNotice(
   item: Pick<ItemRow, "status" | "price_cents">,
   sellerId: string,
+  // THI-1798 F3: callers that already fetched the seller's gate (the
+  // create/update echo) pass it through so one query serves both.
+  payout?: { ready: boolean; country: string | null },
 ): Promise<string | null> {
   const cfg = orderFlowConfig();
   if (!cfg.cardOnlyMode || item.status !== "active") return null;
-  const payout = await sellerPayoutGate(sellerId);
+  const p = payout ?? (await sellerPayoutGate(sellerId));
   const gate = cardOnlyOrderability(cfg, {
     priceCents: item.price_cents,
-    payoutReady: payout.ready,
-    country: payout.country,
+    payoutReady: p.ready,
+    country: p.country,
   });
   if (gate.orderable) return null;
   const detail = CARD_ONLY_NOTICE[gate.reason!];
@@ -742,7 +750,15 @@ export function registerTools(
             // pre-stored create path. "stored" = private inventory save.
             status: args.status,
           });
-        const item = itemToPublic(createdRow);
+        // THI-1798 F3: created rows carry no payout columns, so itemToPublic
+        // would emit status-only flags (orderable=true) right beside a
+        // card-only warning saying buyers cannot order. Under the flag,
+        // thread the seller's own gate so the echo matches the warning and
+        // every other card-only surface. Flag off ⇒ byte-for-byte today.
+        const payout = orderFlowConfig().cardOnlyMode ? await sellerPayoutGate(seller.id) : null;
+        const item = itemToPublic(
+          payout ? { ...createdRow, seller_payout_ready: payout.ready, seller_stripe_country: payout.country } : createdRow,
+        );
         // THI-308 PR 2 (additive): publish state at create time. A zero-image
         // create succeeds but stays pending — next_steps then tells the agent
         // how to publish instead of implying the listing is live. status is
@@ -753,7 +769,7 @@ export function registerTools(
         // THI-1625 B-2: publish-time card-only warning (spec §B2) — active
         // creates that buyers cannot natively order still succeed, with the
         // reason attached. Stored creates warn at update_listing instead.
-        const cardOnlyNotice = await cardOnlyPublishNotice(createdRow, seller.id);
+        const cardOnlyNotice = await cardOnlyPublishNotice(createdRow, seller.id, payout ?? undefined);
         return ok({
           created: true,
           seller: seller.display_name,
@@ -1216,6 +1232,8 @@ export function registerTools(
       description: "Fetch one second-hand listing's full details (price, shipping_price_cents, total_price_cents, condition, " +
         "attributes, images) by its item id. Public — except items saved to a seller's private inventory " +
         "(status \"stored\"): those return not_found unless you authenticate as the owning seller. " +
+        "On card-only deployments (card_only_mode: true) orderable/payment_available apply card-only rules and " +
+        "payment_unavailable_reason names the blocker; 'off_platform' is never a fallback there. " +
         CONTENT_PROVENANCE_NOTE,
       inputSchema: { id: z.string().uuid() },
     },
@@ -1254,7 +1272,8 @@ export function registerTools(
       description:
         "Who is selling: public profile of one marketplace seller — display name, member since " +
         "(month), ships from, items sold (orders that reached payment), active listings, and " +
-        "whether card payment through Thingery is available for them today. Returns their current " +
+        "whether card payment through Thingery is available for them today. On card-only deployments their listings " +
+        "carry card_only_mode and payment_unavailable_reason. Returns their current " +
         "feed-visible listings (same fields as get_item), page-by-page. Public (no API key needed). " +
         "seller_id comes from get_item or search_items results. " +
         CONTENT_PROVENANCE_NOTE,
@@ -1423,8 +1442,18 @@ export function registerTools(
         // THI-1625 B-2: same publish-time warning for the stored→active flip
         // and any edit that leaves an active listing unorderable (e.g. a
         // price set to 0 under card-only mode — D5).
-        const cardOnlyNotice = await cardOnlyPublishNotice(item, seller.id);
-        return ok({ updated: true, item: itemToPublic(item), ...(cardOnlyNotice ? { warning: cardOnlyNotice } : {}) });
+        // THI-1798 F3: same echo fix as create_listing — the stored→active
+        // flip is where this warning matters most, and a status-only
+        // orderable=true beside it would contradict the warning.
+        const payout = orderFlowConfig().cardOnlyMode ? await sellerPayoutGate(seller.id) : null;
+        const cardOnlyNotice = await cardOnlyPublishNotice(item, seller.id, payout ?? undefined);
+        return ok({
+          updated: true,
+          item: itemToPublic(
+            payout ? { ...item, seller_payout_ready: payout.ready, seller_stripe_country: payout.country } : item,
+          ),
+          ...(cardOnlyNotice ? { warning: cardOnlyNotice } : {}),
+        });
       } catch (e) {
         // updateItem throws AttributeValidationError for attribute shape-cap
         // violations (spec THI-83 §3.5); surface it with the structured
@@ -1735,7 +1764,9 @@ export function registerTools(
         "Buy an item: place an order on a second-hand listing. Default payment_mode is 'stripe' (Checkout URL returned) when the " +
         "deployment has payments AND the seller finished payout onboarding; otherwise " +
         "'off_platform' — you and the seller settle payment yourselves (check get_item's " +
-        "payment_available first). Shippable items need a shipping_address, or address_id to " +
+        "payment_available first). On card-only deployments (get_item's card_only_mode: true) 'off_platform' is refused " +
+        "(code 'off_platform_disabled') and the fallback is 'stripe', else the item is not orderable — get_item's " +
+        "payment_unavailable_reason names why. Shippable items need a shipping_address, or address_id to " +
         "reuse a saved address (see list_addresses — summaries only; the full address is " +
         "copied into the order server-side, never shown in chat). country must be a real " +
         "ISO 3166-1 alpha-2 code ('IT', not 'XX'; case/whitespace-insensitive: ' it ' ships as 'IT'). Local-pickup items ignore both. " +
@@ -1766,7 +1797,7 @@ export function registerTools(
             .describe("ISO 3166-1 alpha-2, e.g. 'IT' (case/whitespace-insensitive; stored normalized)"),
         }).strict().optional().describe("Required for shippable items unless address_id is given"),
         payment_mode: z.enum(["stripe", "off_platform"]).optional()
-          .describe("Leave unset for the best available path"),
+          .describe("Leave unset for the best available path (card-only deployments refuse 'off_platform')"),
         verification_choice: z.enum(["keep_original"]).optional()
           .describe("After a correction was suggested: order with your address as typed instead of the carrier's suggestion. No-op without a cached suggestion"),
       },

@@ -27,7 +27,7 @@ Orders can also end as `disputed`, `cancelled` or `refunded`. Off-platform order
 | Step | Who | Tool |
 |---|---|---|
 | Place the order | Buyer | `create_order` |
-| Pay | Buyer | Stripe Checkout link, or off-platform |
+| Pay | Buyer | Stripe Checkout link, or off-platform (card-only deployments: Stripe only) |
 | Confirm an off-platform payment | Seller | `confirm_payment` |
 | Share the shipping address, off-platform only | Buyer | `share_shipping_address` |
 | Record the carrier and tracking code | Seller | `record_tracking` |
@@ -37,6 +37,8 @@ Orders can also end as `disputed`, `cancelled` or `refunded`. Off-platform order
 | Cancel while still possible | Either | `cancel_order` |
 
 Either party reads an order with `get_order` and lists theirs with `my_orders`.
+
+On deployments running card-only mode (`CARD_ONLY_MODE`), new orders pay through Stripe only: an explicit `payment_mode: "off_platform"` request is refused with `off_platform_disabled`, and a listing whose seller cannot take card yet is not orderable — `get_item`'s `payment_unavailable_reason` names why (`card_only_mode: true` marks such deployments). Off-platform orders that already exist finish through the off-platform path above.
 
 ## Deadlines
 

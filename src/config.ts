@@ -137,6 +137,9 @@ export interface OrderFlowConfig {
   // Both read env + defaults only — no client input can widen them.
   labelMaxCostCents: number;             // 3000 ≈ €30 per label (A1)
   labelDailyBudgetCents: number;         // 20000 ≈ €200/day platform-wide; 0 = kill switch (A2)
+  // Off by default: a label is bought only against shipping the buyer paid. "true"
+  // lets sellers also buy labels the deployment pays for (flat and off-platform orders).
+  labelAllowOperatorFunded: boolean;
   // Buyer-paid shipping (spec docs/specs/buyer-paid-shipping.md §2, data
   // model). SHIPPING_QUOTE_TIMEOUT_MS bounds the order-time EasyPost quote
   // call with an AbortSignal — a hanging provider must never hold the
@@ -297,6 +300,7 @@ export function orderFlowConfig(): OrderFlowConfig {
     reorderCooldownMinutes: envInt("REORDER_COOLDOWN_MINUTES", 60),
     labelMaxCostCents: envInt("LABEL_MAX_COST_CENTS", 3000),
     labelDailyBudgetCents: envNonNegativeInt("LABEL_DAILY_BUDGET_CENTS", 20000),
+    labelAllowOperatorFunded: envValue("LABEL_ALLOW_OPERATOR_FUNDED") === "true",
     shippingQuoteTimeoutMs: envInt("SHIPPING_QUOTE_TIMEOUT_MS", 5000),
     shippingQuoteEstimateTtlMinutes: envInt("SHIPPING_QUOTE_ESTIMATE_TTL_MINUTES", 15),
   };

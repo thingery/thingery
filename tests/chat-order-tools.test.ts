@@ -766,6 +766,8 @@ describe.skipIf(!available)("chat buyer order writes behind the confirm gate (DB
   });
 
   it("buy_shipping_label binds its args into the label op and executes via chat-confirm (degraded mode relayed verbatim)", async () => {
+    // An order the buyer paid no label for reaches the carrier only when the operator pays.
+    vi.stubEnv("LABEL_ALLOW_OPERATOR_FUNDED", "true");
     const orderId = await soldOrder();
     // Off-platform orders need the buyer's address consent before a label
     // can be bought — model the real flow, then expect the degraded error.
@@ -796,6 +798,7 @@ describe.skipIf(!available)("chat buyer order writes behind the confirm gate (DB
     const after = await client.query("SELECT status, label_purchase FROM orders WHERE id = $1", [orderId]);
     expect(after.rows[0].status).toBe("sold");
     expect(after.rows[0].label_purchase).toBeNull();
+    vi.unstubAllEnvs();
   });
 
   it("send_order_message executes via chat-confirm and list_order_messages reads it back identically to MCP", async () => {

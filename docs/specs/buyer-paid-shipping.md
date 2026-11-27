@@ -512,6 +512,14 @@ orders in full (or let the seller ship own-label via the unchanged `record_track
 enumerable by the query above, bounded by window size. Documented in the deploy runbook with
 the rollout PR.
 
+## Operator-funded labels are opt-in
+
+Every "operator-funded as today" statement above applies only when
+`LABEL_ALLOW_OPERATOR_FUNDED=true`. By default `buy_shipping_label` refuses an order without a
+paid label quote (`label_not_paid_by_buyer`, before any provider call), and the seller ships
+with their own label via `record_tracking`. Replaying a call on a label-issued order still
+returns the stored label.
+
 ## Open questions
 
 1. **Quote overage.** Buyer pays €7.20, label re-quotes at €6.90 — v1 keeps the difference

@@ -9,6 +9,7 @@ import type Stripe from "stripe";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { setStripeForTests, chargeTotalCents } from "../src/stripe.js";
 import { runSweeps } from "../src/orders-sweep.js";
+import { confirmReceipt } from "../src/fulfillment.js";
 import { orderFlowConfig, type OrderFlowConfig } from "../src/config.js";
 import { applyTransition, type PaymentMode } from "../src/orders.js";
 
@@ -333,6 +334,100 @@ describe.skipIf(!available)("deadline sweeps (DB)", () => {
     expect(calls.some((c) => c.startsWith("transfers.create:"))).toBe(false);
     const ev = await db.query("SELECT 1 FROM order_events WHERE order_id = $1 AND event_type = 'payout_zero_base'", [seed1.orderId]);
     expect(ev.rowCount).toBe(1); // operator note recorded once (deduped)
+  });
+
+  // --- THI-1625 B-3: pickup orders without tracking (card-only native ---
+  // every pickup is now card-paid; pickups never carry tracking, so every
+  // deadline below is proven independent of the shipping-only rules).
+
+  it("rule 2 (THI-1625 B-3): pickup sold past STALE_SOLD_DAYS is never stale-sale — exclusion holds even when pickupAutoconfirmDays > staleSoldDays", async () => {
+    // Pickups survived rule 2 only because the defaults keep 14 < 21 — a
+    // config accident. This test breaks that relationship (autoconfirm AFTER
+    // the stale window) to prove the explicit fulfillment <> 'pickup'
+    // exclusion carries the guarantee. The pickup's real deadline is rule 5.
+    const { client, calls } = fakeStripe();
+    setStripeForTests(client);
+    const a = await seed("stripe");
+    await toSold(a.orderId, a.sellerEmail);
+    await db.query("UPDATE orders SET fulfillment = 'pickup' WHERE id = $1", [a.orderId]);
+    await db.query(
+      "UPDATE orders SET status_changed_at = now() - ($1 || ' days')::interval WHERE id = $2",
+      ["25", a.orderId], // past staleSoldDays=21, before pickupAutoconfirmDays=30
+    );
+    const late = { ...cfg, staleSoldDays: 21, pickupAutoconfirmDays: 30 };
+    const report = await runSweeps(late);
+    expect((await order(a.orderId)).status).toBe("sold"); // neither rule acted
+    expect(report["2-stale-sale"].acted).toBe(0);
+    expect(report["5-pickup-autoconfirm"].acted).toBe(0);
+    expect(calls.some((c) => c.startsWith("refunds.create:"))).toBe(false);
+    // aging past the autoconfirm window confirms rule 5 is the pickup deadline
+    await db.query(
+      "UPDATE orders SET status_changed_at = now() - ($1 || ' days')::interval WHERE id = $2",
+      ["31", a.orderId],
+    );
+    await runSweeps(late);
+    expect((await order(a.orderId)).status).toBe("delivered");
+  });
+
+  it("rule 2 (THI-1625 B-3): pickup in the stale warning band gets no stale_sale warning when autoconfirm is later", async () => {
+    // Pins the pickup exclusion on the warning arm too (post THI-1803 fix
+    // this query becomes load-bearing: the shipping-side warning arm was
+    // shipped dead in THI-780 PR 3 — swapped bind params make its window
+    // empty — tracked separately; not a pickup defect).
+    const a = await seed("stripe");
+    await toSold(a.orderId, a.sellerEmail);
+    await db.query("UPDATE orders SET fulfillment = 'pickup' WHERE id = $1", [a.orderId]);
+    await db.query(
+      "UPDATE orders SET status_changed_at = now() - ($1 || ' days')::interval WHERE id = $2",
+      ["15", a.orderId], // inside [staleSoldDays/2, staleSoldDays) = [10.5, 21)
+    );
+    const late = { ...cfg, staleSoldDays: 21, pickupAutoconfirmDays: 30 };
+    await runSweeps(late);
+    expect((await order(a.orderId)).status).toBe("sold");
+    const warned = await db.query(
+      "SELECT 1 FROM notifications WHERE dedupe_key = $1",
+      [`warn:stale_sale:${a.orderId}`],
+    );
+    expect(warned.rowCount).toBe(0);
+  });
+
+  it("rule 1 (THI-1625 B-3): card-paid pickup past payment deadline → cancelled (stripe arm is fulfillment-agnostic)", async () => {
+    const { client, calls } = fakeStripe({ sessionPaymentStatus: "unpaid" });
+    setStripeForTests(client);
+    const a = await seed("stripe");
+    await db.query("UPDATE orders SET fulfillment = 'pickup' WHERE id = $1", [a.orderId]);
+    await db.query("UPDATE orders SET payment_deadline = now() - interval '1 hour' WHERE id = $1", [a.orderId]);
+    await runSweeps(cfg);
+    expect((await order(a.orderId)).status).toBe("cancelled");
+    expect(calls).toContain("sessions.retrieve");
+    expect(calls).toContain("sessions.expire");
+  });
+
+  it("rule 5 (THI-1625 B-3): card-paid pickup arms auto-confirm identically (delivered + F10 long window)", async () => {
+    const a = await seed("stripe");
+    await toSold(a.orderId, a.sellerEmail);
+    await db.query("UPDATE orders SET fulfillment = 'pickup' WHERE id = $1", [a.orderId]);
+    await db.query(
+      "UPDATE orders SET status_changed_at = now() - ($1 || ' days')::interval WHERE id = $2",
+      [String(cfg.pickupAutoconfirmDays + 1), a.orderId],
+    );
+    await runSweeps(cfg);
+    const o = await order(a.orderId);
+    expect(o.status).toBe("delivered");
+    const expectLong = Date.now() + cfg.systemConfirmedDisputeWindowHours * 3_600_000;
+    expect(new Date(o.dispute_deadline).getTime()).toBeGreaterThan(expectLong - 10 * 60_000);
+  });
+
+  it("confirm_receipt (THI-1625 B-3): card-paid pickup sold → delivered with the short (48h) window", async () => {
+    const a = await seed("stripe");
+    await toSold(a.orderId, a.sellerEmail);
+    await db.query("UPDATE orders SET fulfillment = 'pickup' WHERE id = $1", [a.orderId]);
+    const buyerId = (await order(a.orderId)).buyer_id as string;
+    const delivered = await confirmReceipt(a.orderId, buyerId);
+    expect(delivered.status).toBe("delivered");
+    const hours = (new Date(delivered.dispute_deadline!).getTime() - Date.now()) / 3_600_000;
+    expect(hours).toBeGreaterThan(47);
+    expect(hours).toBeLessThan(49);
   });
 
   it("rule 5: pickup sold past autoconfirm → delivered with the long (F10) window", async () => {

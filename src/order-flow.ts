@@ -78,6 +78,27 @@ export async function sellerPayoutReady(
   return rows[0]?.ready === true;
 }
 
+/** THI-1625 B-1: payout-gate details for create_order — readiness plus the
+ *  connected account's payout country (D4 allowlist input; NULL for legacy
+ *  accounts until Stripe delivers their next account event). Kept separate
+ *  from sellerPayoutReady (chat/sellers call that one) so its contract is
+ *  untouched. */
+interface SellerPayoutGate {
+  ready: boolean;
+  country: string | null;
+}
+
+async function sellerPayoutGate(
+  sellerId: string,
+  db: Pick<typeof pool, "query">,
+): Promise<SellerPayoutGate> {
+  const { rows } = await db.query<{ ready: boolean; country: string | null }>(
+    "SELECT (stripe_account_id IS NOT NULL AND stripe_onboarded_at IS NOT NULL) AS ready, stripe_account_country AS country FROM sellers WHERE id = $1",
+    [sellerId],
+  );
+  return { ready: rows[0]?.ready === true, country: rows[0]?.country ?? null };
+}
+
 export async function createOrder(input: CreateOrderInput): Promise<{ order: OrderView; paymentUrl: string | null }> {
   const cfg = orderFlowConfig();
   const db = await pool.connect();
@@ -121,9 +142,56 @@ export async function createOrder(input: CreateOrderInput): Promise<{ order: Ord
 
     // Payment mode resolution (§11.2): default stripe when available, else
     // off_platform; an explicit 'stripe' where unavailable is an error.
-    const paymentsAvailable = cfg.stripePaymentsEnabled && (await sellerPayoutReady(row.seller_id, db));
+    //
+    // THI-1625 B-1 (card-only mode, thi1611 spec §B2): with CARD_ONLY_MODE
+    // on, this deployment never creates a NEW off_platform order — an
+    // explicit request is refused (off_platform_disabled), the fallback is
+    // stripe-only, and every refusal names a machine-readable reason
+    // (payments_not_configured / seller_not_payout_ready /
+    // seller_country_not_allowed / free_item_not_orderable). Price-0 items
+    // are refused outright (D5: a card cannot apply). Existing off_platform
+    // orders are untouched — the gate is at creation only. Flag off ⇒
+    // byte-for-byte today's behavior (self-hosters keep off-platform mode).
+    const payout = await sellerPayoutGate(row.seller_id, db);
+    const countryAllowedForCard =
+      cfg.cardOnlyMode && cfg.sellerCountryAllowlist !== null
+        ? payout.country !== null &&
+          cfg.sellerCountryAllowlist.has(payout.country.trim().toUpperCase())
+        : true;
+    const paymentsAvailable = cfg.stripePaymentsEnabled && payout.ready && countryAllowedForCard;
     const mode = input.paymentMode ?? (paymentsAvailable ? "stripe" : "off_platform");
-    if (mode === "stripe" && !paymentsAvailable) {
+    if (cfg.cardOnlyMode) {
+      if (row.price_cents === 0) {
+        throw new OrderFlowError(
+          "free_item_not_orderable",
+          "Free items cannot be ordered with card payment on this deployment.",
+        );
+      }
+      if (input.paymentMode === "off_platform") {
+        throw new OrderFlowError(
+          "off_platform_disabled",
+          "This deployment accepts card payment only for new orders; payment_mode 'off_platform' is disabled.",
+        );
+      }
+      if (!paymentsAvailable) {
+        if (!cfg.stripePaymentsEnabled) {
+          throw new OrderFlowError(
+            "payments_not_configured",
+            "Stripe payments are not configured on this deployment; nothing is orderable.",
+          );
+        }
+        if (!payout.ready) {
+          throw new OrderFlowError(
+            "seller_not_payout_ready",
+            "The seller has not completed payout onboarding; this item is not orderable yet.",
+          );
+        }
+        throw new OrderFlowError(
+          "seller_country_not_allowed",
+          "The seller's payout country is not enabled for card orders on this deployment.",
+        );
+      }
+    } else if (mode === "stripe" && !paymentsAvailable) {
       throw new OrderFlowError(
         cfg.stripePaymentsEnabled ? "seller_not_payout_ready" : "payments_not_configured",
         cfg.stripePaymentsEnabled

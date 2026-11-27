@@ -34,6 +34,7 @@ import {
   providerWebhookSecretEnv,
   type ShippingProviderId,
 } from "./shipping/provider.js";
+import { isIsoCountryCode } from "./countries.js";
 
 /** Empty/whitespace strings count as unset (F1). */
 export function envValue(name: string): string | undefined {
@@ -80,6 +81,16 @@ export interface OrderFlowConfig {
   // working; connect-shaped deliveries then 400 exactly as before).
   stripeConnectWebhookSecret: string | undefined;
   stripeConnectWebhookSecretPrevious: string | undefined; // rotation twin (F13)
+  // THI-1625 B-1 (card-only native listings, thi1611 spec §B1/B2): hosted-
+  // platform commercial policy behind a deployment flag — OFF by default so
+  // self-hosters keep exactly today's behavior (off-platform mode stays a
+  // core capability; the public repo stays green with the flag off).
+  cardOnlyMode: boolean;
+  /** D4: seller payout countries allowed to sell natively under card-only
+   *  mode (SELLER_COUNTRY_ALLOWLIST, comma-separated ISO 3166-1 alpha-2).
+   *  null = no country restriction (env unset/empty). Parsed fail-closed:
+   *  invalid entries are dropped with a boot error, never widened. */
+  sellerCountryAllowlist: ReadonlySet<string> | null;
   // THI-1681: Accounts v2 events (capability_status_updated — the payout-ready
   // flip for v2 recipient accounts) do NOT arrive on the v1 webhook endpoints
   // at all; Stripe delivers them only through an event destination
@@ -155,6 +166,43 @@ export function orderFlowConfig(): OrderFlowConfig {
   const stripeWebhookSecretPrevious = envValue("STRIPE_WEBHOOK_SECRET_PREVIOUS");
   const stripeConnectWebhookSecret = envValue("STRIPE_CONNECT_WEBHOOK_SECRET");
   const stripeConnectWebhookSecretPrevious = envValue("STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS");
+
+  // --- Card-only native listings (THI-1625 B-1; thi1611 spec §B1/B2) ------
+  // CARD_ONLY_MODE=true flips the hosted commercial policy: create_order
+  // never creates a NEW off_platform order (explicit requests refused with
+  // off_platform_disabled; the fallback is stripe-only, else a clear
+  // not-orderable reason) and price-0 native listings are not orderable
+  // (free_item_not_orderable). Existing off_platform orders are untouched —
+  // the gate is at creation only.
+  const cardOnlyMode = ["1", "true"].includes((envValue("CARD_ONLY_MODE") ?? "").toLowerCase());
+  // SELLER_COUNTRY_ALLOWLIST (D4): comma-separated ISO 3166-1 alpha-2 payout
+  // countries allowed to sell natively under card-only mode; unset/empty ⇒
+  // no country restriction. Fail-closed parsing: entries are normalized
+  // (trim + uppercase) and validated against the ISO set; an invalid entry
+  // is DROPPED with a boot error — the failure direction is "seller
+  // blocked", never "unvalidated country allowed". A list that validates to
+  // zero entries blocks every seller country until fixed.
+  const allowlistRaw = envValue("SELLER_COUNTRY_ALLOWLIST");
+  let sellerCountryAllowlist: ReadonlySet<string> | null = null;
+  if (allowlistRaw !== undefined) {
+    const entries = allowlistRaw
+      .split(",")
+      .map((c) => c.trim().toUpperCase())
+      .filter((c) => c.length > 0);
+    for (const c of entries.filter((c) => !isIsoCountryCode(c))) {
+      console.error(
+        `[config] SELLER_COUNTRY_ALLOWLIST entry ${JSON.stringify(c)} is not an ISO 3166-1 alpha-2 code — ` +
+          "DROPPED (fail-closed): sellers from that country are blocked until the list is fixed.",
+      );
+    }
+    sellerCountryAllowlist = new Set(entries.filter((c) => isIsoCountryCode(c)));
+    if (cardOnlyMode && sellerCountryAllowlist.size === 0) {
+      console.error(
+        "[config] SELLER_COUNTRY_ALLOWLIST is set but contains no valid ISO 3166-1 alpha-2 code — " +
+          "with CARD_ONLY_MODE on, NO seller country is orderable (fail-closed). Fix the list to re-enable.",
+      );
+    }
+  }
   const stripeEventDestinationSecret = envValue("STRIPE_EVENT_DESTINATION_SECRET");
   const stripeEventDestinationSecretPrevious = envValue("STRIPE_EVENT_DESTINATION_SECRET_PREVIOUS");
 
@@ -223,6 +271,8 @@ export function orderFlowConfig(): OrderFlowConfig {
     stripeEventDestinationSecret,
     stripeEventDestinationSecretPrevious:
       stripeEventDestinationSecret !== undefined ? stripeEventDestinationSecretPrevious : undefined,
+    cardOnlyMode,
+    sellerCountryAllowlist,
     shippingProvider,
     shippingEnabled: shippingSelectionValid && shippingApiKey !== undefined,
     carrierWebhookReady: shippingSelectionValid && carrierWebhookSecret !== undefined,
@@ -372,6 +422,14 @@ export function logConfigBootReport(cfg: OrderFlowConfig = orderFlowConfig()): O
     }
   } else {
     console.log("[config] Stripe payments not configured — order tools answer payments_not_configured (kill switch)");
+  }
+  if (cfg.cardOnlyMode) {
+    console.log(
+      `[config] Card-only mode ON — new off_platform orders refused, price-0 native listings not orderable` +
+        (cfg.sellerCountryAllowlist
+          ? `; seller payout country allowlist: ${[...cfg.sellerCountryAllowlist].sort().join(",")}`
+          : "; no seller-country restriction"),
+    );
   }
   if (cfg.stripeWebhookReady && !cfg.stripeConnectWebhookSecret) {
     console.error(

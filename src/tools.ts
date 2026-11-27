@@ -269,8 +269,14 @@ export function itemToPublic(item: ItemRow & { score?: number }) {
   // R4 (THI-380 rider): embedding is destructured out so the raw ~1536-dim
   // vector (~12-30 KB) cannot ride `...rest` into any item-bearing response
   // — rows fetched with SELECT i.* carry it (search_items, get_item,
-  // my_listings; my_matches never selects the column). Never a documented
-  // contract field; payloads shrink, nothing meaningful is lost.
+  // my_listings); my_matches selects item columns explicitly, so it never
+  // carries the embedding. Never a documented contract field; payloads
+  // shrink, nothing meaningful is lost.
+  // THI-1798 F1: every query whose rows reach this function AND joins
+  // sellers must select BOTH seller_payout_ready and seller_stripe_country
+  // (get_item, search_items, my_listings, get_seller_summary listings,
+  // my_matches) — the card-only predicate below fail-closes on a missing
+  // country and would mislabel in-allowlist sellers on that surface.
   const { id, title, price_cents, currency, seller_payout_ready, seller_stripe_country, embedding: _embedding, ...rest } = item;
   const base = {
     ...rest,

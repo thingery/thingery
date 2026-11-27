@@ -429,3 +429,146 @@ describe.skipIf(!available)("create_order via the shared predicate (B-1 regressi
     expect(orderFlowConfig().cardOnlyMode).toBe(false);
   });
 });
+
+// --- THI-1798 F1: get_seller_summary / my_matches carry the country --------
+
+// F1 (THI-1798): itemToPublic's card-only branch triggers on any row with
+// seller_payout_ready. The two payout-joining selects missed by the B-2
+// surface inventory (get_seller_summary listings, my_matches) rendered every
+// listing unorderable with seller_country_not_allowed under an allowlist —
+// while get_item on the same item said orderable — because the predicate
+// received country=null. These assertions fail on the pre-fix selects.
+describe.skipIf(!available)("card-only orderability on get_seller_summary and my_matches (THI-1798 F1, DB)", () => {
+  let db: pg.Client;
+  let n = 0;
+  let sellerName = "";
+  const ids = { sellerId: "", buyerId: "", itemId: "" };
+  const registered = new Map<string, (a: Record<string, unknown>) => Promise<{ isError?: boolean; content?: { text?: string }[] }>>();
+
+  const callTool = async (name: string, args: Record<string, unknown> = {}) => {
+    const result = await registered.get(name)!(args);
+    return {
+      isError: result.isError === true,
+      body: result.content?.[0]?.text ? JSON.parse(result.content[0].text) : null,
+    };
+  };
+
+  const registerAs = (sellerId: string, displayName: string) => {
+    registered.clear();
+    registerTools(
+      {
+        registerTool(name: string, _c: unknown, handler: never) {
+          registered.set(name, handler as never);
+        },
+      } as never,
+      { seller: { id: sellerId, display_name: displayName } } as never,
+    );
+  };
+
+  beforeAll(async () => {
+    db = new pg.Client({ connectionString });
+    await db.connect();
+    await db.query(readFileSync(schemaPath, "utf8"));
+  });
+  afterAll(async () => {
+    await db.end();
+  });
+  beforeEach(async () => {
+    await db.query("TRUNCATE order_events, webhook_events, orders, items, sellers RESTART IDENTITY CASCADE");
+    n += 1;
+    const s = `cs${n}`, b = `ct${n}`;
+    sellerName = s;
+    await db.query(
+      "INSERT INTO sellers (api_key_hash, display_name, email) VALUES ($1,$2,$3), ($4,$5,$6)",
+      [`thg_${s}`, s, `${s}@t.dev`, `thg_${b}`, b, `${b}@t.dev`],
+    );
+    const r = await db.query(
+      "SELECT (SELECT id FROM sellers WHERE email=$1) AS seller, (SELECT id FROM sellers WHERE email=$2) AS buyer",
+      [`${s}@t.dev`, `${b}@t.dev`],
+    );
+    ids.sellerId = r.rows[0].seller;
+    ids.buyerId = r.rows[0].buyer;
+    const item = await db.query(
+      "INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, shipping_tier, status, photo_required) VALUES ($1,$2,10000,500,'local','active',false) RETURNING id",
+      [ids.sellerId, `F1 item ${n}`],
+    );
+    ids.itemId = item.rows[0].id as string;
+    registerAs(ids.sellerId, s);
+    for (const k of KEYS) delete process.env[k];
+    setStripeForTests(null);
+  });
+
+  const onboardSeller = async (country: string | null) =>
+    db.query(
+      "UPDATE sellers SET stripe_account_id = 'acct_x', stripe_onboarded_at = now(), stripe_account_country = $2 WHERE id = $1",
+      [ids.sellerId, country],
+    );
+
+  const seedMatch = async () => {
+    const intent = await db.query(
+      "INSERT INTO buyer_intents (buyer_id, q, currency) VALUES ($1,$2,'EUR') RETURNING id",
+      [ids.buyerId, `f1 wanted thing ${n}`],
+    );
+    await db.query("INSERT INTO intent_matches (intent_id, buyer_id, item_id, score) VALUES ($1,$2,$3,0.9)", [
+      intent.rows[0].id,
+      ids.buyerId,
+      ids.itemId,
+    ]);
+  };
+
+  it("flag ON + allowlist: onboarded in-allowlist seller is orderable on BOTH surfaces", async () => {
+    process.env.CARD_ONLY_MODE = "true";
+    process.env.SELLER_COUNTRY_ALLOWLIST = "NL,DE";
+    process.env.STRIPE_SECRET_KEY = "sk_test_k1";
+    await onboardSeller("NL");
+    await seedMatch();
+
+    const summary = await callTool("get_seller_summary", { seller_id: ids.sellerId, limit: 8 });
+    expect(summary.isError).toBe(false);
+    const listing = summary.body.listings[0];
+    expect(listing.id).toBe(ids.itemId);
+    expect(listing).toMatchObject({ orderable: true, payment_available: true });
+    expect(listing).not.toHaveProperty("payment_unavailable_reason");
+
+    registerAs(ids.buyerId, `ct${n}`);
+    const matches = await callTool("my_matches", {});
+    expect(matches.isError).toBe(false);
+    const matchItem = matches.body.matches[0].item;
+    expect(matchItem.id).toBe(ids.itemId);
+    expect(matchItem).toMatchObject({ orderable: true, payment_available: true });
+    expect(matchItem).not.toHaveProperty("payment_unavailable_reason");
+  });
+
+  it("flag ON + allowlist: blocked-country seller shows seller_country_not_allowed on BOTH surfaces", async () => {
+    process.env.CARD_ONLY_MODE = "true";
+    process.env.SELLER_COUNTRY_ALLOWLIST = "NL,DE";
+    process.env.STRIPE_SECRET_KEY = "sk_test_k1";
+    await onboardSeller("US");
+    await seedMatch();
+
+    const summary = await callTool("get_seller_summary", { seller_id: ids.sellerId, limit: 8 });
+    expect(summary.body.listings[0]).toMatchObject({
+      orderable: false,
+      payment_unavailable_reason: "seller_country_not_allowed",
+    });
+
+    registerAs(ids.buyerId, `ct${n}`);
+    const matches = await callTool("my_matches", {});
+    expect(matches.body.matches[0].item).toMatchObject({
+      orderable: false,
+      payment_unavailable_reason: "seller_country_not_allowed",
+    });
+  });
+
+  it("flag OFF: neither surface ever gains card-only fields (byte-for-byte regression)", async () => {
+    await onboardSeller("NL");
+    await seedMatch();
+
+    const summary = await callTool("get_seller_summary", { seller_id: ids.sellerId, limit: 8 });
+    expect(summary.body.listings[0]).not.toHaveProperty("payment_unavailable_reason");
+
+    registerAs(ids.buyerId, `ct${n}`);
+    const matches = await callTool("my_matches", {});
+    expect(matches.body.matches[0].item).not.toHaveProperty("payment_unavailable_reason");
+  });
+});

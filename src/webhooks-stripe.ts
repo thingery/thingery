@@ -52,6 +52,25 @@ export function stripeWebhookRouter(cfg: OrderFlowConfig = orderFlowConfig()): R
   return router;
 }
 
+/** THI-1681: Accounts v2 event-destination endpoint. v2 thin notifications
+ *  (capability_status_updated — the payout-ready flip for v2 recipient
+ *  accounts) arrive ONLY through an event destination; they never hit the
+ *  v1 endpoints above. Same raw-body + verify→store→process→mark protocol,
+ *  with the SDK's v2 parseEventNotification (its own destination secret)
+ *  and the full account fetched via fetchRelatedObject (thin payloads
+ *  carry ids only, F6-friendly: we store ids and statuses, never PII). */
+export function stripeV2WebhookRouter(cfg: OrderFlowConfig = orderFlowConfig()): Router {
+  const router = express.Router();
+  router.post(
+    "/api/webhooks/stripe-v2",
+    express.raw({ type: "application/json", limit: "512kb" }),
+    (req, res) => {
+      void handleStripeV2Webhook(req, res, cfg);
+    },
+  );
+  return router;
+}
+
 async function handleStripeWebhook(req: Request, res: Response, cfg: OrderFlowConfig): Promise<void> {
   // THI-64 V1 fix: this handler is void-mounted, so a rejection escaping the
   // body would be an unhandled rejection — Node >= 15 crashes the whole
@@ -110,6 +129,16 @@ async function ingestStripeWebhook(
   // timing-safe constructEvent; the first success wins; all-fail → 400 and
   // nothing is written (F12). An unset Connect secret yields exactly the
   // old single-secret behavior (platform current, then platform previous).
+  //
+  // THI-1711 secret↔event-class binding (spec
+  // docs/specs/webhook-secret-class-binding.md, Security-approved): each
+  // secret family may only verify its own event class — platform family ↔
+  // platform-class events (top-level `account` unset), Connect family ↔
+  // connect-class events (`account` set to a non-empty `acct_…` string).
+  // A verified-but-mismatched delivery is a forgery (an HMAC under one key
+  // cannot verify under another), so rejection is FINAL: 400, nothing
+  // written, never continue-the-loop (same-value misconfigurations fail
+  // loud instead of re-widening acceptance to the union of both families).
   const candidateSecrets = (
     [
       ["STRIPE_WEBHOOK_SECRET", cfg.stripeWebhookSecret],
@@ -122,7 +151,23 @@ async function ingestStripeWebhook(
   let event: Stripe.Event | null = null;
   for (const [name, secret] of candidateSecrets) {
     try {
-      event = stripe.webhooks.constructEvent(req.body, signature, secret);
+      const candidate = stripe.webhooks.constructEvent(req.body, signature, secret);
+      // THI-1711 binding check (spec Design): the payload itself names its
+      // class, and only after signature verification is that trustworthy.
+      // Strict `acct_` discriminator — non-`acct_` strings are NOT
+      // connect-class (fail-closed format allowlisting; Security decision).
+      const connectScoped = typeof candidate.account === "string" && candidate.account.startsWith("acct_");
+      const connectFamily = name.startsWith("STRIPE_CONNECT_");
+      if (connectScoped !== connectFamily) {
+        // Final reject: no store, no onEventId (F12 ordering preserved) —
+        // class-violating deliveries cannot pre-burn dedupe keys.
+        console.error(
+          `[webhooks:stripe] class violation: ${name} verified a ${connectScoped ? "connect" : "platform"}-scoped event ${candidate.type}`,
+        );
+        res.status(400).json({ error: "signature verification failed" });
+        return;
+      }
+      event = candidate;
       if (name.endsWith("_PREVIOUS")) {
         console.warn(`[webhooks:stripe] verified with ${name} — finish the rotation`);
       }
@@ -139,6 +184,8 @@ async function ingestStripeWebhook(
 
   // F6: REDACT at ingest — event id, type, mode, and the object ids handlers
   // need. customer_details, addresses, names never touch the store.
+  // THI-1711: account_scope records the accepted class (additive key, no
+  // schema change) — observability of what the binding let through.
   onEventId(event.id);
   const payload = {
     id: event.id,
@@ -146,6 +193,8 @@ async function ingestStripeWebhook(
     livemode: event.livemode,
     object_id: (event.data.object as { id?: string }).id ?? null,
     object_type: event.data.object.object,
+    account_scope:
+      typeof event.account === "string" && event.account.startsWith("acct_") ? "connect" : "platform",
   };
 
   // F5 acceptance: a test-mode event must never touch live orders (§6.7).
@@ -212,6 +261,212 @@ async function ingestStripeWebhook(
   } finally {
     db.release();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Accounts v2 event destination (THI-1681)
+
+/** Shared onboarding-flip writer for BOTH account generations: the v1
+ *  account.updated handler and the v2 capability_status_updated handler.
+ *  Active → NULL→set flip (one badge per Stripe account, idempotent under
+ *  redelivery, THI-780 PR 3); not-active → reset (re-off). F5 known-account
+ *  guard is inherent: unknown ids match no rows. */
+async function flipSellerOnboarding(db: PoolClient, accountId: string, active: boolean): Promise<void> {
+  const flipped = await db.query<{ id: string; email: string | null }>(
+    `UPDATE sellers SET stripe_onboarded_at = $2
+      WHERE stripe_account_id = $1 AND $2::timestamptz IS NOT NULL AND stripe_onboarded_at IS NULL
+      RETURNING id, email`,
+    [accountId, active ? new Date() : null],
+  );
+  if (!active) {
+    await db.query(
+      "UPDATE sellers SET stripe_onboarded_at = NULL WHERE stripe_account_id = $1",
+      [accountId],
+    );
+    return;
+  }
+  if (flipped.rows[0]) {
+    await planAccountNotification({
+      recipientId: flipped.rows[0].id,
+      toEmail: flipped.rows[0].email,
+      eventType: "seller.payouts_enabled",
+      role: "seller",
+      subject: "Payouts enabled — Thingery",
+      payload: {},
+      dedupeKey: `payouts_enabled:${accountId}`,
+      client: db,
+    });
+  }
+}
+
+async function handleStripeV2Webhook(req: Request, res: Response, cfg: OrderFlowConfig): Promise<void> {
+  // Same void-mount barrier as the v1 handler (THI-64): log, best-effort
+  // mark, 500 — Stripe redelivers.
+  let eventId: string | null = null;
+  try {
+    await ingestStripeV2Webhook(req, res, cfg, (id) => (eventId = id));
+  } catch (err) {
+    console.error("[webhooks:stripe-v2] ingest failed:", (err as Error).message);
+    if (eventId) {
+      await pool
+        .query(
+          "UPDATE webhook_events SET process_error = $2 WHERE source = 'stripe' AND external_id = $1 AND processed_at IS NULL",
+          [eventId, `ingest failed: ${(err as Error).message}`.slice(0, 500)],
+        )
+        .catch(() => undefined);
+    }
+    if (!res.headersSent) res.status(500).json({ error: "processing failed" });
+  }
+}
+
+async function ingestStripeV2Webhook(
+  req: Request,
+  res: Response,
+  cfg: OrderFlowConfig,
+  onEventId: (id: string) => void,
+): Promise<void> {
+  if (!cfg.stripePaymentsEnabled || !cfg.stripeEventDestinationSecret) {
+    // Fail-closed 503 stub (F1 posture): key or destination secret unset.
+    res.status(503).json({ error: "stripe v2 webhook not configured" });
+    return;
+  }
+
+  // F12: non-JSON content-type, empty body → 400 before anything is written.
+  const contentType = String(req.headers["content-type"] ?? "");
+  if (!contentType.includes("application/json") || !Buffer.isBuffer(req.body) || req.body.length === 0) {
+    res.status(400).json({ error: "expected application/json body" });
+    return;
+  }
+
+  const stripe = getStripe();
+  const signature = req.headers["stripe-signature"];
+  if (!stripe || typeof signature !== "string") {
+    res.status(400).json({ error: "missing or invalid signature header" });
+    return;
+  }
+
+  // F13 pattern: the destination's current secret, then the rotation twin —
+  // every attempt is the SDK's timing-safe v2 parseEventNotification; the
+  // first success wins; all-fail → 400 and nothing is written (F12).
+  const candidateSecrets = (
+    [
+      ["STRIPE_EVENT_DESTINATION_SECRET", cfg.stripeEventDestinationSecret],
+      ["STRIPE_EVENT_DESTINATION_SECRET_PREVIOUS", cfg.stripeEventDestinationSecretPrevious],
+    ] as Array<[name: string, secret: string | undefined]>
+  ).filter((entry): entry is [string, string] => entry[1] !== undefined);
+
+  let notif: Stripe.V2.Core.EventNotification | null = null;
+  for (const [name, secret] of candidateSecrets) {
+    try {
+      notif = stripe.parseEventNotification(req.body, signature, secret);
+      if (name.endsWith("_PREVIOUS")) {
+        console.warn(`[webhooks:stripe-v2] verified with ${name} — finish the rotation`);
+      }
+      break;
+    } catch {
+      /* try the next configured secret; all-fail → 400 below */
+    }
+  }
+
+  if (!notif) {
+    res.status(400).json({ error: "signature verification failed" });
+    return;
+  }
+
+  // F6 REDACT at ingest: ids, type, mode only. Thin v2 notifications carry
+  // no PII to begin with; we never store more than ids and statuses.
+  const externalId = `v2:${notif.id}`; // distinct namespace from v1 evt_ ids
+  onEventId(externalId);
+  // related_object sits on the notification payload for v2 events; some v1
+  // variants of the union omit it — read it defensively.
+  const relatedObject = (
+    notif as { related_object?: { id?: string; type?: string } | null }
+  ).related_object;
+  const payload = {
+    id: notif.id,
+    type: notif.type,
+    livemode: notif.livemode,
+    object_id: relatedObject?.id ?? null,
+    object_type: relatedObject?.type ?? null,
+  };
+
+  // F5 acceptance: a test-mode event must never touch live rows (§6.7).
+  if (notif.livemode !== (cfg.stripeMode === "live")) {
+    await pool.query(
+      `INSERT INTO webhook_events (source, external_id, payload, process_error)
+       VALUES ('stripe', $1, $2::jsonb, $3) ON CONFLICT (source, external_id) DO NOTHING`,
+      [externalId, JSON.stringify(payload), "rejected: livemode mismatch"],
+    );
+    res.status(200).json({ received: true, rejected: "livemode mismatch" });
+    return;
+  }
+
+  // Verify → store: UNIQUE conflict means already seen → 200, no reprocessing.
+  const stored = await pool.query<{ id: string }>(
+    `INSERT INTO webhook_events (source, external_id, payload)
+     VALUES ('stripe', $1, $2::jsonb) ON CONFLICT (source, external_id) DO NOTHING RETURNING id`,
+    [externalId, JSON.stringify(payload)],
+  );
+  const storedId = stored.rows[0]?.id;
+  if (!storedId) {
+    res.status(200).json({ received: true, duplicate: true });
+    return;
+  }
+
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    try {
+      await processStripeV2Notification(notif, db);
+      await db.query("UPDATE webhook_events SET processed_at = now() WHERE id = $1", [storedId]);
+      await db.query("COMMIT");
+      res.status(200).json({ received: true });
+    } catch (err) {
+      if (err instanceof WebhookRejectError) {
+        await db.query("UPDATE webhook_events SET processed_at = now(), process_error = $2 WHERE id = $1", [
+          storedId,
+          `rejected: ${err.message}`.slice(0, 500),
+        ]);
+        await db.query("COMMIT");
+        res.status(200).json({ received: true, rejected: err.message });
+        return;
+      }
+      throw err;
+    }
+  } catch (err) {
+    await db.query("ROLLBACK").catch(() => undefined);
+    // Retry-safe: record the failure so sweep rule 6 can reprocess; 500
+    // tells Stripe to redeliver.
+    await pool
+      .query("UPDATE webhook_events SET process_error = $2 WHERE id = $1", [storedId, (err as Error).message.slice(0, 500)])
+      .catch(() => undefined);
+    res.status(500).json({ error: "processing failed" });
+  } finally {
+    db.release();
+  }
+}
+
+/** v2 thin notifications: the delivery proves the event happened; the
+ *  fetchRelatedObject round-trip is the source of truth. Only the recipient
+ *  capability event matters here — stripe_balance.stripe_transfers reaching
+ *  `active` is exactly "the seller can receive payouts" (mirror of the v1
+ *  capabilities.transfers check). */
+async function processStripeV2Notification(notif: Stripe.V2.Core.EventNotification, db: PoolClient): Promise<void> {
+  if (notif.type !== "v2.core.account[configuration.recipient].capability_status_updated") return;
+  const account = (await notif.fetchRelatedObject()) as
+    | {
+        id?: string;
+        configuration?: {
+          recipient?: {
+            capabilities?: { stripe_balance?: { stripe_transfers?: { status?: string } } };
+          };
+        };
+      }
+    | null;
+  if (!account?.id) throw new WebhookRejectError("capability event without a related account");
+  const active =
+    account.configuration?.recipient?.capabilities?.stripe_balance?.stripe_transfers?.status === "active";
+  await flipSellerOnboarding(db, account.id, active);
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +557,15 @@ async function handlePaymentSuccess(db: PoolClient, event: Stripe.Event, cfg: Or
 // Exported for sweep rule 6 reprocessing (§4.5): re-fetches the event by id
 // from the Stripe API (the stored payload is redacted, F6) and re-applies it.
 export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cfg: OrderFlowConfig): Promise<void> {
+  // F5 defense-in-depth (THI-1694 R2): the ingest livemode gate (§6.7) runs
+  // only on delivery — sweep rule 6 re-fetches stored events by id and lands
+  // here directly, bypassing it, so a mismatched-mode event must be refused
+  // here too. Same 'rejected: livemode mismatch' semantics as ingest: the
+  // route marks the row rejected (final, 200) via WebhookRejectError, and
+  // rule 6's rejected:% final filter retires its own attempt-tagged rows.
+  if (event.livemode !== (cfg.stripeMode === "live")) {
+    throw new WebhookRejectError("livemode mismatch");
+  }
   // SDK v23's event union predates/omits some transfer event names — the
   // spec names transfer.paid; Stripe's API emits transfer.created/updated
   // when funds land. All three map to #20; the transition is the arbiter.
@@ -341,6 +605,13 @@ export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cf
     case "transfer.paid":
     case "transfer.created":
     case "transfer.updated": {
+      // A6 verified (THI-1624): at the pinned API version (2026-09-30.endive,
+      // OpenAPI v2526) transfer.paid is NOT in the webhook_endpoints
+      // enabled_events enum — no longer a subscribable event type. The
+      // runbook (§5.3) no longer names it; this alias stays as a defensive
+      // case so a legacy-subscribed delivery is never silently dropped
+      // (webhook-idempotency lens). transfer.created/updated are the
+      // payout-landed signal; the transition is the arbiter.
       const transfer = object as unknown as Stripe.Transfer;
       const { rows } = await db.query<OrderRow>("SELECT * FROM orders WHERE transfer_id = $1", [transfer.id]);
       if (!rows[0]) return;
@@ -352,38 +623,96 @@ export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cf
       });
       return;
     }
+    case "transfer.reversed": {
+      // A6 (THI-1624): A3/A4's SUCCESS signal — the platform clawed the
+      // transfer back. No order transition applies (the refund/dispute path
+      // already settled the order state); this is the durable reconciliation
+      // marker: an order_events.transfer_reversed row tells the A4 retry
+      // arm the reversal completed (stops duplicate reversal attempts) and
+      // closes the tracked debt. Replay-safe: webhook_events UNIQUE + the
+      // surrounding transaction (one row per reversal event, ever).
+      // Partial reversals arrive as transfer.updated, never this event —
+      // Stripe fires transfer.reversed only on FULL reversal.
+      const reversed = object as unknown as Stripe.Transfer & { amount_reversed?: number };
+      const { rows } = await db.query<OrderRow>("SELECT * FROM orders WHERE transfer_id = $1", [reversed.id]);
+      if (!rows[0]) return; // unknown transfer — stored, logged, nothing to do
+      await db.query(
+        `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload)
+         VALUES ($1, 'transfer_reversed', 'stripe', $2, $3, $4::jsonb)`,
+        [
+          rows[0].id,
+          event.id,
+          `transfer ${reversed.id} fully reversed`,
+          JSON.stringify({
+            transfer_id: reversed.id,
+            amount: reversed.amount ?? null,
+            amount_reversed: reversed.amount_reversed ?? null,
+            currency: reversed.currency ?? null,
+          }),
+        ],
+      );
+      console.error(
+        `[webhooks:stripe] operator signal: transfer ${reversed.id} reversed on order ${rows[0].id} — reversal debt closed`,
+      );
+      return;
+    }
+    case "payout.failed": {
+      // A6 (THI-1624): a stuck seller payout must be visible, not silent.
+      // The payout is the seller-side leg (transfers already landed in the
+      // seller's Stripe balance; orders are paid_out — no order transition
+      // applies). Minimum durable handling per spec: console.error floor +
+      // deduped operator alert (opalert:payout_failed:{payout id} —
+      // at-most-once per payout across redeliveries and reprocessing).
+      // Connected-account event: arrives via the Connect-scoped endpoint
+      // (A1, THI-1619); an account id of null means the PLATFORM's own
+      // payout failed — alert either way, money-path visibility wins.
+      const payout = object as unknown as {
+        id?: string;
+        amount?: number;
+        currency?: string;
+        failure_code?: string;
+        failure_message?: string | null;
+      };
+      if (!payout.id) return;
+      const accountId = event.account ?? null;
+      let sellerId: string | null = null;
+      if (accountId) {
+        const s = await db.query<{ id: string }>("SELECT id FROM sellers WHERE stripe_account_id = $1", [accountId]);
+        sellerId = s.rows[0]?.id ?? null;
+      }
+      const failure = [payout.failure_code ?? "unknown", payout.failure_message ?? ""].join(" ").trim();
+      console.error(
+        `[webhooks:stripe] operator alert: payout.failed ${payout.id} (account ${accountId ?? "platform"}) — ${failure}`,
+      );
+      // Rides the webhook transaction: the alert row commits iff the event
+      // commits; an alert failure never breaks the handler (planAccountless
+      // swallow rules).
+      await planOperatorAlert({
+        kind: "payout_failed",
+        ref: `payout_failed:${payout.id}`,
+        subject: `Seller payout failed: ${payout.id} — Thingery`,
+        payload: {
+          title: `Payout ${payout.id} failed${sellerId ? ` (seller ${sellerId})` : ""}`,
+          lines: [
+            `Payout: ${payout.id}`,
+            `Account: ${accountId ?? "platform"}`,
+            ...(sellerId ? [`Seller: ${sellerId}`] : []),
+            `Amount: ${payout.amount ?? "?"} ${(payout.currency ?? "").toUpperCase()}`.trim(),
+            `Failure: ${failure}`,
+            "Action: seller must fix payout details in their Stripe dashboard (funds stay in their Stripe balance); reconcile via Stripe API once resolved",
+          ],
+        },
+        client: db,
+      });
+      return;
+    }
     case "account.updated": {
       const account = object as unknown as Stripe.Account & { capabilities?: { transfers?: string } };
-      const transfers = account.capabilities?.transfers === "active";
       // F5: known connected accounts only — unknown ids change nothing.
       // THI-780 PR 3: badge the seller exactly once per Stripe account on the
       // NULL→set flip (plan §5): re-off cycles never re-badge, and the
       // notification is idempotent under webhook redelivery.
-      const flipped = await db.query<{ id: string; email: string | null }>(
-        `UPDATE sellers SET stripe_onboarded_at = $2
-          WHERE stripe_account_id = $1 AND $2::timestamptz IS NOT NULL AND stripe_onboarded_at IS NULL
-          RETURNING id, email`,
-        [account.id, transfers ? new Date() : null],
-      );
-      if (!transfers) {
-        await db.query(
-          "UPDATE sellers SET stripe_onboarded_at = NULL WHERE stripe_account_id = $1",
-          [account.id],
-        );
-        return;
-      }
-      if (flipped.rows[0]) {
-        await planAccountNotification({
-          recipientId: flipped.rows[0].id,
-          toEmail: flipped.rows[0].email,
-          eventType: "seller.payouts_enabled",
-          role: "seller",
-          subject: "Payouts enabled — Thingery",
-          payload: {},
-          dedupeKey: `payouts_enabled:${account.id}`,
-          client: db,
-        });
-      }
+      await flipSellerOnboarding(db, account.id, account.capabilities?.transfers === "active");
       return;
     }
     case "charge.dispute.created": {
@@ -425,7 +754,18 @@ export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cf
         await handleTerminalOrderDispute(db, order, dispute, event, "closed");
         return;
       }
-      if (dispute.status !== "won") return; // lost → the refund path owns it (A2)
+      // A2 (THI-1611): a lost / charge_refunded closure is the buyer winning
+      // the chargeback — Stripe has refunded (or is refunding) the charge, so
+      // the refund path does NOT own this unwind. The verdict itself must
+      // terminalize the order (see handleDisputeLost). warning closures
+      // (never a dispute on Stripe's books) stay stored no-ops. Terminal
+      // orders are handled above (A3) and never reach this branch.
+      if (dispute.status !== "won") {
+        if (dispute.status === "lost" || dispute.status === "charge_refunded") {
+          await handleDisputeLost(db, event, dispute);
+        }
+        return;
+      }
       if (order.status !== "disputed") return;
       // Restore the recorded pre-dispute state (§2.3 #22 note): the #22
       // transition event carries from_status; pending chargebacks restore
@@ -593,5 +933,124 @@ async function handleTerminalOrderDispute(
       },
       client: db,
     });
+  }
+}
+
+
+/**
+ * A2 (THI-1611): charge.dispute.closed with status `lost` / `charge_refunded`
+ * — the buyer won the chargeback and Stripe returns the money. The order goes
+ * to the `refunded` terminal (#22l) the moment the verdict lands: admin
+ * release (#19) and the payout sweep become impossible on it, the item frees
+ * for relist (same rationale as #18), the refund id is recorded when Stripe
+ * provides one, and the operator is alerted. An in-flight transfer (the
+ * verdict can land after #19 release or #16 window elapsed moved the order to
+ * payout_pending) is reversed best-effort with a durable outcome record — a
+ * failed reversal is tracked debt for the A4 retry/reconcile machinery, never
+ * a reason to keep the order releasable. Stale verdicts (already terminal, or
+ * refunding — the refund path owns those) surface as IllegalTransitionError →
+ * §5.4 stale, 200.
+ */
+async function handleDisputeLost(db: PoolClient, event: Stripe.Event, dispute: Stripe.Dispute): Promise<void> {
+  const { rows } = await db.query<OrderRow>(
+    "SELECT * FROM orders WHERE payment_intent_id = $1",
+    [dispute.payment_intent as string | null],
+  );
+  const order = rows[0];
+  if (!order) return; // not our charge — stored, logged, nothing to do
+  const refundId = await lostDisputeRefundId(dispute);
+  await applyTransition({
+    orderId: order.id,
+    trigger: "dispute_lost",
+    actor: { type: "stripe", id: event.id },
+    reason: `dispute ${dispute.id} ${dispute.status} — terminal refund, release refused`,
+    ...(refundId ? { sets: { refund_id: refundId } } : {}),
+    client: db,
+  });
+  if (order.transfer_id) await reverseInFlightTransfer(db, event, dispute, order);
+  console.error(
+    `[webhooks:stripe] operator alert: order ${order.id} — dispute ${dispute.id} ${dispute.status}; ` +
+      `refunded terminal, release refused${order.transfer_id ? ` (transfer ${order.transfer_id} reversal recorded)` : ""}`,
+  );
+  await planOperatorAlert({
+    kind: "dispute_lost",
+    ref: order.id,
+    subject: `Chargeback lost: order ${order.id} refunded, release refused — Thingery`,
+    payload: {
+      title: `Chargeback lost (${dispute.status}): order ${order.id} → refunded`,
+      lines: [
+        `Order: ${order.id}`,
+        `Dispute: ${dispute.id} (${dispute.status})`,
+        `Refund: ${refundId ?? "by Stripe (auto)"}`,
+        ...(order.transfer_id ? [`Transfer ${order.transfer_id}: reversal attempted — see order events if it failed`] : []),
+        "Action: none, unless a transfer_reversal_failed event follows",
+      ],
+    },
+    client: db,
+  });
+}
+
+/** Best-effort: the dispute object carries no refund id — the auto-refund
+ * rides on the charge. Any failure keeps the verdict authoritative: the
+ * order still terminalizes (#22l), only the id stays unset. */
+async function lostDisputeRefundId(dispute: Stripe.Dispute): Promise<string | null> {
+  const stripe = getStripe();
+  const charge = dispute.charge;
+  const chargeId = typeof charge === "string" ? charge : (charge?.id ?? null);
+  if (!stripe || !chargeId) return null;
+  try {
+    const full = await stripe.charges.retrieve(chargeId);
+    return full.refunds?.data?.[0]?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The race arm: the lost verdict can land while a payout is already in
+ * flight (#19 release / #16 window elapsed precede it). Reverse the transfer
+ * (idempotency key `reversal:{order_id}` — shared with the admin refund
+ * path, so at most one reversal per order exists at Stripe) and record the
+ * outcome durably; a failure alerts and is retried by the A4 machinery. */
+async function reverseInFlightTransfer(
+  db: PoolClient,
+  event: Stripe.Event,
+  dispute: Stripe.Dispute,
+  order: OrderRow,
+): Promise<void> {
+  const transferId = order.transfer_id;
+  const stripe = getStripe();
+  if (!stripe || !transferId) return;
+  try {
+    const reversal = await stripe.transfers.createReversal(transferId, {}, { idempotencyKey: `reversal:${order.id}` });
+    await db.query(
+      `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload, dedupe_key)
+       VALUES ($1, 'transfer_reversed', 'stripe', $2, 'dispute lost — in-flight transfer reversed', $3::jsonb, $4)`,
+      [
+        order.id,
+        event.id,
+        JSON.stringify({ transfer_id: transferId, dispute_id: dispute.id, reversal_id: reversal.id ?? null, amount: reversal.amount ?? null }),
+        `dispute_lost_reversal:${order.id}`,
+      ],
+    );
+  } catch (err) {
+    // Durable failure record + alert; the terminal order state already
+    // blocks release — this is tracked debt, not a lost log line.
+    await db
+      .query(
+        `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload, dedupe_key)
+       VALUES ($1, 'transfer_reversal_failed', 'stripe', $2, $3, $4::jsonb, $5)`,
+        [
+          order.id,
+          event.id,
+          `dispute lost — transfer ${transferId} reversal failed`,
+          JSON.stringify({ transfer_id: transferId, dispute_id: dispute.id, error: (err as Error).message.slice(0, 200) }),
+          `dispute_lost_reversal_failed:${order.id}`,
+        ],
+      )
+      .catch(() => undefined);
+    console.error(
+      `[webhooks:stripe] order ${order.id}: transfer ${transferId} reversal failed after lost dispute ${dispute.id}: ` +
+        `${(err as Error).message} — tracked debt, needs operator action`,
+    );
   }
 }

@@ -13,6 +13,8 @@
 #   .env                               ignored      — base case
 #   .env.example                       NOT ignored  — `!.env.example` stays tracked
 #   metrics/daily.json                 ignored      — `metrics/` dir rule propagates
+#   node_modules                       ignored      — no-slash form: symlink blobs (THI-1619)
+#   node_modules/lodash/index.js       ignored      — `node_modules/` dir rule propagates
 # Docker build context (the real engine; skipped when docker is unavailable):
 #   .env.bak-webpin-20261124T000000Z   excluded from `docker build` context
 #
@@ -48,6 +50,15 @@ assert_not_ignored ".env.example"
 # The `metrics/` pattern only matches a directory, so assert a path *under* it —
 # that works in a fresh checkout where metrics/ does not exist on disk.
 assert_ignored "metrics/daily.json"
+
+# Tracked node_modules symlink-blob policy: the directory-only `node_modules/`
+# pattern never matches a symlink (git stores symlinks as 120000-mode file
+# blobs), which is how a workspace node_modules symlink twice entered history
+# via `git add -A`. The no-slash `node_modules` rule closes that gap; both
+# forms must stay (slash = directories, no-slash = blobs/symlinks/files).
+assert_ignored "node_modules"
+assert_ignored "node_modules/lodash/index.js"
+assert_ignored "packages/client/node_modules"
 
 # --- docker build context probe --------------------------------------------------
 # .dockerignore semantics differ from gitignore (root-anchored, no negation),

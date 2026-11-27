@@ -6,6 +6,24 @@ with automatic HTTPS and encrypted nightly backups (§4).
 
 Total time: ~15 minutes.
 
+> **⚠️ Flagship VPS (thingery.dev): never run the plain form.** On the company
+> VPS the production stack runs behind the platform web overlay, so every
+> production-stack `docker compose` command MUST be:
+>
+> ```bash
+> docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml …
+> ```
+>
+> Plain `docker compose -f docker-compose.prod.yml up -d` recreates `caddy`
+> with the self-hoster Caddyfile (no `web:3000` routes): every platform route
+> falls through to the legacy `app` container and the website goes down
+> (2026-11-26 outages THI-1536 and its same-day recurrence, identical
+> signature, both triggered by a documented rotation step following this
+> plain form). The overlay file and its runbook live in the private platform
+> repo: `deploy/deploy-web.md` in `thingery/platform` (path reference only —
+> do not copy platform material here). Self-hosters without the platform web
+> layer: the plain form in the fresh-install section below is correct for you.
+
 ## 1. VPS initialization
 
 ```bash
@@ -61,6 +79,13 @@ docker compose -f docker-compose.prod.yml up -d --build
 # apply the schema (idempotent — safe to re-run)
 docker compose -f docker-compose.prod.yml exec -T db psql -U thingery -d thingery < db/schema.sql
 ```
+
+**Flagship VPS note:** the section above is the fresh self-host install. On
+thingery.dev the stack runs behind the platform web overlay — on that machine
+append `-f /opt/thingery-web/docker-compose.web.yml` to every command above
+(see the warning at the top; runbook: `deploy/deploy-web.md` in the private
+`thingery/platform` repo). The plain form here is only for installs without
+the platform web layer.
 
 Verify:
 
@@ -433,17 +458,58 @@ SSH session — the deploy steps execute server-side via the forced-command wrap
 migrations are additive, so the running containers ignore them while the new code may
 require the new columns; applying first avoids a window where authenticated traffic hits
 `column ... does not exist` errors. It also exports `GIT_COMMIT`/`BUILD_TIME` before
-building, so `/healthz` reports the deployed commit. Manual equivalent (run as the
+building, so `/healthz` reports the deployed commit.
+
+One-time upgrade note (THI-1706): since the compose network went IPv6-enabled
+(see the `networks:` block in `docker-compose.prod.yml`), the first
+`docker compose up -d` after pulling this change recreates the network and
+restarts every service on it — expect roughly a minute of downtime, same blast
+radius as a normal deploy. This is what makes inbound IPv6 connections DNAT
+directly to Caddy with the real client source IP preserved; on a v4-only
+network every IPv6 visitor shares one rate-limit bucket behind the bridge
+gateway address. Self-hosters upgrading see this restart exactly once; volumes
+are untouched. Manual equivalent (run as the
 `deploy` user — it owns `/opt/thingery` — e.g. `sudo -u deploy bash -c '…'` over the
 operator SSH session):
 
 ```bash
 cd /opt/thingery && git pull && \
-  docker compose -f docker-compose.prod.yml exec -T db \\
+  docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml exec -T db \\
     psql -U thingery -d thingery -v ON_ERROR_STOP=1 < db/schema.sql && \
   GIT_COMMIT=$(git rev-parse HEAD) BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \\
-  docker compose -f docker-compose.prod.yml up -d --build
+  docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d --build
 ```
+
+Known failure mode on that first recreation (seen on Docker 29.10.1,
+2026-11-26): recreating the network can drop the compose service-name DNS
+aliases of some services (`db`, `web`, `caddy`, `goatcounter` lost theirs;
+only `app` kept its) even though every container still shows `running`. The
+app then cannot resolve the database and `/healthz` goes red.
+
+- **Symptom:** right after the first `up -d`, app logs show
+  `getaddrinfo ENOTFOUND db` and `/healthz` returns
+  `{"ok":false,"db":"unreachable"}` while all containers are `running`.
+- **Diagnose:** compare each container's DNS names on the compose network —
+  a healthy service lists its compose service name (e.g.
+  `["thingery-db-1","db","<container-id>"]`); a hit container is missing its
+  short service-name alias:
+
+  ```bash
+  docker inspect thingery-db-1 \
+    --format '{{json .NetworkSettings.Networks.thingery_default.DNSNames}}'
+  ```
+
+- **Do not** just `docker compose restart` the affected services — aliases
+  are not re-registered on restart and the failure persists.
+- **Recover:** recreate all services once (idempotent, ~1 min, volumes
+  untouched, same blast radius as a normal deploy), then re-check `DNSNames`
+  and `/healthz` over both IPv4 and IPv6:
+
+  ```bash
+  docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml \
+    up -d --force-recreate
+  curl -4fsS https://thingery.dev/healthz && curl -6fsS https://thingery.dev/healthz
+  ```
 
 Verify the deployed build info (must match `git rev-parse HEAD` in `/opt/thingery`):
 
@@ -516,11 +582,11 @@ Setup:
    set -euo pipefail
    cd /opt/thingery
    git pull --ff-only
-   docker compose -f docker-compose.prod.yml exec -T db \
+   docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml exec -T db \
      psql -U thingery -d thingery -v ON_ERROR_STOP=1 < db/schema.sql
    export GIT_COMMIT=$(git rev-parse HEAD)
    export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   docker compose -f docker-compose.prod.yml up -d --build
+   docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d --build
    docker image prune -f
    echo "thingery-deploy: done at $GIT_COMMIT"
    ```
@@ -716,13 +782,13 @@ feature = revert the PR; PR-A/B modules are inert without the routes wiring.
 The order flow (ADR 0003) ships with a **kill switch**: with `STRIPE_SECRET_KEY`
 empty/unset the app answers `payments_not_configured`, listings stay buyable as
 off-platform orders, and the Stripe webhook endpoint mounts as a 503 stub.
-`docker-compose.prod.yml` passes the five `STRIPE_*` vars through from the VPS
+`docker-compose.prod.yml` passes the seven `STRIPE_*` vars through from the VPS
 `.env` (merged 2026-10-27, PR #142); before that the container never saw them.
 Mode (test vs live) is derived **only** from the key prefix (`sk_test_` / `sk_live_`)
 and is logged at boot:
 
 ```bash
-docker compose -f docker-compose.prod.yml logs app 2>&1 | grep '\[config\] Stripe'
+docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml logs app 2>&1 | grep '\[config\] Stripe'
 # → "Stripe payments enabled (live mode)" | "Stripe payments not configured … (kill switch)"
 ```
 
@@ -737,44 +803,109 @@ profile, bank details, platform + Connect terms accepted in the Stripe dashboard
 1. Account owner (or operator acting on owner-provided values) appends to
    `/opt/thingery/.env` — `STRIPE_SECRET_KEY=sk_live_…`,
    `STRIPE_WEBHOOK_SECRET=whsec_…` (the signing secret of the **live-mode**
-   platform webhook endpoint from step 2a below) and
+   platform webhook endpoint from step 2a below),
    `STRIPE_CONNECT_WEBHOOK_SECRET=whsec_…` (the signing secret of the
    **live-mode** 'Connected accounts'-scoped endpoint from step 2b below — a
-   second endpoint with its own secret; THI-1611 A1). Leave
-   `STRIPE_WEBHOOK_SECRET_PREVIOUS` / `STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS`
-   unset unless rotating.
+   second endpoint with its own secret; THI-1611 A1) and
+   `STRIPE_EVENT_DESTINATION_SECRET=whsec_…` (the signing secret of the
+   **live-mode** Accounts v2 **event destination** from step 2c below —
+   THI-1681). Leave every `_PREVIOUS` twin unset unless rotating.
+   **Key format (THI-1681):** Accounts v2 API calls (recipient account
+   creation, v2 account links, event-destination delivery verification)
+   require the **new-format secret key — 107 characters**, `sk_live_…`/
+   `sk_test_…` followed by a long suffix. Legacy 40-character keys are
+   rejected by v2 endpoints with `401 invalid_v2_key`; if the dashboard only
+   offers the old format, reveal/create a new key and use that.
 2. In the Stripe dashboard (live mode) register TWO webhook endpoints, both
    pointing at `https://thingery.dev/api/webhooks/stripe`:
    - **2a — platform endpoint** ("Account"-scoped, the dashboard default),
      events: `checkout.session.completed`, `payment_intent.succeeded`,
      `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed`,
-     `transfer.created`, `transfer.updated`, `transfer.paid`. Copy its
+     `transfer.created`, `transfer.updated`, `transfer.reversed`. Copy its
      signing secret into `STRIPE_WEBHOOK_SECRET`. These are all
      platform-account events — orders, refunds, disputes, transfers.
    - **2b — Connected accounts endpoint** (scope "Connected accounts"),
-     event: `account.updated` only. Copy its signing secret into
-     `STRIPE_CONNECT_WEBHOOK_SECRET`. Stripe delivers connected-account
+     events: `account.updated`, `payout.failed`. Copy its signing secret
+     into `STRIPE_CONNECT_WEBHOOK_SECRET`. Stripe delivers connected-account
      events ONLY to a Connect-scoped endpoint — the platform endpoint never
-     receives them, so seller-onboarding detection depends on this second
-     endpoint existing (THI-1611 A1).
-   The app verifies each delivery against the configured secrets in a fixed
+     receives them, so seller-onboarding detection (`account.updated`) and
+     stuck-seller-payout alerts (`payout.failed`) depend on this second
+     endpoint existing (THI-1611 A1; payout.failed handling THI-1624 A6).
+   - **2c — Accounts v2 event destination** (THI-1681): v2 capability
+     notifications
+     (`v2.core.account[configuration.recipient].capability_status_updated`)
+     NEVER arrive on the v1 webhook endpoints above — Stripe delivers them
+     only through an **event destination**. Create it in the dashboard
+     (Workbench → Event destinations) or via
+     `stripe v2 core event_destinations create` with `type: "webhook"`,
+     URL `https://thingery.dev/api/webhooks/stripe-v2`, subscribed to the
+     recipient capability event, then copy its **signing secret** (a
+     separate `whsec_…` value) into `STRIPE_EVENT_DESTINATION_SECRET`.
+     This is the payout-ready path for v2 recipient accounts: without it,
+     a v2 seller who finishes onboarding never gets
+     `sellers.stripe_onboarded_at` set. (Accounts v1 sellers keep flipping
+     via 2b; both paths share one flip routine — an account is badged once.)
+   Event-list notes (A6, THI-1624):
+   - `transfer.paid` is deliberately NOT in either list: verified against
+     Stripe's own OpenAPI spec at the pinned API version
+     (2026-09-30.endive), it is no longer a subscribable event type — the
+     `enabled_events` enum for `POST /v1/webhook_endpoints` omits it. The
+     old runbook list named it in error;
+     `transfer.created`/`transfer.updated` carry the payout-landed signal.
+     The handler keeps a defensive `transfer.paid` alias so a
+     legacy-subscribed delivery is never dropped.
+   - `transfer.reversed` is platform-scoped (the platform creates the
+     transfer): it arrives on 2a and closes A3/A4's tracked reversal debt
+     (`order_events.transfer_reversed`).
+   - `payout.failed` (stuck seller payout → durable operator alert) is a
+     **connected-account** event: it only ever arrives on 2b. An unhandled
+     `payout.failed` is invisible money; keep it in the Connect list.
+   The app verifies each v1 delivery against the configured secrets in a fixed
    order — `STRIPE_WEBHOOK_SECRET`, then `STRIPE_CONNECT_WEBHOOK_SECRET`,
    then the two `_PREVIOUS` rotation twins — timing-safe per attempt, `400`
-   when all fail, and nothing is ever written on a bad signature.
+   when all fail, and nothing is ever written on a bad signature. The two v1
+   secret families are also **class-bound** (THI-1711, spec
+   `docs/specs/webhook-secret-class-binding.md`): the platform family
+   (`STRIPE_WEBHOOK_SECRET(+_PREVIOUS)`) verifies only platform-class
+   deliveries (no top-level `account`), the Connect family
+   (`STRIPE_CONNECT_WEBHOOK_SECRET(+_PREVIOUS)`) only connect-class
+   deliveries (`account` set to `acct_…`). A signature that verifies but
+   violates the class is a forgery: final `400`, nothing written, a distinct
+   `class violation:` log line. Rotation twins inherit the binding, so each
+   family rotates independently; never configure the two families with the
+   same value — same-value misconfiguration turns connect-class deliveries
+   into loud `400`s (desired fail-closed). The rehearsal step covering the
+   binding is `stripe-live-rehearsal.md` in thingery/platform. The v2
+   endpoint verifies the same way against
+   `STRIPE_EVENT_DESTINATION_SECRET` (+ `_PREVIOUS`) using the SDK's v2
+   `parseEventNotification`; unset destination secret ⇒ the v2 endpoint
+   mounts as a fail-closed 503 stub.
 3. Recreate the app container (env changes need recreation, not rebuild):
-   `cd /opt/thingery && docker compose -f docker-compose.prod.yml up -d`
+   `cd /opt/thingery && docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d`
 4. Verify: boot log shows `(live mode)`; `curl -s https://thingery.dev/healthz`
    still `200`; a listing shows `payment_available: true` via the MCP order tools;
    the Stripe dashboard's webhook page shows signature-verified deliveries.
 
+**Stripe API version pin (A6, THI-1624).** `src/stripe.ts` constructs the
+Stripe client with an explicit `apiVersion` literal — `STRIPE_API_VERSION`
+(`"2026-09-30.endive"`, typed against the installed SDK v23's
+`Stripe.LatestApiVersion`), never the SDK's silent default. Upgrading the
+`stripe` npm package is a **deliberate act**: the build (and a CI guard test
+asserting pin == installed SDK version) fails until `STRIPE_API_VERSION` is
+re-confirmed against the new SDK. On any such upgrade: bump the pin, re-check
+the event list above against the new OpenAPI spec version, and re-run the
+test-mode rehearsal before deploy.
+
 **Seller onboarding.** Sellers complete Stripe Connect onboarding via the app's
 payout-setup flow once the platform account is live-enabled; `account.updated`
 deliveries on the **Connected accounts endpoint** (step 2b) flip
-`sellers.stripe_onboarded_at` when the `transfers` capability is active — without
-that endpoint registered, a seller who finishes onboarding never becomes
-payout-ready. Confirm one seller onboarding (flag flips in `sellers`) before
-declaring live mode operational; the test-mode rehearsal step with its evidence
-checklist is `stripe-live-rehearsal.md` in thingery/platform (THI-571).
+`sellers.stripe_onboarded_at` for v1 accounts, and recipient-capability
+notifications on the **v2 event destination** (step 2c) flip it for Accounts v2
+recipient accounts (THI-1681) when `stripe_balance.stripe_transfers` is active —
+without the respective registration, a seller who finishes onboarding never
+becomes payout-ready. Confirm one seller onboarding (flag flips in `sellers`)
+before declaring live mode operational; the test-mode rehearsal step with its
+evidence checklist is `stripe-live-rehearsal.md` in thingery/platform (THI-571).
 
 **Payout verification (seller-borne fees).** Sellers bear the Stripe processing
 fee (ADR 0003 amendment): the seller transfer is **gross − fee**
@@ -818,7 +949,7 @@ manual Stripe-dashboard transfer — there is no re-release transition from
 
 **Rollback (documented path back to the kill switch).** Comment out or remove the
 `STRIPE_*` lines in `/opt/thingery/.env`, then
-`cd /opt/thingery && docker compose -f docker-compose.prod.yml up -d`. The app
+`cd /opt/thingery && docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d`. The app
 returns to `payments_not_configured` (new orders are off-platform), the webhook
 endpoint returns to its 503 stub, and live-mode events stop verifying. Orders,
 payment intents, and payouts already created in Stripe **remain real** — a
@@ -897,7 +1028,7 @@ printf '%s\n' 'REPORT_REVIEW_CREATE_URL=<endpoint URL>' \
   'REPORT_REVIEW_ITEM_URL_TEMPLATE=https://thingery.dev/item/{id}' \
   'REPORT_REVIEW_TIMEOUT_MS=60000' >> .env
 # env changes need a container recreate, not a rebuild:
-docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d
 ```
 
 **Verification (smoke per ops-smoke-policy.md — disposable account, deleted
@@ -974,7 +1105,7 @@ grep -q '^RESEND_WEBHOOK_SECRET=' .env || \
   printf 'RESEND_WEBHOOK_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 # then register the webhook in the Resend dashboard with the same value
 # (view it on the VPS: grep '^RESEND_WEBHOOK_SECRET=' .env), and:
-docker compose -f docker-compose.prod.yml up -d app   # env changes recreate
+docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d app   # env changes recreate
 ```
 
 **Verification:** `curl -i -X POST https://thingery.dev/api/webhooks/resend \
@@ -1043,7 +1174,7 @@ force the stack up just for a rotation.
 **3. Recreate prod** (env change → recreate, not rebuild):
 
 ```bash
-cd /opt/thingery && sudo docker compose -f docker-compose.prod.yml up -d
+cd /opt/thingery && sudo docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d
 ```
 
 Over non-TTY SSH the client can time out while compose still finishes
@@ -1110,8 +1241,9 @@ that exists, or its first bounce will suppress it like any other address.
 **Wiring:** append `OPERATOR_ALERT_EMAIL=<mailbox>` to the VPS `.env`, recreate
 the app container (same command as above).
 
-**Verification:** presence-only — `docker compose -f docker-compose.prod.yml
-exec app printenv OPERATOR_ALERT_EMAIL >/dev/null && echo set`. First alert
+**Verification:** presence-only — `docker compose -f docker-compose.prod.yml -f
+/opt/thingery-web/docker-compose.web.yml exec app printenv OPERATOR_ALERT_EMAIL
+>/dev/null && echo set`. First alert
 lands as an `operator.*` row in `email_outbox` and sends with the sweep.
 
 **Rollback:** unset either variable in `.env` + recreate — webhook returns to
@@ -1335,10 +1467,13 @@ directive (`log` in the `thingery.dev` site block), so each request logs client 
 method, path, status, and User-Agent as one JSON line.
 
 - **Read them:**
-  `docker compose -f docker-compose.prod.yml logs caddy` (access log),
+  `docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml logs caddy` (access log),
   `... logs app` or `docker logs thingery-app-1` (app — running container only), and
   `sudo journalctl -t thingery-app` (app — full history). `-f` follows,
-  `--since 1h` / `--since "2026-11-23 22:30" --until "2026-11-24 06:10"` limit.
+  `--since -1h` / `--since "2026-11-23 22:30" --until "2026-11-24 06:10"` limit.
+  (Note the leading dash on relative spans: journalctl parses `--since -168h`,
+  but fails `--since 168h` with "Failed to parse timestamp" — docker's
+  `--since 168h` is the opposite convention.)
 - **Survives restarts and recreates (app, THI-1330):** restarts, crashes, VPS
   reboots, *and* deploy-driven recreates all keep app logs readable — the journal is
   written by the host daemon and outlives every container. Query a pre-deploy window
@@ -1349,8 +1484,11 @@ method, path, status, and User-Agent as one JSON line.
   same-container restarts preserve their `json-file` logs; a recreate starts a
   fresh log file — nightly DB backups remain the durable record of state.
 - **Bounded disk (app):** app stdout is small in practice (~0.4 MB/day observed),
-  and the journal self-vacuums to host defaults (≤10% of the filesystem, stops at
-  15% free) — `journalctl --disk-usage` shows the total, `sudo journalctl --vacuum-size=500M`
+  and the journal is capped by the installed drop-in
+  `/etc/systemd/journald.conf.d/thingery.conf` (`SystemMaxUse=200M`; install
+  step in the platform deploy docs) — without it the default is ≤10% of the
+  filesystem, stopping at 15% free. `journalctl --disk-usage` shows the total,
+  `sudo journalctl --vacuum-size=500M`
   shrinks it on demand. Note journald applies rate limiting (~10k messages/30s);
   a pathological app burst would be sampled, not dropped silently — look for
   "Suppressed" lines. `json-file` services stay bounded at 3 × 10 MB each.

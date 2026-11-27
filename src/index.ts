@@ -15,7 +15,7 @@ import { pool } from "./db.js";
 import { mountApiRoutes } from "./routes.js";
 import { mountBodyParsers } from "./body-parsers.js";
 import { mountOpenaiAppsChallenge } from "./openai-apps-challenge.js";
-import { stripeWebhookRouter } from "./webhooks-stripe.js";
+import { stripeWebhookRouter, stripeV2WebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
 import { resendWebhookRouter } from "./webhooks-resend.js";
 import { logConfigBootReport, notifyConfig, orderFlowConfig } from "./config.js";
@@ -29,6 +29,7 @@ import { statsHandler } from "./stats.js";
 import { homeSearchHandler } from "./home-search.js";
 import {
   itemPage,
+  orderPageRateLimit,
   orderReturnPage,
   payoutSetupReturnPage,
   rootRedirect,
@@ -105,6 +106,12 @@ function runHttp(): void {
   const cfg = logConfigBootReport();
   app.use(stripeWebhookRouter(cfg));
 
+  // Accounts v2 event destination (THI-1681): same raw-body-before-JSON
+  // constraint; fail-closed 503 stub until STRIPE_EVENT_DESTINATION_SECRET
+  // is set (config boot report). v2 capability events never arrive on the
+  // v1 endpoints — this is the payout-ready path for v2 seller accounts.
+  app.use(stripeV2WebhookRouter(cfg));
+
   // Carrier webhook (spec THI-3 §4.3/§5): same raw-body-before-JSON
   // constraint; fail-closed 503 stub until the selected shipping provider's
   // webhook secret (e.g. EASYPOST_WEBHOOK_SECRET) is set.
@@ -179,7 +186,9 @@ function runHttp(): void {
   // Order return pages (spec THI-3 §4.3 F15). The literal payout-setup route
   // must be registered before the :id pattern to not be captured as an id.
   app.get("/order/payout-setup", asyncHandler(payoutSetupReturnPage));
-  app.get("/order/:id", asyncHandler(orderReturnPage));
+  // THI-1616: per-IP limiter in front of the page (spec docs/specs/order-page-rate-limit.md)
+  // — caps the DB read + Stripe retrieve each pending-stripe hit costs.
+  app.get("/order/:id", orderPageRateLimit, asyncHandler(orderReturnPage));
 
   // Uploaded item images (files under UPLOADS_DIR, served at /img/...)
   app.use("/img", express.static(uploadsDir(), { maxAge: "30d", immutable: true }));

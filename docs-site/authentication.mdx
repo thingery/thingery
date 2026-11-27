@@ -44,3 +44,5 @@ Never commit a key. Read it from an environment variable such as `THINGERY_API_K
 
 - A credential that is present but invalid is rejected with **HTTP 401**. It never falls back to anonymous access, even for public tools.
 - Calling a tool that needs an account without a credential returns a 401 whose challenge points OAuth clients at the sign-in flow.
+- If a sign-in fails with a `state` error (for example `OAUTH_STATE_INVALID`), the one-time token the client kept has expired or was already used. Close the old tab, start the sign-in from your client again, and approve once in the fresh browser window.
+- Thingery never signs you in with GitHub. Sign-in is email and password; the only OAuth approval screen we serve is our own consent page at `thingery.dev`. A GitHub login screen or a GitHub OAuth error such as `OAUTH_STATE_INVALID` comes from your client app's own sign-in, not from Thingery — retry that app's login first, then connect Thingery.

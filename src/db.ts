@@ -38,6 +38,10 @@ export interface ItemRow {
   embedding?: string | null;
   /** Joined from sellers (getItem/searchItems); absent when not queried. */
   seller_payout_ready?: boolean;
+  /** THI-1625 B-2: connected payout account's country (D4 allowlist input);
+   *  present only on queries that join sellers for payout readiness. NULL
+   *  for legacy accounts until Stripe delivers their next account event. */
+  seller_stripe_country?: string | null;
 }
 
 export interface SellerRow {

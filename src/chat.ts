@@ -11,12 +11,14 @@ import { CONTENT_PROVENANCE_NOTE } from "./tools.js";
 import { isIsoCountryCode } from "./countries.js";
 import {
   cancelOrder,
+  cardOnlyOrderability,
   createOrder,
   getOrderView,
   listOrdersForAccount,
   MAX_ORDER_LIST_LIMIT,
   OrderFlowError,
   ORDER_ROLES,
+  sellerPayoutGate,
   sellerPayoutReady,
   shareShippingAddress,
   shippingAddressConsent,
@@ -26,6 +28,7 @@ import {
 } from "./order-flow.js";
 import { ORDER_STATUSES } from "./orders.js";
 import { stripeConfigured } from "./stripe.js";
+import { orderFlowConfig } from "./config.js";
 import { buyShippingLabel, confirmPayment, confirmReceipt, openDispute, recordTracking, releaseFunds } from "./fulfillment.js";
 import {
   listOrderMessages,
@@ -1784,10 +1787,37 @@ export async function orderWriteGate(
     const total = fmtMoney(item.price_cents + shipping, item.currency);
     const how = item.shipping_tier === "local" ? " (local pickup)" : "";
     // Same rule as createOrder: card checkout when the deployment and the seller can take it.
-    const paysByCard =
-      args.payment_mode === "stripe" ||
-      (args.payment_mode === undefined && stripeConfigured() && (await sellerPayoutReady(item.seller_id).catch(() => false)));
-    const payment = paysByCard
+    // THI-1625 B-2 (THI-1788 advisory): under card-only mode the preview is
+    // driven by the SAME predicate create_order refuses on — it can no
+    // longer mislabel a country-blocked or free item as card-payable, and
+    // the summary names the refusal reason the execute will throw.
+    const cardCfg = orderFlowConfig();
+    let cardOnlyNote: string | null = null;
+    let paysByCard: boolean;
+    if (cardCfg.cardOnlyMode) {
+      const payout = await sellerPayoutGate(item.seller_id).catch(() => ({ ready: false, country: null }));
+      const gate = cardOnlyOrderability(cardCfg, {
+        priceCents: item.price_cents,
+        payoutReady: payout.ready,
+        country: payout.country,
+      });
+      if (args.payment_mode === "off_platform") {
+        cardOnlyNote = "this deployment accepts card payment only for new orders — payment_mode 'off_platform' is disabled";
+        paysByCard = false;
+      } else if (!gate.orderable) {
+        cardOnlyNote = `not orderable on this deployment (${gate.reason})`;
+        paysByCard = false;
+      } else {
+        paysByCard = true;
+      }
+    } else {
+      paysByCard =
+        args.payment_mode === "stripe" ||
+        (args.payment_mode === undefined && stripeConfigured() && (await sellerPayoutReady(item.seller_id).catch(() => false)));
+    }
+    const payment = cardOnlyNote
+      ? cardOnlyNote
+      : paysByCard
       ? "the user pays via the link after confirming"
       : "paid directly to the seller, outside Thingery (no card checkout); the user arranges it with them";
     return {

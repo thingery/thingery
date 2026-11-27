@@ -71,18 +71,24 @@ services:
       # (503 while unset). Value lives only in the VPS .env.
       OPENAI_APPS_CHALLENGE_TOKEN: ${OPENAI_APPS_CHALLENGE_TOKEN:-}
       # Order flow — Stripe Connect (THI-358). Passthrough only: values live
-      # in the VPS .env. All five default empty = kill switch (payments off,
+      # in the VPS .env. All seven default empty = kill switch (payments off,
       # order tools answer payments_not_configured). STRIPE_WEBHOOK_SECRET is
       # required before the Stripe webhook endpoint leaves its 503 stub;
       # STRIPE_WEBHOOK_SECRET_PREVIOUS enables zero-downtime secret rotation.
       # STRIPE_CONNECT_WEBHOOK_SECRET (+_PREVIOUS) is the 'Connected
       # accounts'-scoped endpoint's secret (THI-1611 A1): without it,
       # account.updated deliveries 400 and sellers never become payout-ready.
+      # STRIPE_EVENT_DESTINATION_SECRET (+_PREVIOUS) is the Accounts v2 event
+      # destination's signing secret (THI-1681): without it the
+      # /api/webhooks/stripe-v2 endpoint stays a fail-closed 503 stub and a v2
+      # seller's payout-ready flip is never observed.
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       STRIPE_WEBHOOK_SECRET_PREVIOUS: ${STRIPE_WEBHOOK_SECRET_PREVIOUS:-}
       STRIPE_CONNECT_WEBHOOK_SECRET: ${STRIPE_CONNECT_WEBHOOK_SECRET:-}
       STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS: ${STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS:-}
+      STRIPE_EVENT_DESTINATION_SECRET: ${STRIPE_EVENT_DESTINATION_SECRET:-}
+      STRIPE_EVENT_DESTINATION_SECRET_PREVIOUS: ${STRIPE_EVENT_DESTINATION_SECRET_PREVIOUS:-}
       # Order flow — EasyPost carrier automation (THI-572). Passthrough only:
       # values live in the VPS .env. Empty/unset EASYPOST_API_KEY = degraded
       # mode (no trackers, buy_shipping_label answers easypost_not_configured,
@@ -173,6 +179,10 @@ services:
       # Session cookie signing (login/consent). Unset → ephemeral secret,
       # sessions reset on every restart.
       SESSION_SECRET: ${SESSION_SECRET:-}
+      # Admin dispute surface (JSON endpoint + /admin UI). Fail-closed at boot:
+      # unset or shorter than 32 chars ⇒ both admin surfaces 404 (routes.ts,
+      # config.ts adminRouteEnabled/adminUiEnabled).
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
       # OAuth kill switch (spec THI-11 §4.4): "1"/"true" mounts no /oauth route at
       # all (404) and thgo_ tokens 401. Empty → OAuth enabled. Restart to toggle.
       OAUTH_DISABLED: ${OAUTH_DISABLED:-}
@@ -225,6 +235,28 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+# Default compose network, IPv6-enabled (THI-1706). On a v4-only network Docker
+# bridges every inbound IPv6 connection through the userland proxy
+# (docker-proxy), which re-originates it from the host — Caddy (and the app
+# behind it) then see the bridge gateway 172.18.0.1 instead of the client IP,
+# so every IPv6 visitor shares ONE rate-limit bucket (10 auth attempts/hour
+# globally) and per-IP abuse isolation collapses. With IPv6 enabled on the
+# network, Docker 27+ DNATs inbound v6 straight to the container and preserves
+# the client source IP, same as the IPv4 path has always done. The v6 subnet is
+# an RFC 4193 ULA (site-local, never routed on the public internet); the v4
+# range is pinned to the previously auto-assigned 172.18.0.0/16 so container
+# addressing stays stable. One-time note for self-hosters: on the next
+# `docker compose up -d` compose recreates the network and restarts every
+# service on it (same blast radius as a normal deploy; volumes are untouched).
+networks:
+  default:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+          gateway: 172.18.0.1
+        - subnet: fdff:8ea0:bd7a::/64
 
 volumes:
   thingery_pgdata:

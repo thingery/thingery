@@ -11,12 +11,14 @@
 // Shippo REST contract (official docs only; recorded in the spec, 2026-11-23):
 // - Auth: `Authorization: ShippoToken <key>`. Test-mode keys are
 //   `shippo_test_…` (test mode is free; all label features included).
-// - POST /shipments (addresses + parcel, `async: false`) → shipment with
+// - POST /shipments (addresses + `parcels` list, `async: false`) → shipment with
 //   quoted rates; rate = { object_id, provider, servicelevel {name},
 //   amount (decimal string), currency, amount_local }.
+// - GET /rates/{object_id} → one rate, same shape as in the shipment.
 // - POST /transactions { rate, async: false } → the bought label:
 //   status "SUCCESS", label_url (https, signed and expiring — stored as data
-//   at purchase), tracking_number, and the full rate echo (provider + service).
+//   at purchase) and tracking_number. `rate` comes back as the rate id only,
+//   so carrier, service and cost are read from GET /rates before buying.
 // - POST /tracks { carrier, tracking_number, metadata } → a TrackingStatus
 //   object; there is NO tracker object/id (unlike EasyPost trk_…), so the
 //   adapter synthesizes one deterministically via shippoTrackerId().
@@ -313,7 +315,7 @@ export async function createShippoShipment(
     {
       address_from: toWireAddress(input.fromAddress),
       address_to: toWireAddress(input.toAddress),
-      parcel: toWireParcel(input),
+      parcels: [toWireParcel(input)],
       async: false, // synchronous: rates are in the response
     },
     opts,
@@ -343,6 +345,13 @@ export async function buyShippoLabel(
   const apiKey = opts.apiKey ?? envValue("SHIPPO_API_KEY");
   if (apiKey === undefined) return null;
 
+  // Read the rate first: the transaction only echoes its id, and anything that
+  // can fail must fail before money is spent.
+  const rate = parseRate(
+    await shippoRequest("GET", `/rates/${encodeURIComponent(rateId)}`, undefined, opts, "rate lookup"),
+  );
+  if (!rate) throw new Error("shippo label purchase failed: unreadable rate, nothing bought");
+
   const body = await shippoPostJson(
     "/transactions",
     { rate: rateId, async: false },
@@ -354,9 +363,8 @@ export async function buyShippoLabel(
   const labelUrl = typeof body.label_url === "string" && body.label_url.length > 0 ? body.label_url : undefined;
   const trackingCode =
     typeof body.tracking_number === "string" && body.tracking_number.length > 0 ? body.tracking_number : undefined;
-  const rate = parseRate(body.rate); // the transaction echoes the bought rate (carrier + service + amount)
 
-  if (status !== "SUCCESS" || !labelUrl || !trackingCode || !rate) {
+  if (status !== "SUCCESS" || !labelUrl || !trackingCode) {
     throw new Error(
       status === "SUCCESS"
         ? "shippo label purchase failed: incomplete success payload"

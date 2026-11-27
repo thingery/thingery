@@ -24,9 +24,11 @@ import { notifyConfig } from "../config.js";
 export type OperatorAlertKind =
   | "stuck_money"
   | "stale_dispute"
+  | "dispute_lost" // THI-1611 A2: chargeback lost/charge_refunded — order terminalized, release refused
   | "dead_letter"
   | "label_refund_stack"
   | "label_line_refund_stuck"
+  | "payout_failed"
   | "suppression_self"
   | "suppression_volume";
 

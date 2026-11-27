@@ -15,7 +15,7 @@ import { pool } from "./db.js";
 import { mountApiRoutes } from "./routes.js";
 import { mountBodyParsers } from "./body-parsers.js";
 import { mountOpenaiAppsChallenge } from "./openai-apps-challenge.js";
-import { stripeWebhookRouter } from "./webhooks-stripe.js";
+import { stripeWebhookRouter, stripeV2WebhookRouter } from "./webhooks-stripe.js";
 import { carrierWebhookRouter } from "./webhooks-carrier.js";
 import { resendWebhookRouter } from "./webhooks-resend.js";
 import { logConfigBootReport, notifyConfig, orderFlowConfig } from "./config.js";
@@ -105,6 +105,12 @@ function runHttp(): void {
   // until STRIPE_WEBHOOK_SECRET is set (F1); see config boot report.
   const cfg = logConfigBootReport();
   app.use(stripeWebhookRouter(cfg));
+
+  // Accounts v2 event destination (THI-1681): same raw-body-before-JSON
+  // constraint; fail-closed 503 stub until STRIPE_EVENT_DESTINATION_SECRET
+  // is set (config boot report). v2 capability events never arrive on the
+  // v1 endpoints — this is the payout-ready path for v2 seller accounts.
+  app.use(stripeV2WebhookRouter(cfg));
 
   // Carrier webhook (spec THI-3 §4.3/§5): same raw-body-before-JSON
   // constraint; fail-closed 503 stub until the selected shipping provider's

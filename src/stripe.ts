@@ -41,6 +41,16 @@ import { RateLimiter } from "./rate-limit.js";
  *  renders, and log a `rate_limit` security event ("/mcp", THI-112 H4.2). */
 export const payoutSetupLimiter = new RateLimiter(10, 60 * 60_000);
 
+/** A6 (THI-1624): explicit API-version pin — the SDK's typed version, written
+ *  as a literal `satisfies Stripe.LatestApiVersion`. A literal (NOT the SDK's
+ *  silent default or the API_VERSION static) is the point: bumping the stripe
+ *  npm package moves the typed version, so this line FAILS THE BUILD until
+ *  the pin is re-confirmed deliberately (§5.3: an SDK upgrade is a deliberate
+ *  act — bump the pin, re-check the §5.3 webhook event list against the new
+ *  spec version, re-run the test-mode rehearsal). Exported for the CI guard
+ *  test asserting pin == installed SDK version. */
+export const STRIPE_API_VERSION = "2026-09-30.endive" satisfies Stripe.LatestApiVersion;
+
 let client: Stripe | null | undefined;
 
 /** Singleton Stripe client; null when STRIPE_SECRET_KEY is unset (kill switch). */
@@ -51,7 +61,7 @@ export function getStripe(): Stripe | null {
     client = null;
     return client;
   }
-  client = new Stripe(key); // apiVersion pinned by the SDK default
+  client = new Stripe(key, { apiVersion: STRIPE_API_VERSION });
   return client;
 }
 
@@ -284,6 +294,32 @@ export interface ZeroBasePayout {
 
 export type OrderTransfer = Stripe.Transfer | ZeroBasePayout;
 
+/** THI-1681: check the destination account's transfer capability before
+ *  moving money. The v1-view `capabilities.transfers` field serves BOTH
+ *  legacy v1 accounts and v2 recipient accounts (sandbox-verified: a v2
+ *  account with stripe_balance.stripe_transfers restricted reports
+ *  `transfers: "inactive"` on GET /v1/accounts/:id). Active → ok; explicitly
+ *  not-active → throw (callers already treat a failed transfer create the
+ *  same way — the order sits in payout_pending and the sweep retries); a
+ *  missing capabilities block (older v1 shapes) defers to Stripe's own
+ *  rejection rather than guessing. If the retrieve itself fails, defer to
+ *  Stripe: this guard sharpens the error and moves it earlier, it is not
+ *  the enforcement boundary — transfers.create rejects unready accounts
+ *  server-side, and callers handle that rejection identically. */
+export async function ensureTransferable(accountId: string, stripe: Stripe = getStripe() ?? undefined!): Promise<void> {
+  let acct: Stripe.Account | null = null;
+  try {
+    acct = await stripe.accounts.retrieve(accountId);
+  } catch {
+    return; // retrieve unavailable/failed → Stripe enforces at transfers.create
+  }
+  const transfers = acct?.capabilities?.transfers;
+  if (transfers === undefined || transfers === "active") return;
+  throw new Error(
+    `payout_account_not_ready: ${accountId} transfer capability is ${transfers} — seller must complete payout onboarding`,
+  );
+}
+
 export async function createTransferForOrder(
   order: PayoutOrder,
   destination: string,
@@ -296,10 +332,14 @@ export async function createTransferForOrder(
   // The balance-transaction read is skipped: with no funds moving, a
   // charge mismatch has nothing to corrupt (R1 guards transfers only).
   if (payoutBaseCents(order) <= 0) return { zeroBase: true, id: null };
+  // THI-1681: net first, then the capability check, then move money — a
+  // netting failure must surface before an onboarding-gap failure so the
+  // operator sees the money-math problem, not the seller's KYC state.
+  const { amountCents, sourceChargeId } = await sellerNetTransfer(order, stripe);
+  await ensureTransferable(destination, stripe);
   // application_fee_amount is omitted → 0: the platform takes no cut (§6.1).
   // The seller bears the Stripe processing fee by netting (THI-374) — a
   // pass-through of Stripe's own processing cost, not platform revenue.
-  const { amountCents, sourceChargeId } = await sellerNetTransfer(order, stripe);
   return stripe.transfers.create(
     {
       amount: amountCents,
@@ -457,18 +497,78 @@ export async function retrieveRefund(
 }
 
 // ---------------------------------------------------------------------------
-// Seller payout onboarding (§6.3; rev 3 OQ3: asked, not mandatory)
+// Seller payout onboarding (§6.3; rev 3 OQ3: asked, not mandatory;
+// THI-1681: creation + onboarding links moved to the Accounts v2 API —
+// THI-571: Stripe rejects v1 `accounts.create` on this account, so the v1
+// path is dead for NEW accounts. Legacy v1 account ids (none exist in prod
+// or test as of 2026-11-26: sellers.stripe_account_id is NULL on all 54
+// sellers) stay readable: the v1 GET /v1/accounts/:id works on v2 ids too
+// (verified in sandbox), so retrieve/reconcile paths are version-agnostic.
 
 export interface PayoutSetup {
   stripeAccountId: string;
   onboardedAt: Date | null;
 }
 
+/** v2 recipient accounts require a contact email (sandbox-verified 400
+ *  invalid_fields when absent). Sellers created through signup always have
+ *  one; API-key-seeded sellers may not — the tool surfaces this as a
+ *  recoverable `email_required` error, never a generic 500. */
+export class PayoutSetupEmailRequiredError extends Error {
+  constructor() {
+    super("payout setup requires an account email (Stripe contact_email)");
+    this.name = "PayoutSetupEmailRequiredError";
+  }
+}
+
+/** The seller's payout country for account creation: their most relevant
+ *  address country (default first, then most recently used), else the
+ *  platform country (EE). Prefill only — Stripe's hosted onboarding collects
+ *  the authoritative identity; identity.country remains editable via
+ *  accounts.update until onboarding completes (sandbox-verified).
+ *  Caller supplies the seller's id; NULL when the seller has no address. */
+async function payoutCountryFor(sellerId: string): Promise<string | null> {
+  const r = await pool.query<{ country: string | null }>(
+    `SELECT (SELECT a.country FROM account_addresses a WHERE a.account_id = $1
+             ORDER BY a.is_default DESC, a.last_used_at DESC NULLS LAST, a.created_at DESC
+             LIMIT 1) AS country`,
+    [sellerId],
+  );
+  return r.rows[0]?.country ?? null;
+}
+
+/** Keep an existing account's identity.country aligned with the seller's
+ *  current address country while onboarding has NOT completed (transfers
+ *  capability not active — the same v1-view field serves v2 recipient
+ *  accounts, sandbox-verified). Only v2 accounts (v1-view `type: "none"`)
+ *  are updated; legacy v1 accounts are left untouched, and any failure is
+ *  swallowed — a stale prefill must never break link minting. */
+async function syncPayoutCountry(accountId: string, sellerId: string, stripe: Stripe): Promise<void> {
+  try {
+    const country = await payoutCountryFor(sellerId);
+    if (!country) return;
+    const acct = await stripe.accounts.retrieve(accountId);
+    if (acct.type !== "none") return; // legacy v1 account — hands off
+    const active = acct.capabilities?.transfers === "active";
+    if (active) return;
+    if ((acct.country ?? "").toUpperCase() === country.toUpperCase()) return;
+    await stripe.v2.core.accounts.update(accountId, { identity: { country } });
+  } catch {
+    // Prefill-only best effort: never fail payout setup over it.
+  }
+}
+
 /**
- * The seller's connected-account id, creating an Express account once.
+ * The seller's connected-account id, creating a v2 recipient account once
+ * (THI-1681: Accounts v2 — marketplace recipient configuration, transfers
+ * only, NO merchant/card-payments; Express dashboard; platform collects
+ * fees and bears losses — the one Dashboard-acknowledged combination Stripe
+ * allows for recipient+stripe_transfers, docs.stripe.com/connect/marketplace/tasks/create).
  * Concurrent calls can briefly create two accounts; the UPDATE…WHERE NULL
  * arbitration keeps exactly one stored — the loser account stays unused in
  * Stripe (harmless; cleaned up by the seller's own Stripe dashboard).
+ * Throws PayoutSetupEmailRequiredError when the seller has no email (v2
+ * requires contact_email).
  */
 export async function getOrCreateStripeAccount(
   sellerId: string,
@@ -479,9 +579,34 @@ export async function getOrCreateStripeAccount(
     [sellerId],
   );
   const current = existing.rows[0]?.stripe_account_id;
-  if (current) return current;
+  if (current) {
+    await syncPayoutCountry(current, sellerId, stripe);
+    return current;
+  }
 
-  const account = await stripe.accounts.create({ type: "express", metadata: { seller_id: sellerId } });
+  const owner = await pool.query<{ email: string | null }>(
+    "SELECT email FROM sellers WHERE id = $1",
+    [sellerId],
+  );
+  const email = owner.rows[0]?.email ?? null;
+  if (!email) throw new PayoutSetupEmailRequiredError();
+
+  // THI-1678 (parent decision 2026-11-26): v2 account creation carries the
+  // seller's country (v1 sent none and Stripe defaulted it to the platform's
+  // Estonia). include keeps identity + recipient state in the create response
+  // so the arbitration loser is fully described in logs.
+  const country = (await payoutCountryFor(sellerId)) ?? "EE";
+  const account = await stripe.v2.core.accounts.create({
+    dashboard: "express",
+    identity: { country },
+    contact_email: email,
+    metadata: { seller_id: sellerId },
+    defaults: { responsibilities: { fees_collector: "application", losses_collector: "application" } },
+    configuration: {
+      recipient: { capabilities: { stripe_balance: { stripe_transfers: { requested: true } } } },
+    },
+    include: ["configuration.recipient", "identity"],
+  });
   const won = await pool.query(
     "UPDATE sellers SET stripe_account_id = $2 WHERE id = $1 AND stripe_account_id IS NULL",
     [sellerId, account.id],
@@ -494,17 +619,23 @@ export async function getOrCreateStripeAccount(
   return reread.rows[0]?.stripe_account_id ?? account.id;
 }
 
-/** Stripe Express onboarding link (account_links, §6.3). */
+/** Stripe-hosted onboarding link (Accounts v2 account_links, §6.3 + THI-1681).
+ *  Single-use, HTTPS-only URLs (even in sandbox); refresh/return both land on
+ *  the payout-setup page, which re-calls get_payout_setup for a fresh link. */
 export async function createOnboardingLink(
   stripeAccountId: string,
   baseUrl: string,
   stripe: Stripe = getStripe() ?? undefined!,
-): Promise<Stripe.AccountLink> {
-  return stripe.accountLinks.create({
+): Promise<Stripe.V2.Core.AccountLink> {
+  return stripe.v2.core.accountLinks.create({
     account: stripeAccountId,
-    refresh_url: `${baseUrl}/order/payout-setup`,
-    return_url: `${baseUrl}/order/payout-setup`,
-    type: "account_onboarding",
+    use_case: {
+      type: "account_onboarding",
+      account_onboarding: {
+        refresh_url: `${baseUrl}/order/payout-setup`,
+        return_url: `${baseUrl}/order/payout-setup`,
+      },
+    },
   });
 }
 

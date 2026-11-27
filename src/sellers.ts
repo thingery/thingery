@@ -179,16 +179,18 @@ export async function getSellerSummary(
     [sellerId, [...SOLD_COUNT_STATUSES]],
   );
 
-  // 4. Listings page: the getItem select (i.* + joined seller_payout_ready),
-  //    feed-visible actives only, newest first, LIMIT+1 for the one-row
-  //    lookahead (the search_items has_more convention). N.B. `s` here is
-  //    the same join getItem uses — a full seller row join is NOT needed;
-  //    only the two payout columns are read, and neither is serialized (the
-  //    boolean seller_payout_ready is the public part; itemToPublic allows
-  //    it through as payment_available inputs).
+  // 4. Listings page: the getItem select (i.* + joined seller payout
+  //    columns), feed-visible actives only, newest first, LIMIT+1 for the
+  //    one-row lookahead (the search_items has_more convention). N.B. `s`
+  //    here is the same join getItem uses — a full seller row join is NOT
+  //    needed; only the payout columns are read, and neither is serialized
+  //    (seller_payout_ready + seller_stripe_country are itemToPublic's
+  //    card-only predicate inputs; the country is stripped from output —
+  //    THI-1798 F1: the country MUST ride the select or the predicate
+  //    fail-closes every in-allowlist seller on this surface).
   const page = await pool.query<ItemRow>(
     `SELECT i.*, (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL)
-              AS seller_payout_ready
+              AS seller_payout_ready, s.stripe_account_country AS seller_stripe_country
        FROM items i LEFT JOIN sellers s ON s.id = i.seller_id
       WHERE i.seller_id = $1 AND i.status = 'active'
         AND (NOT i.photo_required OR cardinality(i.images) > 0)

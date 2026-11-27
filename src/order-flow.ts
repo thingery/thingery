@@ -14,7 +14,7 @@
 import { pool } from "./db.js";
 import type { OrderRow, OrderStatus } from "./orders.js";
 import { applyTransition, IllegalTransitionError, settleNothingDueRefund } from "./orders.js";
-import { orderFlowConfig } from "./config.js";
+import { orderFlowConfig, type OrderFlowConfig } from "./config.js";
 import { AddressSuggestedError, verifyOrderAddress, type ShippingVerificationRecord } from "./address-verification.js";
 import {
   getSellerDefaultOrigin,
@@ -77,6 +77,82 @@ export async function sellerPayoutReady(
   return rows[0]?.ready === true;
 }
 
+/** THI-1625 B-1: payout-gate details for create_order — readiness plus the
+ *  connected account's payout country (D4 allowlist input; NULL for legacy
+ *  accounts until Stripe delivers their next account event). Kept separate
+ *  from sellerPayoutReady (chat/sellers call that one) so its contract is
+ *  untouched. */
+interface SellerPayoutGate {
+  ready: boolean;
+  country: string | null;
+}
+
+export async function sellerPayoutGate(
+  sellerId: string,
+  db: Pick<typeof pool, "query"> = pool,
+): Promise<SellerPayoutGate> {
+  const { rows } = await db.query<{ ready: boolean; country: string | null }>(
+    "SELECT (stripe_account_id IS NOT NULL AND stripe_onboarded_at IS NOT NULL) AS ready, stripe_account_country AS country FROM sellers WHERE id = $1",
+    [sellerId],
+  );
+  return { ready: rows[0]?.ready === true, country: rows[0]?.country ?? null };
+}
+
+/** THI-1625 B-2 (thi1611 spec §B2): why card payment cannot happen for a
+ *  listing under CARD_ONLY_MODE. One source of truth for every surface —
+ *  create_order refusals, get_item flags, publish warnings,
+ *  get_payout_setup, and the chat order preview — so a preview can never
+ *  contradict an execute (THI-1788 advisory). Fixed precedence:
+ *  payments_not_configured → seller_not_payout_ready →
+ *  seller_country_not_allowed (D4) → free_item_not_orderable (D5). */
+export type CardOnlyBlockReason =
+  | "payments_not_configured"
+  | "seller_not_payout_ready"
+  | "seller_country_not_allowed";
+
+/** Every card-only blocker incl. the item-price one (D5). */
+export type CardOnlyOrderabilityReason = CardOnlyBlockReason | "free_item_not_orderable";
+
+/** Payments-side blocker only (price-independent): lets get_payout_setup
+ *  explain the seller's own payout gap without knowing any item price. */
+export function cardOnlyPaymentsBlocker(
+  cfg: Pick<OrderFlowConfig, "stripePaymentsEnabled" | "sellerCountryAllowlist">,
+  input: { payoutReady: boolean; country: string | null },
+): CardOnlyBlockReason | null {
+  if (!cfg.stripePaymentsEnabled) return "payments_not_configured";
+  if (!input.payoutReady) return "seller_not_payout_ready";
+  if (
+    cfg.sellerCountryAllowlist !== null &&
+    (input.country === null || !cfg.sellerCountryAllowlist.has(input.country.trim().toUpperCase()))
+  ) {
+    return "seller_country_not_allowed";
+  }
+  return null;
+}
+
+export interface CardOnlyOrderability {
+  orderable: boolean;
+  /** First blocker in fixed precedence; null iff orderable. */
+  reason: CardOnlyOrderabilityReason | null;
+  /** Card payment possible for this listing at all (false for price-0:
+   *  a card cannot apply — D5). */
+  paymentAvailable: boolean;
+}
+
+export function cardOnlyOrderability(
+  cfg: Pick<OrderFlowConfig, "stripePaymentsEnabled" | "sellerCountryAllowlist">,
+  input: { priceCents: number; payoutReady: boolean; country: string | null },
+): CardOnlyOrderability {
+  const paymentsBlocker = cardOnlyPaymentsBlocker(cfg, input);
+  if (paymentsBlocker) {
+    return { orderable: false, reason: paymentsBlocker, paymentAvailable: false };
+  }
+  if (input.priceCents === 0) {
+    return { orderable: false, reason: "free_item_not_orderable", paymentAvailable: false };
+  }
+  return { orderable: true, reason: null, paymentAvailable: true };
+}
+
 export async function createOrder(input: CreateOrderInput): Promise<{ order: OrderView; paymentUrl: string | null }> {
   const cfg = orderFlowConfig();
   const db = await pool.connect();
@@ -120,9 +196,54 @@ export async function createOrder(input: CreateOrderInput): Promise<{ order: Ord
 
     // Payment mode resolution (§11.2): default stripe when available, else
     // off_platform; an explicit 'stripe' where unavailable is an error.
-    const paymentsAvailable = cfg.stripePaymentsEnabled && (await sellerPayoutReady(row.seller_id, db));
+    //
+    // THI-1625 B-1 (card-only mode, thi1611 spec §B2): with CARD_ONLY_MODE
+    // on, this deployment never creates a NEW off_platform order — an
+    // explicit request is refused (off_platform_disabled), the fallback is
+    // stripe-only, and every refusal names a machine-readable reason
+    // (payments_not_configured / seller_not_payout_ready /
+    // seller_country_not_allowed / free_item_not_orderable). Price-0 items
+    // are refused outright (D5: a card cannot apply). Existing off_platform
+    // orders are untouched — the gate is at creation only. Flag off ⇒
+    // byte-for-byte today's behavior (self-hosters keep off-platform mode).
+    const payout = await sellerPayoutGate(row.seller_id, db);
+    // B-2: the same predicate that powers every orderability surface drives
+    // the refusals here — preview and execute can never disagree.
+    const cardOnly = cfg.cardOnlyMode
+      ? cardOnlyOrderability(cfg, {
+          priceCents: row.price_cents,
+          payoutReady: payout.ready,
+          country: payout.country,
+        })
+      : null;
+    const paymentsAvailable = cardOnly
+      ? cardOnly.paymentAvailable
+      : cfg.stripePaymentsEnabled && payout.ready;
     const mode = input.paymentMode ?? (paymentsAvailable ? "stripe" : "off_platform");
-    if (mode === "stripe" && !paymentsAvailable) {
+    if (cardOnly) {
+      if (row.price_cents === 0) {
+        throw new OrderFlowError(
+          "free_item_not_orderable",
+          "Free items cannot be ordered with card payment on this deployment.",
+        );
+      }
+      if (input.paymentMode === "off_platform") {
+        throw new OrderFlowError(
+          "off_platform_disabled",
+          "This deployment accepts card payment only for new orders; payment_mode 'off_platform' is disabled.",
+        );
+      }
+      if (!cardOnly.orderable) {
+        throw new OrderFlowError(
+          cardOnly.reason!,
+          cardOnly.reason === "payments_not_configured"
+            ? "Stripe payments are not configured on this deployment; nothing is orderable."
+            : cardOnly.reason === "seller_not_payout_ready"
+              ? "The seller has not completed payout onboarding; this item is not orderable yet."
+              : "The seller's payout country is not enabled for card orders on this deployment.",
+        );
+      }
+    } else if (mode === "stripe" && !paymentsAvailable) {
       throw new OrderFlowError(
         cfg.stripePaymentsEnabled ? "seller_not_payout_ready" : "payments_not_configured",
         cfg.stripePaymentsEnabled

@@ -220,7 +220,7 @@ export interface MatchRow {
   read: boolean;
   created_at: Date;
   intent: IntentRow;
-  item: ItemRow & { seller_payout_ready?: boolean };
+  item: ItemRow & { seller_payout_ready?: boolean; seller_stripe_country?: string | null };
 }
 
 /** Reads the caller's match inbox newest-first (spec THI-360 §5 tool 5).
@@ -249,7 +249,7 @@ export async function listMatches(
             i.shipping_tier, i.shipping_price_cents, i.images, i.attributes, i.status,
             i.photo_required, i.created_at,
             (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL)
-              AS seller_payout_ready
+              AS seller_payout_ready, s.stripe_account_country AS seller_stripe_country
      FROM intent_matches m
      JOIN buyer_intents bi ON bi.id = m.intent_id
      JOIN items i ON i.id = m.item_id
@@ -302,6 +302,10 @@ export async function listMatches(
       photo_required: r.photo_required as boolean,
       created_at: r.created_at as Date,
       seller_payout_ready: r.seller_payout_ready as boolean,
+      // THI-1798 F1: itemToPublic's card-only predicate reads the country —
+      // without it every match fail-closes to seller_country_not_allowed
+      // under an allowlist. Never serialized to buyers (itemToPublic strips it).
+      seller_stripe_country: (r.seller_stripe_country as string | null) ?? null,
     },
   }));
   let markedRead = 0;

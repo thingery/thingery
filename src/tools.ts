@@ -32,7 +32,7 @@ import {
 import { CountryCodeError, isIsoCountryCode, normalizeCountryCode } from "./countries.js";
 import { createOnboardingLink, getPayoutSetup, getOrCreateStripeAccount, getStripe, payoutSetupLimiter, PayoutSetupEmailRequiredError, stripeConfigured } from "./stripe.js";
 import { orderFlowConfig } from "./config.js";
-import { cancelOrder, createOrder, getOrderView, listOrdersForAccount, MAX_ORDER_LIST_LIMIT, ORDER_ROLES, OrderFlowError, shareShippingAddress, shippingAddressConsent, shippingAddressForSeller, shippingVerificationFor, type OrderRole } from "./order-flow.js";
+import { cancelOrder, cardOnlyOrderability, cardOnlyPaymentsBlocker, createOrder, getOrderView, listOrdersForAccount, MAX_ORDER_LIST_LIMIT, ORDER_ROLES, OrderFlowError, sellerPayoutGate, shareShippingAddress, shippingAddressConsent, shippingAddressForSeller, shippingVerificationFor, type CardOnlyOrderabilityReason, type OrderRole } from "./order-flow.js";
 import { ORDER_STATUSES, type OrderStatus } from "./orders.js";
 import { getSellerSummary, SellerNotFoundError, SELLER_LISTINGS_MAX_LIMIT, SELLER_LISTINGS_MAX_OFFSET } from "./sellers.js";
 import { listSellerReviews, ReviewError } from "./reviews.js";
@@ -269,10 +269,16 @@ export function itemToPublic(item: ItemRow & { score?: number }) {
   // R4 (THI-380 rider): embedding is destructured out so the raw ~1536-dim
   // vector (~12-30 KB) cannot ride `...rest` into any item-bearing response
   // — rows fetched with SELECT i.* carry it (search_items, get_item,
-  // my_listings; my_matches never selects the column). Never a documented
-  // contract field; payloads shrink, nothing meaningful is lost.
-  const { id, title, price_cents, currency, seller_payout_ready, embedding: _embedding, ...rest } = item;
-  return {
+  // my_listings); my_matches selects item columns explicitly, so it never
+  // carries the embedding. Never a documented contract field; payloads
+  // shrink, nothing meaningful is lost.
+  // THI-1798 F1: every query whose rows reach this function AND joins
+  // sellers must select BOTH seller_payout_ready and seller_stripe_country
+  // (get_item, search_items, my_listings, get_seller_summary listings,
+  // my_matches) — the card-only predicate below fail-closes on a missing
+  // country and would mislabel in-allowlist sellers on that surface.
+  const { id, title, price_cents, currency, seller_payout_ready, seller_stripe_country, embedding: _embedding, ...rest } = item;
+  const base = {
     ...rest,
     id,
     title,
@@ -283,10 +289,39 @@ export function itemToPublic(item: ItemRow & { score?: number }) {
     },
     // What create_order will charge: price plus shipping (0 for pickup).
     total_price_cents: price_cents + buyerShippingCents(item),
-    // §11.2: buyers see payment availability before ordering; `orderable`
-    // stays true either way (off_platform orders track the deal regardless).
+  };
+  // THI-1625 B-2 (card-only mode, thi1611 spec §B2): when the flag is on and
+  // the row carries payout data, the orderability flags are driven by the
+  // SAME predicate create_order refuses on — a buyer sees exactly what an
+  // order attempt would hit, plus a machine-readable reason. Flag off ⇒
+  // today's output byte-for-byte: orderable reflects status only
+  // (off_platform orders track the deal regardless), payment_available is
+  // the plain stripe-readiness view.
+  const cfg = orderFlowConfig();
+  if (cfg.cardOnlyMode && seller_payout_ready !== undefined) {
+    const gate = cardOnlyOrderability(cfg, {
+      priceCents: price_cents,
+      payoutReady: seller_payout_ready === true,
+      country: seller_stripe_country ?? null,
+    });
+    return {
+      ...base,
+      payment_available: gate.paymentAvailable,
+      orderable: item.status === "active" && gate.orderable,
+      ...(gate.reason ? { payment_unavailable_reason: gate.reason } : {}),
+      // THI-308 PR 2 (additive): derived pending-photo state — true only for
+      // photo-gated listings with no images yet. Pending items are hidden
+      // from feeds; the first photo publishes them (visibleInFeeds in
+      // items.ts is the same predicate's JS twin).
+      needs_photo: item.photo_required && item.images.length === 0,
+      url: `${publicBaseUrl()}/item/${id}`,
+    };
+  }
+  return {
+    ...base,
+    // §11.2: buyers see payment availability before ordering.
     ...(seller_payout_ready !== undefined
-      ? { payment_available: orderFlowConfig().stripePaymentsEnabled && seller_payout_ready === true }
+      ? { payment_available: cfg.stripePaymentsEnabled && seller_payout_ready === true }
       : {}),
     orderable: item.status === "active",
     // THI-308 PR 2 (additive): derived pending-photo state — true only for
@@ -301,6 +336,36 @@ export function itemToPublic(item: ItemRow & { score?: number }) {
 const ok = (data: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
 });
+
+/** THI-1625 B-2 (thi1611 spec §B2): publish-time seller warning under
+ *  CARD_ONLY_MODE — a published listing that buyers cannot natively order
+ *  is WARNED about, never rejected (publish stays publishable). Null when
+ *  the flag is off, the listing is not active (not yet published), or the
+ *  listing is orderable. Same predicate as the create_order refusal, so
+ *  the seller's warning and a buyer's refusal can never disagree. */
+const CARD_ONLY_NOTICE: Record<CardOnlyOrderabilityReason, string> = {
+  payments_not_configured: "Stripe payments are not configured on this deployment, so no listing can be ordered with card payment.",
+  seller_not_payout_ready: "finish payout onboarding with get_payout_setup so buyers can order with card payment",
+  seller_country_not_allowed: "your payout account's country is not enabled for card orders on this deployment",
+  free_item_not_orderable: "price-0 listings are not orderable with card payment — set a price above zero",
+};
+
+async function cardOnlyPublishNotice(
+  item: Pick<ItemRow, "status" | "price_cents">,
+  sellerId: string,
+): Promise<string | null> {
+  const cfg = orderFlowConfig();
+  if (!cfg.cardOnlyMode || item.status !== "active") return null;
+  const payout = await sellerPayoutGate(sellerId);
+  const gate = cardOnlyOrderability(cfg, {
+    priceCents: item.price_cents,
+    payoutReady: payout.ready,
+    country: payout.country,
+  });
+  if (gate.orderable) return null;
+  const detail = CARD_ONLY_NOTICE[gate.reason!];
+  return `Card-only deployment: buyers cannot order this listing yet — ${detail}`;
+}
 
 // quote_shipping rate limit (spec docs/specs/buyer-paid-shipping.md §9):
 // without it the tool is an auth-free oracle for carrier quotes — 20 calls
@@ -657,8 +722,7 @@ export function registerTools(
           return err(`Invalid attributes for category '${category}': ${attributeErrors.join("; ")}`, "invalid_attributes");
         }
 
-        const item = itemToPublic(
-          await createItem({
+        const createdRow = await createItem({
             seller_id: seller.id,
             title: args.title,
             description: args.description,
@@ -677,8 +741,8 @@ export function registerTools(
             // ADR 0010: absent/default = "active" — byte-identical to the
             // pre-stored create path. "stored" = private inventory save.
             status: args.status,
-          }),
-        );
+          });
+        const item = itemToPublic(createdRow);
         // THI-308 PR 2 (additive): publish state at create time. A zero-image
         // create succeeds but stays pending — next_steps then tells the agent
         // how to publish instead of implying the listing is live. status is
@@ -686,6 +750,10 @@ export function registerTools(
         // a stored create is never feed-visible (status != active), so it
         // gets its own next_steps branch below instead of the pending story.
         const visible = visibleInFeeds(item);
+        // THI-1625 B-2: publish-time card-only warning (spec §B2) — active
+        // creates that buyers cannot natively order still succeed, with the
+        // reason attached. Stored creates warn at update_listing instead.
+        const cardOnlyNotice = await cardOnlyPublishNotice(createdRow, seller.id);
         return ok({
           created: true,
           seller: seller.display_name,
@@ -693,6 +761,7 @@ export function registerTools(
           ...(resolved.viaAlias ? { note: aliasResolutionNote(rawCategory, category) } : {}),
           photo_required: item.photo_required,
           visible,
+          ...(cardOnlyNotice ? { warning: cardOnlyNotice } : {}),
           listing_quota: await quotaAfterCreate(seller.id),
           next_steps: item.status === "stored"
             ? [
@@ -1351,7 +1420,11 @@ export function registerTools(
           attributes: args.attributes,
         });
         if (!item) return err("Item not found or not owned by this seller", "not_found");
-        return ok({ updated: true, item: itemToPublic(item) });
+        // THI-1625 B-2: same publish-time warning for the stored→active flip
+        // and any edit that leaves an active listing unorderable (e.g. a
+        // price set to 0 under card-only mode — D5).
+        const cardOnlyNotice = await cardOnlyPublishNotice(item, seller.id);
+        return ok({ updated: true, item: itemToPublic(item), ...(cardOnlyNotice ? { warning: cardOnlyNotice } : {}) });
       } catch (e) {
         // updateItem throws AttributeValidationError for attribute shape-cap
         // violations (spec THI-83 §3.5); surface it with the structured
@@ -1574,8 +1647,13 @@ export function registerTools(
       try {
         if (!stripeConfigured()) {
           return err(
-            "Stripe payments are not configured on this Thingery deployment (STRIPE_SECRET_KEY unset). " +
-              "Listings remain buyable as off-platform orders; platform payment is unavailable.",
+            // THI-1625 B-2: the off-platform reassurance is only true when the
+            // deployment still allows off_platform orders (flag off).
+            orderFlowConfig().cardOnlyMode
+              ? "Stripe payments are not configured on this Thingery deployment (STRIPE_SECRET_KEY unset). " +
+                "Card-only mode is on: no listing can be ordered until payments are configured."
+              : "Stripe payments are not configured on this Thingery deployment (STRIPE_SECRET_KEY unset). " +
+                "Listings remain buyable as off-platform orders; platform payment is unavailable.",
             "payments_not_configured",
           );
         }
@@ -1594,14 +1672,35 @@ export function registerTools(
         const accountId = await getOrCreateStripeAccount(seller.id, stripe);
         const link = await createOnboardingLink(accountId, publicBaseUrl(), stripe);
         const setup = await getPayoutSetup(seller.id);
+        // THI-1625 B-2 (thi1611 spec §B2): under card-only mode the seller is
+        // told why card orders may still be blocked after onboarding — the
+        // D4 country allowlist is invisible otherwise (onboarded:true yet
+        // listings not orderable). Onboarding gaps keep the existing note
+        // (onboarded:false is already the machine signal).
+        let countryBlockedNote = "";
+        let cardOrdersBlockedReason: string | null = null;
+        if (orderFlowConfig().cardOnlyMode) {
+          const payout = await sellerPayoutGate(seller.id);
+          if (
+            cardOnlyPaymentsBlocker(orderFlowConfig(), {
+              payoutReady: payout.ready,
+              country: payout.country,
+            }) === "seller_country_not_allowed"
+          ) {
+            cardOrdersBlockedReason = "seller_country_not_allowed";
+            countryBlockedNote =
+              " Your payout account's country is not enabled for card orders on this deployment — onboarded listings still cannot be ordered with card payment.";
+          }
+        }
         return ok({
           onboarding_url: link.url,
           onboarded: setup?.onboardedAt != null,
           stripe_account_id: accountId,
+          ...(cardOrdersBlockedReason ? { card_orders_blocked_reason: cardOrdersBlockedReason } : {}),
           note: setup?.onboardedAt
-            ? "Payout account is onboarded — your listings accept platform payment."
+            ? "Payout account is onboarded — your listings accept platform payment." + countryBlockedNote
             : "Open the onboarding URL to accept platform payment (Stripe Express, ~5 minutes). " +
-                "The link is single-use; call get_payout_setup again for a fresh one.",
+                "The link is single-use; call get_payout_setup again for a fresh one." + countryBlockedNote,
         });
       } catch (e) {
         // THI-1681: v2 recipient accounts require a Stripe contact_email — a

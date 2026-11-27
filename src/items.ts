@@ -446,7 +446,8 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
       const { rows } = await pool.query<ItemRow & { score: number }>(
         `SELECT * FROM (
            SELECT i.*, 1 - (i.embedding <=> ${vecParam}::vector) AS score,
-                  (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL) AS seller_payout_ready
+                  (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL) AS seller_payout_ready,
+                    s.stripe_account_country AS seller_stripe_country
            FROM items i LEFT JOIN sellers s ON s.id = i.seller_id
            WHERE ${where.join(" AND ")}
              AND i.embedding IS NOT NULL
@@ -465,7 +466,8 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
     const keywordParam = add(`%${q.replace(/[%_]/g, (m) => `\\${m}`)}%`);
     const { rows } = await pool.query<ItemRow & { score: number }>(
       `SELECT i.*, 0 AS score,
-              (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL) AS seller_payout_ready
+              (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL) AS seller_payout_ready,
+                s.stripe_account_country AS seller_stripe_country
        FROM items i LEFT JOIN sellers s ON s.id = i.seller_id
        WHERE ${where.join(" AND ")}
          AND (i.title ILIKE ${keywordParam} OR i.description ILIKE ${keywordParam})
@@ -478,7 +480,8 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
 
   const { rows } = await pool.query<ItemRow & { score: number }>(
     `SELECT i.*, 0 AS score,
-            (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL) AS seller_payout_ready
+            (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL) AS seller_payout_ready,
+              s.stripe_account_country AS seller_stripe_country
      FROM items i LEFT JOIN sellers s ON s.id = i.seller_id
      WHERE ${where.join(" AND ")}
      ORDER BY i.created_at DESC, i.id
@@ -490,7 +493,8 @@ export async function searchItems(filters: SearchFilters): Promise<Array<ItemRow
 
 export async function getItem(id: string): Promise<ItemRow | null> {
   const { rows } = await pool.query<ItemRow>(
-    `SELECT i.*, (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL) AS seller_payout_ready
+    `SELECT i.*, (s.stripe_account_id IS NOT NULL AND s.stripe_onboarded_at IS NOT NULL) AS seller_payout_ready,
+      s.stripe_account_country AS seller_stripe_country
      FROM items i LEFT JOIN sellers s ON s.id = i.seller_id WHERE i.id = $1`,
     [id],
   );

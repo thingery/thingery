@@ -569,6 +569,13 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 -- webhook when capabilities.transfers = 'active' (known connected accounts only, F5).
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;           -- Express connected account
 ALTER TABLE sellers ADD COLUMN IF NOT EXISTS stripe_onboarded_at TIMESTAMPTZ;  -- transfers capability active
+-- THI-1625 B-1 (card-only native listings, thi1611 spec §B2/D4): the seller's
+-- payout country (ISO 3166-1 alpha-2), persisted from account.updated
+-- (account.country) for known connected accounts only — both webhook
+-- generations write it via flipSellerOnboarding. NULL for legacy accounts
+-- until Stripe delivers their next account event; the orderability gate
+-- reads it fail-closed (NULL ⇒ not allowed when an allowlist is set).
+ALTER TABLE sellers ADD COLUMN IF NOT EXISTS stripe_account_country CHAR(2);
 
 -- Seller upload quota (THI-110 / docs/security.md §6 H3): per-seller daily
 -- count + byte caps for item-image uploads. The upload path upsert-increments

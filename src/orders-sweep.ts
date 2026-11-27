@@ -151,11 +151,15 @@ async function itemTitle(itemId: string): Promise<string> {
 // --- Rule 2: sold past STALE_SOLD_DAYS without tracking → refunding (#9) /
 // cancelled (#9b off_platform). Item → active either way (dead seller relists).
 // THI-780 PR 3: a warning fires at half the window, before the hard cancel.
+// THI-1625 B-3: pickup orders are EXCLUDED — they never carry tracking; their
+// deadline is rule 5's PICKUP_AUTOCONFIRM_DAYS. (Historically they survived
+// this rule only because the defaults keep 14 < 21 — a config accident; the
+// exclusion now holds for any configuration.)
 async function rule2(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   open(report, "2-stale-sale");
   const half = new Date(now.getTime() - days(cfg.staleSoldDays / 2));
   const warnable = await pool.query<OrderRow>(
-    "SELECT * FROM orders WHERE status = 'sold' AND tracking_code IS NULL AND status_changed_at < $1 AND status_changed_at >= $2",
+    "SELECT * FROM orders WHERE status = 'sold' AND tracking_code IS NULL AND fulfillment <> 'pickup' AND status_changed_at < $1 AND status_changed_at >= $2",
     [new Date(now.getTime() - days(cfg.staleSoldDays)), half],
   );
   for (const order of warnable.rows) {
@@ -166,7 +170,7 @@ async function rule2(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
     }
   }
   const { rows } = await pool.query<OrderRow>(
-    "SELECT * FROM orders WHERE status = 'sold' AND tracking_code IS NULL AND status_changed_at < $1",
+    "SELECT * FROM orders WHERE status = 'sold' AND tracking_code IS NULL AND fulfillment <> 'pickup' AND status_changed_at < $1",
     [new Date(now.getTime() - days(cfg.staleSoldDays))],
   );
   for (const order of rows) {

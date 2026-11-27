@@ -89,6 +89,12 @@ services:
       STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS: ${STRIPE_CONNECT_WEBHOOK_SECRET_PREVIOUS:-}
       STRIPE_EVENT_DESTINATION_SECRET: ${STRIPE_EVENT_DESTINATION_SECRET:-}
       STRIPE_EVENT_DESTINATION_SECRET_PREVIOUS: ${STRIPE_EVENT_DESTINATION_SECRET_PREVIOUS:-}
+      # Card-only mode (THI-1625, thi1611 spec §B): commercial policy flags,
+      # passthrough only — values live in the VPS .env. Empty CARD_ONLY_MODE
+      # keeps the default (off: off-platform orders stay available). With the
+      # flag on, SELLER_COUNTRY_ALLOWLIST (comma-separated ISO 3166-1 alpha-2)
+      # optionally restricts which seller payout countries may take card
+      # orders (D4) — unset ⇒ no country restriction (see .env.example).
       # Order flow — EasyPost carrier automation (THI-572). Passthrough only:
       # values live in the VPS .env. Empty/unset EASYPOST_API_KEY = degraded
       # mode (no trackers, buy_shipping_label answers easypost_not_configured,

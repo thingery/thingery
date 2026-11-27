@@ -136,6 +136,8 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
     delete process.env.STRIPE_SECRET_KEY;
     delete process.env.LABEL_MAX_COST_CENTS;
     delete process.env.LABEL_DAILY_BUDGET_CENTS;
+    // Most label tests cover the operator-funded path, which is opt-in.
+    process.env.LABEL_ALLOW_OPERATOR_FUNDED = "true";
     setStripeForTests(null);
   });
   afterEach(() => {
@@ -435,6 +437,26 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
       expect(ep.calls).toHaveLength(0); // nothing quoted
     } finally {
       restore();
+    }
+  });
+
+  it("by default sells no label the buyer did not pay for: refused before any provider call", async () => {
+    delete process.env.LABEL_ALLOW_OPERATOR_FUNDED;
+    process.env.EASYPOST_API_KEY = "EZTK_TEST_KEY";
+    const order = await seedOrder();
+    await confirmPayment(order.id, sellerId);
+    await shareShippingAddress(order.id, buyerId);
+    const providerFetch = vi.fn();
+    vi.stubGlobal("fetch", providerFetch);
+    try {
+      const err = await buyShippingLabel(order.id, sellerId, {
+        fromAddress: { name: "S", line1: "2 St", city: "C", postalCode: "00", country: "IT" },
+        weightGrams: 500,
+      }).catch((e: unknown) => e);
+      expect((err as OrderFlowError).code).toBe("label_not_paid_by_buyer");
+      expect(providerFetch).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 

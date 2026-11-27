@@ -8,6 +8,8 @@
 // against webhooks/tools. Alert-only rules (7, 9) never change state.
 
 import { pool } from "./db.js";
+import type { PoolClient } from "pg";
+import type Stripe from "stripe";
 import { orderFlowConfig, type OrderFlowConfig } from "./config.js";
 import {
   applyTransition,
@@ -24,7 +26,7 @@ import {
   payoutBaseCents,
 } from "./stripe.js";
 import { processCarrierEvent } from "./webhooks-carrier.js";
-import { processStripeEvent } from "./webhooks-stripe.js";
+import { processStripeEvent, processStripeV2Notification } from "./webhooks-stripe.js";
 import { planAccountNotification } from "./notify/items.js";
 import { planOperatorAlert } from "./notify/operator.js";
 import { notifyConfig } from "./config.js";
@@ -385,25 +387,74 @@ function attemptTagOf(error: string): { n: number; at: number } {
   return { n: parseInt(m[1], 10), at: Date.parse(m[2]) || 0 };
 }
 
+interface WebhookEventRow {
+  id: string;
+  source: "stripe" | "carrier";
+  external_id: string;
+  payload: unknown;
+  process_error: string;
+}
+
+const RULE6_CANDIDATES = `SELECT id, source, external_id, payload, process_error FROM webhook_events
+  WHERE processed_at IS NULL AND process_error IS NOT NULL AND process_error NOT LIKE 'skipped:%'`;
+
+/** F11 reprocessing wrapper shared by the v1/carrier loop and the v2
+ *  reprocessor (THI-1698): backoff gate, transaction, processed_at flip and
+ *  attempt tagging live here ONCE so the two paths cannot drift. */
+async function reprocessWebhookEvent(
+  report: SweepReport,
+  ev: Pick<WebhookEventRow, "id" | "source" | "external_id" | "process_error">,
+  now: Date,
+  apply: (client: PoolClient) => Promise<void>,
+): Promise<void> {
+  const { n, at } = attemptTagOf(ev.process_error);
+  const backoffMs = Math.min(15 * 60_000 * 2 ** n, hours(6));
+  if (n > 0 && now.getTime() - at < backoffMs) {
+    tally(report, RETRY_RULE6, "skipped");
+    return;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await apply(client);
+    await client.query("UPDATE webhook_events SET processed_at = now(), process_error = NULL WHERE id = $1 AND processed_at IS NULL", [ev.id]);
+    await client.query("COMMIT");
+    tally(report, RETRY_RULE6, "acted");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    const next = n + 1;
+    const msg = `${ev.process_error.replace(ATTEMPT_RE, "").trim()} [attempt ${next} @ ${now.toISOString()}]`;
+    await pool.query("UPDATE webhook_events SET process_error = $2 WHERE id = $1 AND processed_at IS NULL", [ev.id, msg]).catch(() => undefined);
+    if (next >= 5) {
+      console.error(
+        `[sweep:6] operator alert: webhook event ${ev.source}/${ev.external_id} failed reprocessing ${next} times — manual action needed:`,
+        (err as Error).message,
+      );
+    }
+    tally(report, RETRY_RULE6, "errored");
+  } finally {
+    client.release();
+  }
+}
+
 async function rule6(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
   open(report, RETRY_RULE6);
-  const { rows } = await pool.query<{ id: string; source: "stripe" | "carrier"; external_id: string; payload: unknown; process_error: string }>(
-    `SELECT id, source, external_id, payload, process_error FROM webhook_events
-     WHERE processed_at IS NULL AND process_error IS NOT NULL AND process_error NOT LIKE 'skipped:%'
+  // `NOT LIKE 'v2:%'` (THI-1698): v2 event-destination notifications (THI-1681)
+  // live in their own id namespace and have their own reprocessor below — the
+  // v1 events.retrieve can never resolve a `v2:` id, so letting them through
+  // here would only error-loop. `rejected:` rows stay FINAL here too (THI-1694
+  // R2): re-running processStripeEvent on a settled rejection is never wanted.
+  // The v2 arm below deliberately does NOT inherit this exclusion — it re-screens
+  // F5 itself and settles cross-mode rows terminally instead of re-litigating.
+  const { rows } = await pool.query<WebhookEventRow>(
+    `${RULE6_CANDIDATES} AND external_id NOT LIKE 'v2:%'
        AND (process_error IS NULL OR process_error NOT LIKE 'rejected:%')
      ORDER BY received_at LIMIT 100`,
+
   );
   const stripe = getStripe();
   for (const ev of rows) {
-    const { n, at } = attemptTagOf(ev.process_error);
-    const backoffMs = Math.min(15 * 60_000 * 2 ** n, hours(6));
-    if (n > 0 && now.getTime() - at < backoffMs) {
-      tally(report, RETRY_RULE6, "skipped");
-      continue;
-    }
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
+    await reprocessWebhookEvent(report, ev, now, async (client) => {
       if (ev.source === "stripe") {
         if (!stripe) throw new Error("payments_not_configured");
         // Stored payload is redacted (F6) — re-fetch the event by id and
@@ -414,24 +465,102 @@ async function rule6(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
       } else {
         await processCarrierEvent(ev.payload as never, ev.external_id, client, cfg);
       }
-      await client.query("UPDATE webhook_events SET processed_at = now(), process_error = NULL WHERE id = $1 AND processed_at IS NULL", [ev.id]);
-      await client.query("COMMIT");
-      tally(report, RETRY_RULE6, "acted");
-    } catch (err) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      const next = n + 1;
-      const msg = `${ev.process_error.replace(ATTEMPT_RE, "").trim()} [attempt ${next} @ ${now.toISOString()}]`;
-      await pool.query("UPDATE webhook_events SET process_error = $2 WHERE id = $1 AND processed_at IS NULL", [ev.id, msg]).catch(() => undefined);
-      if (next >= 5) {
-        console.error(
-          `[sweep:6] operator alert: webhook event ${ev.source}/${ev.external_id} failed reprocessing ${next} times — manual action needed:`,
-          (err as Error).message,
-        );
+    });
+  }
+  await reprocessStripeV2Events(report, cfg, now);
+}
+
+// --- Rule 6 v2 arm (THI-1698, THI-1696 R1): the Accounts v2 event-destination
+//  endpoint (THI-1681) stores notifications under the `v2:` id namespace; when
+//  their processing fails transiently (e.g. the fetchRelatedObject round-trip
+//  → 500) Stripe's redelivery only hits the dedupe (200 duplicate, provider
+//  stops retrying) — without this pass the stranded seller flip needs the
+//  manual operator path. The stored payload is REDACTED (F6: ids, type,
+//  livemode only), so the thin notification is rebuilt from those ids and the
+//  related object is re-fetched by the stored object_id on the v2 API path
+//  with the same-mode platform key; re-running the exported ingest handler
+//  keeps the flip's NULL→set conditional (verify→dedupe semantics, never
+//  re-badges).
+
+interface V2StoredPayload {
+  id: string;
+  type: string;
+  livemode: boolean;
+  object_id: string | null;
+  object_type: string | null;
+}
+
+function asV2StoredPayload(raw: unknown): V2StoredPayload | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const p = raw as Record<string, unknown>;
+  if (typeof p.id !== "string" || typeof p.type !== "string") return null;
+  return {
+    id: p.id,
+    type: p.type,
+    livemode: p.livemode === true,
+    object_id: typeof p.object_id === "string" ? p.object_id : null,
+    object_type: typeof p.object_type === "string" ? p.object_type : null,
+  };
+}
+
+/** Thin-notification reconstruction: ids only (the stored payload never held
+ *  more); fetchRelatedObject does what the SDK's pulled-event helper does —
+ *  GET the related object on the v2 API path — so the ingest handler sees the
+ *  account's CURRENT state, exactly as on first delivery. */
+function rebuildV2Notification(payload: V2StoredPayload, stripe: Stripe): Stripe.V2.Core.EventNotification {
+  const notif = {
+    id: payload.id,
+    type: payload.type,
+    livemode: payload.livemode,
+    related_object: { id: payload.object_id, type: payload.object_type, url: null },
+    fetchRelatedObject: async () => {
+      // Fail safe: a capability row without usable related-object ids (or
+      // with a type this code cannot fetch) throws — the shared error path
+      // attempt-tags the row and alerts the operator; nothing is applied.
+      if (!payload.object_id || !payload.object_type) {
+        throw new Error("v2 notification payload carries no related object ids");
       }
-      tally(report, RETRY_RULE6, "errored");
-    } finally {
-      client.release();
+      if (payload.object_type !== "v2.core.account") {
+        throw new Error(`unsupported v2 related object type: ${payload.object_type}`);
+      }
+      return stripe.v2.core.accounts.retrieve(payload.object_id);
+    },
+  };
+  return notif as unknown as Stripe.V2.Core.EventNotification;
+}
+
+async function reprocessStripeV2Events(report: SweepReport, cfg: OrderFlowConfig, now: Date) {
+  const { rows } = await pool.query<WebhookEventRow>(
+    `${RULE6_CANDIDATES} AND source = 'stripe' AND external_id LIKE 'v2:%' ORDER BY received_at LIMIT 100`,
+  );
+  if (rows.length === 0) return;
+  const stripe = getStripe();
+  for (const ev of rows) {
+    const payload = asV2StoredPayload(ev.payload);
+    if (!payload) {
+      // Unreadable stored payload: immutable, so retrying can never succeed —
+      // still routed through the error path (attempt tags + operator alert
+      // after 5) rather than silently marked: a corrupt row needs eyes.
+      await reprocessWebhookEvent(report, ev, now, async () => {
+        throw new Error("inconsistent_state: v2 webhook payload is not a stored notification");
+      });
+      continue;
     }
+    // Re-screen F5 (§6.7) against the CURRENT config before touching the v2
+    // API: a cross-mode payload must never drive a platform-key fetch or a
+    // flip. Terminal, mirroring the ingest endpoint's rejected verdict —
+    // retrying a mode mismatch would only re-produce it.
+    if (payload.livemode !== (cfg.stripeMode === "live")) {
+      await pool
+        .query("UPDATE webhook_events SET processed_at = now() WHERE id = $1 AND processed_at IS NULL", [ev.id])
+        .catch(() => undefined);
+      tally(report, RETRY_RULE6, "acted");
+      continue;
+    }
+    await reprocessWebhookEvent(report, ev, now, async (client) => {
+      if (!stripe) throw new Error("payments_not_configured");
+      await processStripeV2Notification(rebuildV2Notification(payload, stripe), client);
+    });
   }
 }
 

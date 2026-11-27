@@ -270,8 +270,25 @@ async function ingestStripeWebhook(
  *  account.updated handler and the v2 capability_status_updated handler.
  *  Active → NULL→set flip (one badge per Stripe account, idempotent under
  *  redelivery, THI-780 PR 3); not-active → reset (re-off). F5 known-account
- *  guard is inherent: unknown ids match no rows. */
-async function flipSellerOnboarding(db: PoolClient, accountId: string, active: boolean): Promise<void> {
+ *  guard is inherent: unknown ids match no rows.
+ *  THI-1625 B-1: additionally persists the connected account's payout
+ *  country (ISO 3166-1 alpha-2, `account.country`) for the D4 allowlist
+ *  gate. Same known-account WHERE as the flip; idempotent under redelivery;
+ *  never cleared — an account's country is stable data, unlike the
+ *  capability flip. Absent/NULL keeps the stored value (legacy accounts
+ *  stay NULL until Stripe delivers their next account event). */
+async function flipSellerOnboarding(
+  db: PoolClient,
+  accountId: string,
+  active: boolean,
+  country?: string | null,
+): Promise<void> {
+  if (country) {
+    await db.query(
+      "UPDATE sellers SET stripe_account_country = $2 WHERE stripe_account_id = $1",
+      [accountId, country],
+    );
+  }
   const flipped = await db.query<{ id: string; email: string | null }>(
     `UPDATE sellers SET stripe_onboarded_at = $2
       WHERE stripe_account_id = $1 AND $2::timestamptz IS NOT NULL AND stripe_onboarded_at IS NULL
@@ -451,11 +468,15 @@ async function ingestStripeV2Webhook(
  *  capability event matters here — stripe_balance.stripe_transfers reaching
  *  `active` is exactly "the seller can receive payouts" (mirror of the v1
  *  capabilities.transfers check). */
-async function processStripeV2Notification(notif: Stripe.V2.Core.EventNotification, db: PoolClient): Promise<void> {
+/** Exported for sweep rule 6's v2-aware reprocessor (THI-1698): a stranded
+ *  notification is rebuilt from its stored REDACTED payload and re-run
+ *  through this exact handler so verify→dedupe semantics cannot drift. */
+export async function processStripeV2Notification(notif: Stripe.V2.Core.EventNotification, db: PoolClient): Promise<void> {
   if (notif.type !== "v2.core.account[configuration.recipient].capability_status_updated") return;
   const account = (await notif.fetchRelatedObject()) as
     | {
         id?: string;
+        country?: string;
         configuration?: {
           recipient?: {
             capabilities?: { stripe_balance?: { stripe_transfers?: { status?: string } } };
@@ -466,7 +487,7 @@ async function processStripeV2Notification(notif: Stripe.V2.Core.EventNotificati
   if (!account?.id) throw new WebhookRejectError("capability event without a related account");
   const active =
     account.configuration?.recipient?.capabilities?.stripe_balance?.stripe_transfers?.status === "active";
-  await flipSellerOnboarding(db, account.id, active);
+  await flipSellerOnboarding(db, account.id, active, account.country);
 }
 
 // ---------------------------------------------------------------------------
@@ -712,7 +733,7 @@ export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cf
       // THI-780 PR 3: badge the seller exactly once per Stripe account on the
       // NULL→set flip (plan §5): re-off cycles never re-badge, and the
       // notification is idempotent under webhook redelivery.
-      await flipSellerOnboarding(db, account.id, account.capabilities?.transfers === "active");
+      await flipSellerOnboarding(db, account.id, account.capabilities?.transfers === "active", account.country);
       return;
     }
     case "charge.dispute.created": {

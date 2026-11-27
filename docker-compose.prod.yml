@@ -122,6 +122,9 @@ services:
       SENDCLOUD_VALIDATE_CARRIER_CODE: ${SENDCLOUD_VALIDATE_CARRIER_CODE:-}
       LABEL_MAX_COST_CENTS: ${LABEL_MAX_COST_CENTS:-}
       LABEL_DAILY_BUDGET_CENTS: ${LABEL_DAILY_BUDGET_CENTS:-}
+      # "true" lets sellers buy labels this deployment pays for; unset/anything
+      # else sells labels only against shipping the buyer paid.
+      LABEL_ALLOW_OPERATOR_FUNDED: ${LABEL_ALLOW_OPERATOR_FUNDED:-}
       # Notifications — in-app store + Resend transactional email (THI-760
       # Phase 0-1, enablement THI-779). NOTIFY_EMAIL_ENABLED=false keeps email
       # dark (in-app notifications only, code default). Flag on with an empty

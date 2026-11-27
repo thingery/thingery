@@ -587,9 +587,28 @@ Setup:
    export GIT_COMMIT=$(git rev-parse HEAD)
    export BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
    docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d --build
+   # THI-1671 tripwire: verify the deploy did not recreate caddy without the web
+   # overlay; if it did, run the documented restore immediately, then fail the run.
+   caddy_label=$(docker inspect thingery-caddy-1 \
+     --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' 2>/dev/null || true)
+   if printf '%s' "$caddy_label" | grep -qF '/opt/thingery-web/docker-compose.web.yml'; then
+     echo "thingery-deploy: caddy overlay label OK (THI-1671)"
+   else
+     echo "thingery-deploy: TRIPWIRE - caddy config_files label lost the web overlay (label=${caddy_label:-<empty>}); running the documented restore (THI-1671)" >&2
+     docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d caddy
+     echo "thingery-deploy: caddy recreated with the web overlay - EXITING NON-ZERO so this deploy is visibly failed and the drift cause gets investigated (THI-1671)" >&2
+     exit 1
+   fi
    docker image prune -f
    echo "thingery-deploy: done at $GIT_COMMIT"
    ```
+
+   After the `up`, the **tripwire** (THI-1671) re-reads the `com.docker.compose.project.config_files`
+   label the deploy just wrote; if the web overlay is missing it immediately re-runs the documented
+   restore (`up -d caddy` **with** the overlay, per the §5 note above) and exits non-zero, so the
+   Actions run fails visibly instead of silently depublishing the platform routes. The nightly
+   `thingery-web-drift-check` cron (04:17 UTC, VPS-side) is the standing watchdog for the same
+   signature between deploys.
 
 3. **Operator machine: dedicated keypair** (never a personal key). The private key
    goes straight into the `production` environment secret and the local copy is
@@ -1396,6 +1415,17 @@ sudo touch /var/log/thingery-daily-metrics.log && sudo chown deploy:deploy /var/
 (`deploy` owns `/opt/thingery` and is in the `docker` group — same posture as
 the deploy flow in §5.)
 
+Since THI-1730 the app-log source is the host journal (§7), which is
+`systemd-journal`-group-readable only — grant the cron user read access.
+(Observed missing on the VPS 2026-11-26: the script silently returned zero
+app-line metrics while running fine as `deploy` — verify this step or the
+snapshot is counts-of-zero.)
+
+```bash
+sudo usermod -aG systemd-journal deploy   # applied on the VPS 2026-11-26
+sudo -u deploy journalctl -t thingery-app --since -30m | tail -2   # verify: app lines appear
+```
+
 **Verify:** `scripts/daily-metrics.sh` from `/opt/thingery` (expect a summary
 block + a file under `metrics/`), then `tail -1 /var/log/thingery-daily-metrics.log`
 the next day. Read any snapshot with
@@ -1483,8 +1513,10 @@ method, path, status, and User-Agent as one JSON line.
   does `journalctl CONTAINER_NAME=... -f`.) `db`/`caddy` keep the THI-312 caveat:
   same-container restarts preserve their `json-file` logs; a recreate starts a
   fresh log file — nightly DB backups remain the durable record of state.
-- **Bounded disk (app):** app stdout is small in practice (~0.4 MB/day observed),
-  and the journal is capped by the installed drop-in
+- **Bounded disk (app):** app stdout is small in practice (~0.4 MB/day observed;
+  0.63 MB/day re-measured 2026-11-26 — ~6 MB/day is the whole-journal intake,
+  so the 200M cap is roughly a month of headroom), and the journal is capped by
+  the installed drop-in
   `/etc/systemd/journald.conf.d/thingery.conf` (`SystemMaxUse=200M`; install
   step in the platform deploy docs) — without it the default is ≤10% of the
   filesystem, stopping at 15% free. `journalctl --disk-usage` shows the total,
@@ -1492,6 +1524,9 @@ method, path, status, and User-Agent as one JSON line.
   shrinks it on demand. Note journald applies rate limiting (~10k messages/30s);
   a pathological app burst would be sampled, not dropped silently — look for
   "Suppressed" lines. `json-file` services stay bounded at 3 × 10 MB each.
+  Coverage boundary: app entries begin at the THI-1330 driver deploy
+  (2026-11-24 07:19 UTC on the VPS) — trailing-7d app-log metrics reach back
+  only that far, not to the vacuum cap.
 - **Confidentiality:** access lines contain client IPs and user agents — operator
   data, not public data. The journal is root/`systemd-journal`-group-readable only.
   Do not paste raw access logs into public issues; strip IPs first.

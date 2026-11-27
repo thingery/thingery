@@ -2123,9 +2123,11 @@ export function registerTools(
         openWorldHint: false,
       },
       description:
-        "Seller buys a shipping label through the platform on a sold, shippable order (sold → label_issued): " +
-        "the platform quotes carrier rates via the deployment's shipping provider, buys the cheapest EUR one (or the cheapest matching " +
-        "carrier_preference), and stores carrier + tracking + label URL and a purchase snapshot. " +
+        "Seller buys a shipping label through the platform on a sold, shippable order (sold → label_issued), " +
+        "and the platform stores carrier + tracking + label URL and a purchase snapshot. " +
+        "Labels are sold only on orders whose shipping the buyer paid at checkout; other orders fail with " +
+        "label_not_paid_by_buyer and ship via record_tracking, unless the deployment opted into paying for labels " +
+        "itself (it then buys the cheapest EUR rate, or the cheapest matching carrier_preference). " +
         "On an order whose shipping the buyer paid at checkout (label-quote mode), the label is bought " +
         "against the paid quote — from_address/weight/dimensions are locked to the quoted snapshot, " +
         "carrier_preference applies only if the paid rate is no longer purchasable, and a live rate " +

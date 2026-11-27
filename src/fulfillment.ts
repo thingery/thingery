@@ -638,11 +638,16 @@ export async function buyShippingLabel(
     throw new OrderFlowError("inconsistent_state", "Shipping address unavailable; refusing to buy a label.");
   }
 
-  // Buyer-paid quote mode (§5): everything below — flat-mode quote from live
-  // rates, operator-funded — is the unchanged legacy path. The quote-mode
-  // branch buys against the paid amount instead.
+  // Buyer-paid quote mode (§5) buys against the paid amount. Everything below
+  // is paid by the deployment, so it runs only when the operator opted in.
   if (order.label_quote) {
     return await buyQuoteModeLabel(order, sellerId, input, order.label_quote);
+  }
+  if (!orderFlowConfig().labelAllowOperatorFunded) {
+    throw new OrderFlowError(
+      "label_not_paid_by_buyer",
+      "The buyer did not pay a quoted shipping label on this order, so none can be bought here. Ship with your own carrier label and record it with record_tracking.",
+    );
   }
 
   // Parcel defaults from the listing, seller-overridable (spec §2).

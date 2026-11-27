@@ -1467,7 +1467,10 @@ method, path, status, and User-Agent as one JSON line.
   `docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml logs caddy` (access log),
   `... logs app` or `docker logs thingery-app-1` (app — running container only), and
   `sudo journalctl -t thingery-app` (app — full history). `-f` follows,
-  `--since 1h` / `--since "2026-11-23 22:30" --until "2026-11-24 06:10"` limit.
+  `--since -1h` / `--since "2026-11-23 22:30" --until "2026-11-24 06:10"` limit.
+  (Note the leading dash on relative spans: journalctl parses `--since -168h`,
+  but fails `--since 168h` with "Failed to parse timestamp" — docker's
+  `--since 168h` is the opposite convention.)
 - **Survives restarts and recreates (app, THI-1330):** restarts, crashes, VPS
   reboots, *and* deploy-driven recreates all keep app logs readable — the journal is
   written by the host daemon and outlives every container. Query a pre-deploy window
@@ -1478,8 +1481,11 @@ method, path, status, and User-Agent as one JSON line.
   same-container restarts preserve their `json-file` logs; a recreate starts a
   fresh log file — nightly DB backups remain the durable record of state.
 - **Bounded disk (app):** app stdout is small in practice (~0.4 MB/day observed),
-  and the journal self-vacuums to host defaults (≤10% of the filesystem, stops at
-  15% free) — `journalctl --disk-usage` shows the total, `sudo journalctl --vacuum-size=500M`
+  and the journal is capped by the installed drop-in
+  `/etc/systemd/journald.conf.d/thingery.conf` (`SystemMaxUse=200M`; install
+  step in the platform deploy docs) — without it the default is ≤10% of the
+  filesystem, stopping at 15% free. `journalctl --disk-usage` shows the total,
+  `sudo journalctl --vacuum-size=500M`
   shrinks it on demand. Note journald applies rate limiting (~10k messages/30s);
   a pathological app burst would be sampled, not dropped silently — look for
   "Suppressed" lines. `json-file` services stay bounded at 3 × 10 MB each.

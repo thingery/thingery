@@ -20,14 +20,17 @@
 # identities with scripts/check-fixture-leaks.sh and file per policy rule 4.
 #
 # Sources (all read-only):
-#   - app container stdout (docker compose logs): THI-371 `tool_call` dispatch
-#     lines + THI-394 `tool_result` outcome lines (see docs/metrics.md)
+#   - app stdout via the host journal (journalctl -t thingery-app, THI-1330
+#     journald driver; falls back to `docker compose logs` for deployments
+#     still on the json-file driver): THI-371 `tool_call` dispatch lines +
+#     THI-394 `tool_result` outcome lines (see docs/metrics.md)
 #   - Postgres: items/sellers aggregates
 #   - public npm downloads API (best effort; null offline)
 #
 # Output: a human-readable block on stdout AND a JSON snapshot written to
 # $THINGERY_METRICS_DIR (default ./metrics) as daily-YYYY-MM-DD.json — the
-# durable record, because container logs rotate (10m x 3 files per service).
+# durable record, because db/caddy container logs rotate (10m x 3) and the
+# journal has its own vacuum cap (docs/deploy-vps.md §7).
 # Re-running the same day overwrites that day's snapshot (idempotent).
 #
 # Run on the VPS from /opt/thingery (any checkout with the compose stack up):
@@ -77,8 +80,25 @@ done
 # SQL section below fails as it always has.
 SYNTH_IDS=$(db_psql -c "SELECT coalesce(json_agg(s.id), '[]'::json) FROM sellers s WHERE $PRED" | head -1) || SYNTH_IDS="[]"
 
-# --- 1. Capture analytics lines from the app container ----------------------
-RAW_LINES=$(docker compose -f "$COMPOSE_FILE" logs --no-log-prefix --since "${HOURS}h" app 2>/dev/null \
+# --- 1. Capture analytics lines from the app --------------------------------
+# THI-1730: read the persistent host journal (driver journald, tag
+# thingery-app — THI-1330) when the running app uses it, so a deploy recreate
+# no longer resets the window: `docker compose logs` reads the per-container
+# json-file and every recreate starts that file empty. Note journalctl's
+# relative --since needs the leading dash ("-24h"); docker's does not.
+# Fall back to docker compose logs for deployments still on json-file
+# (driver override or non-systemd hosts).
+app_log_lines() {
+  local drv=""
+  drv=$(docker inspect --format '{{.HostConfig.LogConfig.Type}}' \
+    "$(docker compose -f "$COMPOSE_FILE" ps -q app)" 2>/dev/null || true)
+  if [ "$drv" = "journald" ] && command -v journalctl >/dev/null 2>&1; then
+    journalctl -t "${THINGERY_APP_LOG_TAG:-thingery-app}" -o cat --since "-${HOURS}h" 2>/dev/null || true
+  else
+    docker compose -f "$COMPOSE_FILE" logs --no-log-prefix --since "${HOURS}h" app 2>/dev/null || true
+  fi
+}
+RAW_LINES=$(app_log_lines \
   | jq -Rr 'fromjson? // empty' | jq -c 'select(.type == "tool_call" or .type == "tool_result" or .type == "page_view")' || true)
 
 LOG_METRICS=$(printf '%s\n' "$RAW_LINES" | jq -s --argjson synth_ids "${SYNTH_IDS:-[]}" '

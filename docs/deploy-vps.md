@@ -944,6 +944,28 @@ that is a funding-setup signal (platform payout currency), not a code bug.
 On refunded orders buyers are refunded in full and Stripe keeps the fee; the
 platform's exposure per refunded order is bounded by that fee.
 
+**Chargebacks on paid-out orders (THI-1611 A3).** A `charge.dispute.created` /
+`charge.dispute.closed` event for an order that is already terminal (`paid_out`,
+`refunded`, `cancelled`, `completed`) cannot change state (#22 sources from
+non-terminal states only) and is handled instead of dropped: every such event
+writes a durable `terminal_dispute` row to `order_events` and alerts the
+operator (alert kind `post_payout_chargeback`; `console.error` floor always,
+`operator.post_payout_chargeback.v1` email when `OPERATOR_ALERT_EMAIL` is set).
+On a paid-out order the recovery policy auto-attempts a full
+`transfers.createReversal` of the seller's transfer — Stripe lands it as a
+negative connected-account balance recovered from the seller's future earnings.
+Skipped when the representment was WON (the charge stood — the payout is
+legitimate), when the buyer was already refunded (`refund_id` set — a reversal
+on top would double-recover), or when there is no transfer. The attempt outcome
+is recorded on the order (`transfer_reversal` `order_events` row: `succeeded`,
+`already_reversed`, `failed`). A FAILED reversal escalates with its own alert
+(kind `reversal_failed`) — real money, not a log line: act via the Stripe
+dashboard (reverse the transfer manually / reconcile) and keep the seller's
+future payouts offset until the negative balance clears. If a dispute is later
+WON after a reversal pulled the payout back, compensate the seller with a
+manual Stripe-dashboard transfer — there is no re-release transition from
+`paid_out` by design.
+
 **Rollback (documented path back to the kill switch).** Comment out or remove the
 `STRIPE_*` lines in `/opt/thingery/.env`, then
 `cd /opt/thingery && docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.web.yml up -d`. The app

@@ -34,7 +34,7 @@ import { orderFlowConfig, type OrderFlowConfig } from "./config.js";
 import { getStripe, createRefundForOrder, isNothingDueRefund, chargeTotalCents } from "./stripe.js";
 import { planAccountNotification } from "./notify/items.js";
 import { planOperatorAlert } from "./notify/operator.js";
-import { applyTransition, IllegalTransitionError, type OrderRow, type OrderStatus } from "./orders.js";
+import { applyTransition, IllegalTransitionError, TERMINAL_STATUSES, type OrderRow, type OrderStatus } from "./orders.js";
 
 /** Spec §6.5 acceptance failure (F5): stored + logged, NO state change, 2xx —
  *  retrying a config mismatch would only produce the same rejection. */
@@ -742,9 +742,17 @@ export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cf
         "SELECT * FROM orders WHERE payment_intent_id = $1",
         [dispute.payment_intent as string | null],
       );
-      if (!rows[0]) return;
+      const order = rows[0];
+      if (!order) return;
+      // A3 (THI-1611 §A3): on a terminal order #22 has no legal transition —
+      // but the event must never drop silently: durable record + operator
+      // alert + transfer recovery attempt (handleTerminalOrderDispute).
+      if (TERMINAL_STATUSES.includes(order.status)) {
+        await handleTerminalOrderDispute(db, order, dispute, event, "created");
+        return;
+      }
       await applyTransition({
-        orderId: rows[0].id,
+        orderId: order.id,
         trigger: "chargeback",
         actor: { type: "stripe", id: event.id },
         reason: `dispute ${dispute.id} (${dispute.reason ?? "unspecified"})`,
@@ -754,23 +762,32 @@ export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cf
     }
     case "charge.dispute.closed": {
       const dispute = object as unknown as Stripe.Dispute;
-      if (dispute.status !== "won") {
-        // A2 (THI-1611): a lost / charge_refunded closure is the buyer winning
-        // the chargeback — Stripe has refunded (or is refunding) the charge, so
-        // the refund path does NOT own this unwind. The verdict itself must
-        // terminalize the order (see handleDisputeLost). warning closures
-        // (never a dispute on Stripe's books) stay stored no-ops.
-        if (dispute.status === "lost" || dispute.status === "charge_refunded") {
-          await handleDisputeLost(db, event, dispute);
-        }
-        return;
-      }
       const { rows } = await db.query<OrderRow>(
         "SELECT * FROM orders WHERE payment_intent_id = $1",
         [dispute.payment_intent as string | null],
       );
       const order = rows[0];
-      if (!order || order.status !== "disputed") return;
+      if (!order) return;
+      // A3 (THI-1611 §A3): a closure landing on a terminal order is the same
+      // never-silent story as created (alert + recovery; a WON representment
+      // skips the reversal — the charge stood, the payout is legitimate).
+      if (TERMINAL_STATUSES.includes(order.status)) {
+        await handleTerminalOrderDispute(db, order, dispute, event, "closed");
+        return;
+      }
+      // A2 (THI-1611): a lost / charge_refunded closure is the buyer winning
+      // the chargeback — Stripe has refunded (or is refunding) the charge, so
+      // the refund path does NOT own this unwind. The verdict itself must
+      // terminalize the order (see handleDisputeLost). warning closures
+      // (never a dispute on Stripe's books) stay stored no-ops. Terminal
+      // orders are handled above (A3) and never reach this branch.
+      if (dispute.status !== "won") {
+        if (dispute.status === "lost" || dispute.status === "charge_refunded") {
+          await handleDisputeLost(db, event, dispute);
+        }
+        return;
+      }
+      if (order.status !== "disputed") return;
       // Restore the recorded pre-dispute state (§2.3 #22 note): the #22
       // transition event carries from_status; pending chargebacks restore
       // to sold (the charge completing is what made it disputable).
@@ -799,6 +816,147 @@ export async function processStripeEvent(event: Stripe.Event, db: PoolClient, cf
       return;
   }
 }
+
+// ---------------------------------------------------------------------------
+// A3 (THI-1611 spec §A3): disputes landing on terminal orders.
+
+/**
+ * A dispute event whose order is already terminal (paid_out, refunded,
+ * cancelled, completed): transition #22 correctly refuses non-terminal-only
+ * sources, but the money story is not over — on paid_out the seller keeps the
+ * payout on a charge the buyer is disputing. Defined handling, never a silent
+ * drop:
+ *
+ *   1. Durable record (order_events `terminal_dispute`) + operator alert —
+ *      on created AND closed phases, any closure status.
+ *   2. Recovery: full `transfers.createReversal` of the order's transfer —
+ *      Stripe lands it as a negative connected-account balance recovered from
+ *      the seller's future earnings. The attempt outcome is recorded durably
+ *      on the order (`transfer_reversal` row: succeeded | already_reversed |
+ *      failed); a failed reversal escalates with its own always-firing alert —
+ *      real money, not a log line.
+ *
+ * Reversal is skipped when: the representment was WON (the charge stood —
+ * clawing back would strand the seller; the alert still fires), the buyer was
+ * already refunded (refund_id — a reversal on top would double-recover), or
+ * there is no transfer to pull from.
+ *
+ * Replay-safety (webhook idempotency lens): order_events rows dedupe per
+ * Stripe event id (`terminal_dispute:{event.id}`, `reversal_attempt:{event.id}`)
+ * so rule-6 reprocessing never double-writes; the Stripe call reuses the §6.6
+ * idempotency key `reversal:{order_id}` so every path (this recovery and the
+ * admin refund-after-transfer) replays the SAME reversal, never a second one.
+ * Alerts dedupe per event id (post-payout) / per order (escalation).
+ */
+async function handleTerminalOrderDispute(
+  db: PoolClient,
+  order: OrderRow,
+  dispute: Stripe.Dispute,
+  event: Stripe.Event,
+  phase: "created" | "closed",
+): Promise<void> {
+  const disputeStatus = dispute.status ?? "unspecified";
+  await db.query(
+    `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload, dedupe_key)
+     VALUES ($1, 'terminal_dispute', 'stripe', $2, $3, $4::jsonb, $5)
+     ON CONFLICT (dedupe_key) DO NOTHING`,
+    [
+      order.id,
+      event.id,
+      `dispute ${dispute.id} (${dispute.reason ?? "unspecified"}, ${disputeStatus}) ${phase} on ${order.status} order`,
+      JSON.stringify({
+        dispute_id: dispute.id,
+        dispute_status: disputeStatus,
+        reason: dispute.reason ?? null,
+        phase,
+        order_status: order.status,
+      }),
+      `terminal_dispute:${event.id}`,
+    ],
+  );
+  const lines = [
+    `Order: ${order.id} (${order.status})`,
+    `Dispute: ${dispute.id} (${dispute.reason ?? "unspecified"}, ${disputeStatus}) — ${phase}`,
+    "Action: inspect in Stripe dashboard — payout recovery engaged (docs/deploy-vps.md §5.3)",
+  ];
+  console.error(
+    `[webhooks:stripe] operator alert: dispute ${dispute.id} (${disputeStatus}) ${phase} on terminal order ${order.id} (${order.status})`,
+  );
+  await planOperatorAlert({
+    kind: "post_payout_chargeback",
+    ref: `post_payout_chargeback:${event.id}`,
+    subject: `Chargeback on ${order.status} order ${order.id} — Thingery`,
+    payload: { title: "Chargeback on a terminal order — payout recovery engaged", lines },
+    client: db,
+  });
+
+  if (phase === "closed" && disputeStatus === "won") return; // charge stood — payout is legitimate
+  if (order.payment_mode !== "stripe" || !order.transfer_id || order.refund_id) return;
+  const stripe = getStripe();
+  if (!stripe) throw new Error("payments_not_configured");
+
+  let outcome: "succeeded" | "already_reversed" | "failed";
+  let reversalId: string | null = null;
+  let error: string | null = null;
+  try {
+    const transfer = await stripe.transfers.retrieve(order.transfer_id);
+    if (transfer.amount_reversed) {
+      outcome = "already_reversed"; // reconcile-don't-recreate (F3)
+    } else {
+      // §6.6 idempotency key: dispute recovery and admin refund replay the
+      // same reversal — never a second money movement for one order.
+      const reversal = await stripe.transfers.createReversal(
+        order.transfer_id,
+        {},
+        { idempotencyKey: `reversal:${order.id}` },
+      );
+      reversalId = reversal.id ?? null;
+      outcome = "succeeded";
+    }
+  } catch (err) {
+    outcome = "failed";
+    error = (err as Error).message.slice(0, 300);
+  }
+  await db.query(
+    `INSERT INTO order_events (order_id, event_type, actor_type, actor_id, reason, payload, dedupe_key)
+     VALUES ($1, 'transfer_reversal', 'stripe', $2, $3, $4::jsonb, $5)
+     ON CONFLICT (dedupe_key) DO NOTHING`,
+    [
+      order.id,
+      event.id,
+      `reversal of transfer ${order.transfer_id}: ${outcome}${error ? ` (${error})` : ""}`,
+      JSON.stringify({
+        transfer_id: order.transfer_id,
+        reversal_id: reversalId,
+        outcome,
+        error,
+        dispute_id: dispute.id,
+      }),
+      `reversal_attempt:${event.id}`,
+    ],
+  );
+  if (outcome === "failed") {
+    console.error(
+      `[webhooks:stripe] operator alert: reversal of ${order.transfer_id} FAILED on charged-back order ${order.id} — ${error} (manual recovery via Stripe dashboard; the seller's future earnings carry the negative balance)`,
+    );
+    await planOperatorAlert({
+      kind: "reversal_failed",
+      ref: `reversal_failed:${order.id}`,
+      subject: `REVERSAL FAILED: order ${order.id} — Thingery`,
+      payload: {
+        title: "Transfer reversal failed on a charged-back order — money is still with the seller",
+        lines: [
+          ...lines,
+          `Transfer: ${order.transfer_id}`,
+          `Error: ${error}`,
+          "Action: reverse manually via Stripe dashboard / reconcile — escalate, real money at stake",
+        ],
+      },
+      client: db,
+    });
+  }
+}
+
 
 /**
  * A2 (THI-1611): charge.dispute.closed with status `lost` / `charge_refunded`

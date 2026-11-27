@@ -35,6 +35,10 @@ function fakeStripe(opts: {
   sessionPaymentStatus?: string;
   transferFails?: boolean;
   retrieveEvent?: Stripe.Event;
+  /** THI-1698: v2 reprocessor seam — the related-account GET
+   *  (stripe.v2.core.accounts.retrieve, the v2 API path). */
+  v2Account?: unknown;
+  v2AccountError?: string;
 } = {}) {
   const calls: string[] = [];
   const refundAmounts: (number | undefined)[] = [];
@@ -83,6 +87,18 @@ function fakeStripe(opts: {
         calls.push(`events.retrieve:${id}`);
         if (!opts.retrieveEvent) throw new Error("no event");
         return opts.retrieveEvent;
+      },
+    },
+    v2: {
+      core: {
+        accounts: {
+          retrieve: async (id: string) => {
+            calls.push(`v2.core.accounts.retrieve:${id}`);
+            if (opts.v2AccountError) throw new Error(opts.v2AccountError);
+            if (!opts.v2Account) throw new Error("no v2 account fixture");
+            return opts.v2Account;
+          },
+        },
       },
     },
   } as unknown as Stripe;
@@ -472,6 +488,116 @@ describe.skipIf(!available)("deadline sweeps (DB)", () => {
     const rej = (await db.query("SELECT processed_at, process_error FROM webhook_events WHERE external_id = $1", [evt.id])).rows[0];
     expect(rej.processed_at).toBeNull();
     expect(rej.process_error).toBe("rejected: livemode mismatch");
+  });
+
+  // --- THI-1698: v2-aware reprocessing (THI-1696 R1) -------------------------
+
+  /** A v2 event-destination notification exactly the way the THI-1681 v2
+   *  endpoint stores it (F6 ids-only payload) + the stranded-flip error the
+   *  finding describes (transient ingest failure → 500). */
+  async function seedV2WebhookEvent(
+    notifId: string,
+    objectId: string,
+    opts: { livemode?: boolean; type?: string; error?: string; payload?: unknown } = {},
+  ) {
+    const payload = opts.payload ?? {
+      id: notifId,
+      type: opts.type ?? "v2.core.account[configuration.recipient].capability_status_updated",
+      livemode: opts.livemode ?? false,
+      object_id: objectId,
+      object_type: "v2.core.account",
+    };
+    await db.query(
+      `INSERT INTO webhook_events (source, external_id, payload, process_error) VALUES ('stripe', $1, $2::jsonb, $3)`,
+      [`v2:${notifId}`, JSON.stringify(payload), opts.error ?? "ingest failed: fetchRelatedObject network error"],
+    );
+  }
+
+  /** Related account the way the SDK's v2 accounts.retrieve returns it. */
+  const v2AccountFixture = (acctId: string, transfersStatus = "active") => ({
+    id: acctId,
+    object: "v2.core.account",
+    configuration: { recipient: { capabilities: { stripe_balance: { stripe_transfers: { status: transfersStatus } } } } },
+  });
+
+  it("rule 6: recovers a stranded v2 capability notification — re-fetch by object_id flips the seller (THI-1698)", async () => {
+    n += 1;
+    const acct = `acct_v2_sweep_${n}`;
+    await db.query("INSERT INTO sellers (api_key_hash, display_name, email, stripe_account_id) VALUES ($1,$2,$3,$4)", [
+      `thg_v2sw${n}`, `v2sw${n}`, `v2sw${n}@t.dev`, acct,
+    ]);
+    await seedV2WebhookEvent(`evt_v2_sweep_${n}`, acct);
+    const { client, calls } = fakeStripe({ v2Account: v2AccountFixture(acct, "active") });
+    setStripeForTests(client);
+    const report = await runSweeps(cfg);
+    expect(report["6-reprocess"].acted).toBe(1);
+    expect(calls).toContain(`v2.core.accounts.retrieve:${acct}`); // v2 API path, by the stored object_id
+    expect(calls.filter((c) => c.startsWith("events.retrieve:"))).toEqual([]); // never the v1 API for a v2 row
+    const seller = await db.query("SELECT stripe_onboarded_at FROM sellers WHERE api_key_hash = $1", [`thg_v2sw${n}`]);
+    expect(seller.rows[0].stripe_onboarded_at).not.toBeNull();
+    const row = (await db.query("SELECT processed_at, process_error FROM webhook_events WHERE external_id = $1", [`v2:evt_v2_sweep_${n}`])).rows[0];
+    expect(row.processed_at).not.toBeNull();
+    expect(row.process_error).toBeNull();
+    const badge = await db.query("SELECT count(*)::int AS c FROM notifications WHERE dedupe_key = $1", [`payouts_enabled:${acct}`]);
+    expect(badge.rows[0].c).toBe(1);
+  });
+
+  it("rule 6: v2 row with an unknown object_id fails safe — stays unprocessed, no flip, backoff honored (THI-1698)", async () => {
+    await db.query("DELETE FROM webhook_events WHERE external_id = 'evt_bump'"); // earlier backoff test's leftover — keep skip counts exact
+    n += 1;
+    const acct = `acct_v2_ghost_${n}`;
+    await db.query("INSERT INTO sellers (api_key_hash, display_name, email, stripe_account_id) VALUES ($1,$2,$3,$4)", [
+      `thg_v2gh${n}`, `v2gh${n}`, `v2gh${n}@t.dev`, acct,
+    ]);
+    await seedV2WebhookEvent(`evt_v2_ghost_${n}`, acct);
+    const { client, calls } = fakeStripe({ v2AccountError: `No such account: ${acct}` });
+    setStripeForTests(client);
+    const report = await runSweeps(cfg);
+    expect(report["6-reprocess"].errored).toBe(1);
+    expect(calls.filter((c) => c.startsWith("events.retrieve:"))).toEqual([]);
+    expect((await db.query("SELECT stripe_onboarded_at FROM sellers WHERE api_key_hash = $1", [`thg_v2gh${n}`])).rows[0].stripe_onboarded_at).toBeNull();
+    const row = (await db.query("SELECT processed_at, process_error FROM webhook_events WHERE external_id = $1", [`v2:evt_v2_ghost_${n}`])).rows[0];
+    expect(row.processed_at).toBeNull();
+    expect(row.process_error).toMatch(/fetchRelatedObject network error \[attempt 1 @ /);
+
+    // Inside the 15-minute backoff → skipped, attempt unchanged.
+    const again = await runSweeps(cfg);
+    expect(again["6-reprocess"].skipped).toBe(1);
+    const row2 = (await db.query("SELECT process_error FROM webhook_events WHERE external_id = $1", [`v2:evt_v2_ghost_${n}`])).rows[0];
+    expect(row2.process_error).toBe(row.process_error);
+  });
+
+  it("rule 6: cross-mode v2 payload is terminal-rejected — no platform-key fetch, no flip (THI-1698 F5 re-screen)", async () => {
+    n += 1;
+    const acct = `acct_v2_live_${n}`;
+    await db.query("INSERT INTO sellers (api_key_hash, display_name, email, stripe_account_id) VALUES ($1,$2,$3,$4)", [
+      `thg_v2lv${n}`, `v2lv${n}`, `v2lv${n}@t.dev`, acct,
+    ]);
+    await seedV2WebhookEvent(`evt_v2_live_${n}`, acct, { livemode: true, error: "rejected: livemode mismatch" });
+    const { client, calls } = fakeStripe({ v2Account: v2AccountFixture(acct, "active") });
+    setStripeForTests(client);
+    const report = await runSweeps(cfg);
+    expect(report["6-reprocess"].acted).toBe(1); // terminal disposition, not a retry loop
+    expect(calls.filter((c) => c.startsWith("v2.core.accounts.retrieve:") || c.startsWith("events.retrieve:"))).toEqual([]);
+    expect((await db.query("SELECT stripe_onboarded_at FROM sellers WHERE api_key_hash = $1", [`thg_v2lv${n}`])).rows[0].stripe_onboarded_at).toBeNull();
+    const row = (await db.query("SELECT processed_at, process_error FROM webhook_events WHERE external_id = $1", [`v2:evt_v2_live_${n}`])).rows[0];
+    expect(row.processed_at).not.toBeNull();
+    expect(row.process_error).toBe("rejected: livemode mismatch");
+  });
+
+  it("rule 6: non-capability v2 row reprocesses as an ingest-mirroring no-op (THI-1698)", async () => {
+    n += 1;
+    await seedV2WebhookEvent(`evt_v2_other_${n}`, `acct_v2_other_${n}`, {
+      type: "v2.core.some_other_event",
+      error: "ingest failed: db fault",
+    });
+    const { client, calls } = fakeStripe({});
+    setStripeForTests(client);
+    const report = await runSweeps(cfg);
+    expect(report["6-reprocess"].acted).toBe(1);
+    expect(calls.filter((c) => c.startsWith("v2.core.accounts.retrieve:") || c.startsWith("events.retrieve:"))).toEqual([]);
+    const row = (await db.query("SELECT processed_at FROM webhook_events WHERE external_id = $1", [`v2:evt_v2_other_${n}`])).rows[0];
+    expect(row.processed_at).not.toBeNull();
   });
 
   it("rule 7: stuck refunding past the alert window raises an operator alert", async () => {

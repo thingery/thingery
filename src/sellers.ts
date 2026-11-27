@@ -14,6 +14,7 @@ import { pool, type ItemRow } from "./db.js";
 import { sellerPayoutReady } from "./order-flow.js";
 import { orderFlowConfig } from "./config.js";
 import { SOLD_COUNT_STATUSES } from "./orders.js";
+import { sellerReviewSummary, type SellerReviewSummary } from "./reviews.js";
 import { emailLocalPart, maskEmailDerivedHandle, MASKED_DISPLAY_NAME } from "./display-names.js";
 
 // The F1 mask rule and its seller-surface constant live in src/display-names.ts
@@ -64,8 +65,11 @@ export interface SellerSummarySeller {
   /** Whether card payment through Thingery is available for this seller
    *  today — same expression as create_order/the item page (F-parity). */
   payment_available: boolean;
-  /** THI-925 seam: reviews land in a later PR; constant zeros until then. */
-  reviews: { count: 0; average: null };
+  /** Published review summary — the exact per-pair-capped aggregate the
+   *  get_seller_reviews tool / public reviews route serves (THI-1755: the
+   *  THI-925 seam, wired). Zero summary for a seller with no published
+   *  reviews; hidden rows never count. */
+  reviews: SellerReviewSummary;
 }
 
 /** Minimal shape sellerToPublic consumes. `email` is the sensitive input for
@@ -86,6 +90,7 @@ export function sellerToPublic(
     sold_count: number;
     active_listings_total: number;
     payment_available: boolean;
+    reviews: SellerReviewSummary;
   },
 ): SellerSummarySeller {
   // F1 guard via the shared helper: an email-derived handle is never
@@ -99,7 +104,7 @@ export function sellerToPublic(
     sold_count: aggregates.sold_count,
     active_listings_total: aggregates.active_listings_total,
     payment_available: aggregates.payment_available,
-    reviews: { count: 0, average: null },
+    reviews: aggregates.reviews,
   };
 }
 
@@ -115,7 +120,7 @@ export interface SellerSummary {
   hasMore: boolean;
 }
 
-/** Aggregates + one page of listings for one seller, in four round trips.
+/** Aggregates + one page of listings for one seller, in five round trips.
  *  Read-only; throws SellerNotFoundError for an unknown id. */
 export async function getSellerSummary(
   sellerId: string,
@@ -199,12 +204,19 @@ export async function getSellerSummary(
   const paymentAvailable =
     orderFlowConfig().stripePaymentsEnabled && (await sellerPayoutReady(sellerId));
 
+  // 5. Review summary: the shared aggregate behind get_seller_reviews and
+  //    the public reviews route (published only, per-pair cap K) — one
+  //    source, so the seller card can never drift from the reviews surface
+  //    (THI-1755, wiring the THI-925 seam; zero summary when unreviewed).
+  const reviews = await sellerReviewSummary(sellerId);
+
   return {
     seller: sellerToPublic(row, {
       ships_from: agg.rows[0].ships_from,
       sold_count: sold.rows[0].sold_count,
       active_listings_total: agg.rows[0].active_listings_total,
       payment_available: paymentAvailable,
+      reviews,
     }),
     listings: page.rows.slice(0, limit),
     count: Math.min(page.rows.length, limit),

@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { createEasyPostShipment, type EasyPostRate, type EasyPostShipment } from "../src/easypost.js";
 import { orderFlowConfig } from "../src/config.js";
 import {
+  resolveSenderContact,
   resolveShippingQuote,
   selectQuoteRate,
   toQuoteAddress,
@@ -202,6 +203,84 @@ describe("resolveShippingQuote — happy path snapshot (§2, data model)", () =>
     const without = await resolveShippingQuote(baseInputs(), { createShipment: create });
     if (without.mode === "label_quote") expect("line2" in without.quote.destination).toBe(false);
     else throw new Error("expected quote mode");
+  });
+});
+
+describe("sender-of-record contact (THI-1827)", () => {
+  const saved: Record<string, string | undefined> = {};
+  function takeEnv(name: string): void {
+    saved[name] = process.env[name];
+    delete process.env[name];
+  }
+  function restoreEnv(): void {
+    for (const [n, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[n];
+      else process.env[n] = v;
+    }
+  }
+
+  /** Full-input stub so senderContact can be captured off the seam. */
+  function captureStub(): { captured: Array<Parameters<typeof createEasyPostShipment>[0]>; create: typeof createEasyPostShipment } {
+    const captured: Array<Parameters<typeof createEasyPostShipment>[0]> = [];
+    const create = (async (input: Parameters<typeof createEasyPostShipment>[0]) => {
+      captured.push(input);
+      return SHIPMENT;
+    }) as typeof createEasyPostShipment;
+    return { captured, create };
+  }
+
+  it("resolveSenderContact — verified seller email wins; deployment defaults fill gaps; empty never sent", () => {
+    expect(resolveSenderContact("seller@x.dev", { email: "ops@y.dev", phone: "+39 02 111" }))
+      .toEqual({ email: "seller@x.dev", phone: "+39 02 111" });
+    expect(resolveSenderContact(undefined, { email: "ops@y.dev", phone: "+39 02 111" }))
+      .toEqual({ email: "ops@y.dev", phone: "+39 02 111" });
+    expect(resolveSenderContact("seller@x.dev", {})).toEqual({ email: "seller@x.dev" });
+    expect(resolveSenderContact(undefined, { phone: "+39 02 111" })).toEqual({ phone: "+39 02 111" });
+    expect(resolveSenderContact(undefined, {})).toEqual({});
+    expect(resolveSenderContact("seller@x.dev", { email: "", phone: "" })).toEqual({ email: "seller@x.dev" });
+  });
+
+  it("quote-time: snapshot origin.email rides into the provider call as senderContact", async () => {
+    takeEnv("SHIPPING_SENDER_EMAIL");
+    takeEnv("SHIPPING_SENDER_PHONE");
+    try {
+      const { captured, create } = captureStub();
+      const out = await resolveShippingQuote(
+        baseInputs({ sellerOrigin: { ...ORIGIN, email: "seller@x.dev" } }),
+        { createShipment: create },
+      );
+      expect(out.mode).toBe("label_quote");
+      if (out.mode === "label_quote") expect(out.quote.origin.email).toBe("seller@x.dev");
+      expect(captured[0].senderContact).toEqual({ email: "seller@x.dev" });
+    } finally {
+      restoreEnv();
+    }
+  });
+
+  it("quote-time: no origin email + no env defaults → no senderContact (legacy wire unchanged)", async () => {
+    takeEnv("SHIPPING_SENDER_EMAIL");
+    takeEnv("SHIPPING_SENDER_PHONE");
+    try {
+      const { captured, create } = captureStub();
+      await resolveShippingQuote(baseInputs(), { createShipment: create });
+      expect(captured[0].senderContact).toBeUndefined();
+    } finally {
+      restoreEnv();
+    }
+  });
+
+  it("quote-time: env defaults fill gaps; the snapshot origin itself stays free of default email", async () => {
+    process.env.SHIPPING_SENDER_EMAIL = "ops@y.dev";
+    process.env.SHIPPING_SENDER_PHONE = "+39 02 111";
+    try {
+      const { captured, create } = captureStub();
+      const out = await resolveShippingQuote(baseInputs(), { createShipment: create });
+      expect(captured[0].senderContact).toEqual({ email: "ops@y.dev", phone: "+39 02 111" });
+      if (out.mode === "label_quote") expect(out.quote.origin).toEqual(ORIGIN); // env defaults are NOT snapshotted
+    } finally {
+      delete process.env.SHIPPING_SENDER_EMAIL;
+      delete process.env.SHIPPING_SENDER_PHONE;
+    }
   });
 });
 

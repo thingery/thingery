@@ -34,7 +34,7 @@ import { createEasyPostTracker } from "./easypost.js";
 // keeps the EasyPost wire details.
 
 import { getShippingProvider } from "./shipping/registry.js";
-import type { LabelQuoteSnapshot, QuoteAddress } from "./shipping-quotes.js";
+import { getVerifiedSellerEmail, resolveSenderContact, type LabelQuoteSnapshot, type QuoteAddress } from "./shipping-quotes.js";
 import { logSecurityEvent } from "./security-events.js";
 
 export { OrderFlowError };
@@ -514,11 +514,16 @@ async function buyQuoteModeLabel(
     let shipment: ProviderShipment | null;
     try {
       const dims = parseDimensionsMm(quote.dimensions_mm);
+      // Sender-of-record contact from the SNAPSHOT only (THI-1827, spec §5.3
+      // determinism): origin.email was captured at quote time; the phone is
+      // the deployment default — never re-resolved account data here.
+      const senderContact = resolveSenderContact(quote.origin.email, { email: cfg.shippingSenderEmail, phone: cfg.shippingSenderPhone });
       shipment = await provider.createShipment({
         toAddress: quoteAddressToDomain(quote.destination),
         fromAddress: quoteAddressToDomain(quote.origin),
         weightGrams: quote.weight_grams,
         ...(dims ? { dimensionsMm: dims } : {}),
+        ...(senderContact.email || senderContact.phone ? { senderContact } : {}),
       });
     } catch (quoteErr) {
       throw new OrderFlowError(`${provider.id}_error`, `${provider.displayName} refused to re-quote this shipment: ${describeProviderError(quoteErr)}`);
@@ -680,11 +685,19 @@ export async function buyShippingLabel(
   // Quote rates — no money moves until /buy. Null = degraded mode (key unset).
   let shipment: ProviderShipment | null;
   try {
+    // Sender-of-record contact (THI-1827): the tool-supplied from_address
+    // carries no email (its schema is frozen), so the seller's VERIFIED
+    // account email is resolved server-side; the deployment default phone
+    // fills the address phone gap. USPS purchases fail sender_info_missing
+    // without a sender email + phone on address_from.
+    const sellerEmail = await getVerifiedSellerEmail(sellerId);
+    const senderContact = resolveSenderContact(sellerEmail, { email: cfg.shippingSenderEmail, phone: cfg.shippingSenderPhone });
     shipment = await provider.createShipment({
       toAddress: storedAddressToDomain(toAddress),
       fromAddress: input.fromAddress,
       weightGrams,
       ...(dimensionsMm ? { dimensionsMm } : {}),
+      ...(senderContact.email || senderContact.phone ? { senderContact } : {}),
     });
   } catch (err) {
     throw new OrderFlowError("easypost_error", `${provider.displayName} refused to quote this shipment: ${describeProviderError(err)}`);

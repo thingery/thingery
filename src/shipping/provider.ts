@@ -47,6 +47,13 @@ export interface ProviderShipmentInput {
   fromAddress: ProviderAddress; // seller-supplied, not persisted
   weightGrams: number; // listing estimate or seller override
   dimensionsMm?: { length: number; width: number; height: number };
+  /** Sender-of-record contact for the shipment (THI-1827): the seller's
+   *  VERIFIED account email and/or the deployment sender phone. Adapters
+   *  apply it per provider contract — Shippo merges it onto address_from
+   *  (USPS refuses the purchase without sender email+phone,
+   *  `sender_info_missing`); providers without a use ignore it (EasyPost's
+   *  wire stays byte-identical). The buyer's contact NEVER rides here. */
+  senderContact?: { email?: string; phone?: string };
 }
 
 /** One quoted rate from a shipment (money is a decimal string at every

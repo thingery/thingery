@@ -14,6 +14,14 @@
 // - POST /shipments (addresses + `parcels` list, `async: false`) → shipment with
 //   quoted rates; rate = { object_id, provider, servicelevel {name},
 //   amount (decimal string), currency, amount_local }.
+// - address_from must carry the SENDER's email + phone for USPS purchases:
+//   without them POST /transactions returns status ERROR,
+//   `sender_info_missing` ("Seller email and phone number required for
+//   USPS" — provider fact verified in test mode, 2026-11-27, THI-1827).
+//   The contact arrives via ProviderShipmentInput.senderContact (service
+//   layer resolves the seller's VERIFIED account email; a deployment
+//   default fills gaps) and withSenderContact() merges it here — the
+//   buyer's destination address never carries contact fields.
 // - GET /rates/{object_id} → one rate, same shape as in the shipment.
 // - POST /transactions { rate, async: false } → the bought label:
 //   status "SUCCESS", label_url (https, signed and expiring — stored as data
@@ -75,6 +83,9 @@ export interface ShippoAddressInput {
   postalCode: string;
   country: string; // ISO 3166-1 alpha-2
   phone?: string;
+  /** Sender email (address_from only — USPS sender_info_missing,
+   *  THI-1827). Never set on the buyer's destination. */
+  email?: string;
 }
 
 /** One quoted rate from a Shippo shipment (money is a decimal string at the
@@ -249,7 +260,35 @@ function toWireAddress(a: ShippoAddressInput): Record<string, unknown> {
     zip: a.postalCode,
     country: a.country,
     ...(a.phone ? { phone: a.phone } : {}),
+    ...(a.email ? { email: a.email } : {}),
   };
+}
+
+/** Merges the sender-of-record contact onto a COPY of the from-address
+ *  (THI-1827): the contact email fills address_from.email; the contact phone
+ *  fills address_from.phone ONLY when the address carries none (a
+ *  seller-supplied phone is more specific than the deployment default).
+ *  Undefined fields are omitted, never sent as empty strings. Pure. */
+export function withSenderContact(
+  address: ShippoAddressInput,
+  contact?: { email?: string; phone?: string },
+): ShippoAddressInput {
+  return {
+    ...address,
+    ...(contact?.email ? { email: contact.email } : {}),
+    ...(!address.phone && contact?.phone ? { phone: contact.phone } : {}),
+  };
+}
+
+/** True for pickup-point-only services: quotable to a home address but NOT
+ *  purchasable without a pickup-point selection (provider evidence:
+ *  Colissimo "Point Retrait" → "Pickup point ID invalid", THI-1827). This
+ *  deployment has no pickup-point purchase flow, so such a rate can never
+ *  legally transition quote → purchase — the adapter filters it at quote
+ *  time rather than offering a rate that would fail the buyer's paid
+ *  shipping line. Pure. */
+export function isPickupPointOnlyRate(rate: ShippoRate): boolean {
+  return /retrait|pickup/i.test(rate.service);
 }
 
 /** "10.45" (decimal string) → 1045 cents; rounds, never float-drifts. */

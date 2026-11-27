@@ -136,6 +136,10 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
     delete process.env.STRIPE_SECRET_KEY;
     delete process.env.LABEL_MAX_COST_CENTS;
     delete process.env.LABEL_DAILY_BUDGET_CENTS;
+    delete process.env.SHIPPING_SENDER_EMAIL;
+    delete process.env.SHIPPING_SENDER_PHONE;
+    delete process.env.SHIPPING_PROVIDER;
+    delete process.env.SHIPPO_API_KEY;
     // Most label tests cover the operator-funded path, which is opt-in.
     process.env.LABEL_ALLOW_OPERATOR_FUNDED = "true";
     setStripeForTests(null);
@@ -393,6 +397,60 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
 
   const BUY_INPUT = { fromAddress: FROM_ADDR, weightGrams: 800 };
 
+  /** Shippo stub (THI-1827): quotes on POST /shipments, buys via
+   *  GET /rates/{id} + POST /transactions. `bodies` captures each POST body.
+   *  `txResponses` queues transaction outcomes in order ("error" first = the
+   *  §5.3 paid-rate-unbuyable trigger). */
+  function shippoFetchStub(rate: Record<string, unknown>, opts: { shipId?: string; txResponses?: Array<"error" | "success"> } = {}) {
+    const shipId = opts.shipId ?? `shp_${Math.random().toString(36).slice(2, 8)}`;
+    const txQueue = [...(opts.txResponses ?? ["success"])];
+    const calls: string[] = [];
+    const bodies: Record<string, unknown>[] = [];
+    const fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? "GET";
+      calls.push(`${method} ${u}`);
+      if (u.endsWith("/shipments") && method === "POST") {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(JSON.stringify({ object_id: shipId, status: "SUCCESS", rates: [rate] }), { status: 200 });
+      }
+      if (/\/rates\/[^/]+$/.test(u) && method === "GET") {
+        return new Response(JSON.stringify(rate), { status: 200 });
+      }
+      if (u.endsWith("/transactions") && method === "POST") {
+        const outcome = txQueue.length > 0 ? txQueue.shift() : "success";
+        return new Response(
+          JSON.stringify(
+            outcome === "error"
+              ? { error: { message: "rate is no longer purchasable", code: "rate_unavailable" } } // HTTP-level → ShippoError (ProviderError) → §5.3 re-quote
+              : { object_id: "tx_ok", status: "SUCCESS", label_url: "https://shippo.test/labels/l1.pdf", tracking_number: "LP0001" },
+          ),
+          { status: outcome === "error" ? 422 : 200 },
+        );
+      }
+      throw new Error(`shippo stub: unhandled ${method} ${u}`);
+    }) as typeof fetch;
+    return { shipId, calls, bodies, fetch };
+  }
+
+  const SHIPPO_EUR_RATE = { object_id: "rate_eur_1", provider: "USPS", servicelevel: { name: "Priority" }, amount: "7.20", currency: "EUR" };
+
+  function withShippoProvider(rate: Record<string, unknown> = SHIPPO_EUR_RATE, opts: { txResponses?: Array<"error" | "success"> } = {}) {
+    process.env.SHIPPING_PROVIDER = "shippo";
+    process.env.SHIPPO_API_KEY = "shippo_test_KEY";
+    const stub = shippoFetchStub(rate, opts);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = stub.fetch;
+    return {
+      stub,
+      restore: () => {
+        globalThis.fetch = realFetch;
+        delete process.env.SHIPPING_PROVIDER;
+        delete process.env.SHIPPO_API_KEY;
+      },
+    };
+  }
+
   it("buy_shipping_label: sold → label_issued with persisted tracker + label snapshot (stripe address visible from sold)", async () => {
     const { order, ep, restore } = await seedSoldOrderWithLabels(undefined, { mode: "stripe" });
     try {
@@ -425,6 +483,40 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
       const result = await buyShippingLabel(order.id, sellerId, { fromAddress: FROM_ADDR });
       expect(result.order.status).toBe("label_issued");
     } finally {
+      restore();
+    }
+  });
+
+  it("sender info (THI-1827): legacy path — verified seller email + env-default phone ride on the Shippo from_address", async () => {
+    const { order, restore } = await seedSoldOrderWithLabels(undefined, { mode: "stripe" });
+    // Seeds create sellers with an email but no verification timestamp.
+    await db.query("UPDATE sellers SET email_verified_at = now() WHERE id = $1", [sellerId]);
+    process.env.SHIPPING_SENDER_PHONE = "+39 02 9999";
+    const sp = withShippoProvider();
+    try {
+      const result = await buyShippingLabel(order.id, sellerId, BUY_INPUT);
+      expect(result.order.status).toBe("label_issued");
+      const body = sp.stub.bodies[0] as { address_from: Record<string, unknown> };
+      const seller = await db.query<{ email: string }>("SELECT email FROM sellers WHERE id = $1", [sellerId]);
+      expect(body.address_from.email).toBe(seller.rows[0].email); // the seller's verified account email
+      expect(body.address_from.phone).toBe("+39 02 9999"); // the deployment default
+    } finally {
+      sp.restore();
+      restore();
+    }
+  });
+
+  it("sender info (THI-1827): unverified seller email is never sent — env defaults fill only what they can", async () => {
+    const { order, restore } = await seedSoldOrderWithLabels(undefined, { mode: "stripe" });
+    process.env.SHIPPING_SENDER_PHONE = "+39 02 9999";
+    const sp = withShippoProvider();
+    try {
+      await buyShippingLabel(order.id, sellerId, BUY_INPUT);
+      const body = sp.stub.bodies[0] as { address_from: Record<string, unknown> };
+      expect(body.address_from).not.toHaveProperty("email"); // seeded email exists but is unverified
+      expect(body.address_from.phone).toBe("+39 02 9999");
+    } finally {
+      sp.restore();
       restore();
     }
   });
@@ -790,7 +882,7 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
 
   const BUYER_ADDR_SNAPSHOT = { name: "B", line1: "1 St", city: "C", postal_code: "20100", country: "IT" };
 
-  async function seedQuoteModeSoldOrder(opts: { quoteAmountCents?: number } = {}) {
+  async function seedQuoteModeSoldOrder(opts: { quoteAmountCents?: number; originEmail?: string } = {}) {
     const order = await seedOrder({ mode: "stripe", onboarded: true });
     await db.query("UPDATE items SET weight_grams = 800, dimensions_mm = '300x200x150' WHERE id = $1", [order.item_id]);
     await applyTransition({ orderId: order.id, trigger: "stripe_payment", actor: { type: "stripe" }, sets: { payment_intent_id: `pi_q${n}` } });
@@ -800,7 +892,10 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
       JSON.stringify({
         shipment_id: "shp_paid", rate_id: "rate_paid", carrier: "DHLExpress", service: "ExpressWorldwide",
         amount_cents: opts.quoteAmountCents ?? 733, currency: "EUR", weight_grams: 800, dimensions_mm: "300x200x150",
-        origin: { name: "Seller", line1: "Corso Buenos Aires 2", city: "Milan", postal_code: "20122", country: "IT" },
+        origin: {
+          name: "Seller", line1: "Corso Buenos Aires 2", city: "Milan", postal_code: "20122", country: "IT",
+          ...(opts.originEmail ? { email: opts.originEmail } : {}),
+        },
         destination: BUYER_ADDR_SNAPSHOT, quoted_at: "2026-11-18T00:00:00Z",
       }),
     ]);
@@ -874,6 +969,26 @@ describe.skipIf(!available)("fulfillment tools (DB)", () => {
       expect(payload).not.toHaveProperty("destination"); // ids + amounts only, no PII
     } finally {
       globalThis.fetch = realFetch;
+    }
+  });
+
+  it("§5.3 re-quote sender info (THI-1827): snapshot origin.email + env phone ride on the re-quote from_address", async () => {
+    const order = await seedQuoteModeSoldOrder({ originEmail: "seller@t.dev" });
+    process.env.EASYPOST_API_KEY = "EZTK_TEST_KEY";
+    process.env.SHIPPING_SENDER_PHONE = "+39 02 9999";
+    const sp = withShippoProvider(undefined, { txResponses: ["error", "success"] });
+    try {
+      const result = await buyShippingLabel(order.id, sellerId, { fromAddress: FROM_ADDR });
+      expect(result.order.status).toBe("label_issued");
+      // First POST /shipments = the re-quote, built solely from the snapshot:
+      // origin email comes from the quote snapshot, never from a live account
+      // re-read (§5.3 rule). (The paid /transactions attempt posts no shipment.)
+      expect(sp.stub.bodies).toHaveLength(1);
+      const body = sp.stub.bodies[0] as { address_from: Record<string, unknown> };
+      expect(body.address_from.email).toBe("seller@t.dev");
+      expect(body.address_from.phone).toBe("+39 02 9999");
+    } finally {
+      sp.restore();
     }
   });
 

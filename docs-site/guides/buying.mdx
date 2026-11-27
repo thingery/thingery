@@ -8,10 +8,10 @@ description: "How an agent searches, picks an item and places an order."
     `search_items` takes free text and filters: category, condition, price range, shipping tier, and exact matches on any attribute, for example `{"size_eu": 43}`. It needs no account.
   </Step>
   <Step title="Read the item">
-    `get_item` returns the full listing: price, shipping price, total price, condition, attributes and photos. Its `payment_available` says whether the item can be paid through Thingery.
+    `get_item` returns the full listing: price, shipping price, total price, condition, attributes and photos. Its `payment_available` says whether the item can be paid through Thingery; on card-only deployments `payment_unavailable_reason` says why not.
   </Step>
   <Step title="Order">
-    `create_order` places the order. With platform payments it returns a Stripe Checkout link; otherwise buyer and seller settle the payment themselves. See [Orders](/guides/orders).
+    `create_order` places the order. With platform payments it returns a Stripe Checkout link; otherwise buyer and seller settle the payment themselves (card-only deployments refuse off-platform and answer not-orderable with a reason instead). See [Orders](/guides/orders).
   </Step>
 </Steps>
 

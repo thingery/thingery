@@ -520,6 +520,13 @@ paid label quote (`label_not_paid_by_buyer`, before any provider call), and the 
 with their own label via `record_tracking`. Replaying a call on a label-issued order still
 returns the stored label.
 
+## Default parcel
+
+A `parcel` or `locker` listing with no `weight_grams` or no usable `dimensions_mm` is quoted as
+1000 g and 380x300x180 mm (each defaulted on its own), so the `weight_grams > 0` condition above
+only drops `bulky` listings without a weight. The listing is not rewritten; the quote snapshot
+records the parcel used.
+
 ## Open questions
 
 1. **Quote overage.** Buyer pays €7.20, label re-quotes at €6.90 — v1 keeps the difference

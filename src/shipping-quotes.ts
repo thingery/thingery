@@ -149,6 +149,25 @@ function dimensionsToMm(raw: string): { length: number; width: number; height: n
   return dims.length > 0 && dims.width > 0 && dims.height > 0 ? dims : undefined;
 }
 
+/** Size M, assumed for a parcel listing that carries no measurements: carriers need
+ *  them to quote, and without a quote the buyer cannot pay for a label. */
+export const DEFAULT_PARCEL = { weightGrams: 1000, dimensionsMm: "380x300x180" } as const;
+
+/** The parcel to quote for a listing: its own values, each defaulted when missing
+ *  on parcel and locker listings. Bulky and local listings are never guessed. */
+export function listingParcel(listing: {
+  shipping_tier: string;
+  weight_grams: number | null;
+  dimensions_mm: string | null;
+}): { weightGrams: number | null; dimensionsMm: string | null } {
+  const stored = { weightGrams: listing.weight_grams, dimensionsMm: listing.dimensions_mm };
+  if (listing.shipping_tier !== "parcel" && listing.shipping_tier !== "locker") return stored;
+  return {
+    weightGrams: stored.weightGrams ?? DEFAULT_PARCEL.weightGrams,
+    dimensionsMm: normalizedDimensionsMm(stored.dimensionsMm) ?? DEFAULT_PARCEL.dimensionsMm,
+  };
+}
+
 /** Snapshot address → the easypost client's domain shape (postal_code →
  *  postalCode). Pure; the only place the two shapes meet. */
 function toProviderAddress(a: QuoteAddress): ProviderAddress {

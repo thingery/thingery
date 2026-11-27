@@ -16,8 +16,7 @@ import {
   resolveShippingQuote,
   selectQuoteRate,
   toQuoteAddress,
-  type ShippingQuoteInputs,
-} from "../src/shipping-quotes.js";
+  type ShippingQuoteInputs, listingParcel } from "../src/shipping-quotes.js";
 
 const ORIGIN = { name: "Seller", line1: "Corso Buenos Aires 2", line2: "Scala B", city: "Milan", postal_code: "20122", country: "IT" };
 const BUYER_ADDRESS = { name: "Buyer", line1: "Via Roma 1", city: "Milan", postal_code: "20121", country: "IT" };
@@ -249,6 +248,28 @@ describe("config wiring (§2 / data model: the two new env knobs)", () => {
     for (const [n, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[n];
       else process.env[n] = v;
+    }
+  });
+});
+
+describe("listingParcel", () => {
+  const listing = { shipping_tier: "parcel", weight_grams: null, dimensions_mm: null };
+
+  it("quotes a parcel or locker listing without measurements as size M", () => {
+    for (const shipping_tier of ["parcel", "locker"]) {
+      expect(listingParcel({ ...listing, shipping_tier })).toEqual({ weightGrams: 1000, dimensionsMm: "380x300x180" });
+    }
+  });
+
+  it("defaults each missing or unusable value on its own", () => {
+    expect(listingParcel({ ...listing, weight_grams: 300 })).toEqual({ weightGrams: 300, dimensionsMm: "380x300x180" });
+    expect(listingParcel({ ...listing, dimensions_mm: "100x100x50" })).toEqual({ weightGrams: 1000, dimensionsMm: "100x100x50" });
+    expect(listingParcel({ ...listing, dimensions_mm: "about a shoebox" }).dimensionsMm).toBe("380x300x180");
+  });
+
+  it("never guesses for bulky or local listings", () => {
+    for (const shipping_tier of ["bulky", "local"]) {
+      expect(listingParcel({ ...listing, shipping_tier })).toEqual({ weightGrams: null, dimensionsMm: null });
     }
   });
 });

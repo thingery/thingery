@@ -290,9 +290,9 @@ describe.skipIf(!available)(
       expect(JSON.stringify(ev.rows[0].payload)).not.toContain("Via Orig");
     });
 
-    it("falls back to flat with a named reason when the item has no weight", async () => {
+    it("falls back to flat with a named reason when a bulky item has no weight", async () => {
       easypostOk(); // must never be reached
-      const itemId = await seed({ weightGrams: null, defaultAddress: true });
+      const itemId = await seed({ weightGrams: null, shippingTier: "bulky", defaultAddress: true });
       const { order } = await createOrder({
         buyerId,
         itemId,

@@ -1007,9 +1007,10 @@ export function renderOrderEmail(
     }
     // THI-1451 (THI-1479 plan Phase C): item-report mirror to the report
     // alias — account-less row, bypasses account gates for the same reason
-    // operator.* does. Same PII-minimal discipline: ids, reason slug,
-    // timestamp only; the motivation free-text (UNTRUSTED user content)
-    // never enters the payload, so it can never leak into the mail body.
+    // operator.* does. The payload carries the motivation free-text since
+    // the report-moderation spec §1: it is the field the reporter wrote for
+    // the moderation reader (length-capped at insert; escapeHtml below
+    // keeps it inert markup-wise). Ids, reason slug, timestamp unchanged.
     case "ops.item_reported": {
       const itemId = str("item_id") ?? "";
       return renderOperatorAlert({
@@ -1018,6 +1019,7 @@ export function renderOrderEmail(
           `Report: ${str("report_id") ?? "?"}`,
           `Item: ${itemId ? `${baseUrl}/item/${itemId}` : "?"}`, 
           `Reason: ${str("reason") ?? "?"}`,
+          `Description: ${str("motivation") ?? "(none)"}`,
           `Reported at: ${str("created_at") ?? "?"}`,
         ],
       });

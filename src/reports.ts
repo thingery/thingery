@@ -217,6 +217,7 @@ export async function createItemReport(
         reportId: inserted.rows[0].id,
         itemId: input.itemId,
         reason: input.reason,
+        motivation,
         createdAt: inserted.rows[0].created_at,
         client: db,
       });

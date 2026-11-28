@@ -274,6 +274,40 @@ describe.skipIf(!available)("category taxonomy PR 1 (THI-734)", () => {
     expect((body(result) as { code: string }).code).toBe("unknown_category");
   });
 
+  // THI-1921: validation refusals carry field_errors (field/problem/message)
+  // next to the unchanged error+code envelope, so clients can surface which
+  // field failed instead of a blanket refusal.
+  it("create_listing: unknown category names the category field in field_errors", async () => {
+    const parsed = body(await createHandler({ title: "THI-1921 nope", category: "thi734nope", price_cents: 100 })) as {
+      error: string;
+      code: string;
+      field_errors: { field: string; problem: string; message: string }[];
+    };
+    expect(parsed.code).toBe("unknown_category");
+    expect(parsed.field_errors).toEqual([
+      { field: "category", problem: "unknown_category", message: parsed.error },
+    ]);
+  });
+
+  it("create_listing: missing required attribute answers field_errors[attributes.<key>]", async () => {
+    // sneakers declares size_eu (number, required) in the test tree; the
+    // payload below is valid in every visible field — the refusal must name
+    // the invisible one.
+    const parsed = body(
+      await createHandler({ title: "THI-1921 sneaker", category: "sneakers", price_cents: 900 }),
+    ) as {
+      error: string;
+      code: string;
+      field_errors: { field: string; problem: string; message: string }[];
+    };
+    expect(parsed.code).toBe("invalid_attributes");
+    expect(parsed.field_errors).toHaveLength(1);
+    expect(parsed.field_errors[0].field).toBe("attributes.size_eu");
+    expect(parsed.field_errors[0].problem).toBe("missing_required");
+    expect(parsed.field_errors[0].message).toContain("size_eu");
+    expect(parsed.error).toContain("size_eu");
+  });
+
   // --- write paths: alias → canonical stored + echoed (D4) -----------------
 
   it("create_listing: alias stored as canonical slug, resolution echoed as note", async () => {

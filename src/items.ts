@@ -6,10 +6,10 @@ import { logSecurityEvent, type ListingWriteLimit } from "./security-events.js";
 import { LIVE_ORDER_ITEM_STATUSES } from "./orders.js";
 import { markWantedResponsesPublished } from "./wanted.js";
 import {
-  attributeShapeErrors,
+  attributeShapeIssues,
   AttributeValidationError,
   attributeFilterClause,
-  definitionErrors,
+  definitionIssues,
   UNDECLARED_KEY_PATTERN,
   type Attributes,
   type CategoryRow,
@@ -634,10 +634,10 @@ export async function updateItem(
   // keys present, declared keys type/enum-valid); undeclared keys still pass
   // through. This is the single choke point for both MCP and chat callers.
   if (update.attributes !== undefined) {
-    const shapeErrors = attributeShapeErrors(update.attributes);
-    if (shapeErrors.length > 0) {
+    const shapeIssues = attributeShapeIssues(update.attributes);
+    if (shapeIssues.length > 0) {
       logSecurityEvent({ type: "listing_write", action: writeAction(update.status), outcome: "rejected" }, { sellerId });
-      throw new AttributeValidationError(shapeErrors);
+      throw new AttributeValidationError(shapeIssues);
     }
     // One indexed read, paid only on the attributes path. Fallbacks mirror
     // create-listing trust boundaries: row missing/not owned (the UPDATE's
@@ -653,10 +653,10 @@ export async function updateItem(
       [id, sellerId],
     );
     const definitions = defRows[0]?.attribute_definitions;
-    const defErrors = definitions ? definitionErrors(definitions, update.attributes) : [];
-    if (defErrors.length > 0) {
+    const defIssues = definitions ? definitionIssues(definitions, update.attributes) : [];
+    if (defIssues.length > 0) {
       logSecurityEvent({ type: "listing_write", action: writeAction(update.status), outcome: "rejected" }, { sellerId });
-      throw new AttributeValidationError(defErrors);
+      throw new AttributeValidationError(defIssues);
     }
     sets.push(`attributes = ${add(JSON.stringify(update.attributes))}::jsonb`);
   }

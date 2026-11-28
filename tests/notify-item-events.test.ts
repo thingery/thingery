@@ -15,9 +15,10 @@ import type Stripe from "stripe";
 import { runSweeps } from "../src/orders-sweep.js";
 import { orderFlowConfig, type OrderFlowConfig } from "../src/config.js";
 import { processStripeEvent } from "../src/webhooks-stripe.js";
-import { mountApiRoutes } from "../src/routes.js";
+import { mountApiRoutes, adminAttemptLimiter } from "../src/routes.js";
 import {
   renderSellerDeadlineWarning,
+  renderSellerItemSuspended,
   renderSellerItemTakenDown,
   renderSellerPayoutsEnabled,
 } from "../src/notify/templates.js";
@@ -64,6 +65,18 @@ describe("item-event templates (THI-780 PR 3 — pure)", () => {
     });
     expect(r.subject).toBe("Listing removed: Lava lamp — Thingery");
     expect(r.text).toContain("prohibited item");
+    expect(r.text).not.toContain("reply to this email");
+    expect(r.text).toContain("open item database and MCP server");
+  });
+  it("suspend twin: says suspended, reversible copy, states the reason (report-moderation PR 2)", () => {
+    const r = renderSellerItemSuspended({
+      itemTitle: "Lava lamp", itemUrl: "https://thingery.test/item/x", reason: "under policy review",
+    });
+    expect(r.subject).toBe("Listing suspended: Lava lamp — Thingery");
+    expect(r.text).toContain("under policy review");
+    expect(r.text).toContain("hidden from the marketplace");
+    expect(r.text).toContain("preserved");
+    expect(r.html).toContain("Listing suspended");
     expect(r.text).not.toContain("reply to this email");
     expect(r.text).toContain("open item database and MCP server");
   });
@@ -255,6 +268,81 @@ describe.skipIf(!available)("item events (THI-780 PR 3 — DB)", () => {
     delete process.env.ADMIN_API_KEY;
     try {
       const res = await fetch(`${base}/api/admin/items/00000000-0000-0000-0000-000000000000/takedown`, { method: "POST" });
+      expect(res.status).toBe(404);
+    } finally {
+      if (had) process.env.ADMIN_API_KEY = had;
+    }
+  });
+
+  // Report-moderation spec PR 2: the suspend/reinstate pair and the takedown
+  // escalation leg (suspended → deleted).
+  it("suspend + reinstate routes: auth matrix, eligibility, owner notified once, escalation", async () => {
+    process.env.ADMIN_API_KEY = `k-${crypto.randomBytes(24).toString("hex")}`;
+    adminAttemptLimiter.reset();
+    try {
+      const seller = await seedSeller();
+      const seed = async (status: string): Promise<string> => {
+        const r = await db.query<{ id: string }>(
+          `INSERT INTO items (seller_id, title, category, price_cents, currency, status)
+           VALUES ($1, $2, 'other', 5000, 'EUR', $3) RETURNING id`,
+          [seller.id, `Suspend ${runTag}`, status],
+        );
+        return r.rows[0].id;
+      };
+      const id = await seed("active");
+      const url = `${base}/api/admin/items/${id}/suspend`;
+      const post = (u: string, body: string, key = process.env.ADMIN_API_KEY) =>
+        fetch(u, { method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }, body });
+
+      // Auth/validation matrix, the takedown pattern exactly.
+      expect((await post(url, JSON.stringify({ reason: "x" }), "wrong")).status).toBe(401);
+      expect((await post(url, "{}")).status).toBe(400);
+
+      // Happy path: active → suspended, owner notified exactly once.
+      const ok = await post(url, JSON.stringify({ reason: "under policy review" }));
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toMatchObject({ status: "suspended", seller_notified: true });
+      expect((await db.query("SELECT status FROM items WHERE id = $1", [id])).rows[0].status).toBe("suspended");
+      expect(await notifications(seller.id, "seller.item_suspended")).toBe(1);
+      expect((await outboxFor("seller.item_suspended", seller.email))).toHaveLength(1);
+
+      // Replay → 404 (status guard), no email churn.
+      expect((await post(url, JSON.stringify({ reason: "again" }))).status).toBe(404);
+      expect(await notifications(seller.id, "seller.item_suspended")).toBe(1);
+
+      // Reinstate → active, no additional email; replay → 404.
+      const rUrl = `${base}/api/admin/items/${id}/reinstate`;
+      const rOk = await post(rUrl, "{}");
+      expect(rOk.status).toBe(200);
+      expect(await rOk.json()).toMatchObject({ status: "active" });
+      expect((await db.query("SELECT status FROM items WHERE id = $1", [id])).rows[0].status).toBe("active");
+      expect(await notifications(seller.id, "seller.item_suspended")).toBe(1);
+      expect((await post(rUrl, "{}")).status).toBe(404);
+
+      // Eligibility: reserved (live order) is not suspendable — 404, no email.
+      const reservedId = await seed("reserved");
+      expect((await post(`${base}/api/admin/items/${reservedId}/suspend`, JSON.stringify({ reason: "x" }))).status).toBe(404);
+      expect(await notifications(seller.id, "seller.item_suspended")).toBe(1);
+
+      // Escalation: takedown lands a suspended item in deleted (widened
+      // eligibility), with the taken-down email — not a second suspension mail.
+      const suspendedId = await seed("active");
+      await post(`${base}/api/admin/items/${suspendedId}/suspend`, JSON.stringify({ reason: "suspect" }));
+      const td = await post(`${base}/api/admin/items/${suspendedId}/takedown`, JSON.stringify({ reason: "confirmed prohibited" }));
+      expect(td.status).toBe(200);
+      expect((await db.query("SELECT status FROM items WHERE id = $1", [suspendedId])).rows[0].status).toBe("deleted");
+      expect(await notifications(seller.id, "seller.item_taken_down")).toBe(1);
+    } finally {
+      delete process.env.ADMIN_API_KEY;
+      adminAttemptLimiter.reset();
+    }
+  });
+
+  it("suspend route: unset admin key → 404 (route indistinguishable from absent)", async () => {
+    const had = process.env.ADMIN_API_KEY;
+    delete process.env.ADMIN_API_KEY;
+    try {
+      const res = await fetch(`${base}/api/admin/items/00000000-0000-0000-0000-000000000000/suspend`, { method: "POST" });
       expect(res.status).toBe(404);
     } finally {
       if (had) process.env.ADMIN_API_KEY = had;

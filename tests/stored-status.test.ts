@@ -94,6 +94,9 @@ describe("ADR-0010 transition table on updateItem (pure)", () => {
     ["reserved", "sold", true],
     ["sold", "active", true],
     ["reserved", "deleted", true],
+    // report-moderation spec PR 2: 'suspended' is the moderator-only status —
+    // same-status writes stay no-ops like every other status
+    ["suspended", "suspended", true],
   ])("%s → %s is allowed", async (from, to) => {
     const mock = mockUpdateFlow(from, fakeItemRow({ status: to as string }));
     const row = await updateItem("item-1", "seller-1", { status: to });
@@ -107,6 +110,18 @@ describe("ADR-0010 transition table on updateItem (pure)", () => {
     ["reserved", "stored"],
     ["sold", "stored"],
     ["deleted", "stored"],
+    // report-moderation spec PR 2: the suspended fence — any seller move into
+    // or out of 'suspended' is rejected in both directions, from every status
+    ["active", "suspended"],
+    ["stored", "suspended"],
+    ["reserved", "suspended"],
+    ["sold", "suspended"],
+    ["deleted", "suspended"],
+    ["suspended", "active"],
+    ["suspended", "stored"],
+    ["suspended", "reserved"],
+    ["suspended", "sold"],
+    ["suspended", "deleted"],
   ])("%s → %s is rejected with invalid_item_transition", async (from, to) => {
     mockUpdateFlow(from, null);
     await expect(updateItem("item-1", "seller-1", { status: to })).rejects.toMatchObject({
@@ -423,6 +438,60 @@ describe.skipIf(!available)("stored status end-to-end (DB)", () => {
     const ok = await callTool(ownerTools, "update_listing", { id, status: "stored" });
     expect(ok.isError).toBe(false);
     expect(ok.body.item.status).toBe("stored");
+  });
+
+  it("suspended (report-moderation PR 2): hidden everywhere, owner-visible in my_listings, edits inert, restorable", async () => {
+    const title = `Suspend radio ${randomUUID()}`;
+    const ownerTools = toolsFor(owner);
+    const created = await callTool(ownerTools, "create_listing", {
+      title, category: "other", price_cents: 900, currency: "EUR", shipping_tier: "parcel",
+      images: ["https://img.example.com/s.jpg"], status: "active",
+    });
+    const id = created.body.item.id as string;
+    itemIds.push(id);
+
+    // Admin-leg equivalence: exactly the suspend route's write (the route
+    // itself — auth matrix, eligibility, owner email — is covered in
+    // notify-item-events.test.ts).
+    await db.query(`UPDATE items SET status = 'suspended' WHERE id = $1`, [id]);
+
+    // Hidden from the MCP surface for everyone — including the owner (no
+    // carve-out, unlike stored; the owner's visibility is my_listings below).
+    for (const viewer of [null, other, owner]) {
+      const get = await callTool(toolsFor(viewer), "get_item", { id });
+      expect(get.isError).toBe(true);
+      expect(get.body).toMatchObject({ code: "not_found" });
+    }
+
+    // Public item page 404s like a deleted item.
+    const page = stubResponse(id);
+    await itemPage(page.req, page.res as unknown as Response);
+    expect(page.res.statusCode).toBe(404);
+
+    // The seller still sees it in their own listings — with the status that
+    // explains why it vanished from the marketplace.
+    const mine = await callTool(ownerTools, "my_listings", {});
+    const listed = (mine.body.items as Array<{ id: string; status: string }>).find((i) => i.id === id);
+    expect(listed).toBeTruthy();
+    expect(listed!.status).toBe("suspended");
+
+    // Field edits stay possible (inert while hidden) — only status moves are
+    // fenced. The fence keeps the listing from being un-suspended or stored.
+    const edit = await callTool(ownerTools, "update_listing", { id, price_cents: 750 });
+    expect(edit.isError).toBe(false);
+    expect(edit.body.item.status).toBe("suspended");
+    const move = await callTool(ownerTools, "update_listing", { id, status: "stored" });
+    expect(move.isError).toBe(true);
+    expect(move.body).toMatchObject({ code: "invalid_item_transition" });
+
+    // Reinstatement leg: exactly the reinstate route's write — visible again
+    // everywhere, nothing lost.
+    await db.query(`UPDATE items SET status = 'active' WHERE id = $1`, [id]);
+    const backGet = await callTool(toolsFor(null), "get_item", { id });
+    expect(backGet.isError).toBe(false);
+    const backPage = stubResponse(id);
+    await itemPage(backPage.req, backPage.res as unknown as Response);
+    expect(backPage.res.statusCode).toBe(200);
   });
 
   it("item page shows stored items to the signed-in owner (200)", async () => {

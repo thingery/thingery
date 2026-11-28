@@ -551,9 +551,24 @@ async function itemStatusForTransition(id: string, sellerId: string): Promise<st
  *  active/reserved/sold/deleted stay free-form (deliberately not re-
  *  restricted in this change — ADR 0010 open question, one behavior change
  *  per PR). The live-order guard for active → stored runs in updateItem,
- *  after this table passes. */
+ *  after this table passes.
+ *  Report-moderation spec PR 2: `suspended` is the moderator-only status —
+ *  any seller-requested move into or out of it throws invalid_item_transition
+ *  in both directions. Only the admin suspend/reinstate routes write it;
+ *  same-status `suspended → suspended` stays a no-op like every other
+ *  same-status write. Field edits (price/title/…) of a suspended listing
+ *  never reach this table (updateItem runs it only for status changes), so
+ *  they stay possible while hidden — the fence is narrow by design. */
 function assertItemTransition(from: string, to: string): void {
   if (from === to) return;
+  if (from === "suspended" || to === "suspended") {
+    throw new ItemTransitionError(
+      "invalid_item_transition",
+      from === "suspended"
+        ? "This listing is suspended by the operators — only they can reinstate or remove it."
+        : "'suspended' is a moderator-only status and cannot be set by sellers.",
+    );
+  }
   if (from !== "stored" && to !== "stored") return; // legacy free-form, unchanged
   if (to === "stored") {
     if (from !== "active") {

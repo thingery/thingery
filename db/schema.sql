@@ -170,6 +170,28 @@ BEGIN
   END IF;
 END $$;
 
+-- Widen the items status CHECK with 'suspended' (report-moderation spec PR 2:
+-- reversible moderation state — hidden from every public surface, listing
+-- preserved, restorable via /admin/items/:id/reinstate). Only the admin
+-- suspend/reinstate routes write it; the seller-side transition fence in
+-- src/items.ts rejects any seller move into or out of 'suspended'. Same
+-- idempotent widening pattern as the 'stored' block above: databases created
+-- after that widening carry the five-value CHECK, so drop/re-add when the
+-- existing constraint lacks the new value. Skipped when already widened.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'items_status_check'
+      AND conrelid = 'items'::regclass
+      AND pg_get_constraintdef(oid) NOT LIKE '%suspended%'
+  ) THEN
+    ALTER TABLE items DROP CONSTRAINT items_status_check;
+    ALTER TABLE items ADD CONSTRAINT items_status_check
+      CHECK (status IN ('active','stored','reserved','sold','deleted','suspended'));
+  END IF;
+END $$;
+
 -- Registry as code (THI-734 D7): the seed CONVERGES the registry to schema.sql
 -- on every apply — description, attribute_definitions, parent and aliases are
 -- updated in place (created_at untouched). This replaces ON CONFLICT DO

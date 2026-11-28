@@ -217,7 +217,9 @@ export function rootRedirect(_req: Request, res: Response): void {
 
 export async function itemPage(req: Request, res: Response): Promise<void> {
   const item = await getItem(req.params.id).catch(() => null);
-  if (!item || item.status === "deleted") {
+  // `suspended` (report-moderation spec PR 2) 404s like deleted — hidden from
+  // every public surface; the seller sees the status in their own listings.
+  if (!item || item.status === "deleted" || item.status === "suspended") {
     res.status(404).send(page("Not found — Thingery", "Item not found", `<h1 data-i18n="item.nfH1">Not found</h1><p data-i18n="item.nfP">This item does not exist or was removed.</p><p><a href="/">Thingery</a></p>`));
     return;
   }

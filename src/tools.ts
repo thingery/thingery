@@ -1232,6 +1232,7 @@ export function registerTools(
       description: "Fetch one second-hand listing's full details (price, shipping_price_cents, total_price_cents, condition, " +
         "attributes, images) by its item id. Public — except items saved to a seller's private inventory " +
         "(status \"stored\"): those return not_found unless you authenticate as the owning seller. " +
+        "Removed or operator-suspended items return not_found to everyone (the seller sees those in their own listings). " +
         "On card-only deployments (card_only_mode: true) orderable/payment_available apply card-only rules and " +
         "payment_unavailable_reason names the blocker; 'off_platform' is never a fallback there. " +
         CONTENT_PROVENANCE_NOTE,
@@ -1239,7 +1240,10 @@ export function registerTools(
     },
     async (args) => {
       const item = await getItem(args.id);
-      if (!item || item.status === "deleted") return err("Item not found", "not_found");
+      // Report-moderation spec PR 2: `suspended` is moderator-hidden — the
+      // same not_found a deleted item gets, for every caller (no owner
+      // carve-out; the seller sees the suspension in their own my_listings).
+      if (!item || item.status === "deleted" || item.status === "suspended") return err("Item not found", "not_found");
       // ADR 0010: `stored` is owner-private inventory — the same not_found a
       // deleted item gets, for every caller except the authenticated owner.
       // requireSeller() is a pure read of the request context (no challenge),
@@ -1411,6 +1415,7 @@ export function registerTools(
         "asking price or shipping price, or edit title/description/condition. Stored rules: " +
         "only an active listing can be stored, a stored listing can only flip to active or deleted, and a " +
         "listing with a live order cannot be stored (typed errors: invalid_item_transition / item_in_order). " +
+        "Operator-suspended listings cannot be changed by sellers — only the operators reinstate or remove them. " +
         "Changing shipping_price_cents only affects future orders; existing orders keep the price they " +
         "snapshotted. Requires API key.",
       inputSchema: {

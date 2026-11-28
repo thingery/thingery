@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   ATTRIBUTE_CAPS,
   attributeFilterClause,
+  attributeIssues,
   attributeShapeErrors,
+  attributeShapeIssues,
   AttributeValidationError,
   attributesToText,
+  definitionErrors,
+  definitionIssues,
   validateAttributes,
   type AttributeDefinition,
 } from "../src/attributes.js";
@@ -102,10 +106,59 @@ describe("attributeShapeErrors (write caps, THI-83 §3.5)", () => {
   });
 
   it("AttributeValidationError carries the joined messages and the MCP error code", () => {
-    const err = new AttributeValidationError(attributeShapeErrors({ k: "v".repeat(501) }));
+    const err = new AttributeValidationError(attributeShapeIssues({ k: "v".repeat(501) }));
     expect(err).toBeInstanceOf(Error);
     expect(err.code).toBe("invalid_attributes");
     expect(err.message).toContain("value too long");
+  });
+
+  // THI-1921: structured twins — same checks, same order, plus field path +
+  // problem slug for field_errors surfacing.
+  it("attributeShapeIssues mirrors attributeShapeErrors with field paths and slugs", () => {
+    const issues = attributeShapeIssues({
+      ["k".repeat(129)]: "v",
+      big: "v".repeat(501),
+    });
+    expect(issues).toHaveLength(2);
+    expect(issues[0]).toMatchObject({
+      field: `attributes.${"k".repeat(129)}`,
+      problem: "key_too_long",
+    });
+    expect(issues[1]).toMatchObject({ field: "attributes.big", problem: "value_too_long" });
+    expect(issues.map((i) => i.message)).toEqual(
+      attributeShapeErrors({ ["k".repeat(129)]: "v", big: "v".repeat(501) }),
+    );
+  });
+
+  it("definitionIssues names the missing required attribute and mirrors definitionErrors", () => {
+    const issues = definitionIssues(sneakerDefs, { colorway: "red" });
+    expect(issues).toEqual([
+      {
+        field: "attributes.size_eu",
+        problem: "missing_required",
+        message: issues[0].message,
+        expected: "number",
+      },
+    ]);
+    expect(issues[0].message).toContain("size_eu");
+    expect(issues.map((i) => i.message)).toEqual(definitionErrors(sneakerDefs, { colorway: "red" }));
+  });
+
+  it("attributeIssues folds shape + definition issues in validateAttributes order", () => {
+    const issues = attributeIssues(sneakerDefs, {
+      colorway: "x".repeat(ATTRIBUTE_CAPS.maxValueLength + 1),
+    });
+    expect(issues.map((i) => i.problem)).toEqual(["value_too_long", "missing_required"]);
+    expect(issues.map((i) => i.message)).toEqual(
+      validateAttributes(sneakerDefs, { colorway: "x".repeat(ATTRIBUTE_CAPS.maxValueLength + 1) }),
+    );
+  });
+
+  it("AttributeValidationError carries the structured issues", () => {
+    const err = new AttributeValidationError(definitionIssues(sneakerDefs, {}));
+    expect(err.issues).toHaveLength(1);
+    expect(err.issues[0].field).toBe("attributes.size_eu");
+    expect(err.message).toBe(err.issues[0].message);
   });
 });
 

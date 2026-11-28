@@ -984,6 +984,7 @@ describe.skipIf(!available)("chat confirmation gate (DB)", () => {
   describe("THI-1942 F5: confirm-card title visibility", () => {
     let storedOtherId = "";
     let deletedOwnId = "";
+    let suspendedOtherId = "";
 
     beforeAll(async () => {
       const stored = await client.query(
@@ -998,6 +999,12 @@ describe.skipIf(!available)("chat confirmation gate (DB)", () => {
         [sellerA.id],
       );
       deletedOwnId = deleted.rows[0].id as string;
+      const suspended = await client.query(
+        `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, attributes, status)
+         VALUES ($1, 'Frozen Lamp', 10000, 100, 'other', '{}'::jsonb, 'suspended') RETURNING id`,
+        [sellerB.id],
+      );
+      suspendedOtherId = suspended.rows[0].id as string;
     });
 
     /** F5 assertion core: the card gates, holds the op, and carries no title. */
@@ -1008,10 +1015,12 @@ describe.skipIf(!available)("chat confirmation gate (DB)", () => {
       expect(out.confirm?.summary).toContain("this listing"); // generic shape
       expect(out.confirm?.summary).not.toContain("Secret Stash");
       expect(out.confirm?.summary).not.toContain("Ghost Sofa");
+      expect(out.confirm?.summary).not.toContain("Frozen Lamp");
       expect(out.confirm?.summary).not.toContain("City Bike");
       const toolContent = bodies.flatMap((b) => b.messages).find((m) => m.role === "tool")?.content ?? "";
       expect(toolContent).toContain("confirmation_required");
       expect(toolContent).not.toContain("Secret Stash");
+      expect(toolContent).not.toContain("Frozen Lamp");
       expectAllToolMessagesWrapped(bodies);
     }
 
@@ -1030,16 +1039,9 @@ describe.skipIf(!available)("chat confirmation gate (DB)", () => {
       expect((await statusOf(deletedOwnId)).status).toBe("deleted"); // held
     });
 
-    it("status op on a SUSPENDED item: card gates, title absent (fence simulated on the getItem seam until #445 widens the schema)", async () => {
-      // 'suspended' cannot exist in this DB yet (CHECK widening lands with
-      // report-moderation PR #445), so simulate the post-#445 row shape on
-      // the established mock seam; after rebasing onto post-#445 main this
-      // row should be backed by a real suspended fixture.
-      const real = await realGetItem(bikeId);
-      expect(real).toBeTruthy();
-      vi.mocked(getItem).mockResolvedValueOnce({ ...real!, status: "suspended" });
-      await expectGenericTitleLessCard(bikeId, { status: "sold" });
-      expect((await statusOf(bikeId)).status).toBe("active"); // held
+    it("status op on a SUSPENDED item: card gates, title absent (real fixture — #445 widened the CHECK)", async () => {
+      await expectGenericTitleLessCard(suspendedOtherId, { status: "sold" });
+      expect((await statusOf(suspendedOtherId)).status).toBe("suspended"); // held
     });
 
     it("control: an ACTIVE OWN item still renders its title on the card", async () => {

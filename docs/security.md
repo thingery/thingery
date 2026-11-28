@@ -687,8 +687,11 @@ A read sweep on top of a wrong state machine is wasted work, so re-verify who
 can WRITE each value before sweeping readers:
 
 - **Schema ↔ type parity:** the `items_status_check` CHECK constraint
-  (`db/schema.sql`) and the type-level twin `ItemStatus` (`src/orders.ts`) must
-  enumerate the same set. A value in one and not the other is drift. Widening
+  (`db/schema.sql`) and the type-level twin `STATUSES` (`src/db.ts`) must
+  enumerate the same set. A value in one and not the other is drift. Do not
+  "fix" `ItemStatus` (`src/orders.ts`) to match: it is the order-machine
+  subset (`stored` is deliberately absent — ADR 0010), not the full domain.
+  Widening
   the constraint follows the PR #445 pattern: idempotent DO-block keyed on the
   constraint definition, validated against a domain superset so no existing row
   can be rejected.
@@ -713,7 +716,7 @@ can WRITE each value before sweeping readers:
 | 2 | MCP `search_items` | `searchItems` (`src/items.ts`) — the feed choke point | Deny-states excluded by construction (`i.status = 'active'` + `FEED_VISIBLE`). Verify no caller bypasses the choke point. |
 | 3 | Chat `get_item` | `src/chat.ts` executeTool `get_item` case | Must mirror row 1's guard exactly. **This is the row that was missed**: the chat surface is a full API twin of MCP and serves anonymous callers. |
 | 4 | Chat `search_items` | `src/chat.ts` → `searchItems` | Choke point covers it; confirm no chat-local re-filtering or extra exposure was layered on top. |
-| 5 | Chat order gates | `src/chat.ts` create_order / confirm-card gates + `src/order-flow.ts` reservation | A gated item must not appear in an order card (title/price disclosure counts as a leak); the conditional reservation must fail closed for the new value. |
+| 5 | Order gates (MCP + chat) | chat gates in `src/chat.ts` (create_order / confirm-card); MCP `create_order` rides the shared `createOrder` reservation (`src/order-flow.ts`, `WHERE status = 'active'`); MCP `quote_shipping` eligibility gate (`src/tools.ts`: non-`active` answers `quotable: false, reason: "item_not_available"`) | A gated item must not appear in an order card (title/price disclosure counts as a leak); the conditional reservation must fail closed for the new value; `quote_shipping` must answer not-available, never quote a gated item. |
 | 6 | Web item page `/item/:id` (+ OG/share card) | `src/web-pages.ts` `itemPage` | 404 per deny-value with the same owner carve-out as row 1 — page and MCP must agree; OG cards inherit. |
 | 7 | `/browse`, `/search.json`, homepage search box, extraction comparables, any future feed | all via `searchItems` (`src/home-search.ts`, `src/extraction.ts`) | Choke point covers them; grep for hand-rolled `WHERE … status` terms on the items table — every hit must be a place this table already cites, else add a row. |
 | 8 | Seller public profile + listings tab | `src/sellers.ts` (aggregates + listings query) | Public predicate in every term: `status = 'active'` + `FEED_VISIBLE`. |
@@ -722,7 +725,7 @@ can WRITE each value before sweeping readers:
 | 11 | Buyer intents: match read + fan-out | match query gate in `src/intents.ts` (`i.status = 'active'`); fan-out fires only on `visibleInFeeds()` at the publish transitions (`createItem`, `updateItem` stored→active, `addItemImage`) | Gated items match nothing new and fire no notifications (under-notifies, never over-notifies). |
 | 12 | Embedding / vector search | items leg inside `searchItems`; wanted-board leg reads `buyer_intents`, not items | No new exposure expected; confirm the new value does not change which rows get embedded or surfaced via the vector leg. |
 | 13 | `my_listings` (MCP + chat) | `myItems` (`src/items.ts`) | Owner-scoped by design — and note it hides `deleted` even from the owner; decide where the new value sits (visible-to-owner vs hidden). The tool's status filter enum must accept the new value and reject garbage. |
-| 14 | Email templates | `src/emails.ts` | Two questions: (a) does the new value need a notification twin (moderation events notify the seller — PR #445 adds `seller.item_suspended.v1`)? (b) every "view item" button in every template 404s for gated items — established pattern, re-confirm. |
+| 14 | Email templates | `src/notify/templates.ts` (fan-out in `src/notify/fanout.ts`, delivery in `src/mailer.ts`) | Two questions: (a) does the new value need a notification twin (moderation events notify the seller — PR #445 adds `seller.item_suspended.v1`)? (b) every "view item" button in every template 404s for gated items — established pattern, re-confirm. |
 | 15 | Docs site / `llms.txt` regeneration | website docs + generated `llms.txt` | Tool descriptions state the public predicate; regenerate so buyer agents' tool docs describe the new deny behavior. |
 
 **Standing invariants to re-check in the same sweep**
@@ -739,7 +742,7 @@ can WRITE each value before sweeping readers:
 
 ```md
 ## items.status sweep checklist (docs/security.md §4e)
-- [ ] Step 0: CHECK constraint ↔ `ItemStatus` parity; writer inventory grepped clean; quota/transition-fence decision stated
+- [ ] Step 0: CHECK constraint ↔ `STATUSES` parity; writer inventory grepped clean; quota/transition-fence decision stated
 - [ ] 1 MCP `get_item` guard
 - [ ] 2 MCP `search_items` (via `searchItems` choke point)
 - [ ] 3 chat `get_item` guard (exact mirror of MCP)

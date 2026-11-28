@@ -983,6 +983,18 @@ CREATE INDEX IF NOT EXISTS reports_target_created_idx
 CREATE INDEX IF NOT EXISTS reports_review_created_idx
   ON reports (target_review_id, created_at);
 
+-- Report-moderation spec PR 3: resolution metadata (additive, nullable,
+-- replay-idempotent). A report leaving 'open' carries when and (for
+-- moderation actions) which action resolved it: 'suspended' | 'deleted'
+-- set by the admin suspend/takedown side effect in the same transaction as
+-- the item status change. Dismissed rows keep resolution_action NULL —
+-- the moderator's optional note rides dismiss_note (route-capped 500;
+-- PII-free discipline: stored, never emailed). No backfill: existing rows
+-- are history. No destructive step; old code ignores the extra columns.
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS resolution_action TEXT;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS dismiss_note TEXT;
+
 -- Review-notify backfill state (spec docs/specs/item-reports.md §backfill;
 -- the email_outbox delivery-sweep pattern applied to reports): NULL-ref
 -- misses get bounded retry with attempts + exponential backoff; permanent

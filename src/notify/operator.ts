@@ -109,16 +109,22 @@ export async function planOperatorAlert(p: {
  * account-less ops.* rows for the same reason it exempts operator.*).
  * Dedupe key `report:{id}`: at-most-once per report, ever. Pass `client` to
  * ride the report INSERT transaction (createItemReport does — the row
- * commits iff the report commits). Payload is PII-minimal: report id, item
- * id, reason slug, timestamp — never the motivation free-text (UNTRUSTED
- * user content stays in the reports table / triage task, the sources of
- * truth). Unset REPORT_ALERT_EMAIL ⇒ log-only (no row), the same dark
- * default as operator alerts — a self-hosted deployment must not mail the
- * Thingery project alias by default. */
+ * commits iff the report commits). Payload carries the report id, item id,
+ * reason slug, timestamp AND the motivation free-text (report-moderation
+ * spec §1): the description is the one field the reporter wrote for the
+ * moderation reader — omitting it made "other" reports unreadable from the
+ * mailbox alone. It is UNTRUSTED user content, but it is length-capped at
+ * insert (10–1000 chars) and the template HTML-escapes every line before
+ * rendering, so it cannot carry markup into the mail body; the sources of
+ * truth (reports table, triage task) are unchanged. Unset
+ * REPORT_ALERT_EMAIL ⇒ log-only (no row), the same dark default as operator
+ * alerts — a self-hosted deployment must not mail the Thingery project
+ * alias by default. */
 export async function planItemReportEmail(p: {
   reportId: string;
   itemId: string;
   reason: string;
+  motivation: string;
   createdAt: Date;
   client?: PoolClient;
   /** Defaults to notifyConfig() — inject for tests. */
@@ -133,6 +139,7 @@ export async function planItemReportEmail(p: {
       report_id: p.reportId,
       item_id: p.itemId,
       reason: p.reason,
+      motivation: p.motivation,
       created_at: p.createdAt.toISOString(),
     },
     dedupeKey: `report:${p.reportId}`,

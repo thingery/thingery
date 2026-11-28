@@ -829,7 +829,11 @@ export async function executeTool(
       const item = await getItem(args.id as string);
       // ADR 0010: stored is owner-private inventory — same rule as the MCP
       // get_item: not found for everyone except the authenticated owner.
-      if (!item || item.status === "deleted" || (item.status === "stored" && seller?.id !== item.seller_id)) {
+      // Report-moderation spec (THI-1932 F1): 'suspended' is moderator-hidden
+      // — not found for everyone, no owner carve-out, mirroring the MCP
+      // get_item. This chat op is a full read twin of the MCP surface and
+      // must enforce the same mediation.
+      if (!item || item.status === "deleted" || item.status === "suspended" || (item.status === "stored" && seller?.id !== item.seller_id)) {
         return { error: "not found" };
       }
       return { item };
@@ -1759,7 +1763,11 @@ export async function orderWriteGate(
     } catch {
       return { outcome: "error", error: "create_order: the item could not be read right now, so nothing was ordered. Tell the user to try again in a moment." };
     }
-    if (!item) return { outcome: "error", error: "Item not found." };
+    // Report-moderation spec (THI-1932 F1): a suspended (or deleted) listing
+    // is "Item not found." at the confirm-card gate too — the card must never
+    // render moderated content before the reservation's WHERE status='active'
+    // fails closed. Reserved/sold keep their card-then-item_unavailable flow.
+    if (!item || item.status === "deleted" || item.status === "suspended") return { outcome: "error", error: "Item not found." };
     if (item.seller_id === seller.id) return { outcome: "error", error: "Sellers cannot order their own item." };
     // THI-919 PR4 (spec §6): run the same advisory verification at propose
     // time so the card carries one carrier line before the user confirms.

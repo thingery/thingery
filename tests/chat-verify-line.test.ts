@@ -136,6 +136,20 @@ describe("gate verification line (spec §6: one line on the order card)", () => 
     expect(verdict.summary.split("\n")).toHaveLength(1);
   });
 
+  it("THI-1932 F1: suspended and deleted items are 'Item not found.' at the gate — the card never renders moderated content", async () => {
+    vi.mocked(getItem).mockResolvedValue({ ...itemRow, status: "suspended" } as typeof itemRow);
+    const suspended = await orderWriteGate("create_order", canonicalArgs(), seller);
+    expect(suspended).toEqual({ outcome: "error", error: "Item not found." });
+    vi.mocked(getItem).mockResolvedValue({ ...itemRow, status: "deleted" } as typeof itemRow);
+    const deleted = await orderWriteGate("create_order", canonicalArgs(), seller);
+    expect(deleted).toEqual({ outcome: "error", error: "Item not found." });
+    // Reserved keeps its card-then-execute-refusal flow (the buyer gets the
+    // specific item_unavailable feedback, not a misleading not-found).
+    vi.mocked(getItem).mockResolvedValue({ ...itemRow, status: "reserved" } as typeof itemRow);
+    const reserved = await orderWriteGate("create_order", canonicalArgs(), seller);
+    expect(reserved.outcome).toBe("gate");
+  });
+
   it("no shipping_address means no verification call and no line (local pickup)", async () => {
     const verdict = await orderWriteGate("create_order", canonicalArgs({ shipping_address: undefined }), seller);
     expect(verdict.outcome).toBe("gate");

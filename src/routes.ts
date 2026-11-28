@@ -1958,9 +1958,12 @@ api.post("/admin/items/:id/takedown", asyncHandler(async (req: Request, res: Res
     res.status(400).json({ error: "reason (1-500 chars) required." });
     return;
   }
+  // Report-moderation spec PR 2: eligibility widened with 'suspended' —
+  // the escalation path (suspend first while borderline, takedown when
+  // confirmed). Eligible-from is now {active, stored, suspended}.
   const taken = await pool.query<{ seller_id: string; title: string }>(
     `UPDATE items SET status = 'deleted', updated_at = now()
-      WHERE id = $1 AND status IN ('active', 'stored')
+      WHERE id = $1 AND status IN ('active', 'stored', 'suspended')
       RETURNING seller_id, title`,
     [String(req.params.id)],
   );
@@ -1983,6 +1986,109 @@ api.post("/admin/items/:id/takedown", asyncHandler(async (req: Request, res: Res
   });
   res.set("Cache-Control", "no-store");
   res.json({ item_id: String(req.params.id), status: "deleted", seller_notified: true });
+}));
+
+// Report-moderation spec PR 2: reversible suspend — the takedown pattern
+// exactly (Bearer ADMIN_API_KEY, boot gate, per-IP limiter, timing-safe
+// compare, zod body, no-store), but the target state is 'suspended': hidden
+// from every public surface (feeds filter active; get_item and the item page
+// 404 it) with the listing preserved and restorable via reinstate. The owner
+// is notified at most once per item lifetime — the dedupe key
+// suspended:{item_id} has no epoch, so a re-suspension after a reinstate does
+// NOT re-notify (report-moderation spec §4; THI-1932 F3 wording fix); the
+// email is orders-class, so the seller's prefs and the account gate apply at
+// send time. Eligibility mirrors takedown: only active|stored (reserved/sold
+// have live orders — use the dispute flow; deleted/suspended are out of
+// band). A second suspend hits the status guard and 404s. The report
+// auto-resolution side effect lands with PR 3 (report resolution columns).
+const suspendSchema = z.object({ reason: z.string().min(1).max(500) });
+
+api.post("/admin/items/:id/suspend", asyncHandler(async (req: Request, res: Response) => {
+  if (!orderFlowConfig().adminRouteEnabled) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const header = req.get("Authorization");
+  const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : undefined;
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
+    res.status(401).json({ error: "Not authorized." });
+    return;
+  }
+  const parsed = suspendSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "reason (1-500 chars) required." });
+    return;
+  }
+  const suspended = await pool.query<{ seller_id: string; title: string }>(
+    `UPDATE items SET status = 'suspended', updated_at = now()
+      WHERE id = $1 AND status IN ('active', 'stored')
+      RETURNING seller_id, title`,
+    [String(req.params.id)],
+  );
+  if (!suspended.rows[0]) {
+    res.status(404).json({ error: "Item not found or not suspend-eligible." });
+    return;
+  }
+  const item = suspended.rows[0];
+  const seller = await pool.query<{ email: string | null }>(
+    "SELECT email FROM sellers WHERE id = $1", [item.seller_id],
+  );
+  await planAccountNotification({
+    recipientId: item.seller_id,
+    toEmail: seller.rows[0]?.email,
+    eventType: "seller.item_suspended",
+    role: "seller",
+    subject: subjectSafe(`Listing suspended: ${item.title} — Thingery`),
+    payload: { item_title: item.title, item_id: String(req.params.id), reason: parsed.data.reason },
+    dedupeKey: `suspended:${String(req.params.id)}`,
+  });
+  res.set("Cache-Control", "no-store");
+  res.json({ item_id: String(req.params.id), status: "suspended", seller_notified: true });
+}));
+
+// Reinstatement — the restore leg of the suspend state machine
+// (suspended → active, listing live again exactly as before; reserved/sold
+// are set by the order machine, never here). No email in v1 (spec open
+// question 2): the seller sees the listing live again in their own listings.
+// Empty body by design; same auth discipline as suspend. A second reinstate
+// (or reinstate of a non-suspended item) hits the status guard and 404s.
+const reinstateSchema = z.object({}).strict();
+
+api.post("/admin/items/:id/reinstate", asyncHandler(async (req: Request, res: Response) => {
+  if (!orderFlowConfig().adminRouteEnabled) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const header = req.get("Authorization");
+  const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : undefined;
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
+    res.status(401).json({ error: "Not authorized." });
+    return;
+  }
+  if (!reinstateSchema.safeParse(req.body ?? {}).success) {
+    res.status(400).json({ error: "No body expected." });
+    return;
+  }
+  const reinstated = await pool.query<{ title: string }>(
+    `UPDATE items SET status = 'active', updated_at = now()
+      WHERE id = $1 AND status = 'suspended'
+      RETURNING title`,
+    [String(req.params.id)],
+  );
+  if (!reinstated.rows[0]) {
+    res.status(404).json({ error: "Item not found or not suspended." });
+    return;
+  }
+  res.set("Cache-Control", "no-store");
+  res.json({ item_id: String(req.params.id), status: "active" });
 }));
 
 // Review moderation (order-reviews spec PR 3): hide one review — the

@@ -864,6 +864,35 @@ export function renderSellerItemTakenDown(p: { itemTitle: string; itemUrl: strin
   return { subject, text, html };
 }
 
+/** `seller.item_suspended.v1` — moderation suspended (hid, reversibly) a
+ *  listing (report-moderation spec PR 2). Same discipline as the takedown
+ *  twin: what happened, which listing, the moderator's reason, item link,
+ *  and the mistake-remedy line. Reinstatement deliberately emails nothing
+ *  (spec open question 2). */
+export function renderSellerItemSuspended(p: { itemTitle: string; itemUrl: string; reason: string }): RenderedEmail {
+  const subject = subjectSafe(`Listing suspended: ${p.itemTitle} — Thingery`);
+  const text =
+    "A moderator temporarily suspended your listing on Thingery. It is hidden from the " +
+    "marketplace while the operators review it; the listing itself is preserved.\n\n" +
+    `Item: ${p.itemTitle}\nReason: ${p.reason}\n` +
+    `\n${p.itemUrl}\n\n` +
+    `If you believe this was a mistake, contact the marketplace operators.\n\n` +
+    `— ${CANONICAL_SENTENCE}\n`;
+  const html = layoutHtml({
+    tag: "Listing suspended",
+    tone: "problem",
+    heading: "Your listing was suspended.",
+    paragraph:
+      "A moderator temporarily suspended your listing — it is hidden from the marketplace while the " +
+      "operators review it. If you believe this was a mistake, contact the marketplace operators.",
+    origin: safeOrigin(p.itemUrl),
+    panelTitle: p.itemTitle,
+    panelRows: [{ label: "Reason", value: p.reason }],
+    button: { label: "View the item", url: p.itemUrl },
+  });
+  return { subject, text, html };
+}
+
 /** `buyer.review_hidden.v1` — moderation hid a review the buyer wrote
  *  (order-reviews spec PR 3). */
 export function renderBuyerReviewHidden(p: { itemTitle: string; sellerUrl: string; reason: string }): RenderedEmail {
@@ -981,6 +1010,14 @@ export function renderOrderEmail(
         itemTitle: str("item_title") ?? "",
         itemUrl: str("item_id") ? `${baseUrl}/item/${payload.item_id}` : baseUrl,
         reason: str("reason") ?? "policy violation",
+      });
+    // Report-moderation spec PR 2: moderation suspended (hid, reversibly)
+    // one of the seller's listings.
+    case "seller.item_suspended":
+      return renderSellerItemSuspended({
+        itemTitle: str("item_title") ?? "",
+        itemUrl: str("item_id") ? `${baseUrl}/item/${payload.item_id}` : baseUrl,
+        reason: str("reason") ?? "policy review",
       });
     // Order-reviews spec PR 3: moderation hid one of the buyer's reviews.
     case "buyer.review_hidden":

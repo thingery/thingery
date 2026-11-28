@@ -811,11 +811,31 @@ docker compose -f docker-compose.prod.yml -f /opt/thingery-web/docker-compose.we
 # → "Stripe payments enabled (live mode)" | "Stripe payments not configured … (kill switch)"
 ```
 
-**Gate.** Live mode means real buyer payments and real Connect payouts. Flip only
-after the operator's legal/ToS sign-off for acting as merchant of record is
-recorded, and only the Stripe account owner activates the account for live mode
-(business
-profile, bank details, platform + Connect terms accepted in the Stripe dashboard).
+**CI side-effect hazard (observed 2026-11-27).** Every merge to main auto-deploys
+and recreates the app container, which re-reads `/opt/thingery/.env` — so any
+`STRIPE_*` edit activates on the NEXT routine deploy, without a dedicated
+announcement (test mode went live on thingery.dev this way on 2026-11-27
+13:09Z after the test key was placed in `.env`). Consequences: (a) never place
+`sk_live_…` in `.env` until the flip is authorized and re-announced — otherwise
+an unrelated merge silently flips prod live; (b) before any deploy window,
+verify the key prefixes (counts only, never values):
+`sudo -n -u deploy grep -c '^STRIPE_SECRET_KEY=sk_live' /opt/thingery/.env`
+— expected `0` outside an authorized flip.
+
+**Gate (updated 2026-11-28, owner directive).** Live mode means real buyer
+payments and real Connect payouts. Flip only when ALL of the following hold:
+1. the go-ahead is recorded on THI-358 — a later owner directive supersedes
+   earlier card acceptances;
+2. the payments terms of service — the **intermediary model** (owner option B,
+   2026-11-28), NOT the earlier seller-of-record draft — are approved and
+   published;
+3. the platform Stripe account can create connected accounts (identity
+   verification complete): the account owner confirms in the dashboard, or a
+   probe connected account is created and immediately deleted via the API
+   from the VPS;
+4. only the Stripe account owner activates the account for live mode (business
+   profile, bank details, platform + Connect terms accepted in the Stripe
+   dashboard).
 
 **Flip (all on the VPS, secrets never leave the box or this file):**
 

@@ -463,6 +463,15 @@ describe.skipIf(!available)("stored status end-to-end (DB)", () => {
       expect(get.body).toMatchObject({ code: "not_found" });
     }
 
+    // Chat twin (THI-1932 F1): the chat get_item op is a full read twin of
+    // the MCP surface and enforces the same mediation — not found for
+    // everyone, no owner carve-out.
+    for (const viewer of [null, other, owner]) {
+      const chatGet = (await executeTool("get_item", { id }, viewer)) as { error?: string; item?: unknown };
+      expect(chatGet.error).toBe("not found");
+      expect(chatGet.item).toBeUndefined();
+    }
+
     // Public item page 404s like a deleted item.
     const page = stubResponse(id);
     await itemPage(page.req, page.res as unknown as Response);

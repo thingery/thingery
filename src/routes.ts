@@ -1993,7 +1993,9 @@ api.post("/admin/items/:id/takedown", asyncHandler(async (req: Request, res: Res
 // compare, zod body, no-store), but the target state is 'suspended': hidden
 // from every public surface (feeds filter active; get_item and the item page
 // 404 it) with the listing preserved and restorable via reinstate. The owner
-// is notified exactly once per suspension (dedupe suspended:{item_id}); the
+// is notified at most once per item lifetime — the dedupe key
+// suspended:{item_id} has no epoch, so a re-suspension after a reinstate does
+// NOT re-notify (report-moderation spec §4; THI-1932 F3 wording fix); the
 // email is orders-class, so the seller's prefs and the account gate apply at
 // send time. Eligibility mirrors takedown: only active|stored (reserved/sold
 // have live orders — use the dispute flow; deleted/suspended are out of

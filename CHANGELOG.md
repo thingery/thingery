@@ -26,6 +26,15 @@ may change without a major version bump.
 
 ### Changed
 
+- **The /apps page follows the site locale cookie (THI-1953).** The legacy
+  connected-apps page — the documented revoke URL linked from privacy and
+  security pages — now renders in Italian when the browser carries the
+  `thingery_locale=it` cookie set by the thingery.dev web app, matching the
+  web app's voice ("App collegate", "Scollega"). Every other cookie value
+  (absent, `en`, unknown) renders English exactly as before, and the change is
+  cookie-only: no Accept-Language sniffing, no routing change, so self-hosted
+  behavior is unchanged for anyone not carrying the cookie.
+
 - **Order email text fixes (THI-1585).** Order emails no longer show raw
   internal codes: cancel/refund reasons, dispute outcomes, and order
   statuses render in plain English (unknown values fall back to neutral

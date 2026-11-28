@@ -7,7 +7,7 @@ import { resolveShippingQuote, getSellerDefaultOrigin, listingParcel } from "./s
 import { resolveCategory } from "./categories.js";
 import { aliasResolutionNote, describeCategoryNote } from "./categories.js";
 import { buyerShippingCents, categoryChildren, getCategory, getItem, createItem, listCategories, ItemTransitionError, ListingLimitError, listingQuota, type ListingQuota, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, SEARCH_MAX_OFFSET, ShippingPriceError, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
-import { validateAttributes, AttributeValidationError, attributeShapeErrors } from "./attributes.js";
+import { AttributeValidationError, attributeShapeErrors, attributeIssues, type AttributeIssue } from "./attributes.js";
 import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
 import { listNotificationsForAccount } from "./notify/queries.js";
 import { addItemImageBase64 } from "./images.js";
@@ -498,6 +498,21 @@ const err = (message: string, code = "error") => ({
   isError: true,
 });
 
+/** THI-1921: validation refusals answer with `field_errors` — a stable input
+ *  dot-path and problem slug per failing field, alongside the unchanged
+ *  `error`+`code` envelope (additive; existing clients keep parsing the old
+ *  shape). Lets clients surface every failing field instead of a blanket
+ *  "check the fields" refusal. */
+const errFields = (message: string, code: string, field_errors: AttributeIssue[]) => ({
+  content: [
+    {
+      type: "text" as const,
+      text: JSON.stringify({ error: message, code, field_errors }, null, 2),
+    },
+  ],
+  isError: true,
+});
+
 /** pg connection errors can carry an empty message; keep the code visible. */
 const describeError = (e: unknown): string => {
   const error = e as Error & { code?: string };
@@ -714,20 +729,30 @@ export function registerTools(
           // sellerId (no request IP at this layer). Mirrors items.ts.
           logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: seller.id });
           const available = (await listCategories()).map((c) => c.name).join(", ");
-          return err(`Unknown category '${rawCategory}'. Available: ${available}`, "unknown_category");
+          const message = `Unknown category '${rawCategory}'. Available: ${available}`;
+          return errFields(message, "unknown_category", [
+            { field: "category", problem: "unknown_category", message },
+          ]);
         }
         const category = resolved.canonical;
         const categoryRow = await getCategory(category);
         if (!categoryRow) {
           logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: seller.id });
-          return err(`Unknown category '${rawCategory}'.`, "unknown_category");
+          const message = `Unknown category '${rawCategory}'.`;
+          return errFields(message, "unknown_category", [
+            { field: "category", problem: "unknown_category", message },
+          ]);
         }
 
         const attributes = args.attributes;
-        const attributeErrors = validateAttributes(categoryRow.attribute_definitions, attributes);
-        if (attributeErrors.length > 0) {
+        const issues = attributeIssues(categoryRow.attribute_definitions, attributes);
+        if (issues.length > 0) {
           logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: seller.id });
-          return err(`Invalid attributes for category '${category}': ${attributeErrors.join("; ")}`, "invalid_attributes");
+          return errFields(
+            `Invalid attributes for category '${category}': ${issues.map((issue) => issue.message).join("; ")}`,
+            "invalid_attributes",
+            issues,
+          );
         }
 
         const createdRow = await createItem({
@@ -1458,8 +1483,10 @@ export function registerTools(
         // updateItem throws AttributeValidationError for attribute shape-cap
         // violations (spec THI-83 §3.5); surface it with the structured
         // invalid_attributes code, same as create_listing (THI-90 note 1).
+        // THI-1921: the caught issues ride along as field_errors so the same
+        // field-specific surfacing applies to updates.
         if (e instanceof AttributeValidationError) {
-          return err(`Invalid attributes: ${describeError(e)}`, e.code);
+          return errFields(`Invalid attributes: ${describeError(e)}`, e.code, e.issues);
         }
         if (e instanceof ShippingPriceError) return err(describeError(e), e.code);
         // ADR 0010: illegal stored transitions are typed rejections an agent

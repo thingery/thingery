@@ -16,7 +16,7 @@ Never commit `.env`.
 | `DATABASE_URL` | Postgres connection string. Required |
 | `PORT` | HTTP port. Default `3000` |
 | `PUBLIC_BASE_URL` | Base URL used in item links |
-| `SESSION_SECRET` | Signs login cookies. Generate one with `openssl rand -hex 32`; without it, logins reset on every restart |
+| `SESSION_SECRET` | Signs login cookies. Generate one with `openssl rand -hex 32`; without it, logins reset on every restart. Must be at least 32 characters for the admin UI |
 
 ## Search
 
@@ -64,7 +64,7 @@ Drafts are rate-limited to 10 per seller per hour on top of these caps. Photos a
 | `EASYPOST_API_KEY`, `EASYPOST_WEBHOOK_SECRET` | Optional automatic carrier tracking and label purchase. With no key, sellers track and buy labels manually |
 | `SENDCLOUD_API_KEY`, `SENDCLOUD_VALIDATE_CARRIER_CODE` | Optional order-time and saved-address verification (Sendcloud v3 address validation — an advisory check when a shippable order is created or an address is saved; with either variable unset, no check runs and buyers see no suggestions). The API key is the basic-auth credential (`key:secret` pair, or a single token sent as the basic username); the carrier code must name a carrier available on the Sendcloud account. See docs/specs/order-address-verification.md |
 | `ADDRESS_VERIFICATION_DAILY_CAP` | Max order-time address checks per UTC day, platform-wide (default `1000`). `0` disables address verification entirely; orders then always proceed without a check |
-| `ADMIN_API_KEY` | Turns on the admin route for resolving disputes. Must be at least 32 characters |
+| `ADMIN_API_KEY` | At least 32 characters. With it (and a valid `SESSION_SECRET`), the admin UI at `/admin` serves the dispute queue and the reports moderation queue — open item reports, with suspend / delete / dismiss actions that also resolve the report and email the owner. See [docs/admin-ui.md](https://github.com/thingery/thingery/blob/main/docs/admin-ui.md) |
 
 ## Order windows
 

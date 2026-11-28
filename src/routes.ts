@@ -26,7 +26,7 @@ import { parseNotificationPrefs, sanitizePrefsUpdate } from "./notify/prefs.js";
 import { verifyDigestUnsubscribeToken } from "./notify/digest.js";
 import { planAccountNotification } from "./notify/items.js";
 import { subjectSafe } from "./notify/templates.js";
-import { chatTurn, chatConfigured, type ChatMessage } from "./chat.js";
+import { chatTurn, chatConfigured, resolveReplyLocale, LOCALE_TAG_RE, type ChatMessage } from "./chat.js";
 import { appendChatTurn, clearChatHistory, loadChatHistory } from "./chat-history.js";
 import { chatLimits, dailyTokenBudget } from "./chat-limits.js";
 import {
@@ -1741,6 +1741,11 @@ const chatSchema = z.object({
     .array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(8000) }))
     .max(24)
     .default([]),
+  // THI-1951: optional request locale ("it", "en-US", …) so replies follow the
+  // user's language. Strict tag pattern — the value is request data and must
+  // never carry prompt text; the browser's Accept-Language is the fallback when
+  // absent (resolveReplyLocale), so old clients keep working.
+  locale: z.string().max(35).regex(LOCALE_TAG_RE).optional(),
 });
 
 // No inner try/catch → next(e): asyncHandler forwards rejections to the
@@ -1844,7 +1849,14 @@ api.post("/chat", asyncHandler(async (req: Request, res: Response) => {
     res.status(400).json({ error: "Message required (max 4000 characters)." });
     return;
   }
-  const { usage, ...reply } = await chatTurn(parsed.data.history as ChatMessage[], parsed.data.message, seller, byo);
+  const { usage, ...reply } = await chatTurn(
+    parsed.data.history as ChatMessage[],
+    parsed.data.message,
+    seller,
+    byo,
+    // THI-1951: body locale wins, else Accept-Language, else none (English default).
+    resolveReplyLocale(parsed.data.locale, req.headers["accept-language"]),
+  );
   if (usage) {
     // One usage line per LLM-backed turn (numbers + slugs only — no message
     // content, H4.2). Confirm/decline fast paths emit none. THI-197: every

@@ -657,6 +657,111 @@ user-clearable, so an aging history is bounded residue, not unbounded growth.
 As with every delete, rows persist in the encrypted nightly backups until they
 age out of the retention rotation (same caveat as §4b).
 
+## 4e. `items.status` value-change checklist — the complete-mediation sweep
+
+`items.status` is a deny-state carrier: each value is a promise about who may read
+a listing and where. Every read path that can return item content must agree on
+that promise — not just the paths a PR author remembers. This section is the
+enumeration; the rule below makes it a merge gate.
+
+**Why this exists (the near-miss that earned it).** When a moderation status
+value was added (PR #445), its fences were correctly applied to MCP `get_item`,
+the item page, and the feed choke point — but the chat tool surface (a full API
+twin of MCP, and anonymous-capable) was not in the enumeration, so one chat tool
+kept returning the moderated listing until security review caught it. Complete
+Mediation is a sweep obligation, not a spot check: **one missed read path is a
+complete bypass of the deny-state**, because every path to the object is a
+mediation point.
+
+**Rule (merge gate).** Any PR that adds, removes, or re-meanings an
+`items.status` value must tick every checklist row below in the PR description —
+one line per row: ✅ + how it was verified (regression test or code pointer).
+The Security reviewer rejects the PR if any row is unticked, or if the row's
+cited surface changed shape since this table was written. A PR that adds a new
+read path for items must add the matching row here **in the same PR**. Copy the
+block at the end of this section into the PR description.
+
+### Step 0 — writer inventory first
+
+A read sweep on top of a wrong state machine is wasted work, so re-verify who
+can WRITE each value before sweeping readers:
+
+- **Schema ↔ type parity:** the `items_status_check` CHECK constraint
+  (`db/schema.sql`) and the type-level twin `STATUSES` (`src/db.ts`) must
+  enumerate the same set. A value in one and not the other is drift. Do not
+  "fix" `ItemStatus` (`src/orders.ts`) to match: it is the order-machine
+  subset (`stored` is deliberately absent — ADR 0010), not the full domain.
+  Widening
+  the constraint follows the PR #445 pattern: idempotent DO-block keyed on the
+  constraint definition, validated against a domain superset so no existing row
+  can be rejected.
+- **Writers (the complete list — grep `UPDATE items SET status` to confirm no
+  fourth kind exists):** `createItem` (admits only `CREATE_ITEM_STATUSES`),
+  `updateItem` (MCP zod `STATUSES`, chat `UPDATE_LISTING_STATUSES`, and the
+  `assertItemTransition` direct-caller backstop fence), admin moderation routes
+  (takedown; suspend/reinstate in PR #445), and the order machine
+  (`ItemStatus` transitions in `src/orders.ts`, the conditional reservation in
+  `src/order-flow.ts` — `WHERE status = 'active'` — and the webhook status
+  override).
+- **Write-eligibility consumers:** `listingQuota` (`src/items.ts`) counts
+  `active` listings toward caps — decide and state whether the new value counts.
+  Transition fences must place the new value on the right side of every
+  allowed/forbidden pair.
+
+### The read-path table
+
+| # | Read path | Where the status term lives | What a deny-state must do here |
+|---|---|---|---|
+| 1 | MCP `get_item` | `src/tools.ts` get_item handler | Per-value guard before serialization → `not_found`. Owner carve-outs only where ADR 0010 grants them (`stored` = owner-private). |
+| 2 | MCP `search_items` | `searchItems` (`src/items.ts`) — the feed choke point | Deny-states excluded by construction (`i.status = 'active'` + `FEED_VISIBLE`). Verify no caller bypasses the choke point. |
+| 3 | Chat `get_item` | `src/chat.ts` executeTool `get_item` case | Must mirror row 1's guard exactly. **This is the row that was missed**: the chat surface is a full API twin of MCP and serves anonymous callers. |
+| 4 | Chat `search_items` | `src/chat.ts` → `searchItems` | Choke point covers it; confirm no chat-local re-filtering or extra exposure was layered on top. |
+| 5 | Order gates (MCP + chat) | chat gates in `src/chat.ts` (create_order / confirm-card); MCP `create_order` rides the shared `createOrder` reservation (`src/order-flow.ts`, `WHERE status = 'active'`); MCP `quote_shipping` eligibility gate (`src/tools.ts`: non-`active` answers `quotable: false, reason: "item_not_available"`) | A gated item must not appear in an order card (title/price disclosure counts as a leak); the conditional reservation must fail closed for the new value; `quote_shipping` must answer not-available, never quote a gated item. |
+| 6 | Web item page `/item/:id` (+ OG/share card) | `src/web-pages.ts` `itemPage` | 404 per deny-value with the same owner carve-out as row 1 — page and MCP must agree; OG cards inherit. |
+| 7 | `/browse`, `/search.json`, homepage search box, extraction comparables, any future feed | all via `searchItems` (`src/home-search.ts`, `src/extraction.ts`) | Choke point covers them; grep for hand-rolled `WHERE … status` terms on the items table — every hit must be a place this table already cites, else add a row. |
+| 8 | Seller public profile + listings tab | `src/sellers.ts` (aggregates + listings query) | Public predicate in every term: `status = 'active'` + `FEED_VISIBLE`. |
+| 9 | Category counts (`describe_category`, `categoryChildren`, nav counts) | count queries in `src/items.ts` | Same public predicate. A gated item must not move any count. |
+| 10 | `/stats.json` | `src/stats.ts` `COUNTS_SQL` | Today a deny-list (`status <> 'deleted'`): **decide explicitly** whether the new value is counted. Aggregate-only (no enumeration path), but it is a product/trust call — record the decision in the PR. |
+| 11 | Buyer intents: match read + fan-out | match query gate in `src/intents.ts` (`i.status = 'active'`); fan-out fires only on `visibleInFeeds()` at the publish transitions (`createItem`, `updateItem` stored→active, `addItemImage`) | Gated items match nothing new and fire no notifications (under-notifies, never over-notifies). |
+| 12 | Embedding / vector search | items leg inside `searchItems`; wanted-board leg reads `buyer_intents`, not items | No new exposure expected; confirm the new value does not change which rows get embedded or surfaced via the vector leg. |
+| 13 | `my_listings` (MCP + chat) | `myItems` (`src/items.ts`) | Owner-scoped by design — and note it hides `deleted` even from the owner; decide where the new value sits (visible-to-owner vs hidden). The tool's status filter enum must accept the new value and reject garbage. |
+| 14 | Email templates | `src/notify/templates.ts` (fan-out in `src/notify/fanout.ts`, delivery in `src/mailer.ts`) | Two questions: (a) does the new value need a notification twin (moderation events notify the seller — PR #445 adds `seller.item_suspended.v1`)? (b) every "view item" button in every template 404s for gated items — established pattern, re-confirm. |
+| 15 | Docs site / `llms.txt` regeneration | website docs + generated `llms.txt` | Tool descriptions state the public predicate; regenerate so buyer agents' tool docs describe the new deny behavior. |
+
+**Standing invariants to re-check in the same sweep**
+
+- No sitemap, RSS/Atom feed, or bulk-export endpoint exists. If one is ever
+  added, it becomes a row in this table at birth.
+- Every deny-value ships with **regression tests on the per-item surfaces**
+  (rows 1, 3, 5, 6 at minimum) that fail against the old code.
+- Post-PR grep: every `status` term on an items-table query lives in a place
+  this table cites (rows) or Step 0 (writers). Any other hit is an unmediated
+  path — fix or add a row before merge.
+
+### Copy-paste checklist for the PR description
+
+```md
+## items.status sweep checklist (docs/security.md §4e)
+- [ ] Step 0: CHECK constraint ↔ `STATUSES` parity; writer inventory grepped clean; quota/transition-fence decision stated
+- [ ] 1 MCP `get_item` guard
+- [ ] 2 MCP `search_items` (via `searchItems` choke point)
+- [ ] 3 chat `get_item` guard (exact mirror of MCP)
+- [ ] 4 chat `search_items`
+- [ ] 5 chat order gates (confirm card + reservation fail closed)
+- [ ] 6 web item page + OG card
+- [ ] 7 `/browse`, `/search.json`, homepage search box, extraction comparables (choke point)
+- [ ] 8 seller public profile + listings tab
+- [ ] 9 category counts
+- [ ] 10 `/stats.json` count decision recorded
+- [ ] 11 intents match read + fan-out gate
+- [ ] 12 vector/embedding legs (items + buyer_intents)
+- [ ] 13 `my_listings` filter enum + owner-visibility decision
+- [ ] 14 email templates (notification twin? view-item 404s)
+- [ ] 15 docs site / `llms.txt` regenerated
+- [ ] no new sitemap/RSS/export surface (or a row added for it)
+- [ ] regression tests on per-item surfaces, failing against old code
+```
+
 ## 5. Secrets hygiene policy
 
 **Policy: keys and secrets live only in GitHub Secrets (CI/CD) or the VPS
@@ -1130,4 +1235,5 @@ Review triggers: any PR touching `src/auth.ts`, `src/oauth.ts`, `src/rate-limit.
 `src/chat.ts`, `src/tools.ts`, `db/schema.sql`, the CI/deploy workflows, or the VPS
 runbook must check whether this document still tells the truth and update it in the same
 PR (or open a follow-up issue saying what changed). The Security role re-verifies the
-backlog quarterly and after any incident.
+backlog quarterly and after any incident. Any PR that adds, removes, or re-meanings an
+`items.status` value must run the §4e sweep checklist and tick it in the PR description.

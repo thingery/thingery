@@ -80,7 +80,7 @@ expand-contract; no destructive step). Semantics:
 - Eligibility (mirror takedown): only `active` and `stored` items may be suspended;
   `reserved`/`sold` have live orders (use the dispute flow), `deleted`/`suspended`
   are out of band.
-- **Reader inventory (every `getItem` path, THI-1929 RC-1/RC-2 + THI-1932 F1):**
+- **Reader inventory (every `getItem` path, spec-review RC-1/RC-2 + security-verdict F1):**
   adding a status value means sweeping **all** read surfaces, not just the MCP tool:
   `get_item` (MCP, `src/tools.ts`) → not_found; public item page (`src/web-pages.ts`)
   → 404 like `deleted`; **chat `get_item` op (`src/chat.ts`) → `not found` for
@@ -112,7 +112,7 @@ active|stored|suspended --takedown--> deleted
   involving `suspended` — in either direction — throws `invalid_item_transition`.
   Only the admin routes above can write it. Same-status writes stay no-ops. The
   suspended checks run **before** the `from !== "stored" && to !== "stored"`
-  early-return (THI-1929 N-3), so a seller cannot delete their own suspended
+  early-return (spec-review note N-3), so a seller cannot delete their own suspended
   listing either — intended: the moderator keeps recoverability.
 - Suspension does not block the seller from editing other fields of a suspended
   listing (price/description edits are inert while hidden); only the status moves are
@@ -134,7 +134,7 @@ per-IP attempt limiter, timing-safe key compare, zod body validation, `no-store`
 
 All are additive; no existing route changes meaning (takedown gains eligibility
 states and the report-resolution side effect — both named above). **Limiter buckets
-(THI-1929 N-2):** queue reads (`GET /admin/reports` JSON and the HTML page) use the
+(spec-review note N-2):** queue reads (`GET /admin/reports` JSON and the HTML page) use the
 page-class bucket (~300/h, `adminPageLimiter`-style) so routine polling cannot eat
 the auth-attempt budget; all POSTs (suspend/reinstate/takedown/dismiss) stay on the
 strict `adminAttemptLimiter`.
@@ -161,7 +161,7 @@ layout and discipline: what happened, which listing, the moderator's reason, ite
 link, "contact the operators if you believe this is a mistake". Planned via
 `planAccountNotification` with dedupe `suspended:{item_id}` — **at most once per
 item lifetime: the key has no epoch, so a re-suspension after a reinstate does not
-re-notify** (THI-1932 F3); prefs + verified-account gate apply at send time.
+re-notify** (security-verdict F3); prefs + verified-account gate apply at send time.
 Reinstatement does not
 email in v1; takedown keeps its existing email and dedupe.
 
@@ -185,7 +185,7 @@ rotatable key is the existing accepted posture of the admin surface).
 ## Data model changes (protected: `db/schema.sql`)
 
 Additive, replay-safe — shipped as the idempotent guarded DO block the schema
-already uses (THI-1929 N-1: the sketch below is illustrative; the **shipped**
+already uses (spec-review note N-1: the sketch below is illustrative; the **shipped**
 migration is a DO block that inspects the live `items_status_check`, drops and
 re-adds it widened only when `suspended` is absent, and the inline `CREATE TABLE
 items` CHECK is widened in the same PR so fresh installs and replayed installs
@@ -252,7 +252,7 @@ DB-backed (skip-guarded, existing suites extended):
 - Seller fence: `updateItem` status suspended → invalid_item_transition;
   suspended → active (seller) rejected; other transitions unchanged.
 - get_item: suspended → not_found.
-- **Reader sweep (THI-1929 RC-1/RC-2, THI-1932 F1 — these regression tests must
+- **Reader sweep (spec-review RC-1/RC-2 + security-verdict F1 — these regression tests must
   fail against code without the guard):** public item page `/item/:id` → 404;
   chat `executeTool("get_item", { id }, viewer)` → `not found` for anonymous,
   other, and owner (no carve-out); chat `orderWriteGate("create_order", …)` on a
@@ -260,7 +260,7 @@ DB-backed (skip-guarded, existing suites extended):
   `deleted` stays `Item not found.` too; `reserved` keeps its gate flow).
 - Reports queue JSON: boot gate, key, open-only list carries motivation; dismiss →
   dismissed, second dismiss → 404; queue reads on the page-class bucket, POSTs on
-  `adminAttemptLimiter` (THI-1929 N-2).
+  `adminAttemptLimiter` (spec-review note N-2).
 
 ## Rollout + rollback
 
@@ -290,11 +290,11 @@ it. No destructive step is required at any point.
 - `/stats.json` public item total counts suspended rows (`status <> 'deleted'`,
   `src/stats.ts`) — aggregate number only, no enumeration path; excluding them is
   a separate product call.
-- Shared `ADMIN_API_KEY` gives aggregate-only attribution (THI-1932 F4, standing
+- Shared `ADMIN_API_KEY` gives aggregate-only attribution (standing
   follow-up: per-operator tokens).
 - **Process control:** adding a status value requires a documented sweep of all
   read paths (MCP, web, chat, feeds, stats) — the chat twin was missed in the
-  first PR-2 push because the enumeration list omitted it (THI-1932 F1 root
+  first PR-2 push because the enumeration list omitted it (security-verdict F1 root
   cause); the checklist goes into `docs/security.md`.
 
 ## Open questions

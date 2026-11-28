@@ -973,4 +973,81 @@ describe.skipIf(!available)("chat confirmation gate (DB)", () => {
     expect(toolContent).not.toContain("try again"); // permanent failure must not invite retries
     expect((await statusOf(bikeId)).status).toBe("active"); // nothing executed anywhere
   });
+
+  // --- THI-1942 (report-moderation re-review F5): the gate read is a
+  // disclosure boundary. destructiveUpdateOp must apply the chat get_item
+  // visibility predicate before a title reaches a confirm card: an item the
+  // seller cannot see (deleted, suspended, another seller's stored) gates on
+  // a generic title-less card; only a visible item renders its title.
+  // Regression matrix per the F5 fix spec; the write itself stays fail-closed
+  // on WHERE id AND seller_id either way.
+  describe("THI-1942 F5: confirm-card title visibility", () => {
+    let storedOtherId = "";
+    let deletedOwnId = "";
+
+    beforeAll(async () => {
+      const stored = await client.query(
+        `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, attributes, status)
+         VALUES ($1, 'Secret Stash', 10000, 100, 'other', '{}'::jsonb, 'stored') RETURNING id`,
+        [sellerB.id],
+      );
+      storedOtherId = stored.rows[0].id as string;
+      const deleted = await client.query(
+        `INSERT INTO items (seller_id, title, price_cents, shipping_price_cents, category, attributes, status)
+         VALUES ($1, 'Ghost Sofa', 10000, 100, 'furniture', '{}'::jsonb, 'deleted') RETURNING id`,
+        [sellerA.id],
+      );
+      deletedOwnId = deleted.rows[0].id as string;
+    });
+
+    /** F5 assertion core: the card gates, holds the op, and carries no title. */
+    async function expectGenericTitleLessCard(id: string, args: Record<string, unknown>): Promise<void> {
+      const bodies = mockLlm([toolCallMsg("c1", "update_listing", { id, ...args }), FINAL]);
+      const out = await chatTurn([], "apply this change", sellerA);
+      expect(out.confirm).toBeTruthy(); // still gated — no silent execution
+      expect(out.confirm?.summary).toContain("this listing"); // generic shape
+      expect(out.confirm?.summary).not.toContain("Secret Stash");
+      expect(out.confirm?.summary).not.toContain("Ghost Sofa");
+      expect(out.confirm?.summary).not.toContain("City Bike");
+      const toolContent = bodies.flatMap((b) => b.messages).find((m) => m.role === "tool")?.content ?? "";
+      expect(toolContent).toContain("confirmation_required");
+      expect(toolContent).not.toContain("Secret Stash");
+      expectAllToolMessagesWrapped(bodies);
+    }
+
+    it("status op on ANOTHER SELLER'S stored item: card gates, title absent", async () => {
+      await expectGenericTitleLessCard(storedOtherId, { status: "sold" });
+      expect((await statusOf(storedOtherId)).status).toBe("stored"); // held
+    });
+
+    it("price >20% drop on ANOTHER SELLER'S stored item: card gates, title absent", async () => {
+      await expectGenericTitleLessCard(storedOtherId, { price_cents: 1000 });
+      expect((await statusOf(storedOtherId)).price_cents).toBe(10000); // held
+    });
+
+    it("status op on the seller's OWN DELETED item: card gates, title absent (deleted is invisible to everyone)", async () => {
+      await expectGenericTitleLessCard(deletedOwnId, { status: "sold" });
+      expect((await statusOf(deletedOwnId)).status).toBe("deleted"); // held
+    });
+
+    it("status op on a SUSPENDED item: card gates, title absent (fence simulated on the getItem seam until #445 widens the schema)", async () => {
+      // 'suspended' cannot exist in this DB yet (CHECK widening lands with
+      // report-moderation PR #445), so simulate the post-#445 row shape on
+      // the established mock seam; after rebasing onto post-#445 main this
+      // row should be backed by a real suspended fixture.
+      const real = await realGetItem(bikeId);
+      expect(real).toBeTruthy();
+      vi.mocked(getItem).mockResolvedValueOnce({ ...real!, status: "suspended" });
+      await expectGenericTitleLessCard(bikeId, { status: "sold" });
+      expect((await statusOf(bikeId)).status).toBe("active"); // held
+    });
+
+    it("control: an ACTIVE OWN item still renders its title on the card", async () => {
+      const bodies = mockLlm([toolCallMsg("c1", "update_listing", { id: sofaId, status: "sold" }), FINAL]);
+      const out = await chatTurn([], "mark the sofa sold", sellerA);
+      expect(out.confirm?.op).toBe("sold");
+      expect(out.confirm?.summary).toContain("Vintage Sofa"); // title present
+      expectAllToolMessagesWrapped(bodies);
+    });
+  });
 });

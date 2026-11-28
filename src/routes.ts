@@ -1958,20 +1958,46 @@ api.post("/admin/items/:id/takedown", asyncHandler(async (req: Request, res: Res
     res.status(400).json({ error: "reason (1-500 chars) required." });
     return;
   }
-  // Report-moderation spec PR 2: eligibility widened with 'suspended' —
+  // Report-moderation spec PR 3: eligibility widened with 'suspended' —
   // the escalation path (suspend first while borderline, takedown when
   // confirmed). Eligible-from is now {active, stored, suspended}.
-  const taken = await pool.query<{ seller_id: string; title: string }>(
-    `UPDATE items SET status = 'deleted', updated_at = now()
-      WHERE id = $1 AND status IN ('active', 'stored', 'suspended')
-      RETURNING seller_id, title`,
-    [String(req.params.id)],
-  );
-  if (!taken.rows[0]) {
+  // One transaction covers the item status change and the report
+  // auto-resolution side effect (spec: "the report cannot end up open
+  // while its target is gone"); the owner email stays out-of-band after
+  // COMMIT exactly as before.
+  const client = await pool.connect();
+  let reportsResolved = 0;
+  let taken: { seller_id: string; title: string } | undefined;
+  try {
+    await client.query("BEGIN");
+    const result = await client.query<{ seller_id: string; title: string }>(
+      `UPDATE items SET status = 'deleted', updated_at = now()
+        WHERE id = $1 AND status IN ('active', 'stored', 'suspended')
+        RETURNING seller_id, title`,
+      [String(req.params.id)],
+    );
+    taken = result.rows[0];
+    if (taken) {
+      const resolved = await client.query<{ id: string }>(
+        `UPDATE reports SET status = 'resolved', resolution_action = 'deleted', resolved_at = now()
+          WHERE target_item_id = $1 AND status = 'open'
+          RETURNING id`,
+        [String(req.params.id)],
+      );
+      reportsResolved = resolved.rowCount ?? resolved.rows.length;
+    }
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  if (!taken) {
     res.status(404).json({ error: "Item not found or not takedown-eligible." });
     return;
   }
-  const item = taken.rows[0];
+  const item = taken;
   const seller = await pool.query<{ email: string | null }>(
     "SELECT email FROM sellers WHERE id = $1", [item.seller_id],
   );
@@ -1985,7 +2011,7 @@ api.post("/admin/items/:id/takedown", asyncHandler(async (req: Request, res: Res
     dedupeKey: `takedown:${String(req.params.id)}`,
   });
   res.set("Cache-Control", "no-store");
-  res.json({ item_id: String(req.params.id), status: "deleted", seller_notified: true });
+  res.json({ item_id: String(req.params.id), status: "deleted", seller_notified: true, reports_resolved: reportsResolved });
 }));
 
 // Report-moderation spec PR 2: reversible suspend — the takedown pattern
@@ -1999,8 +2025,10 @@ api.post("/admin/items/:id/takedown", asyncHandler(async (req: Request, res: Res
 // email is orders-class, so the seller's prefs and the account gate apply at
 // send time. Eligibility mirrors takedown: only active|stored (reserved/sold
 // have live orders — use the dispute flow; deleted/suspended are out of
-// band). A second suspend hits the status guard and 404s. The report
-// auto-resolution side effect lands with PR 3 (report resolution columns).
+// band). A second suspend hits the status guard and 404s. Open reports on
+// the item auto-resolve in the same transaction as the status change
+// (report-moderation spec PR 3: resolution_action 'suspended', resolved_at
+// set), so a report can never stay open under a hidden listing.
 const suspendSchema = z.object({ reason: z.string().min(1).max(500) });
 
 api.post("/admin/items/:id/suspend", asyncHandler(async (req: Request, res: Response) => {
@@ -2023,17 +2051,39 @@ api.post("/admin/items/:id/suspend", asyncHandler(async (req: Request, res: Resp
     res.status(400).json({ error: "reason (1-500 chars) required." });
     return;
   }
-  const suspended = await pool.query<{ seller_id: string; title: string }>(
-    `UPDATE items SET status = 'suspended', updated_at = now()
-      WHERE id = $1 AND status IN ('active', 'stored')
-      RETURNING seller_id, title`,
-    [String(req.params.id)],
-  );
-  if (!suspended.rows[0]) {
+  const client = await pool.connect();
+  let reportsResolved = 0;
+  let suspended: { seller_id: string; title: string } | undefined;
+  try {
+    await client.query("BEGIN");
+    const result = await client.query<{ seller_id: string; title: string }>(
+      `UPDATE items SET status = 'suspended', updated_at = now()
+        WHERE id = $1 AND status IN ('active', 'stored')
+        RETURNING seller_id, title`,
+      [String(req.params.id)],
+    );
+    suspended = result.rows[0];
+    if (suspended) {
+      const resolved = await client.query<{ id: string }>(
+        `UPDATE reports SET status = 'resolved', resolution_action = 'suspended', resolved_at = now()
+          WHERE target_item_id = $1 AND status = 'open'
+          RETURNING id`,
+        [String(req.params.id)],
+      );
+      reportsResolved = resolved.rowCount ?? resolved.rows.length;
+    }
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  if (!suspended) {
     res.status(404).json({ error: "Item not found or not suspend-eligible." });
     return;
   }
-  const item = suspended.rows[0];
+  const item = suspended;
   const seller = await pool.query<{ email: string | null }>(
     "SELECT email FROM sellers WHERE id = $1", [item.seller_id],
   );
@@ -2047,7 +2097,7 @@ api.post("/admin/items/:id/suspend", asyncHandler(async (req: Request, res: Resp
     dedupeKey: `suspended:${String(req.params.id)}`,
   });
   res.set("Cache-Control", "no-store");
-  res.json({ item_id: String(req.params.id), status: "suspended", seller_notified: true });
+  res.json({ item_id: String(req.params.id), status: "suspended", seller_notified: true, reports_resolved: reportsResolved });
 }));
 
 // Reinstatement — the restore leg of the suspend state machine
@@ -2089,6 +2139,103 @@ api.post("/admin/items/:id/reinstate", asyncHandler(async (req: Request, res: Re
   }
   res.set("Cache-Control", "no-store");
   res.json({ item_id: String(req.params.id), status: "active" });
+}));
+
+// Report-moderation spec PR 3: the moderator's queue, JSON first (PR 4 adds
+// the HTML page). Open ITEM reports only — review-targeted reports keep their
+// own triage path — newest first, motivation included (it is exactly the
+// content the reporter wrote for the moderation reader), item title joined
+// for the action card, capped page. Limiter bucket per spec note N-2: reads
+// use the page-class bucket (300/h) so routine queue polling cannot eat the
+// strict auth-attempt budget; the dismiss POST below stays on
+// adminAttemptLimiter. Same boot gate + timing-safe key discipline as every
+// admin route; no-store so no proxy caches the queue.
+const ADMIN_REPORTS_PAGE_CAP = 100;
+
+api.get("/admin/reports", asyncHandler(async (req: Request, res: Response) => {
+  if (!orderFlowConfig().adminRouteEnabled) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  if (!adminPageLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).json({ error: "Too many requests. Try again later." });
+    return;
+  }
+  const header = req.get("Authorization");
+  const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : undefined;
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
+    res.status(401).json({ error: "Not authorized." });
+    return;
+  }
+  const { rows } = await pool.query<{
+    id: string; reason: string; motivation: string;
+    item_id: string; item_title: string;
+    reporter_account_id: string; created_at: Date;
+  }>(
+    `SELECT r.id, r.reason, r.motivation, r.target_item_id AS item_id,
+            i.title AS item_title, r.reporter_account_id, r.created_at
+       FROM reports r
+       JOIN items i ON i.id = r.target_item_id
+      WHERE r.status = 'open' AND r.target_item_id IS NOT NULL
+      ORDER BY r.created_at DESC
+      LIMIT $1`,
+    [ADMIN_REPORTS_PAGE_CAP],
+  );
+  res.set("Cache-Control", "no-store");
+  res.json({
+    reports: rows.map((r) => ({
+      id: r.id,
+      reason: r.reason,
+      motivation: r.motivation,
+      item_id: r.item_id,
+      item_title: r.item_title,
+      reporter_account_id: r.reporter_account_id,
+      created_at: r.created_at.toISOString(),
+    })),
+  });
+}));
+
+// Dismiss — the reviewed-no-action leg of the report state machine
+// (open → dismissed, terminal; re-reporting is the reporter's dedupe-bounded
+// remedy). Optional moderator note (audit trail; PII-free discipline: stored,
+// never emailed). The open-only lookup makes a second dismiss 404 by
+// construction — the explicit state machine, no transition route out of a
+// terminal state. resolution_action stays NULL (nothing was done to the
+// target); resolved_at marks when the report left 'open'.
+const dismissSchema = z.object({ note: z.string().max(500).optional() });
+
+api.post("/admin/reports/:id/dismiss", asyncHandler(async (req: Request, res: Response) => {
+  if (!orderFlowConfig().adminRouteEnabled) {
+    res.status(404).json({ error: "Not found." });
+    return;
+  }
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    res.status(429).json({ error: "Too many attempts. Try again later." });
+    return;
+  }
+  const header = req.get("Authorization");
+  const presented = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : undefined;
+  if (!adminKeyMatches(presented, envValue("ADMIN_API_KEY"))) {
+    res.status(401).json({ error: "Not authorized." });
+    return;
+  }
+  const parsed = dismissSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "note (0-500 chars) optional." });
+    return;
+  }
+  const dismissed = await pool.query<{ id: string }>(
+    `UPDATE reports SET status = 'dismissed', dismiss_note = $2, resolved_at = now()
+      WHERE id = $1 AND status = 'open'
+      RETURNING id`,
+    [String(req.params.id), parsed.data.note ?? ""],
+  );
+  if (!dismissed.rows[0]) {
+    res.status(404).json({ error: "Report not found or not open." });
+    return;
+  }
+  res.set("Cache-Control", "no-store");
+  res.json({ report_id: dismissed.rows[0].id, status: "dismissed" });
 }));
 
 // Review moderation (order-reviews spec PR 3): hide one review — the

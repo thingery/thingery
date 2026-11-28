@@ -360,7 +360,7 @@ $("chatgpt-disconnect").onclick = async () => {
 // dynamic sections (welcome line, key note, BYO/ChatGPT status) follow the
 // choice without a reload — the signup form keeps whatever is typed.
 if (globalThis.__thingeryI18N) {
-  globalThis.__thingeryI18N.onChange(() => {
+  globalThis.__thingeryI18N.onchange(() => {
     syncAuthMode();
     if (lastSeller) showDone(lastSeller);
     if (lastByoData !== undefined) renderByo(lastByoData);

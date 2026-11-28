@@ -255,5 +255,11 @@ npm run db:migrate && npm run db:seed
 psql "postgres://thingery:thingery@localhost:5432/thingery"   # or "$DATABASE_URL" if exported
 ```
 
-When the admin surface from H4 lands, replace the procedures here with the UI path and
-keep the safety rails — the rails outlive the tooling.
+Part of this runbook is now superseded: suspending, taking down, or dismissing a
+**reported listing** is a browser flow in the admin UI — see
+[admin-ui.md](admin-ui.md) (the queue does the same state change as step 2
+above, plus the report resolution and owner email, in one transaction). Keep
+using the SQL procedures here for everything the UI does not cover yet —
+disabling a seller (step 3), mass takedowns, and any incident where the admin
+surface itself is the problem. And keep the safety rails either way — the rails
+outlive the tooling.

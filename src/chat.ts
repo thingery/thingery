@@ -1706,8 +1706,14 @@ type DestructiveVerdict =
  * read is a transient failure. The previous `.catch(() => null)` flattened
  * both, so a failed read made a >20% price drop execute ungated. Reads that
  * fail now hold the op.
+ *
+ * THI-1942 (report-moderation re-review F5): the item read is a disclosure
+ * boundary, not just a gate input — the verdict must apply the chat
+ * `get_item` visibility predicate before a title reaches a card, so an
+ * item the seller cannot see never renders its title (spec
+ * docs/specs/report-moderation.md, protected set incl. `src/chat.ts`).
  */
-async function destructiveUpdateOp(args: Record<string, unknown>): Promise<DestructiveVerdict> {
+async function destructiveUpdateOp(args: Record<string, unknown>, sellerId: string): Promise<DestructiveVerdict> {
   const id = args.id;
   if (typeof id !== "string" || !id) return { outcome: "execute" };
   const status = args.status === "sold" || args.status === "deleted" ? args.status : null;
@@ -1727,12 +1733,30 @@ async function destructiveUpdateOp(args: Record<string, unknown>): Promise<Destr
         "update_listing: the listing could not be read to decide whether this change needs confirmation, so it was NOT applied. Tell the user the listing could not be read right now and to try again in a moment.",
     };
   }
-  if (status) return { outcome: "gate", op: status, title: item?.title ?? null };
+  // THI-1942 (F5): the chat get_item visibility predicate (ADR 0010 stored-
+  // owner privacy + the report-moderation suspended fence). An item this
+  // seller cannot see — unknown, deleted, suspended, or another seller's
+  // stored inventory — never contributes its title: every destructive op
+  // still gates exactly as before (no gate is removed; an own deleted item's
+  // price edit stays confirmed-by-card), but the card renders the generic
+  // "this listing" shape instead of the title. The write itself keeps its
+  // own fail-closed answer: WHERE id AND seller_id reports "not found or not
+  // yours" for anything the seller could not have targeted anyway.
+  // Deliberately a local copy of the get_item guard — PR #445 owns those
+  // exact lines and its approval carries only while its patch stays
+  // byte-identical post-merge; unify behind it, not over it.
+  const titleVisible =
+    item !== null &&
+    item.status !== "deleted" &&
+    item.status !== "suspended" &&
+    (item.status !== "stored" || item.seller_id === sellerId);
+  const cardTitle = item !== null && titleVisible ? item.title : null;
+  if (status) return { outcome: "gate", op: status, title: cardTitle };
   if (!item) return { outcome: "execute" };
-  if (price !== null && price * 5 < item.price_cents * 4) return { outcome: "gate", op: `price=${price}`, title: item.title };
+  if (price !== null && price * 5 < item.price_cents * 4) return { outcome: "gate", op: `price=${price}`, title: cardTitle };
   // A local-tier update falls through so updateItem's pickup rule answers it.
   if (shipping !== null && item.shipping_tier !== "local" && shipping * 5 < item.shipping_price_cents * 4) {
-    return { outcome: "gate", op: `shipping=${shipping}`, title: item.title };
+    return { outcome: "gate", op: `shipping=${shipping}`, title: cardTitle };
   }
   return { outcome: "execute" }; // no drop, or ≤ 20%
 }
@@ -2306,7 +2330,7 @@ export async function chatTurn(
           // the same card: they reserve items, move money and release
           // addresses, so they are at least as consequential.
           const verdict = seller && call.function.name === "update_listing"
-            ? await destructiveUpdateOp(canonicalArgs)
+            ? await destructiveUpdateOp(canonicalArgs, seller.id)
             : seller && orderVerbTool
               ? await orderWriteGate(call.function.name, canonicalArgs, seller)
               : null;

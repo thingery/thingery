@@ -1942,6 +1942,137 @@ const resolveDisputeSchema = z.object({
   note: z.string().min(1).max(500),
 });
 
+// Report-moderation spec PR 4: the moderation action cores, extracted from
+// the JSON routes below so the admin HTML queue (GET /admin/reports —
+// session + CSRF, spec §5) and the Bearer-key JSON routes execute the exact
+// same state machine: one transaction covering the status change and the
+// open-report auto-resolution (a report can never stay open under a hidden
+// or deleted listing), owner email planned after COMMIT exactly as the JSON
+// surface has always done it. The surfaces differ only in transport
+// (Bearer+JSON vs session+form+PRG); the semantics live here, once.
+type ItemModerationCoreResult =
+  | { kind: "ok"; reports_resolved: number }
+  | { kind: "not_found" };
+
+/** Takedown core: active|stored|suspended → deleted (terminal). Eligibility
+ *  widened with 'suspended' in report-moderation PR 3 — the escalation path
+ *  (suspend first while borderline, takedown when confirmed). One tx covers
+ *  the status change and the open-report auto-resolution
+ *  (resolution_action 'deleted'); owner email post-COMMIT, dedupe
+ *  takedown:{item_id} (once per item). */
+async function takedownItemCore(itemId: string, reason: string): Promise<ItemModerationCoreResult> {
+  const client = await pool.connect();
+  let reportsResolved = 0;
+  let taken: { seller_id: string; title: string } | undefined;
+  try {
+    await client.query("BEGIN");
+    const result = await client.query<{ seller_id: string; title: string }>(
+      `UPDATE items SET status = 'deleted', updated_at = now()
+        WHERE id = $1 AND status IN ('active', 'stored', 'suspended')
+        RETURNING seller_id, title`,
+      [itemId],
+    );
+    taken = result.rows[0];
+    if (taken) {
+      const resolved = await client.query<{ id: string }>(
+        `UPDATE reports SET status = 'resolved', resolution_action = 'deleted', resolved_at = now()
+          WHERE target_item_id = $1 AND status = 'open'
+          RETURNING id`,
+        [itemId],
+      );
+      reportsResolved = resolved.rowCount ?? resolved.rows.length;
+    }
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  if (!taken) {
+    return { kind: "not_found" };
+  }
+  const seller = await pool.query<{ email: string | null }>(
+    "SELECT email FROM sellers WHERE id = $1", [taken.seller_id],
+  );
+  await planAccountNotification({
+    recipientId: taken.seller_id,
+    toEmail: seller.rows[0]?.email,
+    eventType: "seller.item_taken_down",
+    role: "seller",
+    subject: subjectSafe(`Listing removed: ${taken.title} — Thingery`),
+    payload: { item_title: taken.title, item_id: itemId, reason },
+    dedupeKey: `takedown:${itemId}`,
+  });
+  return { kind: "ok", reports_resolved: reportsResolved };
+}
+
+/** Suspend core: active|stored → suspended (reversible). One tx covers the
+ *  status change and the open-report auto-resolution (resolution_action
+ *  'suspended'); owner email post-COMMIT, dedupe suspended:{item_id} — the
+ *  key has no epoch, so a re-suspension after a reinstate does not
+ *  re-notify (report-moderation spec §4). */
+async function suspendItemCore(itemId: string, reason: string): Promise<ItemModerationCoreResult> {
+  const client = await pool.connect();
+  let reportsResolved = 0;
+  let suspended: { seller_id: string; title: string } | undefined;
+  try {
+    await client.query("BEGIN");
+    const result = await client.query<{ seller_id: string; title: string }>(
+      `UPDATE items SET status = 'suspended', updated_at = now()
+        WHERE id = $1 AND status IN ('active', 'stored')
+        RETURNING seller_id, title`,
+      [itemId],
+    );
+    suspended = result.rows[0];
+    if (suspended) {
+      const resolved = await client.query<{ id: string }>(
+        `UPDATE reports SET status = 'resolved', resolution_action = 'suspended', resolved_at = now()
+          WHERE target_item_id = $1 AND status = 'open'
+          RETURNING id`,
+        [itemId],
+      );
+      reportsResolved = resolved.rowCount ?? resolved.rows.length;
+    }
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  if (!suspended) {
+    return { kind: "not_found" };
+  }
+  const seller = await pool.query<{ email: string | null }>(
+    "SELECT email FROM sellers WHERE id = $1", [suspended.seller_id],
+  );
+  await planAccountNotification({
+    recipientId: suspended.seller_id,
+    toEmail: seller.rows[0]?.email,
+    eventType: "seller.item_suspended",
+    role: "seller",
+    subject: subjectSafe(`Listing suspended: ${suspended.title} — Thingery`),
+    payload: { item_title: suspended.title, item_id: itemId, reason },
+    dedupeKey: `suspended:${itemId}`,
+  });
+  return { kind: "ok", reports_resolved: reportsResolved };
+}
+
+/** Dismiss core: the reviewed-no-action leg (open → dismissed, terminal).
+ *  The open-only UPDATE makes a second dismiss 404 by construction — the
+ *  explicit report state machine, no transition route out of a terminal
+ *  state. resolution_action stays NULL (nothing was done to the target). */
+async function dismissReportCore(reportId: string, note: string): Promise<{ kind: "ok" } | { kind: "not_found" }> {
+  const dismissed = await pool.query<{ id: string }>(
+    `UPDATE reports SET status = 'dismissed', dismiss_note = $2, resolved_at = now()
+      WHERE id = $1 AND status = 'open'
+      RETURNING id`,
+    [reportId, note],
+  );
+  return dismissed.rows[0] ? { kind: "ok" } : { kind: "not_found" };
+}
+
 // THI-780 PR 3 (plan §5): moderation takedown — Bearer ADMIN_API_KEY like
 // the dispute route, same boot gate (unset/short key ⇒ 404, route
 // indistinguishable from absent, F1/F7). Takes an item out of all feeds by
@@ -1970,60 +2101,13 @@ api.post("/admin/items/:id/takedown", asyncHandler(async (req: Request, res: Res
     res.status(400).json({ error: "reason (1-500 chars) required." });
     return;
   }
-  // Report-moderation spec PR 3: eligibility widened with 'suspended' —
-  // the escalation path (suspend first while borderline, takedown when
-  // confirmed). Eligible-from is now {active, stored, suspended}.
-  // One transaction covers the item status change and the report
-  // auto-resolution side effect (spec: "the report cannot end up open
-  // while its target is gone"); the owner email stays out-of-band after
-  // COMMIT exactly as before.
-  const client = await pool.connect();
-  let reportsResolved = 0;
-  let taken: { seller_id: string; title: string } | undefined;
-  try {
-    await client.query("BEGIN");
-    const result = await client.query<{ seller_id: string; title: string }>(
-      `UPDATE items SET status = 'deleted', updated_at = now()
-        WHERE id = $1 AND status IN ('active', 'stored', 'suspended')
-        RETURNING seller_id, title`,
-      [String(req.params.id)],
-    );
-    taken = result.rows[0];
-    if (taken) {
-      const resolved = await client.query<{ id: string }>(
-        `UPDATE reports SET status = 'resolved', resolution_action = 'deleted', resolved_at = now()
-          WHERE target_item_id = $1 AND status = 'open'
-          RETURNING id`,
-        [String(req.params.id)],
-      );
-      reportsResolved = resolved.rowCount ?? resolved.rows.length;
-    }
-    await client.query("COMMIT");
-  } catch (e) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw e;
-  } finally {
-    client.release();
-  }
-  if (!taken) {
+  const result = await takedownItemCore(String(req.params.id), parsed.data.reason);
+  if (result.kind === "not_found") {
     res.status(404).json({ error: "Item not found or not takedown-eligible." });
     return;
   }
-  const item = taken;
-  const seller = await pool.query<{ email: string | null }>(
-    "SELECT email FROM sellers WHERE id = $1", [item.seller_id],
-  );
-  await planAccountNotification({
-    recipientId: item.seller_id,
-    toEmail: seller.rows[0]?.email,
-    eventType: "seller.item_taken_down",
-    role: "seller",
-    subject: subjectSafe(`Listing removed: ${item.title} — Thingery`),
-    payload: { item_title: item.title, item_id: String(req.params.id), reason: parsed.data.reason },
-    dedupeKey: `takedown:${String(req.params.id)}`,
-  });
   res.set("Cache-Control", "no-store");
-  res.json({ item_id: String(req.params.id), status: "deleted", seller_notified: true, reports_resolved: reportsResolved });
+  res.json({ item_id: String(req.params.id), status: "deleted", seller_notified: true, reports_resolved: result.reports_resolved });
 }));
 
 // Report-moderation spec PR 2: reversible suspend — the takedown pattern
@@ -2063,53 +2147,13 @@ api.post("/admin/items/:id/suspend", asyncHandler(async (req: Request, res: Resp
     res.status(400).json({ error: "reason (1-500 chars) required." });
     return;
   }
-  const client = await pool.connect();
-  let reportsResolved = 0;
-  let suspended: { seller_id: string; title: string } | undefined;
-  try {
-    await client.query("BEGIN");
-    const result = await client.query<{ seller_id: string; title: string }>(
-      `UPDATE items SET status = 'suspended', updated_at = now()
-        WHERE id = $1 AND status IN ('active', 'stored')
-        RETURNING seller_id, title`,
-      [String(req.params.id)],
-    );
-    suspended = result.rows[0];
-    if (suspended) {
-      const resolved = await client.query<{ id: string }>(
-        `UPDATE reports SET status = 'resolved', resolution_action = 'suspended', resolved_at = now()
-          WHERE target_item_id = $1 AND status = 'open'
-          RETURNING id`,
-        [String(req.params.id)],
-      );
-      reportsResolved = resolved.rowCount ?? resolved.rows.length;
-    }
-    await client.query("COMMIT");
-  } catch (e) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw e;
-  } finally {
-    client.release();
-  }
-  if (!suspended) {
+  const result = await suspendItemCore(String(req.params.id), parsed.data.reason);
+  if (result.kind === "not_found") {
     res.status(404).json({ error: "Item not found or not suspend-eligible." });
     return;
   }
-  const item = suspended;
-  const seller = await pool.query<{ email: string | null }>(
-    "SELECT email FROM sellers WHERE id = $1", [item.seller_id],
-  );
-  await planAccountNotification({
-    recipientId: item.seller_id,
-    toEmail: seller.rows[0]?.email,
-    eventType: "seller.item_suspended",
-    role: "seller",
-    subject: subjectSafe(`Listing suspended: ${item.title} — Thingery`),
-    payload: { item_title: item.title, item_id: String(req.params.id), reason: parsed.data.reason },
-    dedupeKey: `suspended:${String(req.params.id)}`,
-  });
   res.set("Cache-Control", "no-store");
-  res.json({ item_id: String(req.params.id), status: "suspended", seller_notified: true, reports_resolved: reportsResolved });
+  res.json({ item_id: String(req.params.id), status: "suspended", seller_notified: true, reports_resolved: result.reports_resolved });
 }));
 
 // Reinstatement — the restore leg of the suspend state machine
@@ -2164,6 +2208,37 @@ api.post("/admin/items/:id/reinstate", asyncHandler(async (req: Request, res: Re
 // admin route; no-store so no proxy caches the queue.
 const ADMIN_REPORTS_PAGE_CAP = 100;
 
+/** The moderator's queue rows: open, item-targeted reports, newest first,
+ *  motivation included (it is exactly the content the reporter wrote for
+ *  the moderation reader), item title joined for the action card. Fetched
+ *  at cap+1 so both surfaces — the Bearer JSON route below and the session
+ *  HTML page in the admin UI section (report-moderation spec §5) — render
+ *  an overflow note exactly when more than the cap exist (disputes-list
+ *  pattern). */
+interface ReportListRow {
+  id: string;
+  reason: string;
+  motivation: string;
+  item_id: string;
+  item_title: string;
+  reporter_account_id: string;
+  created_at: Date;
+}
+
+async function loadOpenItemReports(): Promise<ReportListRow[]> {
+  const { rows } = await pool.query<ReportListRow>(
+    `SELECT r.id, r.reason, r.motivation, r.target_item_id AS item_id,
+            i.title AS item_title, r.reporter_account_id, r.created_at
+       FROM reports r
+       JOIN items i ON i.id = r.target_item_id
+      WHERE r.status = 'open' AND r.target_item_id IS NOT NULL
+      ORDER BY r.created_at DESC
+      LIMIT $1`,
+    [ADMIN_REPORTS_PAGE_CAP + 1],
+  );
+  return rows;
+}
+
 api.get("/admin/reports", asyncHandler(async (req: Request, res: Response) => {
   if (!orderFlowConfig().adminRouteEnabled) {
     res.status(404).json({ error: "Not found." });
@@ -2179,20 +2254,7 @@ api.get("/admin/reports", asyncHandler(async (req: Request, res: Response) => {
     res.status(401).json({ error: "Not authorized." });
     return;
   }
-  const { rows } = await pool.query<{
-    id: string; reason: string; motivation: string;
-    item_id: string; item_title: string;
-    reporter_account_id: string; created_at: Date;
-  }>(
-    `SELECT r.id, r.reason, r.motivation, r.target_item_id AS item_id,
-            i.title AS item_title, r.reporter_account_id, r.created_at
-       FROM reports r
-       JOIN items i ON i.id = r.target_item_id
-      WHERE r.status = 'open' AND r.target_item_id IS NOT NULL
-      ORDER BY r.created_at DESC
-      LIMIT $1`,
-    [ADMIN_REPORTS_PAGE_CAP],
-  );
+  const rows = (await loadOpenItemReports()).slice(0, ADMIN_REPORTS_PAGE_CAP);
   res.set("Cache-Control", "no-store");
   res.json({
     reports: rows.map((r) => ({
@@ -2236,18 +2298,13 @@ api.post("/admin/reports/:id/dismiss", asyncHandler(async (req: Request, res: Re
     res.status(400).json({ error: "note (0-500 chars) optional." });
     return;
   }
-  const dismissed = await pool.query<{ id: string }>(
-    `UPDATE reports SET status = 'dismissed', dismiss_note = $2, resolved_at = now()
-      WHERE id = $1 AND status = 'open'
-      RETURNING id`,
-    [String(req.params.id), parsed.data.note ?? ""],
-  );
-  if (!dismissed.rows[0]) {
+  const result = await dismissReportCore(String(req.params.id), parsed.data.note ?? "");
+  if (result.kind === "not_found") {
     res.status(404).json({ error: "Report not found or not open." });
     return;
   }
   res.set("Cache-Control", "no-store");
-  res.json({ report_id: dismissed.rows[0].id, status: "dismissed" });
+  res.json({ report_id: String(req.params.id), status: "dismissed" });
 }));
 
 // Review moderation (order-reviews spec PR 3): hide one review — the
@@ -2768,7 +2825,7 @@ adminPages.get("/admin/disputes", asyncHandler(async (req: Request, res: Respons
     )
     .join("\n");
   const body = `
-  <p class="meta"><a href="/admin/disputes">Disputes</a> · <strong>Thingery admin</strong> · ${signOutForm(session)}</p>
+  <p class="meta"><a href="/admin/disputes">Disputes</a> · <a href="/admin/reports">Reports</a> · <strong>Thingery admin</strong> · ${signOutForm(session)}</p>
   <h1>Disputed orders</h1>
   ${resolvedNote(req)}
   ${list.length === 0 ? `<p class="meta">No disputed orders right now.</p>` : `
@@ -3029,6 +3086,200 @@ adminPages.post("/admin/disputes/:id/resolve", asyncHandler(async (req: Request,
 }));
 
 
+
+// --- admin UI: reports queue (report-moderation spec §5, PR-4) --------------
+
+// One HTML page beside the disputes queue: the human path over the exact
+// same cores the Bearer JSON routes run. Same discipline as the dispute
+// pages — boot gate, session gate, page-class limiter on reads, strict
+// attempt limiter on action POSTs, CSRF on every form, no-store, unlinked
+// + noindex. B2: the motivation and every other interpolated field is
+// reporter- or seller-controlled and aggregates into this authenticated
+// admin page (stored-XSS → admin-session-takeover class) — every
+// interpolation goes through escapeHtml, no raw output anywhere below.
+
+const queueReasonSchema = z.object({ reason: z.string().min(1).max(500) });
+
+/** PRG (spec: no double-submit): after a successful queue action the list
+ *  renders a confirmation line for ?done=<reportId>&action=<verb>. Both
+ *  values are server-generated — the uuid is echoed from the DB row, the
+ *  verb must be one of the three known actions (escaped anyway, B2). */
+const REPORT_ACTION_VERBS: Record<string, string> = {
+  suspend: "listing suspended — hidden from every public surface, owner notified",
+  takedown: "listing deleted — removed permanently, owner notified",
+  dismiss: "dismissed — reviewed, no action taken",
+};
+
+function reportActionNote(req: Request): string {
+  const raw = typeof req.query.done === "string" ? req.query.done : "";
+  const action = typeof req.query.action === "string" ? req.query.action : "";
+  return raw && ADMIN_UUID_RE.test(raw) && action in REPORT_ACTION_VERBS
+    ? `<p class="meta">Report ${escapeHtml(raw.slice(0, 8))}… — ${escapeHtml(REPORT_ACTION_VERBS[action])}. It has left the queue.</p>`
+    : "";
+}
+
+/** One action card: the report's evidence (reason badge, motivation, item)
+ *  plus the three state-machine actions — suspend (reversible), takedown
+ *  (permanent escalation), dismiss (reviewed, no action). Every form is
+ *  CSRF-stamped; the reason fields are exactly the JSON schemas' 1–500. */
+function reportCardHtml(r: ReportListRow, session: AdminSession): string {
+  const csrf = escapeHtml(adminCsrfValue(session));
+  return `<div class="card">
+  <p class="meta"><strong>Report ${escapeHtml(r.id.slice(0, 8))}…</strong> · <span class="badge">${escapeHtml(r.reason)}</span> · ${escapeHtml(fmtUtc(r.created_at))} · reporter ${escapeHtml(r.reporter_account_id.slice(0, 8))}…</p>
+  <p>Item: <strong>${escapeHtml(r.item_title)}</strong> — <a href="/item/${escapeHtml(r.item_id)}">open listing</a></p>
+  <div class="desc">${escapeHtml(r.motivation)}</div>
+  <form method="post" action="/admin/reports/${escapeHtml(r.id)}/suspend">
+    <input type="hidden" name="csrf" value="${csrf}">
+    <p><label>Suspension reason shown to the owner (1–500 chars)<br>
+    <textarea name="reason" maxlength="500" required rows="2" cols="60"></textarea></label></p>
+    <button type="submit">Suspend listing (reversible)</button>
+  </form>
+  <form method="post" action="/admin/reports/${escapeHtml(r.id)}/takedown">
+    <input type="hidden" name="csrf" value="${csrf}">
+    <p><label>Removal reason shown to the owner (1–500 chars)<br>
+    <textarea name="reason" maxlength="500" required rows="2" cols="60"></textarea></label></p>
+    <button type="submit">Delete listing (permanent)</button>
+  </form>
+  <form method="post" action="/admin/reports/${escapeHtml(r.id)}/dismiss">
+    <input type="hidden" name="csrf" value="${csrf}">
+    <p><label>Dismiss note (optional — stored as the audit trail, never emailed)<br>
+    <textarea name="note" maxlength="500" rows="2" cols="60"></textarea></label></p>
+    <button type="submit">Dismiss report</button>
+  </form>
+</div>`;
+}
+
+adminPages.get("/admin/reports", asyncHandler(async (req: Request, res: Response) => {
+  if (!adminUiGate(res)) return;
+  if (!adminPageLimiter.allow(`ip:${clientIp(req)}`)) {
+    admin429(res);
+    return;
+  }
+  const session = requireAdminSession(req, res);
+  if (!session) return;
+  const rows = await loadOpenItemReports();
+  const overflow = rows.length > ADMIN_REPORTS_PAGE_CAP;
+  const list = overflow ? rows.slice(0, ADMIN_REPORTS_PAGE_CAP) : rows;
+  const body = `
+  <p class="meta"><a href="/admin/disputes">Disputes</a> · <strong>Thingery admin</strong> · ${signOutForm(session)}</p>
+  <h1>Open item reports</h1>
+  ${reportActionNote(req)}
+  ${list.length === 0 ? `<p class="meta">No open reports right now.</p>` : list.map((r) => reportCardHtml(r, session)).join("\n")}
+  ${overflow ? `<p class="meta">More than ${ADMIN_REPORTS_PAGE_CAP} open reports — showing the ${ADMIN_REPORTS_PAGE_CAP} most recent.</p>` : ""}`;
+  res.set("Cache-Control", "no-store").type("html").send(page("Open reports — Thingery admin", "Open item reports", body, undefined, true));
+}));
+
+/** Gate chain shared by the queue's action POSTs: boot gate → strict attempt
+ *  limiter (B1 — a sensitive POST, never the page bucket) → session → CSRF.
+ *  Returns the session, or null after responding. */
+function requireReportActionSession(req: Request, res: Response): AdminSession | null {
+  if (!adminUiGate(res)) return null;
+  if (!adminAttemptLimiter.allow(`ip:${clientIp(req)}`)) {
+    admin429(res);
+    return null;
+  }
+  const session = requireAdminSession(req, res);
+  if (!session) return null;
+  const token = typeof req.body?.csrf === "string" ? req.body.csrf : undefined;
+  if (!adminCsrfMatches(token, session)) {
+    res.status(400).set("Cache-Control", "no-store").type("html").send(
+      page("Bad request — Thingery", "Bad request", `<h1>Bad request</h1><p class="meta">Invalid request.</p>`),
+    );
+    return null;
+  }
+  return session;
+}
+
+/** Loads one open, item-targeted report for the action POSTs. Uniform 404
+ *  for malformed, unknown, non-open and non-item ids — this UI acts on the
+ *  open queue only (the explicit report state machine: no transition out
+ *  of a terminal state, and no existence oracle). */
+async function loadOpenReportOr404(id: string, res: Response): Promise<ReportListRow | null> {
+  if (!ADMIN_UUID_RE.test(id)) {
+    adminNotFound(res);
+    return null;
+  }
+  const { rows } = await pool.query<ReportListRow>(
+    `SELECT r.id, r.reason, r.motivation, r.target_item_id AS item_id,
+            i.title AS item_title, r.reporter_account_id, r.created_at
+       FROM reports r
+       JOIN items i ON i.id = r.target_item_id
+      WHERE r.id = $1 AND r.status = 'open' AND r.target_item_id IS NOT NULL`,
+    [id],
+  );
+  const report = rows[0];
+  if (!report) {
+    adminNotFound(res);
+    return null;
+  }
+  return report;
+}
+
+function reportActionBadRequest(res: Response, message: string): void {
+  res.status(400).set("Cache-Control", "no-store").type("html").send(
+    page("Bad request — Thingery", "Bad request", `<h1>Bad request</h1><p class="meta">${escapeHtml(message)}</p><p><a href="/admin/reports">← All reports</a></p>`),
+  );
+}
+
+// Suspend via the queue: form → the same suspendItemCore as the JSON route
+// (tx: suspended + report auto-resolution; owner email post-COMMIT with the
+// form's reason). Validation errors 400 before the id is touched (no
+// existence oracle); an ineligible target 404s (illegal transition,
+// undefined-behavior-free state machine); success is a PRG redirect.
+adminPages.post("/admin/reports/:id/suspend", asyncHandler(async (req: Request, res: Response) => {
+  const session = requireReportActionSession(req, res);
+  if (!session) return;
+  const parsed = queueReasonSchema.safeParse({ reason: req.body?.reason });
+  if (!parsed.success) {
+    reportActionBadRequest(res, "Provide a 1–500 character suspension reason (shown to the owner).");
+    return;
+  }
+  const report = await loadOpenReportOr404(String(req.params.id ?? ""), res);
+  if (!report) return;
+  const result = await suspendItemCore(report.item_id, parsed.data.reason);
+  if (result.kind === "not_found") {
+    adminNotFound(res);
+    return;
+  }
+  res.redirect(303, `/admin/reports?done=${encodeURIComponent(report.id)}&action=suspend`);
+}));
+
+adminPages.post("/admin/reports/:id/takedown", asyncHandler(async (req: Request, res: Response) => {
+  const session = requireReportActionSession(req, res);
+  if (!session) return;
+  const parsed = queueReasonSchema.safeParse({ reason: req.body?.reason });
+  if (!parsed.success) {
+    reportActionBadRequest(res, "Provide a 1–500 character removal reason (shown to the owner).");
+    return;
+  }
+  const report = await loadOpenReportOr404(String(req.params.id ?? ""), res);
+  if (!report) return;
+  const result = await takedownItemCore(report.item_id, parsed.data.reason);
+  if (result.kind === "not_found") {
+    adminNotFound(res);
+    return;
+  }
+  res.redirect(303, `/admin/reports?done=${encodeURIComponent(report.id)}&action=takedown`);
+}));
+
+adminPages.post("/admin/reports/:id/dismiss", asyncHandler(async (req: Request, res: Response) => {
+  const session = requireReportActionSession(req, res);
+  if (!session) return;
+  const note = typeof req.body?.note === "string" ? req.body.note : undefined;
+  const parsed = dismissSchema.safeParse({ note });
+  if (!parsed.success) {
+    reportActionBadRequest(res, "The dismiss note must be at most 500 characters.");
+    return;
+  }
+  const report = await loadOpenReportOr404(String(req.params.id ?? ""), res);
+  if (!report) return;
+  const result = await dismissReportCore(report.id, parsed.data.note ?? "");
+  if (result.kind === "not_found") {
+    adminNotFound(res);
+    return;
+  }
+  res.redirect(303, `/admin/reports?done=${encodeURIComponent(report.id)}&action=dismiss`);
+}));
 
 /**
  * Mounts the browser API and its terminal error middleware (spec THI-58 §2

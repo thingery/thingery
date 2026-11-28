@@ -6,8 +6,10 @@
 // (dedupe report:{id} absorbs any replay), written in the report INSERT
 // transaction; the delivery sweep sends it PAST the Phase 0 verified-
 // recipient gate (account-less ops.* rows are internal mail, not account
-// mail) as notifications@; the body is PII-minimal (no motivation).
-// Review reports intentionally mirror nothing.
+// mail) as notifications@; the body carries the motivation description
+// (report-moderation spec §1 — the field the reporter wrote for the
+// moderation reader; HTML-escaped at render). Review reports intentionally
+// mirror nothing.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import pg from "pg";
@@ -50,14 +52,15 @@ class RecordingMailer implements Mailer {
   }
 }
 
-describe("renderOrderEmail ops.item_reported (THI-1451 — pure)", () => {
-  it("PII-minimal body: ids + item URL + reason + timestamp, canonical footer", () => {
+describe("renderOrderEmail ops.item_reported (THI-1451 + report-moderation §1 — pure)", () => {
+  it("body: ids + item URL + reason + description + timestamp, canonical footer", () => {
     const r = renderOrderEmail(
       "ops.item_reported",
       {
         report_id: "rep-1",
         item_id: "itm-2",
-        reason: "scam_fraud",
+        reason: "other",
+        motivation: "seller never shipped my previous order and keeps relisting",
         created_at: "2026-11-25T12:00:00.000Z",
       },
       "https://thingery.test",
@@ -65,12 +68,37 @@ describe("renderOrderEmail ops.item_reported (THI-1451 — pure)", () => {
     expect(r.subject).toBe("New item report — Thingery");
     expect(r.text).toContain("Report: rep-1");
     expect(r.text).toContain("Item: https://thingery.test/item/itm-2");
-    expect(r.text).toContain("Reason: scam_fraud");
+    expect(r.text).toContain("Reason: other");
+    expect(r.text).toContain("Description: seller never shipped my previous order and keeps relisting");
     expect(r.text).toContain("Reported at: 2026-11-25T12:00:00.000Z");
     expect(r.text).toContain("open item database and MCP server");
-    // No free-text field exists in the payload by construction — assert the
-    // body is exactly the four alert lines + footer (no motivation carrier).
-    expect(r.text.match(/Report:|Item:|Reason:|Reported at:/g)).toHaveLength(4);
+    expect(r.text.match(/Report:|Item:|Reason:|Description:|Reported at:/g)).toHaveLength(5);
+  });
+
+  it("motivation is HTML-escaped in the html body (UNTRUSTED user content)", () => {
+    const r = renderOrderEmail(
+      "ops.item_reported",
+      {
+        report_id: "rep-3",
+        item_id: "itm-4",
+        reason: "other",
+        motivation: "<script>alert(1)</script> & fake <b>markup</b>",
+        created_at: "2026-11-26T08:30:00.000Z",
+      },
+      "https://thingery.test",
+    );
+    expect(r.text).toContain("Description: <script>alert(1)</script> & fake <b>markup</b>");
+    expect(r.html).not.toContain("<script>alert(1)</script>");
+    expect(r.html).toContain("&lt;script&gt;");
+  });
+
+  it("missing motivation payload renders a placeholder (defensive, callers always send it)", () => {
+    const r = renderOrderEmail(
+      "ops.item_reported",
+      { report_id: "rep-5", item_id: "itm-6", reason: "explicit_images", created_at: "2026-11-26T09:00:00.000Z" },
+      "https://thingery.test",
+    );
+    expect(r.text).toContain("Description: (none)");
   });
 
   it("REPORT_ALERT_EMAIL config: unset/blank ⇒ undefined (dark default), set ⇒ value", () => {
@@ -139,13 +167,13 @@ describe.skipIf(!available)("planItemReportEmail + createItemReport (THI-1451 �
     void report;
   });
 
-  it("set ⇒ exactly one account-less row, atomic with the report, PII-minimal payload", async () => {
+  it("set ⇒ exactly one account-less row, atomic with the report, payload carries the motivation", async () => {
     process.env.REPORT_ALERT_EMAIL = ALERT_TO;
     const reporter = await mkSeller("Reporter");
     const seller = await mkSeller("Seller");
     const itemId = await mkItem(seller);
     const report = await createItemReport(
-      { itemId, reporterAccountId: reporter, reason: "scam_fraud", motivation: "motivation stays in the table" },
+      { itemId, reporterAccountId: reporter, reason: "scam_fraud", motivation: "motivation rides to the alias now" },
       itemReportLimiter,
     );
     const rows = await alertRows();
@@ -156,12 +184,12 @@ describe.skipIf(!available)("planItemReportEmail + createItemReport (THI-1451 �
     expect(row.template).toBe("ops.item_reported.v1");
     expect(row.dedupe_key).toBe(`report:${report.id}`);
     const payload = row.payload as Record<string, unknown>;
-    expect(Object.keys(payload).sort()).toEqual(["created_at", "item_id", "reason", "report_id"]);
+    expect(Object.keys(payload).sort()).toEqual(["created_at", "item_id", "motivation", "reason", "report_id"]);
     expect(payload.report_id).toBe(report.id);
     expect(payload.item_id).toBe(itemId);
     expect(payload.reason).toBe("scam_fraud");
+    expect(payload.motivation).toBe("motivation rides to the alias now");
     expect(typeof payload.created_at).toBe("string");
-    expect(JSON.stringify(payload)).not.toContain("motivation");
   });
 
   it("duplicate report ⇒ no second row (dedupe report:{id})", async () => {
@@ -221,6 +249,7 @@ describe.skipIf(!available)("planItemReportEmail + createItemReport (THI-1451 �
     expect(mine[0].from).toBe(cfg.digestFromAddress); // notifications@ — internal stream (THI-1280)
     expect(mine[0].subject).toBe("New item report — Thingery");
     expect(mine[0].text).toContain("/item/");
+    expect(mine[0].text).toContain("Description: sweep delivery assertion");
     expect(r.sent).toBeGreaterThanOrEqual(1);
     const status = await db.query<{ status: string; last_error: string | null }>(
       "SELECT status, last_error FROM email_outbox WHERE to_email = $1 AND template = 'ops.item_reported.v1'",

@@ -219,8 +219,22 @@ describe.skipIf(!available)("update_listing MCP invalid_attributes surface (DB)"
       attributes: { edition: "gold" }, // drops required platform
     })) as { isError?: boolean; content: { text: string }[] };
     expect(result.isError).toBe(true);
-    const parsed = JSON.parse(result.content[0].text) as { error: string; code: string };
+    // THI-1936: the structured field_errors twin rides along next to the
+    // joined error text — same message, same declared type.
+    const parsed = JSON.parse(result.content[0].text) as {
+      error: string;
+      code: string;
+      field_errors?: { field: string; problem: string; message: string; expected?: string }[];
+    };
     expect(parsed.code).toBe("invalid_attributes");
     expect(parsed.error).toContain("missing required attribute");
+    expect(parsed.field_errors).toEqual([
+      {
+        field: "attributes.platform",
+        problem: "missing_required",
+        message: 'missing required attribute "platform"',
+        expected: "string",
+      },
+    ]);
   });
 });

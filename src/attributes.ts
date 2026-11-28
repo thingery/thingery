@@ -36,34 +36,112 @@ export const ATTRIBUTE_CAPS = {
  *  cap, so overlong keys are filtered from surfaces, never rejected on write. */
 export const UNDECLARED_KEY_PATTERN = "^[A-Za-z0-9_-]{1,64}$";
 
+/** THI-1936: cap on machine-readable field errors per rejection — matches the
+ *  client-side cap in the platform ingest form, so both sides drop the same
+ *  overflow and the refusal text (the joined message) stays the full truth. */
+export const ATTRIBUTE_FIELD_ERROR_CAP = 20;
+
+/** THI-1936: one machine-readable attribute problem, riding on tool errors as
+ *  `field_errors` so clients (platform ingest review form) can render a
+ *  field-specific refusal instead of a blanket one. `field` is the payload
+ *  path ("attributes.<key>"; entry-less shape problems use "attributes"),
+ *  `problem` a stable slug, `message` the exact human text also present in
+ *  the joined error string, `expected` the declared type when one applies. */
+export interface AttributeFieldError {
+  field: string;
+  problem: "missing_required" | "wrong_type" | "not_in_enum" | "too_many_entries" | "key_too_long" | "value_too_long";
+  message: string;
+  expected?: AttributeDefinition["type"];
+}
+
+/** THI-1936: structured twin of the shape-cap checks — same order (entry
+ *  count first, then per-entry), same message text as attributeShapeErrors. */
+function shapeFieldErrors(attributes: Attributes): AttributeFieldError[] {
+  const problems: AttributeFieldError[] = [];
+  const entries = Object.entries(attributes);
+  if (entries.length > ATTRIBUTE_CAPS.maxEntries) {
+    problems.push({
+      field: "attributes",
+      problem: "too_many_entries",
+      message: `too many attribute entries: ${entries.length} (max ${ATTRIBUTE_CAPS.maxEntries})`,
+    });
+  }
+  for (const [key, value] of entries) {
+    if (key.length > ATTRIBUTE_CAPS.maxKeyLength) {
+      // No per-key field: an over-long key cannot ride the attributes.<key>
+      // path form inputs can express, so the entry is intentionally
+      // entry-less and the offending key stays in the message text.
+      problems.push({
+        field: "attributes",
+        problem: "key_too_long",
+        message: `attribute key too long (${key.length} chars, max ${ATTRIBUTE_CAPS.maxKeyLength}): "${key.slice(0, 32)}…"`,
+      });
+    }
+    if (typeof value === "string" && value.length > ATTRIBUTE_CAPS.maxValueLength) {
+      problems.push({
+        field: `attributes.${key}`,
+        problem: "value_too_long",
+        message: `attribute "${key}" value too long (${value.length} chars, max ${ATTRIBUTE_CAPS.maxValueLength})`,
+      });
+    }
+  }
+  return problems;
+}
+
 /** Shape validation against ATTRIBUTE_CAPS: entry count, key length, string
  *  value length. Numbers and booleans are unconstrained. Returns error
  *  messages; empty array = valid. */
 export function attributeShapeErrors(attributes: Attributes): string[] {
-  const errors: string[] = [];
-  const entries = Object.entries(attributes);
-  if (entries.length > ATTRIBUTE_CAPS.maxEntries) {
-    errors.push(`too many attribute entries: ${entries.length} (max ${ATTRIBUTE_CAPS.maxEntries})`);
-  }
-  for (const [key, value] of entries) {
-    if (key.length > ATTRIBUTE_CAPS.maxKeyLength) {
-      errors.push(`attribute key too long (${key.length} chars, max ${ATTRIBUTE_CAPS.maxKeyLength}): "${key.slice(0, 32)}…"`);
-    }
-    if (typeof value === "string" && value.length > ATTRIBUTE_CAPS.maxValueLength) {
-      errors.push(`attribute "${key}" value too long (${value.length} chars, max ${ATTRIBUTE_CAPS.maxValueLength})`);
-    }
-  }
-  return errors;
+  return shapeFieldErrors(attributes).map((p) => p.message);
 }
 
 /** Thrown by write paths when attributeShapeErrors() is non-empty; `code`
- *  matches the MCP error code create_listing already reports. */
+ *  matches the MCP error code create_listing already reports. THI-1936:
+ *  carries the structured twin of `messages` so update_listing's rejection
+ *  can emit field_errors with the same detail create_listing emits. */
 export class AttributeValidationError extends Error {
   readonly code = "invalid_attributes";
-  constructor(messages: string[]) {
+  readonly fieldErrors: AttributeFieldError[];
+  constructor(messages: string[], fieldErrors: AttributeFieldError[] = []) {
     super(messages.join("; "));
     this.name = "AttributeValidationError";
+    this.fieldErrors = fieldErrors;
   }
+}
+
+/** THI-1936: structured twin of the registry-definition checks — same order
+ *  (definition order), same message text as definitionErrors. */
+function definitionFieldErrors(
+  definitions: AttributeDefinition[],
+  attributes: Attributes,
+): AttributeFieldError[] {
+  const problems: AttributeFieldError[] = [];
+
+  for (const def of definitions) {
+    const value = attributes[def.key];
+    if (value === undefined || value === null || value === "") {
+      if (def.required) {
+        problems.push({
+          field: `attributes.${def.key}`,
+          problem: "missing_required",
+          message: `missing required attribute "${def.key}"${def.description ? ` (${def.description})` : ""}`,
+          expected: def.type,
+        });
+      }
+      continue;
+    }
+    if (def.type === "number" && typeof value !== "number") {
+      problems.push({ field: `attributes.${def.key}`, problem: "wrong_type", message: `attribute "${def.key}" must be a number, got ${JSON.stringify(value)}`, expected: "number" });
+    } else if (def.type === "boolean" && typeof value !== "boolean") {
+      problems.push({ field: `attributes.${def.key}`, problem: "wrong_type", message: `attribute "${def.key}" must be a boolean, got ${JSON.stringify(value)}`, expected: "boolean" });
+    } else if (def.type === "string" && typeof value !== "string") {
+      problems.push({ field: `attributes.${def.key}`, problem: "wrong_type", message: `attribute "${def.key}" must be a string, got ${JSON.stringify(value)}`, expected: "string" });
+    } else if (def.enum && (typeof value !== "string" || !def.enum.includes(value))) {
+      problems.push({ field: `attributes.${def.key}`, problem: "not_in_enum", message: `attribute "${def.key}" must be one of: ${def.enum.join(", ")}`, expected: def.type });
+    }
+  }
+
+  return problems;
 }
 
 /** Registry-definition checks only (no shape caps): for each declared key,
@@ -76,26 +154,18 @@ export function definitionErrors(
   definitions: AttributeDefinition[],
   attributes: Attributes,
 ): string[] {
-  const errors: string[] = [];
+  return definitionFieldErrors(definitions, attributes).map((p) => p.message);
+}
 
-  for (const def of definitions) {
-    const value = attributes[def.key];
-    if (value === undefined || value === null || value === "") {
-      if (def.required) errors.push(`missing required attribute "${def.key}"${def.description ? ` (${def.description})` : ""}`);
-      continue;
-    }
-    if (def.type === "number" && typeof value !== "number") {
-      errors.push(`attribute "${def.key}" must be a number, got ${JSON.stringify(value)}`);
-    } else if (def.type === "boolean" && typeof value !== "boolean") {
-      errors.push(`attribute "${def.key}" must be a boolean, got ${JSON.stringify(value)}`);
-    } else if (def.type === "string" && typeof value !== "string") {
-      errors.push(`attribute "${def.key}" must be a string, got ${JSON.stringify(value)}`);
-    } else if (def.enum && (typeof value !== "string" || !def.enum.includes(value))) {
-      errors.push(`attribute "${def.key}" must be one of: ${def.enum.join(", ")}`);
-    }
-  }
-
-  return errors;
+/** THI-1936: the full structured problem list for one attributes payload —
+ *  shape caps first, then definition checks, exactly mirroring
+ *  validateAttributes()' order and message text. Consumers cap at
+ *  ATTRIBUTE_FIELD_ERROR_CAP when emitting (tools.ts). */
+export function attributeFieldErrors(
+  definitions: AttributeDefinition[],
+  attributes: Attributes,
+): AttributeFieldError[] {
+  return [...shapeFieldErrors(attributes), ...definitionFieldErrors(definitions, attributes)];
 }
 
 /** Validate attributes against a category's definitions.

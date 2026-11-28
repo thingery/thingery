@@ -7,7 +7,7 @@ import { resolveShippingQuote, getSellerDefaultOrigin, listingParcel } from "./s
 import { resolveCategory } from "./categories.js";
 import { aliasResolutionNote, describeCategoryNote } from "./categories.js";
 import { buyerShippingCents, categoryChildren, getCategory, getItem, createItem, listCategories, ItemTransitionError, ListingLimitError, listingQuota, type ListingQuota, MAX_SHIPPING_PRICE_CENTS, myItems, searchItems, SEARCH_MAX_OFFSET, ShippingPriceError, undeclaredKeyUsage, updateItem, visibleInFeeds } from "./items.js";
-import { validateAttributes, AttributeValidationError, attributeShapeErrors } from "./attributes.js";
+import { validateAttributes, AttributeValidationError, attributeShapeErrors, attributeFieldErrors, ATTRIBUTE_FIELD_ERROR_CAP, type AttributeFieldError } from "./attributes.js";
 import { saveIntent, listIntents, updateIntentMute, deleteIntent, listMatches, IntentLimitError, IntentValidationError, type IntentRow } from "./intents.js";
 import { listNotificationsForAccount } from "./notify/queries.js";
 import { addItemImageBase64 } from "./images.js";
@@ -493,8 +493,17 @@ async function quotaAfterCreate(sellerId: string): Promise<ListingQuota | undefi
   }
 }
 
-const err = (message: string, code = "error") => ({
-  content: [{ type: "text" as const, text: JSON.stringify({ error: message, code }, null, 2) }],
+const err = (message: string, code = "error", fieldErrors?: readonly AttributeFieldError[]) => ({
+  content: [{ type: "text" as const, text: JSON.stringify(
+    // THI-1936: well-formed attribute problems ride along as `field_errors`
+    // (capped, same structured shape as the joined message text) so clients
+    // can render a field-specific refusal; plain `{error, code}` clients see
+    // byte-identical payloads as before.
+    { error: message, code,
+      ...(fieldErrors && fieldErrors.length > 0
+        ? { field_errors: fieldErrors.slice(0, ATTRIBUTE_FIELD_ERROR_CAP) }
+        : {}) },
+    null, 2) }],
   isError: true,
 });
 
@@ -727,7 +736,14 @@ export function registerTools(
         const attributeErrors = validateAttributes(categoryRow.attribute_definitions, attributes);
         if (attributeErrors.length > 0) {
           logSecurityEvent({ type: "listing_write", action: "create", outcome: "rejected" }, { sellerId: seller.id });
-          return err(`Invalid attributes for category '${category}': ${attributeErrors.join("; ")}`, "invalid_attributes");
+          // THI-1936: the structured field_errors twin (attributes.<key> /
+          // problem slug / exact same message text) lets the photo-first web
+          // form name every failing field instead of a blanket refusal.
+          return err(
+            `Invalid attributes for category '${category}': ${attributeErrors.join("; ")}`,
+            "invalid_attributes",
+            attributeFieldErrors(categoryRow.attribute_definitions, attributes),
+          );
         }
 
         const createdRow = await createItem({
@@ -1459,7 +1475,8 @@ export function registerTools(
         // violations (spec THI-83 §3.5); surface it with the structured
         // invalid_attributes code, same as create_listing (THI-90 note 1).
         if (e instanceof AttributeValidationError) {
-          return err(`Invalid attributes: ${describeError(e)}`, e.code);
+          // THI-1936: field_errors ride along here too, same as create_listing.
+          return err(`Invalid attributes: ${describeError(e)}`, e.code, e.fieldErrors);
         }
         if (e instanceof ShippingPriceError) return err(describeError(e), e.code);
         // ADR 0010: illegal stored transitions are typed rejections an agent

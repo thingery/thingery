@@ -6,6 +6,7 @@ import { logSecurityEvent, type ListingWriteLimit } from "./security-events.js";
 import { LIVE_ORDER_ITEM_STATUSES } from "./orders.js";
 import { markWantedResponsesPublished } from "./wanted.js";
 import {
+  attributeFieldErrors,
   attributeShapeErrors,
   AttributeValidationError,
   attributeFilterClause,
@@ -622,7 +623,8 @@ export async function updateItem(
     const shapeErrors = attributeShapeErrors(update.attributes);
     if (shapeErrors.length > 0) {
       logSecurityEvent({ type: "listing_write", action: writeAction(update.status), outcome: "rejected" }, { sellerId });
-      throw new AttributeValidationError(shapeErrors);
+      // THI-1936: structured twin rides along for update_listing's field_errors.
+      throw new AttributeValidationError(shapeErrors, attributeFieldErrors([], update.attributes));
     }
     // One indexed read, paid only on the attributes path. Fallbacks mirror
     // create-listing trust boundaries: row missing/not owned (the UPDATE's
@@ -641,7 +643,8 @@ export async function updateItem(
     const defErrors = definitions ? definitionErrors(definitions, update.attributes) : [];
     if (defErrors.length > 0) {
       logSecurityEvent({ type: "listing_write", action: writeAction(update.status), outcome: "rejected" }, { sellerId });
-      throw new AttributeValidationError(defErrors);
+      // THI-1936: structured twin rides along for update_listing's field_errors.
+      throw new AttributeValidationError(defErrors, attributeFieldErrors(definitions ?? [], update.attributes));
     }
     sets.push(`attributes = ${add(JSON.stringify(update.attributes))}::jsonb`);
   }

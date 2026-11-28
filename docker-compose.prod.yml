@@ -95,6 +95,8 @@ services:
       # flag on, SELLER_COUNTRY_ALLOWLIST (comma-separated ISO 3166-1 alpha-2)
       # optionally restricts which seller payout countries may take card
       # orders (D4) — unset ⇒ no country restriction (see .env.example).
+      CARD_ONLY_MODE: ${CARD_ONLY_MODE:-}
+      SELLER_COUNTRY_ALLOWLIST: ${SELLER_COUNTRY_ALLOWLIST:-}
       # Order flow — EasyPost carrier automation (THI-572). Passthrough only:
       # values live in the VPS .env. Empty/unset EASYPOST_API_KEY = degraded
       # mode (no trackers, buy_shipping_label answers easypost_not_configured,

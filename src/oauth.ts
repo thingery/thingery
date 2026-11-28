@@ -431,39 +431,117 @@ export async function revokeConnectedApp(
   }
 }
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// --- THI-1953 (plan step 6 Option B, finding X1): the legacy /apps page is a
+// documented revoke URL reached from privacy/security links, but unlike every
+// other user-facing page it ignored the site's language choice. It now honors
+// the `thingery_locale` cookie (set by the thingery.dev web app, values
+// "en"/"it"). Deliberately cookie-only: no Accept-Language sniffing and no
+// routing change, so self-hosted and English-default behavior is byte-for-byte
+// unchanged unless the visitor carries the cookie. Italian copy follows the
+// web app's connected-apps screen ("App collegate", "Scollega") so both
+// surfaces read as one product.
 
-/** "3 Nov 2026" in UTC: fixed English, so the page reads the same on every server locale. */
-function shortDate(d: Date): string {
-  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+/** Locales the /apps page can render. Mirrors the web app's locale set. */
+type AppsLocale = "en" | "it";
+
+const APPS_LOCALE_COOKIE = "thingery_locale";
+
+/** The /apps page locale for a request: cookie value "it" → Italian, every
+ *  other value (absent, "en", unknown) → English, so the historical default is
+ *  unchanged. Cookie parsing mirrors auth.ts's readCookie but stays local:
+ *  auth.ts is a protected path and gains nothing from exporting it. */
+function appsLocaleFromRequest(req: Request): AppsLocale {
+  const header = req.headers.cookie;
+  if (header) {
+    for (const part of header.split(";")) {
+      const [name, ...rest] = part.trim().split("=");
+      if (name === APPS_LOCALE_COOKIE && rest.join("=") === "it") return "it";
+    }
+  }
+  return "en";
 }
 
-/** Exported for render tests that need no database. */
-export function appsPageHtml(grants: AppsGrantRow[], revoked: boolean): string {
+/** Static page copy per locale (no user data — nothing here needs escaping). */
+const APPS_COPY: Record<AppsLocale, {
+  lang: string;
+  title: string;
+  heading: string;
+  intro: string;
+  back: string;
+  connected: string;
+  used: string;
+  neverUsed: string;
+  disconnect: string;
+  revokedNotice: string;
+  empty: string;
+}> = {
+  en: {
+    lang: "en",
+    title: "Connected apps",
+    heading: "Connected apps.",
+    intro: "These apps can act as you. Disconnect one and it loses access right away.",
+    back: "Your account",
+    connected: "Connected",
+    used: "Used",
+    neverUsed: "Never used",
+    disconnect: "Disconnect",
+    revokedNotice: "App disconnected. It no longer has access.",
+    empty: "No apps are connected. Apps you sign in to Thingery from will show up here.",
+  },
+  it: {
+    lang: "it",
+    title: "App collegate",
+    heading: "App collegate.",
+    intro: "Queste app possono agire per te. Se ne scolleghi una, perde subito l'accesso.",
+    back: "Il tuo account",
+    connected: "Collegata il",
+    used: "Usata il",
+    neverUsed: "Mai usata",
+    disconnect: "Scollega",
+    revokedNotice: "App scollegata. Non ha più accesso.",
+    empty: "Nessuna app è collegata. Qui compariranno le app da cui accedi a Thingery.",
+  },
+};
+
+/** Month abbreviations per page locale. */
+const MONTHS: Record<AppsLocale, string[]> = {
+  en: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+  it: ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"],
+};
+
+/** "3 Nov 2026" in UTC: fixed format, so the page reads the same on every server locale. */
+function shortDate(d: Date, locale: AppsLocale): string {
+  return `${d.getUTCDate()} ${MONTHS[locale][d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+/** Exported for render tests that need no database. `locale` defaults to
+ *  English, so existing callers keep byte-identical output. */
+export function appsPageHtml(grants: AppsGrantRow[], revoked: boolean, locale: AppsLocale = "en"): string {
+  const c = APPS_COPY[locale];
   const rows = grants
     .map(
       (g) => `
 <article class="row">
   <div>
     <h2>${htmlEscape(g.client_name)}</h2>
-    <p class="ticket">Connected ${htmlEscape(shortDate(g.created_at))} · ${g.last_used_at ? `Used ${htmlEscape(shortDate(g.last_used_at))}` : "Never used"}</p>
+    <p class="ticket">${c.connected} ${htmlEscape(shortDate(g.created_at, locale))} · ${g.last_used_at ? `${c.used} ${htmlEscape(shortDate(g.last_used_at, locale))}` : c.neverUsed}</p>
   </div>
   <form method="post" action="/apps/revoke">
     <input type="hidden" name="grant_id" value="${htmlEscape(g.id)}">
     <input type="hidden" name="csrf" value="${htmlEscape(g.csrf)}">
-    <button type="submit" class="compact">Disconnect</button>
+    <button type="submit" class="compact">${c.disconnect}</button>
   </form>
 </article>`,
     )
     .join("");
   return pageDocument(
-    "Connected apps",
-    `<a class="back" href="/login.html">Your account</a>
-<h1>Connected apps.</h1>
-<p>These apps can act as you. Disconnect one and it loses access right away.</p>
-${revoked ? `<p class="notice" role="status">App disconnected. It no longer has access.</p>` : ""}
-${grants.length === 0 ? `<p class="muted">No apps are connected. Apps you sign in to Thingery from will show up here.</p>` : `<div class="rows">${rows}</div>`}`,
-    { wide: true },
+    c.title,
+    `<a class="back" href="/login.html">${c.back}</a>
+<h1>${c.heading}</h1>
+<p>${c.intro}</p>
+${revoked ? `<p class="notice" role="status">${c.revokedNotice}</p>` : ""}
+${grants.length === 0 ? `<p class="muted">${c.empty}</p>` : `<div class="rows">${rows}</div>`}`,
+    { wide: true, lang: c.lang },
   );
 }
 
@@ -482,7 +560,7 @@ function mountApps(app: Express): void {
       csrf: revokeCsrfToken(seller.id, g.id),
     }));
     pageHeaders(res);
-    res.status(200).type("html").send(appsPageHtml(bound, req.query.revoked === "1"));
+    res.status(200).type("html").send(appsPageHtml(bound, req.query.revoked === "1", appsLocaleFromRequest(req)));
   }));
 
   app.post(
@@ -636,9 +714,9 @@ const BRAND_MARK =
   '<svg viewBox="0 0 128 128" aria-hidden="true"><path d="M26 48H86C104 48 104 20 84 20C66 20 58 34 58 52V92C58 108 68 114 82 114H102" fill="none" stroke="currentColor" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 /** The document around every page in this file. `title` and `body` must already be escaped. */
-function pageDocument(title: string, body: string, opts: { wide?: boolean } = {}): string {
+function pageDocument(title: string, body: string, opts: { wide?: boolean; lang?: string } = {}): string {
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="${opts.lang ?? "en"}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} — Thingery</title>
 <style>${PAGE_CSS}</style></head>
 <body><main${opts.wide ? ' class="wide"' : ""}>

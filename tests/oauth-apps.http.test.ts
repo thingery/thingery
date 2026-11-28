@@ -159,6 +159,23 @@ describe.skipIf(!available)("/apps connected-applications page + kill switch (HT
     expect(res.headers.get("content-security-policy")).toMatch(/style-src 'sha256-[A-Za-z0-9+/]+=*'/);
   });
 
+  it("renders Italian with thingery_locale=it and stays English otherwise (THI-1953)", async () => {
+    const itPage = await fetch(`${baseUrl}/apps`, { headers: { cookie: `${cookie}; thingery_locale=it` } });
+    expect(itPage.status).toBe(200);
+    const itHtml = await itPage.text();
+    expect(itHtml).toContain('<html lang="it">');
+    expect(itHtml).toContain("<h1>App collegate.</h1>");
+    expect(itHtml).toContain("Se ne scolleghi una, perde subito l'accesso.");
+    expect(itHtml).toMatch(/>Scollega<\/button>/);
+
+    const enPage = await fetch(`${baseUrl}/apps`, { headers: { cookie } });
+    expect(await enPage.text()).toContain("<h1>Connected apps.</h1>");
+
+    // Unknown cookie value falls back to English — the default is unchanged.
+    const frPage = await fetch(`${baseUrl}/apps`, { headers: { cookie: `${cookie}; thingery_locale=fr` } });
+    expect(await frPage.text()).toContain("<h1>Connected apps.</h1>");
+  });
+
   it("rejects a forged CSRF on revoke (F10) without touching the grant", async () => {
     const grant = await grantRow();
     expect(grant).toBeDefined();

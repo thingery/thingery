@@ -145,3 +145,30 @@ describe("connected apps page", () => {
     expect(html).toContain("No apps are connected.");
   });
 });
+
+describe("connected apps page in Italian (THI-1953)", () => {
+  const grant = {
+    id: "8f9e0c4e-0000-4000-8000-000000000001",
+    client_name: "Apps Client <test>",
+    created_at: new Date("2026-11-03T10:00:00Z"),
+    last_used_at: null,
+    csrf: "revoke-csrf",
+  };
+
+  it("renders Italian copy, lang=it and localized dates, keeping the web app's voice", () => {
+    const html = appsPageHtml([grant], false, "it");
+    expect(html).toContain('<html lang="it">');
+    expect(html).toContain("<title>App collegate — Thingery</title>");
+    expect(html).toContain("<h1>App collegate.</h1>");
+    expect(html).toContain("Queste app possono agire per te. Se ne scolleghi una, perde subito l'accesso.");
+    expect(html).toContain('<a class="back" href="/login.html">Il tuo account</a>');
+    expect(html).toContain("Collegata il 3 nov 2026 · Mai usata");
+    expect(html).toMatch(/>Scollega<\/button>/);
+  });
+
+  it("localizes the disconnect confirmation and the empty state", () => {
+    const html = appsPageHtml([], true, "it");
+    expect(html).toContain('<p class="notice" role="status">App scollegata. Non ha più accesso.</p>');
+    expect(html).toContain("Nessuna app è collegata. Qui compariranno le app da cui accedi a Thingery.");
+  });
+});

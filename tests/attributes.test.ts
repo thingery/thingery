@@ -137,6 +137,7 @@ describe("attributeShapeErrors (write caps, THI-83 §3.5)", () => {
         field: "attributes.size_eu",
         problem: "missing_required",
         message: issues[0].message,
+        expected: "number",
       },
     ]);
     expect(issues[0].message).toContain("size_eu");

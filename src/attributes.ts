@@ -52,6 +52,10 @@ export interface AttributeIssue {
     | "enum"
     | "unknown_category";
   message: string;
+  /** THI-1921: the definition's declared type, set on definition issues so
+   *  clients can coerce input (e.g. render a numeric field for size_eu)
+   *  instead of guessing from the message text. */
+  expected?: "string" | "number" | "boolean";
 }
 
 /** Shape validation against ATTRIBUTE_CAPS: entry count, key length, string
@@ -135,6 +139,7 @@ export function definitionIssues(
           field: `attributes.${def.key}`,
           problem: "missing_required",
           message: `missing required attribute "${def.key}"${def.description ? ` (${def.description})` : ""}`,
+          expected: def.type,
         });
       }
       continue;
@@ -144,24 +149,28 @@ export function definitionIssues(
         field: `attributes.${def.key}`,
         problem: "type",
         message: `attribute "${def.key}" must be a number, got ${JSON.stringify(value)}`,
+        expected: "number",
       });
     } else if (def.type === "boolean" && typeof value !== "boolean") {
       issues.push({
         field: `attributes.${def.key}`,
         problem: "type",
         message: `attribute "${def.key}" must be a boolean, got ${JSON.stringify(value)}`,
+        expected: "boolean",
       });
     } else if (def.type === "string" && typeof value !== "string") {
       issues.push({
         field: `attributes.${def.key}`,
         problem: "type",
         message: `attribute "${def.key}" must be a string, got ${JSON.stringify(value)}`,
+        expected: "string",
       });
     } else if (def.enum && (typeof value !== "string" || !def.enum.includes(value))) {
       issues.push({
         field: `attributes.${def.key}`,
         problem: "enum",
         message: `attribute "${def.key}" must be one of: ${def.enum.join(", ")}`,
+        expected: def.type,
       });
     }
   }

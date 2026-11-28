@@ -3,6 +3,9 @@
 Status: implemented (schema, endpoint, and notification seam shipped — see PR
 breakdown) · Touches protected paths `db/schema.sql`, `src/routes.ts` — see
 AGENTS.md for review requirements on those files.
+Amended by `docs/specs/report-moderation.md`: the alias email now carries the
+motivation, and the reserved `resolved`/`dismissed` states gained their mutators
+(moderation suspend/takedown/dismiss). That spec wins where the two differ.
 
 ## Problem
 

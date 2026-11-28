@@ -884,6 +884,15 @@ payments and real Connect payouts. Flip only when ALL of the following hold:
      a v2 seller who finishes onboarding never gets
      `sellers.stripe_onboarded_at` set. (Accounts v1 sellers keep flipping
      via 2b; both paths share one flip routine — an account is badged once.)
+     **Secret-visibility gotcha (THI-1814, API `2026-09-30.endive`):** a
+     create via `stripe v2 core event_destinations create` returns the
+     signing secret and URL **redacted** unless the request explicitly
+     passes
+     `include: ["webhook_endpoint.signing_secret", "webhook_endpoint.url"]`.
+     Without that parameter the secret is unretrievable later — the
+     destination has to be deleted and re-created — so pass `include` and
+     copy the `whsec_…` into `STRIPE_EVENT_DESTINATION_SECRET` in the same
+     step. (Dashboard-created destinations always display the secret.)
    Event-list notes (A6, THI-1624):
    - `transfer.paid` is deliberately NOT in either list: verified against
      Stripe's own OpenAPI spec at the pinned API version

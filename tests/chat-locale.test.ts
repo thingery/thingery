@@ -61,8 +61,10 @@ describe("replyLanguageName", () => {
   });
 
   it("never returns free text: unknown tags resolve to nothing", () => {
-    // 'zzzz' is structurally valid but unknown — DisplayNames echoes the code
-    // back, and an echoed code must not enter the prompt as a "language name".
+    // 'zzzz' is structurally valid but unknown. DisplayNames either throws
+    // (older ICU, caught below) or echoes the code back with the default
+    // "code" fallback (newer ICU) — an echoed code is not a language name,
+    // so the equality guard rejects it. Either way: no prompt text.
     expect(replyLanguageName("zzzz")).toBeUndefined();
     // Structurally invalid input throws inside DisplayNames — caught to undefined.
     expect(replyLanguageName("not a tag")).toBeUndefined();

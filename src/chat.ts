@@ -134,11 +134,16 @@ export function primaryAcceptLanguage(header: string | undefined): string | unde
 /** English name for a locale tag ("it" -> "Italian"), or undefined when the tag
  * does not resolve to a plain language name. The resolved name — never the raw
  * tag — is the only locale-derived text that may enter the system prompt
- * (THI-1951 spec: injection wording). */
+ * (THI-1951 spec: injection wording). A name that merely echoes the tag back
+ * (DisplayNames' unknown-code fallback, e.g. "zzzz") counts as unresolved. */
 export function replyLanguageName(tag: string): string | undefined {
   try {
     const name = new Intl.DisplayNames(["en"], { type: "language" }).of(tag);
-    return typeof name === "string" && /^[A-Za-z][A-Za-z ()-]{0,39}$/.test(name) ? name : undefined;
+    return typeof name === "string"
+      && /^[A-Za-z][A-Za-z ()-]{0,39}$/.test(name)
+      && name.toLowerCase() !== tag.toLowerCase()
+      ? name
+      : undefined;
   } catch {
     return undefined;
   }

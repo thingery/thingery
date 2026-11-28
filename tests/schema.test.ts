@@ -162,6 +162,10 @@ describe.skipIf(!available)("db schema", () => {
         "review_notify_next_attempt_at",
         "review_notify_status",
         "review_notify_last_error",
+        // Report-moderation spec PR 3: resolution metadata.
+        "resolution_action",
+        "resolved_at",
+        "dismiss_note",
       ],
     };
     for (const [table, columns] of Object.entries(expected)) {

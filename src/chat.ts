@@ -105,6 +105,57 @@ Keep replies short and concrete. Amounts in normal currency (12500 cents = €12
 
 Follow-up suggestions: end every reply with one last line <suggestions>first | second | third</suggestions> holding up to 3 short next messages the user might send, in the user's words and language (e.g. <suggestions>Show me the other two | Order this one</suggestions>). A few words each, plain text, no links. Leave the line out when no follow-up is natural. The chat shows them as buttons and removes the line from your reply.`;
 
+// --- reply language (THI-1951, plan THI-1934 step 3) -------------------------
+
+/** BCP-47-ish tag: 2–8 letter primary subtag plus up to 7 alphanumeric subtags.
+ * Strict by design — this value is request data, and anything looser would risk
+ * smuggling prompt text through the locale field. */
+export const LOCALE_TAG_RE = /^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8}){0,7}$/;
+
+/** First non-"*" Accept-Language tag with the highest non-zero q (ties: leftmost).
+ * Lenient on purpose: a malformed header yields undefined, never a throw. */
+export function primaryAcceptLanguage(header: string | undefined): string | undefined {
+  if (!header) return undefined;
+  let best: { tag: string; q: number } | undefined;
+  for (const part of header.split(",")) {
+    const [rawTag, ...params] = part.trim().split(";");
+    const tag = rawTag?.trim() ?? "";
+    if (!tag || tag === "*" || !LOCALE_TAG_RE.test(tag)) continue;
+    let q = 1;
+    for (const p of params) {
+      const m = /^q=([\d.]+)$/.exec(p.trim());
+      if (m) q = Number.parseFloat(m[1]);
+    }
+    if (q > 0 && (!best || q > best.q)) best = { tag, q };
+  }
+  return best?.tag;
+}
+
+/** English name for a locale tag ("it" -> "Italian"), or undefined when the tag
+ * does not resolve to a plain language name. The resolved name — never the raw
+ * tag — is the only locale-derived text that may enter the system prompt
+ * (THI-1951 spec: injection wording). A name that merely echoes the tag back
+ * (DisplayNames' unknown-code fallback, e.g. "zzzz") counts as unresolved. */
+export function replyLanguageName(tag: string): string | undefined {
+  try {
+    const name = new Intl.DisplayNames(["en"], { type: "language" }).of(tag);
+    return typeof name === "string"
+      && /^[A-Za-z][A-Za-z ()-]{0,39}$/.test(name)
+      && name.toLowerCase() !== tag.toLowerCase()
+      ? name
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** THI-1951 fallback chain: validated body locale wins, else the browser's
+ * Accept-Language, else undefined (no instruction — today's English default). */
+export function resolveReplyLocale(bodyLocale: unknown, acceptLanguage: string | undefined): string | undefined {
+  if (typeof bodyLocale === "string" && LOCALE_TAG_RE.test(bodyLocale)) return bodyLocale;
+  return primaryAcceptLanguage(acceptLanguage);
+}
+
 type ToolDef = {
   type: "function";
   function: { name: string; description: string; parameters: Record<string, unknown> };
@@ -2116,6 +2167,9 @@ export async function chatTurn(
   userMessage: string,
   seller: SellerRow | null,
   credential: ResolvedLlmCredential | null = null,
+  /** THI-1951: request locale (body or Accept-Language fallback); no value keeps
+   * the system prompt byte-identical to the pre-THI-1951 prompt. */
+  locale?: string,
 ): Promise<ChatTurnResult> {
   // Confirmation-card responses ride the message field with reserved
   // prefixes (no /api/chat request-shape change). Verification is
@@ -2138,8 +2192,15 @@ export async function chatTurn(
     return { text: "Cancelled — nothing was changed. The pending update is void." };
   }
 
+  // THI-1951: a resolved locale appends one line whose only interpolated text is
+  // the Intl.DisplayNames-resolved language name (never the raw tag); an
+  // unresolvable locale appends nothing, so the prompt stays exactly as before.
+  const languageName = locale ? replyLanguageName(locale) : undefined;
+  const languageLine = languageName
+    ? `\n\nReply in ${languageName} — the user's interface language. If the user writes in another language, follow the user's language.`
+    : "";
   const messages: LlmMessage[] = [
-    { role: "system", content: SYSTEM_PROMPT + (seller ? `\n\nThe user is logged in as seller "${seller.display_name}".` : "\n\nThe user is NOT logged in: read-only tools only; publishing needs an account.") },
+    { role: "system", content: SYSTEM_PROMPT + (seller ? `\n\nThe user is logged in as seller "${seller.display_name}".` : "\n\nThe user is NOT logged in: read-only tools only; publishing needs an account.") + languageLine },
     ...history.slice(-12).map((m) => ({ role: m.role, content: m.content } as LlmMessage)),
     { role: "user", content: userMessage },
   ];

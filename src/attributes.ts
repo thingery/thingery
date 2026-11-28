@@ -36,33 +36,73 @@ export const ATTRIBUTE_CAPS = {
  *  cap, so overlong keys are filtered from surfaces, never rejected on write. */
 export const UNDECLARED_KEY_PATTERN = "^[A-Za-z0-9_-]{1,64}$";
 
+/** One field-specific attribute problem (THI-1921): a stable input dot-path
+ *  and problem slug alongside the human message, so clients can render which
+ *  field failed and why instead of a blanket refusal. `field` names the
+ *  create_listing/update_listing input key (`attributes.<key>`; entry-count
+ *  problems point at `attributes` itself). */
+export interface AttributeIssue {
+  field: string;
+  problem:
+    | "too_many_entries"
+    | "key_too_long"
+    | "value_too_long"
+    | "missing_required"
+    | "type"
+    | "enum"
+    | "unknown_category";
+  message: string;
+}
+
 /** Shape validation against ATTRIBUTE_CAPS: entry count, key length, string
  *  value length. Numbers and booleans are unconstrained. Returns error
  *  messages; empty array = valid. */
 export function attributeShapeErrors(attributes: Attributes): string[] {
-  const errors: string[] = [];
+  return attributeShapeIssues(attributes).map((issue) => issue.message);
+}
+
+/** Structured twin of attributeShapeErrors — same checks, same order, plus
+ *  the field path and problem slug (THI-1921). */
+export function attributeShapeIssues(attributes: Attributes): AttributeIssue[] {
+  const issues: AttributeIssue[] = [];
   const entries = Object.entries(attributes);
   if (entries.length > ATTRIBUTE_CAPS.maxEntries) {
-    errors.push(`too many attribute entries: ${entries.length} (max ${ATTRIBUTE_CAPS.maxEntries})`);
+    issues.push({
+      field: "attributes",
+      problem: "too_many_entries",
+      message: `too many attribute entries: ${entries.length} (max ${ATTRIBUTE_CAPS.maxEntries})`,
+    });
   }
   for (const [key, value] of entries) {
     if (key.length > ATTRIBUTE_CAPS.maxKeyLength) {
-      errors.push(`attribute key too long (${key.length} chars, max ${ATTRIBUTE_CAPS.maxKeyLength}): "${key.slice(0, 32)}…"`);
+      issues.push({
+        field: `attributes.${key}`,
+        problem: "key_too_long",
+        message: `attribute key too long (${key.length} chars, max ${ATTRIBUTE_CAPS.maxKeyLength}): "${key.slice(0, 32)}…"`,
+      });
     }
     if (typeof value === "string" && value.length > ATTRIBUTE_CAPS.maxValueLength) {
-      errors.push(`attribute "${key}" value too long (${value.length} chars, max ${ATTRIBUTE_CAPS.maxValueLength})`);
+      issues.push({
+        field: `attributes.${key}`,
+        problem: "value_too_long",
+        message: `attribute "${key}" value too long (${value.length} chars, max ${ATTRIBUTE_CAPS.maxValueLength})`,
+      });
     }
   }
-  return errors;
+  return issues;
 }
 
-/** Thrown by write paths when attributeShapeErrors() is non-empty; `code`
- *  matches the MCP error code create_listing already reports. */
+/** Thrown by write paths when attribute validation is non-empty; `code`
+ *  matches the MCP error code create_listing already reports. Carries the
+ *  structured issues (THI-1921) so tool surfaces can answer with
+ *  field_errors, not just the joined message. */
 export class AttributeValidationError extends Error {
   readonly code = "invalid_attributes";
-  constructor(messages: string[]) {
-    super(messages.join("; "));
+  readonly issues: AttributeIssue[];
+  constructor(issues: AttributeIssue[]) {
+    super(issues.map((issue) => issue.message).join("; "));
     this.name = "AttributeValidationError";
+    this.issues = issues;
   }
 }
 
@@ -76,26 +116,67 @@ export function definitionErrors(
   definitions: AttributeDefinition[],
   attributes: Attributes,
 ): string[] {
-  const errors: string[] = [];
+  return definitionIssues(definitions, attributes).map((issue) => issue.message);
+}
+
+/** Structured twin of definitionErrors — same checks, same order, plus the
+ *  field path and problem slug (THI-1921). */
+export function definitionIssues(
+  definitions: AttributeDefinition[],
+  attributes: Attributes,
+): AttributeIssue[] {
+  const issues: AttributeIssue[] = [];
 
   for (const def of definitions) {
     const value = attributes[def.key];
     if (value === undefined || value === null || value === "") {
-      if (def.required) errors.push(`missing required attribute "${def.key}"${def.description ? ` (${def.description})` : ""}`);
+      if (def.required) {
+        issues.push({
+          field: `attributes.${def.key}`,
+          problem: "missing_required",
+          message: `missing required attribute "${def.key}"${def.description ? ` (${def.description})` : ""}`,
+        });
+      }
       continue;
     }
     if (def.type === "number" && typeof value !== "number") {
-      errors.push(`attribute "${def.key}" must be a number, got ${JSON.stringify(value)}`);
+      issues.push({
+        field: `attributes.${def.key}`,
+        problem: "type",
+        message: `attribute "${def.key}" must be a number, got ${JSON.stringify(value)}`,
+      });
     } else if (def.type === "boolean" && typeof value !== "boolean") {
-      errors.push(`attribute "${def.key}" must be a boolean, got ${JSON.stringify(value)}`);
+      issues.push({
+        field: `attributes.${def.key}`,
+        problem: "type",
+        message: `attribute "${def.key}" must be a boolean, got ${JSON.stringify(value)}`,
+      });
     } else if (def.type === "string" && typeof value !== "string") {
-      errors.push(`attribute "${def.key}" must be a string, got ${JSON.stringify(value)}`);
+      issues.push({
+        field: `attributes.${def.key}`,
+        problem: "type",
+        message: `attribute "${def.key}" must be a string, got ${JSON.stringify(value)}`,
+      });
     } else if (def.enum && (typeof value !== "string" || !def.enum.includes(value))) {
-      errors.push(`attribute "${def.key}" must be one of: ${def.enum.join(", ")}`);
+      issues.push({
+        field: `attributes.${def.key}`,
+        problem: "enum",
+        message: `attribute "${def.key}" must be one of: ${def.enum.join(", ")}`,
+      });
     }
   }
 
-  return errors;
+  return issues;
+}
+
+/** Structured validateAttributes: shape caps first, then definition checks
+ *  (same order as the string form). THI-1921: create_listing answers with
+ *  these so clients can surface every failing attribute field. */
+export function attributeIssues(
+  definitions: AttributeDefinition[],
+  attributes: Attributes,
+): AttributeIssue[] {
+  return [...attributeShapeIssues(attributes), ...definitionIssues(definitions, attributes)];
 }
 
 /** Validate attributes against a category's definitions.
